@@ -4,8 +4,9 @@
 //! which necessarily stages a fresh object — is a different commit as far as
 //! the publisher is concerned and it says so. What makes the rerun safe
 //! anyway is the runtime reading back what that commit id actually
-//! committed and comparing it against the bytes just staged. Nothing weaker
-//! counts as agreement.
+//! committed, rebuilding this request's fingerprint around the committed
+//! reference, and requiring the whole value to match before it proves the
+//! bytes agree. Nothing weaker counts as agreement.
 
 use crate::common::{open_runtime_async, store, TestRuntime};
 use bytes::Bytes;
@@ -14,7 +15,7 @@ use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ByteStream, ChangeSeq, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
     DestinationBehavior, ListChangesOptions, MaintenanceStepKind, MaintenanceStepOptions,
-    NamespaceId, PutFileOptions, ReorganizeStepOutcome,
+    NamespaceId, PutFileOptions, ReorganizeStepOutcome, RevisionNo,
 };
 use loonfs_api::ErrorCode;
 use tempfile::tempdir;
@@ -138,6 +139,190 @@ async fn different_bytes_under_a_used_commit_id_still_conflict() {
             .bytes,
         b"stable bytes\n",
         "the refused rerun changed nothing"
+    );
+}
+
+/// The same bytes written somewhere else are a different mutation, and no
+/// amount of matching payload makes them the same one. Content evidence
+/// alone would call this a successful retry and leave `/b.txt` unwritten
+/// forever, which is why the proof is the whole request fingerprint.
+#[tokio::test]
+async fn the_same_bytes_at_a_different_path_still_conflict() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+
+    let first = runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/a.txt",
+            b"stable bytes\n",
+            options(&commit_id),
+        )
+        .await
+        .expect("first put");
+    let error = runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/b.txt",
+            b"stable bytes\n",
+            options(&commit_id),
+        )
+        .await
+        .expect_err("the same bytes at another path are a different commit");
+
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+    assert_eq!(
+        runtime
+            .stat_path(&namespace_id, "/b.txt")
+            .await
+            .expect_err("the refused rerun wrote nothing")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    let entry = runtime
+        .stat_path(&namespace_id, "/a.txt")
+        .await
+        .expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "the refused rerun published no revision"
+    );
+}
+
+/// The replacement behavior is part of what the caller asked for: the same
+/// bytes at the same path under a changed `behavior` is a different
+/// mutation, and a create-only rerun must not report a replacing commit's
+/// success.
+#[tokio::test]
+async fn a_changed_behavior_under_a_used_commit_id_still_conflicts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+
+    let first = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect("first put with replace behavior");
+    let error = runtime
+        .put_file_bytes(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            PutFileOptions {
+                behavior: DestinationBehavior::NoReplace,
+                ..options(&commit_id)
+            },
+        )
+        .await
+        .expect_err("a changed behavior is a different commit");
+
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+    let entry = runtime
+        .stat_path(&namespace_id, PATH)
+        .await
+        .expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "the refused rerun published no revision"
+    );
+}
+
+/// The expected revision is a race guard, and a rerun that adds one asked a
+/// question the original never asked. Replaying the unguarded commit would
+/// answer it without ever checking it.
+#[tokio::test]
+async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+
+    let first = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect("first unguarded put");
+    let error = runtime
+        .put_file_bytes(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            PutFileOptions {
+                expected_revision_no: Some(RevisionNo(1)),
+                ..options(&commit_id)
+            },
+        )
+        .await
+        .expect_err("a guard the original never carried is a different commit");
+
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+    let entry = runtime
+        .stat_path(&namespace_id, PATH)
+        .await
+        .expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "the refused rerun published no revision"
+    );
+}
+
+/// A commit that did more than one thing is not the commit a single put
+/// makes, however well its put half lines up. The operation list is inside
+/// the fingerprint, so the count alone settles this — no comparison of the
+/// other operations is needed or attempted.
+#[tokio::test]
+async fn a_single_put_does_not_replay_a_multi_operation_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-batch").expect("valid commit id");
+
+    let prepared = runtime
+        .writer
+        .prepare_file_bytes(&namespace_id, b"stable bytes\n")
+        .await
+        .expect("prepare content");
+    let content_ref = prepared.content_ref().clone();
+    let first = runtime
+        .writer
+        .commit_prepared(
+            &namespace_id,
+            CommitRequest {
+                commit_id: commit_id.clone(),
+                message: None,
+                operations: vec![
+                    FilesystemOperation::PutFile {
+                        path: parse_mutation_path(PATH).expect("path"),
+                        content_ref,
+                        behavior: DestinationBehavior::Replace,
+                        expected_revision_no: None,
+                    },
+                    FilesystemOperation::CreateDirectory {
+                        path: parse_mutation_path("/reports").expect("path"),
+                        parents: true,
+                    },
+                ],
+            },
+            vec![prepared],
+        )
+        .await
+        .expect("first two-operation commit");
+
+    let error = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect_err("one put is not the two-operation commit that landed");
+
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+    let entry = runtime
+        .stat_path(&namespace_id, PATH)
+        .await
+        .expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "the refused rerun published no revision"
     );
 }
 

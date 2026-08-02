@@ -2,7 +2,7 @@
 //!
 //! A planned commit is validated against a metadata view into a commit plan,
 //! the plan is materialized into WAL deltas, and the result is framed for
-//! publication. Submodules follow that pipeline; `identity` defines the
+//! publication. Submodules follow that pipeline; `identity` names the
 //! fingerprint that makes reused commit ids safe to compare, and `ops` holds
 //! the inode-level vocabulary path operations compile into.
 
@@ -22,7 +22,6 @@ mod validate_error;
 
 pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
 pub use self::identity::CommitFingerprint;
-pub(crate) use self::identity::{fingerprint_digest, COMMIT_FINGERPRINT_DOMAIN};
 pub(crate) use self::ir::CommitIr;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
 pub use self::materialize::{CommitOpResult, MaterializedCommitDelta};

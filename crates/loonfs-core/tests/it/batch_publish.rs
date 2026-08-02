@@ -1283,11 +1283,15 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     responses[0].as_ref().expect("primary commit");
     let error = responses[1].as_ref().expect_err("duplicate conflict");
     // Neither claim had committed when the batch admitted them, so the
-    // conflict has no landed sequence to name.
+    // conflict has no receipt to name: neither the sequence nor the
+    // fingerprint a retry would reconcile against.
     assert!(matches!(
         error,
-        CoreError::CommitIdReuseConflict { commit_id, committed_seq: None }
-            if commit_id == "req-conflict"
+        CoreError::CommitIdReuseConflict {
+            commit_id,
+            committed_seq: None,
+            committed_fingerprint: None,
+        } if commit_id == "req-conflict"
     ));
 
     let wal_keys = store
@@ -1359,11 +1363,17 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
     .await
     .expect_err("conflicting retry");
     // The receipt decided this one, so the conflict names where the id
-    // landed — the sequence a retry reads back to reconcile.
+    // landed and what landed there — the sequence a retry reads back, and
+    // the identity it proves itself against.
     assert!(matches!(
         conflict,
-        CoreError::CommitIdReuseConflict { commit_id, committed_seq }
-            if commit_id == "same-path-request" && committed_seq == Some(first.committed_seq)
+        CoreError::CommitIdReuseConflict {
+            commit_id,
+            committed_seq,
+            committed_fingerprint: Some(fingerprint),
+        } if commit_id == "same-path-request"
+            && committed_seq == Some(first.committed_seq)
+            && fingerprint.starts_with("v0:sha256:")
     ));
 
     let wal_keys = store
@@ -1484,8 +1494,11 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         .expect_err("changed guard must conflict");
         assert!(matches!(
             error,
-            CoreError::CommitIdReuseConflict { commit_id: reused, committed_seq: Some(_) }
-                if reused == commit_id
+            CoreError::CommitIdReuseConflict {
+                commit_id: reused,
+                committed_seq: Some(_),
+                committed_fingerprint: Some(_),
+            } if reused == commit_id
         ));
     }
 

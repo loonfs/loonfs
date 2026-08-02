@@ -750,6 +750,7 @@ impl NamespacePublisher {
                 return Err(CoreError::CommitIdReuseConflict {
                     commit_id: commit_id.to_string(),
                     committed_seq: None,
+                    committed_fingerprint: None,
                 });
             }
             existing.waiters.push(waiter);

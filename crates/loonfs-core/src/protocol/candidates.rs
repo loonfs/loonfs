@@ -83,6 +83,7 @@ impl BatchDedup {
                 CoreError::CommitIdReuseConflict {
                     commit_id: commit_id.to_string(),
                     committed_seq: None,
+                    committed_fingerprint: None,
                 },
             )));
         }
@@ -200,11 +201,13 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         return Ok(Some(CandidateAdmission::Settled(
             if existing.semantic_commit_fingerprint != semantic_identity.as_str() {
-                // The receipt holds where the id landed; reporting it is
-                // what turns a caller's reconciliation into one feed read.
+                // The receipt holds where the id landed and what landed
+                // there; reporting both is what turns a caller's
+                // reconciliation into one feed read and one comparison.
                 Err(CoreError::CommitIdReuseConflict {
                     commit_id: commit_id.to_string(),
                     committed_seq: Some(existing.committed_seq),
+                    committed_fingerprint: Some(existing.semantic_commit_fingerprint.clone()),
                 })
             } else {
                 Ok(commit_response_from_commit_receipt(namespace_id, &existing))

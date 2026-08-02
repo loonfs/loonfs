@@ -33,14 +33,6 @@ enum StagedPayload<'a> {
 }
 
 impl StagedPayload<'_> {
-    /// Complete length of what was staged.
-    fn size_bytes(&self) -> u64 {
-        match self {
-            Self::Bytes(bytes) => bytes.len() as u64,
-            Self::Streamed(content_ref) => content_ref.size_bytes,
-        }
-    }
-
     /// Whether the staged bytes produce this checksum. `None` is a refusal
     /// to answer, never agreement.
     fn matches(&self, expected: &StorageChecksum) -> Option<bool> {
@@ -60,28 +52,41 @@ impl StagedPayload<'_> {
     }
 }
 
-/// Where a reuse conflict says the commit id already landed.
+/// What a reuse conflict says the commit id already landed as: where, and
+/// the semantic identity of the mutation that landed there.
 ///
 /// The publisher decides the conflict against a durable receipt, and the
-/// receipt holds the sequence, so the error carries it. It is absent only
-/// when nothing has committed under the id yet — two conflicting requests
+/// receipt holds both, so the error carries both. They are absent only when
+/// nothing has committed under the id yet — two conflicting requests
 /// claiming it at once — and then there is nothing to read back.
-fn reported_committed_seq(error: &RuntimeError) -> Option<ChangeSeq> {
+fn reported_commit_receipt(error: &RuntimeError) -> Option<(ChangeSeq, String)> {
     match error {
-        RuntimeError::Core(CoreError::CommitIdReuseConflict { committed_seq, .. }) => {
-            *committed_seq
-        }
+        RuntimeError::Core(CoreError::CommitIdReuseConflict {
+            committed_seq,
+            committed_fingerprint,
+            ..
+        }) => Some(((*committed_seq)?, committed_fingerprint.clone()?)),
         _ => None,
     }
 }
 
-/// The content one committed change wrote, if it wrote any.
-fn committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
-    change.events.iter().find_map(|event| match event {
+/// The content one committed change wrote, when it wrote exactly one.
+///
+/// A single put's commit produces exactly one content-bearing event: the
+/// file's `Created` or `ContentChanged`. Auto-created parent directories
+/// appear as `Created` without a content ref, and no other change kind
+/// carries content at all, so "exactly one" holds for a put however many
+/// directories it had to make. Anything else — nothing, or several — is not
+/// the commit a single put produces, and the caller leaves the conflict
+/// standing rather than picking one.
+fn sole_committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
+    let mut content = change.events.iter().filter_map(|event| match event {
         FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
         FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
         _ => None,
-    })
+    });
+    let only = content.next()?;
+    content.next().is_none().then_some(only)
 }
 
 /// Whether the committed reference provably holds the bytes just staged.
@@ -152,10 +157,11 @@ impl FsWriter {
     /// content object it wrote, and a re-run necessarily stages a fresh
     /// one, so the publisher sees a different commit and reports
     /// `commit_id_reuse_conflict`. This resolves that by reading back what
-    /// the commit id actually committed and comparing it against the
-    /// request just made: same content and same message means the
-    /// operation had already succeeded. Different bytes, a different
-    /// message, or content this build cannot compare surface the conflict.
+    /// the commit id actually committed and rebuilding this request's
+    /// fingerprint around it: an identical value plus bytes that provably
+    /// agree means the operation had already succeeded. Anything else —
+    /// a different path, behavior, guard, message, or payload, or content
+    /// this build cannot compare — surfaces the conflict.
     ///
     /// The freshly staged duplicate object is then referenced by nothing.
     /// That is by design, not a leak: it is a completed upload session's
@@ -171,16 +177,15 @@ impl FsWriter {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        let commit_id = options.commit_id.clone();
-        let message = options.message.clone();
+        let attempt = options.clone();
         let prepared_content = self.prepare_file_bytes(namespace_id, bytes).await?;
         let published = self
             .put_file_prepared(namespace_id, absolute_path, prepared_content, options)
             .await;
         self.settle_put(
             namespace_id,
-            commit_id,
-            message,
+            absolute_path,
+            &attempt,
             published,
             StagedPayload::Bytes(bytes),
         )
@@ -221,8 +226,7 @@ impl FsWriter {
         options: PutFileOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let commit_id = options.commit_id.clone();
-        let message = options.message.clone();
+        let attempt = options.clone();
         let prepared_content = self.prepare_file_stream(namespace_id, body).await?;
         // The prepared reference describes the bytes that just went past,
         // and with the payload gone it is the only description of them that
@@ -233,8 +237,8 @@ impl FsWriter {
             .await;
         self.settle_put(
             namespace_id,
-            commit_id,
-            message,
+            absolute_path,
+            &attempt,
             published,
             StagedPayload::Streamed(&staged),
         )
@@ -246,17 +250,18 @@ impl FsWriter {
     async fn settle_put(
         &self,
         namespace_id: &NamespaceId,
-        commit_id: Option<CommitId>,
-        message: Option<String>,
+        absolute_path: &str,
+        attempt: &PutFileOptions,
         published: Result<CommitResponse>,
         staged: StagedPayload<'_>,
     ) -> Result<CommitResponse> {
-        match (published, commit_id) {
+        match (published, attempt.commit_id.as_ref()) {
             (Err(error), Some(commit_id)) if error.code() == ErrorCode::CommitIdReuseConflict => {
                 self.reconcile_commit_id_reuse(
                     namespace_id,
-                    &commit_id,
-                    message.as_deref(),
+                    absolute_path,
+                    commit_id,
+                    attempt,
                     staged,
                     error,
                 )
@@ -268,21 +273,32 @@ impl FsWriter {
 
     /// Decides whether a reused commit id already did this exact work.
     ///
-    /// The evidence is the committed change itself, read from the change
-    /// feed at the sequence the conflict reported: its message against the
-    /// one this request asked for, and its content against the bytes just
-    /// staged. Nothing weaker counts: every way of failing to prove the two
-    /// requests are the same — including a comparison this build cannot
-    /// make — leaves the original conflict standing, never agreement.
+    /// The proof is the commit's whole semantic identity, not a selection of
+    /// its parts. The conflict reports the fingerprint the receipt holds;
+    /// this reads the one change that commit id landed, rebuilds this
+    /// request's fingerprint with the committed content reference in place
+    /// of the freshly staged one, and requires the two to be equal. That
+    /// covers the path, the replacement behavior, the expected revision, the
+    /// annotation, and that the original commit was this one put — every
+    /// field a future request gains is covered the day it joins the
+    /// preimage. What the fingerprint cannot speak to is whether the two
+    /// content objects hold the same bytes, so digest evidence answers that
+    /// separately.
+    ///
+    /// Nothing weaker counts: every way of failing to prove the two requests
+    /// are the same — including a comparison this build cannot make — leaves
+    /// the original conflict standing, never agreement.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
+        absolute_path: &str,
         commit_id: &CommitId,
-        message: Option<&str>,
+        attempt: &PutFileOptions,
         staged: StagedPayload<'_>,
         conflict: RuntimeError,
     ) -> Result<CommitResponse> {
-        let Some(committed_seq) = reported_committed_seq(&conflict) else {
+        let Some((committed_seq, committed_fingerprint)) = reported_commit_receipt(&conflict)
+        else {
             return Err(conflict);
         };
         let Some(committed) = self
@@ -291,19 +307,23 @@ impl FsWriter {
         else {
             return Err(conflict);
         };
-        // The message is part of a commit's identity, so a rerun that
-        // changed it asked for a different mutation and the conflict is the
-        // honest answer. Equality here is the fingerprint's: it serializes
-        // the message as given — absent becomes `null`, an empty message
-        // becomes `""` — so no message and an empty message are different
-        // commits, and this comparison must not fold them together.
-        if committed.message.as_deref() != message {
-            return Err(conflict);
-        }
-        let Some(content_ref) = committed_content_ref(&committed) else {
+        let Some(content_ref) = sole_committed_content_ref(&committed) else {
             return Err(conflict);
         };
-        if content_ref.size_bytes != staged.size_bytes() {
+        let retried = loonfs_core::path::parse_mutation_path(absolute_path)
+            .ok()
+            .and_then(|path| {
+                loonfs_api::put_retry_fingerprint(
+                    namespace_id,
+                    &path,
+                    attempt.behavior,
+                    attempt.expected_revision_no,
+                    attempt.message.as_deref(),
+                    content_ref,
+                )
+                .ok()
+            });
+        if retried.as_deref() != Some(committed_fingerprint.as_str()) {
             return Err(conflict);
         }
         if !staged_matches_committed(&staged, content_ref) {

@@ -81,14 +81,6 @@ enum UploadedContent<'a> {
 }
 
 impl UploadedContent<'_> {
-    /// Complete length of what was uploaded.
-    fn size_bytes(&self) -> u64 {
-        match self {
-            Self::Bytes(bytes) => bytes.len() as u64,
-            Self::Streamed(content_ref) => content_ref.size_bytes,
-        }
-    }
-
     /// Whether the upload's bytes produce this checksum.
     ///
     /// `None` is a refusal to answer — the algorithm is one this build
@@ -136,26 +128,43 @@ fn uploaded_matches_committed(uploaded: &UploadedContent<'_>, content_ref: &Cont
     uploaded.matches(&evidence) == Some(true)
 }
 
-/// Where a reuse conflict says the commit id already landed.
+/// What a reuse conflict says the commit id already landed as: where, and
+/// the semantic identity of the mutation that landed there.
 ///
 /// The server decides the conflict against a durable receipt, and the
-/// receipt holds the sequence, so the error body carries it. It is absent
-/// only when nothing has committed under the id yet — two conflicting
-/// requests claiming it at once — and then there is nothing to read back.
-fn reported_committed_seq(error: &ClientError) -> Option<ChangeSeq> {
+/// receipt holds both, so the error body carries both. They are absent only
+/// when nothing has committed under the id yet — two conflicting requests
+/// claiming it at once — and then there is nothing to read back.
+fn reported_commit_receipt(error: &ClientError) -> Option<(ChangeSeq, String)> {
     match error {
-        ClientError::Api { details, .. } => details.as_ref()?.committed_seq,
+        ClientError::Api { details, .. } => {
+            let details = details.as_ref()?;
+            Some((
+                details.committed_seq?,
+                details.committed_fingerprint.clone()?,
+            ))
+        }
         _ => None,
     }
 }
 
-/// The content one committed change wrote, if it wrote any.
-fn committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
-    change.events.iter().find_map(|event| match event {
+/// The content one committed change wrote, when it wrote exactly one.
+///
+/// A single put's commit produces exactly one content-bearing event: the
+/// file's `created` or `content_changed`. Auto-created parent directories
+/// appear as `created` without a content ref, and no other change kind
+/// carries content at all, so "exactly one" holds for a put however many
+/// directories it had to make. Anything else — nothing, or several — is not
+/// the commit a single put produces, and the caller leaves the conflict
+/// standing rather than picking one.
+fn sole_committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
+    let mut content = change.events.iter().filter_map(|event| match event {
         FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
         FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
         _ => None,
-    })
+    });
+    let only = content.next()?;
+    content.next().is_none().then_some(only)
 }
 
 pub use config::ClientConfig;
@@ -1835,14 +1844,8 @@ impl Client {
         match response {
             Ok(response) => Ok(response),
             Err(error) if error.code() == Some(ErrorCode::CommitIdReuseConflict) => {
-                self.reconcile_commit_id_reuse(
-                    spec.namespace(),
-                    &commit_id,
-                    options.message.as_deref(),
-                    uploaded,
-                    error,
-                )
-                .await
+                self.reconcile_commit_id_reuse(spec, &commit_id, options, uploaded, error)
+                    .await
             }
             Err(error) => Err(error),
         }
@@ -1850,22 +1853,32 @@ impl Client {
 
     /// Decides whether a reused commit id already did this exact work.
     ///
-    /// The evidence is the committed change itself, read back from the
-    /// change feed at the sequence the conflict reported: its message
-    /// against the one this request asked for, and its content against the
-    /// bytes that were just uploaded. Nothing weaker counts: every way of
-    /// failing to prove the two requests are the same — including a
-    /// comparison this client cannot make — leaves the original conflict
-    /// standing, never agreement.
+    /// The proof is the commit's whole semantic identity, not a selection of
+    /// its parts. The conflict reports the fingerprint the server's receipt
+    /// holds; this reads the one change that commit id landed, rebuilds this
+    /// request's fingerprint with the committed content reference in place
+    /// of the freshly uploaded one, and requires the two to be equal. That
+    /// covers the path, the replacement behavior, the expected revision, the
+    /// annotation, and that the original commit was this one put — every
+    /// field a future request gains is covered the day it joins the
+    /// preimage. What the fingerprint cannot speak to is whether the two
+    /// content objects hold the same bytes, so digest evidence answers that
+    /// separately.
+    ///
+    /// Nothing weaker counts: every way of failing to prove the two requests
+    /// are the same — including a comparison this client cannot make —
+    /// leaves the original conflict standing, never agreement.
     async fn reconcile_commit_id_reuse(
         &self,
-        namespace_id: &NamespaceId,
+        spec: &NamespacePath,
         commit_id: &CommitId,
-        message: Option<&str>,
+        options: &PutFileOptions,
         uploaded: UploadedContent<'_>,
         conflict: ClientError,
     ) -> Result<ApiCommitResponse> {
-        let Some(committed_seq) = reported_committed_seq(&conflict) else {
+        let namespace_id = spec.namespace();
+        let Some((committed_seq, committed_fingerprint)) = reported_commit_receipt(&conflict)
+        else {
             return Err(conflict);
         };
         let Some(committed) = self
@@ -1874,20 +1887,18 @@ impl Client {
         else {
             return Err(conflict);
         };
-        // The message is part of a commit's identity, so a rerun that
-        // changed it asked for a different mutation and the server's
-        // conflict is the honest answer. Equality here is the server
-        // fingerprint's: the message is taken as given — absent serializes
-        // as `null`, an empty message as `""` — so no message and an empty
-        // message are different commits, and this comparison must not fold
-        // them together.
-        if committed.message.as_deref() != message {
-            return Err(conflict);
-        }
-        let Some(content_ref) = committed_content_ref(&committed) else {
+        let Some(content_ref) = sole_committed_content_ref(&committed) else {
             return Err(conflict);
         };
-        if content_ref.size_bytes != uploaded.size_bytes() {
+        let retried = loonfs_api::put_retry_fingerprint(
+            namespace_id,
+            spec.absolute_path(),
+            options.behavior,
+            options.expected_revision_no,
+            options.message.as_deref(),
+            content_ref,
+        );
+        if retried.ok().as_deref() != Some(committed_fingerprint.as_str()) {
             return Err(conflict);
         }
         if !uploaded_matches_committed(&uploaded, content_ref) {

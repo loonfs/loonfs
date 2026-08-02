@@ -7,6 +7,7 @@ use loonfs_api::v0::{
 };
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, CommitRequest, DestinationBehavior, FilesystemOperation,
+    RevisionNo,
 };
 use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath,
@@ -287,6 +288,234 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         Some("import batch"),
         "the refused rerun did not rewrite the annotation that landed"
     );
+    let entry = harness.client.stat_path(&target).await.expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "the refused rerun published no revision"
+    );
+
+    harness.server.abort();
+}
+
+/// The same bytes written somewhere else are a different mutation, and no
+/// amount of matching payload makes them the same one. Content evidence
+/// alone would call this a successful retry and leave `/b.txt` unwritten
+/// forever, which is why the client proves the whole request fingerprint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_conflict_stands_when_only_the_path_changed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-path",
+        "http-path",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let commit_id = CommitId::parse("req-path-put").expect("valid commit id");
+    let options = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        commit_id: Some(commit_id.clone()),
+        message: Some("import batch".to_owned()),
+        expected_revision_no: None,
+    };
+
+    let first_target = NamespacePath::parse("demo", "/a.txt").expect("first target");
+    let first = harness
+        .client
+        .put_file_bytes(&first_target, b"stable bytes\n", &options)
+        .await
+        .expect("first put");
+
+    let second_target = NamespacePath::parse("demo", "/b.txt").expect("second target");
+    match harness
+        .client
+        .put_file_bytes(&second_target, b"stable bytes\n", &options)
+        .await
+    {
+        Err(ClientError::Api { code, details, .. }) => {
+            assert_eq!(code, "commit_id_reuse_conflict");
+            // The receipt named both halves of what landed, so the client
+            // had everything it needed and still refused.
+            let details = details.expect("structured details");
+            assert_eq!(details.committed_seq, Some(first.committed_seq));
+            let fingerprint = details
+                .committed_fingerprint
+                .expect("the receipt's semantic identity");
+            assert!(fingerprint.starts_with("v0:sha256:"), "got `{fingerprint}`");
+        }
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    match harness.client.stat_path(&second_target).await {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+        other => unreachable!("the refused rerun wrote nothing, got {other:?}"),
+    }
+    let entry = harness
+        .client
+        .stat_path(&first_target)
+        .await
+        .expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "the refused rerun published no revision"
+    );
+
+    harness.server.abort();
+}
+
+/// The replacement behavior and the expected-revision guard are part of
+/// what the caller asked for, so the same bytes at the same path under
+/// either one changed are different mutations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_conflict_stands_when_only_a_guard_changed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-guard",
+        "http-guard",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let target = NamespacePath::parse("demo", "/docs/guard.txt").expect("target");
+    let commit_id = CommitId::parse("req-guard-put").expect("valid commit id");
+    let replacing = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        commit_id: Some(commit_id.clone()),
+        message: None,
+        expected_revision_no: None,
+    };
+
+    let first = harness
+        .client
+        .put_file_bytes(&target, b"stable bytes\n", &replacing)
+        .await
+        .expect("first put");
+
+    match harness
+        .client
+        .put_file_bytes(
+            &target,
+            b"stable bytes\n",
+            &PutFileOptions {
+                behavior: DestinationBehavior::NoReplace,
+                ..replacing.clone()
+            },
+        )
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    match harness
+        .client
+        .put_file_bytes(
+            &target,
+            b"stable bytes\n",
+            &PutFileOptions {
+                expected_revision_no: Some(RevisionNo(1)),
+                ..replacing
+            },
+        )
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    let entry = harness.client.stat_path(&target).await.expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "neither refused rerun published a revision"
+    );
+
+    harness.server.abort();
+}
+
+/// A commit that did more than one thing is not the commit a single put
+/// makes, however well its put half lines up. The operation list is inside
+/// the fingerprint, so the count alone settles this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_single_put_does_not_replay_a_multi_operation_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-batch",
+        "http-batch",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let target = NamespacePath::parse("demo", "/docs/batch.txt").expect("target");
+    let commit_id = CommitId::parse("req-batch-put").expect("valid commit id");
+
+    let staged = stage_uploaded_content(&harness.client, &namespace, b"stable bytes\n").await;
+    let first = harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id.clone(),
+                message: None,
+                content_tokens: vec![ValidatedContentToken {
+                    content_ref: staged.content_ref.clone(),
+                    token: staged
+                        .validated_content_token
+                        .clone()
+                        .expect("completion returns a content token"),
+                }],
+                operations: vec![
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse("/docs/batch.txt").expect("path"),
+                        content_ref: staged.content_ref.clone(),
+                        behavior: DestinationBehavior::Replace,
+                        expected_revision_no: None,
+                    },
+                    FilesystemOperation::CreateDirectory {
+                        path: AbsolutePath::parse("/reports").expect("path"),
+                        parents: true,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("first two-operation commit");
+
+    match harness
+        .client
+        .put_file_bytes(
+            &target,
+            b"stable bytes\n",
+            &PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                commit_id: Some(commit_id),
+                message: None,
+                expected_revision_no: None,
+            },
+        )
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
     let entry = harness.client.stat_path(&target).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
