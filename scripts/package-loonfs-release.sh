@@ -8,22 +8,44 @@ Usage: package-loonfs-release.sh --target <target> --version <version> --artifac
 EOF
 }
 
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
+
 target=""
 version=""
 artifact_dir=""
+stage_dir=""
+archive_tmp=""
+
+cleanup() {
+    if [ -n "$stage_dir" ] && [ -d "$stage_dir" ]; then
+        rm -rf "$stage_dir"
+    fi
+    if [ -n "$archive_tmp" ] && [ -f "$archive_tmp" ]; then
+        rm -f "$archive_tmp"
+    fi
+}
+
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --target)
-            target="${2:-}"
+            [ "$#" -ge 2 ] || die "--target requires a value"
+            target="$2"
             shift 2
             ;;
         --version)
-            version="${2:-}"
+            [ "$#" -ge 2 ] || die "--version requires a value"
+            version="$2"
             shift 2
             ;;
         --artifact-dir)
-            artifact_dir="${2:-}"
+            [ "$#" -ge 2 ] || die "--artifact-dir requires a value"
+            artifact_dir="$2"
             shift 2
             ;;
         -h|--help)
@@ -31,9 +53,8 @@ while [ "$#" -gt 0 ]; do
             exit 0
             ;;
         *)
-            echo "unknown argument: $1" >&2
             usage >&2
-            exit 1
+            die "unknown argument: $1"
             ;;
     esac
 done
@@ -43,25 +64,41 @@ if [ -z "$target" ] || [ -z "$version" ] || [ -z "$artifact_dir" ]; then
     exit 1
 fi
 
+case "$target" in
+    aarch64-apple-darwin | x86_64-apple-darwin | aarch64-unknown-linux-gnu | x86_64-unknown-linux-gnu)
+        ;;
+    *)
+        die "unsupported release target: $target"
+        ;;
+esac
+
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 binary_path="$repo_root/target/$target/release/loonfs"
 archive_name="loonfs-$target.tar.gz"
-stage_dir="$artifact_dir/package/$target"
 
 if [ ! -x "$binary_path" ]; then
-    echo "missing compiled loonfs binary at $binary_path" >&2
-    exit 1
+    die "missing compiled loonfs binary at $binary_path"
 fi
 
-mkdir -p "$stage_dir"
-rm -rf "$stage_dir"/*
+binary_output=$("$binary_path" version)
+binary_version=${binary_output%% *}
+if [ "$binary_version" != "$version" ]; then
+    die "compiled loonfs reports version $binary_version, expected $version"
+fi
+
+mkdir -p "$artifact_dir"
+artifact_dir=$(CDPATH= cd -- "$artifact_dir" && pwd)
+stage_dir=$(mktemp -d "${TMPDIR:-/tmp}/loonfs-release.XXXXXX")
+archive_tmp=$(mktemp "$artifact_dir/.${archive_name}.XXXXXX")
+archive_path="$artifact_dir/$archive_name"
 
 cp "$binary_path" "$stage_dir/loonfs"
 cp "$repo_root/README.md" "$stage_dir/README.md"
 cp "$repo_root/LICENSE" "$stage_dir/LICENSE"
 printf '%s\n' "$version" > "$stage_dir/VERSION"
 
-mkdir -p "$artifact_dir"
-tar -C "$stage_dir" -czf "$artifact_dir/$archive_name" .
+COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$archive_tmp" loonfs README.md LICENSE VERSION
+mv "$archive_tmp" "$archive_path"
+archive_tmp=""
 
-printf '%s\n' "$artifact_dir/$archive_name"
+printf '%s\n' "$archive_path"
