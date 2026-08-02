@@ -14,12 +14,10 @@ const GREP_MANIFEST_ID_BODY_LEN: usize = 32;
 
 /// Version of the grep index state nested inside a v1 manifest.
 ///
-/// Version 2 moved the phase-only watermark fields out of the index-wide
-/// bookkeeping and into the lifecycle variant that owns them. A version-1
-/// root is rejected outright: it spelled a backfill's target and a steady
-/// index's real progress with the same field, and nothing can tell those
-/// apart after the fact.
-pub const GREP_INDEX_FORMAT_VERSION: u32 = 2;
+/// Before the first stable release this schema evolves in place at version 1;
+/// compatibility starts with the released format, not intermediate
+/// pre-release encodings.
+pub const GREP_INDEX_FORMAT_VERSION: u32 = 1;
 
 /// Durable object id for one immutable grep manifest candidate.
 ///
