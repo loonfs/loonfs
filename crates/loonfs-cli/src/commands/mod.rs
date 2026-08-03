@@ -43,8 +43,8 @@ pub(crate) async fn run(
             mode: None,
             data: CommandData::Version {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
-                commit: option_env!("LOON_GIT_COMMIT").map(str::to_owned),
-                commit_date: option_env!("LOON_GIT_COMMIT_DATE").map(str::to_owned),
+                commit: option_env!("LOONFS_GIT_COMMIT").map(str::to_owned),
+                commit_date: option_env!("LOONFS_GIT_COMMIT_DATE").map(str::to_owned),
             },
         }),
         Command::Init(args) => config::run_config_init(kind, config_path, args, runtime),

@@ -14,8 +14,8 @@ struct GitMetadata {
 }
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=LOON_BUILD_GIT_COMMIT");
-    println!("cargo:rerun-if-env-changed=LOON_BUILD_GIT_COMMIT_DATE");
+    println!("cargo:rerun-if-env-changed=LOONFS_BUILD_GIT_COMMIT");
+    println!("cargo:rerun-if-env-changed=LOONFS_BUILD_GIT_COMMIT_DATE");
 
     let metadata = explicit_metadata()
         .or_else(packaged_metadata)
@@ -30,17 +30,17 @@ fn main() {
     };
 
     if let Some(metadata) = metadata {
-        println!("cargo:rustc-env=LOON_GIT_COMMIT={}", metadata.commit);
+        println!("cargo:rustc-env=LOONFS_GIT_COMMIT={}", metadata.commit);
         if let Some(date) = metadata.commit_date {
-            println!("cargo:rustc-env=LOON_GIT_COMMIT_DATE={date}");
+            println!("cargo:rustc-env=LOONFS_GIT_COMMIT_DATE={date}");
         }
     }
-    println!("cargo:rustc-env=LOON_LONG_VERSION={long_version}");
+    println!("cargo:rustc-env=LOONFS_LONG_VERSION={long_version}");
 }
 
 fn explicit_metadata() -> Option<GitMetadata> {
-    let commit = env_value("LOON_BUILD_GIT_COMMIT").and_then(|value| short_commit(&value))?;
-    let commit_date = env_value("LOON_BUILD_GIT_COMMIT_DATE");
+    let commit = env_value("LOONFS_BUILD_GIT_COMMIT").and_then(|value| short_commit(&value))?;
+    let commit_date = env_value("LOONFS_BUILD_GIT_COMMIT_DATE");
     Some(GitMetadata {
         commit,
         commit_date,

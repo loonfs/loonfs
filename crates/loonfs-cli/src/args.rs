@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// The string served by `--version`, with only the source metadata that the
 /// build can establish.
-pub(crate) const LONG_VERSION: &str = env!("LOON_LONG_VERSION");
+pub(crate) const LONG_VERSION: &str = env!("LOONFS_LONG_VERSION");
 
 #[derive(Debug, Parser)]
 #[command(name = "loonfs", version = LONG_VERSION)]
