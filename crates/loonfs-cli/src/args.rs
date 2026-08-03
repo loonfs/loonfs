@@ -5,16 +5,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-/// `loonfs x.y.z (commit date)`: the string served by both `--version` and
-/// the `version` subcommand, built from the metadata `build.rs` embeds.
-pub(crate) const LONG_VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    " (",
-    env!("LOON_GIT_COMMIT"),
-    " ",
-    env!("LOON_GIT_COMMIT_DATE"),
-    ")"
-);
+/// The string served by `--version`, with only the source metadata that the
+/// build can establish.
+pub(crate) const LONG_VERSION: &str = env!("LOON_LONG_VERSION");
 
 #[derive(Debug, Parser)]
 #[command(name = "loonfs", version = LONG_VERSION)]

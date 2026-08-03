@@ -849,14 +849,22 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             version,
             commit,
             commit_date,
-        } => format!("{version} ({commit} {commit_date})"),
+        } => human_version(version, commit.as_deref(), commit_date.as_deref()),
         CommandData::StreamBytes(_) | CommandData::StreamedToStdout => String::new(),
+    }
+}
+
+fn human_version(version: &str, commit: Option<&str>, commit_date: Option<&str>) -> String {
+    match (commit, commit_date) {
+        (Some(commit), Some(date)) => format!("{version} ({commit} {date})"),
+        (Some(commit), None) => format!("{version} ({commit})"),
+        (None, _) => version.to_owned(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{human_success, json_error, json_success};
+    use super::{human_success, human_version, json_error, json_success};
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
     use crate::config::{ProfileConfig, StoreConfig};
@@ -882,6 +890,19 @@ mod tests {
             content_ref: None,
             committed_at_ms: None,
         }
+    }
+
+    #[test]
+    fn version_omits_unavailable_build_metadata() {
+        assert_eq!(
+            human_version("0.2.0", Some("a23ce9f07cca"), Some("2026-08-02")),
+            "0.2.0 (a23ce9f07cca 2026-08-02)"
+        );
+        assert_eq!(
+            human_version("0.2.0", Some("785e69a54362"), None),
+            "0.2.0 (785e69a54362)"
+        );
+        assert_eq!(human_version("0.2.0", None, None), "0.2.0");
     }
 
     fn stat_output(entry: AuthoritativePathEntry) -> CommandOutput {

@@ -3501,16 +3501,15 @@ fn mkdir_parents_get_noclobber_and_version_metadata() {
     assert_success(&forced);
     assert_eq!(fs::read(&dest).expect("replaced"), b"remote bytes");
 
-    // --version is a real flag now, and both forms carry build metadata.
-    assert_success(&harness.run(&["--version"]));
+    // --version is a real flag now, and neither form fabricates metadata.
+    let version_flag = harness.run(&["--version"]);
+    assert_success(&version_flag);
+    assert!(!String::from_utf8_lossy(&version_flag.stdout).contains("unknown"));
     let version = harness.run(&["--json", "version"]);
     assert_success(&version);
     let data = json_data(&version);
-    assert!(!data["commit"].as_str().expect("commit").is_empty());
-    assert!(!data["commit_date"]
-        .as_str()
-        .expect("commit date")
-        .is_empty());
+    assert_ne!(data["commit"], "unknown");
+    assert_ne!(data["commit_date"], "unknown");
 }
 
 #[test]
