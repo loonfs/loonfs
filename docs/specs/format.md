@@ -65,7 +65,7 @@ The required durable object families and standard key patterns are:
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The lifecycle is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
-| **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}` |
+| **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
 These key shapes are part of the interoperable storage contract.
 Implementations may keep additional private control-plane objects — queues,
@@ -573,17 +573,18 @@ This separation is part of the core model.
 The stable immutable content families are:
 
 ```text
-content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}
+content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}
 ```
 
 The core rules are:
 
 - `content_ref.kind` is `blob_v1` for the current content strategy;
 - `content_id` is `con_` followed by 32 lowercase hex characters — 128 fully
-  random bits, with no time component. The shard directory is the first two
-  characters of that body, so ingest spreads evenly across provider
-  partitions; a clock-derived prefix would put every upload in a window into
-  one shard;
+  random bits, with no time component. Two shard directories use the first
+  four characters of that body in two-character groups. This spreads ingest
+  evenly across provider partitions and bounds directory fanout for
+  filesystem-backed stores; a clock-derived prefix would put every upload in
+  a window into one shard;
 - because the id is random, the final object key is known before the first
   byte is read, and an object that was never published belongs to exactly one
   upload;
@@ -966,7 +967,7 @@ Content must be durable before any metadata change can reference it.
    the final object key exists up front.
 2. Read the namespace head for its `content_store_id`.
 3. Upload the complete byte sequence to
-   `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}`
+   `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}`
    with create-if-absent semantics.
 4. Build a content reference:
 
@@ -1161,7 +1162,7 @@ Given a visible file inode at seq N:
 2. Read the namespace head for its `content_store_id`.
 3. Verify that `content_ref.kind` is supported by the reader.
 4. For `blob_v1`, fetch the object at
-   `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}`.
+   `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}`.
 5. Verify that the fetched bytes match `content_ref.size_bytes` and the
    reference's `whole_file_sha256`. A reference whose evidence the reader
    cannot recompute fails the read; nothing is served unverified.

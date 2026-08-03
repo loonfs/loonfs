@@ -32,7 +32,7 @@ fn key_builders_cover_locked_object_families() {
             "cs_00000000000000000000000000000001",
             &ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("valid content id"),
         ),
-        "content-stores/cs_00000000000000000000000000000001/objects/ab/con_abcdef0123456789abcdef0123456789"
+        "content-stores/cs_00000000000000000000000000000001/objects/ab/cd/con_abcdef0123456789abcdef0123456789"
     );
     assert_eq!(
         wal_segment("ns-1", "seg_00000000000000000000000000000001"),

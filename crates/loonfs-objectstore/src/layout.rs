@@ -158,12 +158,14 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/uploads/")
     }
 
-    /// Content objects shard on the content id's leading characters, which
-    /// are random, so ingest spreads evenly across provider partitions.
+    /// Content objects shard across two directory levels selected by the
+    /// content id's leading characters. Those characters are random, so
+    /// ingest spreads evenly and filesystem-backed stores keep bounded
+    /// directory fanout.
     pub(crate) fn content_blob(&self, content_store: &str, content_id: &ContentId) -> String {
+        let [first_shard, second_shard] = content_id.shard_prefixes();
         format!(
-            "content-stores/{content_store}/objects/{}/{}",
-            content_id.shard_prefix(),
+            "content-stores/{content_store}/objects/{first_shard}/{second_shard}/{}",
             content_id.as_str()
         )
     }
@@ -176,7 +178,7 @@ impl ObjectLayout {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        ["content-stores", _, "objects", _, _] => parsed(DurableObjectFamily::ContentBlob, None),
+        ["content-stores", _, "objects", _, _, _] => parsed(DurableObjectFamily::ContentBlob, None),
         ["namespaces", namespace, "wal", "head.json"] => {
             parsed(DurableObjectFamily::WalHead, Some(namespace))
         }
@@ -279,7 +281,7 @@ mod tests {
             layout
                 .content_blob("cs_00000000000000000000000000000001", &content_id())
                 .as_str(),
-            "content-stores/cs_00000000000000000000000000000001/objects/ab/con_abcdef0123456789abcdef0123456789"
+            "content-stores/cs_00000000000000000000000000000001/objects/ab/cd/con_abcdef0123456789abcdef0123456789"
         );
     }
 
@@ -390,14 +392,14 @@ mod tests {
         assert!(parse_object_key("namespaces/ns-1/unknown/file").is_none());
     }
 
-    /// One content layout exists. Anything else under `content-stores/`,
-    /// including the deeper digest-partitioned shape this format replaced,
+    /// One content layout exists. Anything else under `content-stores/`
     /// classifies as nothing at all rather than as content.
     #[test]
     fn parser_admits_exactly_one_content_layout() {
         for foreign in [
             "content-stores/cs-1/blobs/ab/cd/deadbeef",
-            "content-stores/cs-1/objects/ab/cd/deadbeef",
+            "content-stores/cs-1/objects/ab/deadbeef",
+            "content-stores/cs-1/objects/ab/cd/ef/deadbeef",
             "content-stores/cs-1/objects/deadbeef",
             "content-stores/cs-1/objects/",
         ] {

@@ -525,7 +525,8 @@ mod tests {
     use loonfs_api::{ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, StorageChecksum};
     use std::time::{Duration, UNIX_EPOCH};
 
-    const CONTENT_KEY: &str = "content-stores/cs/objects/01/con_0123456789abcdef0123456789abcdef";
+    const CONTENT_KEY: &str =
+        "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef";
 
     fn content_ref() -> ContentRef {
         ContentRef::blob_v1(
