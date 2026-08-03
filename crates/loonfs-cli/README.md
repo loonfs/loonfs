@@ -6,7 +6,7 @@ filesystem operations, and namespace maintenance against LoonFS.
 ## Command Reference
 
 ```text
-Loon CLI Command Reference
+LoonFS CLI Command Reference
 
 `loonfs` works with profiles, namespaces, and path-based filesystem operations.
 

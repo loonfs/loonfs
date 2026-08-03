@@ -231,10 +231,6 @@ pub(crate) enum CommandData {
     },
     Version {
         version: String,
-        /// Git commit the binary was built from ("unknown" without git).
-        commit: String,
-        /// Commit date of that commit ("unknown" without git).
-        commit_date: String,
     },
     StreamBytes(Vec<u8>),
     /// The payload already went to standard output as it arrived, so there is

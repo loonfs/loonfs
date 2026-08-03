@@ -845,11 +845,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 "warning: {error}\nshowing the file as parsed, secrets masked:\n\n{config_toml}"
             )
         }
-        CommandData::Version {
-            version,
-            commit,
-            commit_date,
-        } => format!("{version} ({commit} {commit_date})"),
+        CommandData::Version { version } => version.clone(),
         CommandData::StreamBytes(_) | CommandData::StreamedToStdout => String::new(),
     }
 }
