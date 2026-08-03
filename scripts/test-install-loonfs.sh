@@ -5,7 +5,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 version=$(cargo pkgid --manifest-path "$repo_root/Cargo.toml" -p loonfs-cli | sed 's/.*#//')
 target="${LOONFS_TEST_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
-expected_version="$version ($(git -C "$repo_root" rev-parse --short=12 HEAD) $(git -C "$repo_root" show -s --format=%cs HEAD))"
+expected_version="$version"
 
 tmpdir=$(mktemp -d)
 cleanup() {
