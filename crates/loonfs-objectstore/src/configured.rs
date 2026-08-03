@@ -262,7 +262,8 @@ mod tests {
         let signed = issuer
             .presign_put(
                 PresignedPutRequest {
-                    object_key: "content-stores/cs/objects/01/con_0123456789abcdef0123456789abcdef",
+                    object_key:
+                        "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef",
                     content_ref: &ContentRef::blob_v1(ContentId::generate(), b"hello"),
                     expires_in: Duration::from_secs(900),
                 },

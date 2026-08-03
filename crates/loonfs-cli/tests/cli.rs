@@ -1478,7 +1478,8 @@ fn a_partial_that_does_not_describe_this_file_is_started_over() {
 }
 
 /// The one content object of a given length under a store root. Content
-/// objects live at `content-stores/<store>/objects/<shard>/<id>`, and the
+/// objects live at
+/// `content-stores/<store>/objects/<first-shard>/<second-shard>/<id>`, and the
 /// tests that use this write one file whose length nothing else shares.
 fn content_object_path(store_root: &Path, size_bytes: u64) -> PathBuf {
     let objects = walkdir::WalkDir::new(store_root.join("content-stores"))

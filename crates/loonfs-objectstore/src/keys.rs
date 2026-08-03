@@ -197,6 +197,7 @@ mod tests {
                 .replace("{table_id}", "tbl-1")
                 .replace("{upload_id}", "up-1")
                 .replace("{content_id[4..6]}", &CONTENT_ID[4..6])
+                .replace("{content_id[6..8]}", &CONTENT_ID[6..8])
                 .replace("{content_id}", CONTENT_ID)
         };
 
@@ -278,7 +279,7 @@ mod tests {
         );
         assert_eq!(
             content_blob("cs_00000000000000000000000000000001", &content_id()),
-            "content-stores/cs_00000000000000000000000000000001/objects/ab/con_abcdef0123456789abcdef0123456789"
+            "content-stores/cs_00000000000000000000000000000001/objects/ab/cd/con_abcdef0123456789abcdef0123456789"
         );
         assert_eq!(
             upload_session("ns-1", "upl_00000000000000000000000000000001"),
@@ -286,12 +287,13 @@ mod tests {
         );
     }
 
-    /// Content keys shard on the id's own leading characters, so the shard a
-    /// key lands in is derivable from the id and nothing else.
+    /// Content keys shard on the id's own leading characters, so both shard
+    /// directories are derivable from the id and nothing else.
     #[test]
     fn content_keys_shard_on_the_content_id_prefix() {
         let id = content_id();
         let key = content_blob("cs-1", &id);
-        assert!(key.ends_with(&format!("/{}/{}", id.shard_prefix(), id.as_str())));
+        let [first_shard, second_shard] = id.shard_prefixes();
+        assert!(key.ends_with(&format!("/{first_shard}/{second_shard}/{}", id.as_str())));
     }
 }

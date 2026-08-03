@@ -492,19 +492,26 @@ impl ContentId {
         ))
     }
 
-    /// Returns the two-character shard prefix content keys are grouped by.
+    /// Returns the two-character components for both content-key shard levels.
     ///
     /// Every valid id has a 32-character lowercase hex body, so this never
     /// panics.
-    pub fn shard_prefix(&self) -> &str {
-        &self.0[CONTENT_ID_PREFIX_LEN..CONTENT_ID_PREFIX_LEN + CONTENT_ID_SHARD_LEN]
+    pub fn shard_prefixes(&self) -> [&str; CONTENT_ID_SHARD_LEVELS] {
+        let first_start = CONTENT_ID_PREFIX_LEN;
+        let second_start = first_start + CONTENT_ID_SHARD_WIDTH;
+        [
+            &self.0[first_start..second_start],
+            &self.0[second_start..second_start + CONTENT_ID_SHARD_WIDTH],
+        ]
     }
 }
 
 /// Byte length of the `con_` marker that precedes a content id's hex body.
 const CONTENT_ID_PREFIX_LEN: usize = "con_".len();
-/// Number of leading body characters that select a content object's shard.
-const CONTENT_ID_SHARD_LEN: usize = 2;
+/// Number of directory levels used to shard content objects.
+const CONTENT_ID_SHARD_LEVELS: usize = 2;
+/// Number of content-id body characters in each shard directory name.
+const CONTENT_ID_SHARD_WIDTH: usize = 2;
 
 string_id! {
     /// Durable id for one metadata SST table file.
@@ -936,26 +943,33 @@ mod tests {
     #[test]
     fn generated_content_ids_are_unique_and_shard_uniformly() {
         let mut ids = BTreeSet::new();
-        let mut shards = BTreeSet::new();
+        let mut first_level_shards = BTreeSet::new();
+        let mut leaf_shards = BTreeSet::new();
         for _ in 0..512 {
             let id = ContentId::generate();
             assert_generated_id_shape(id.as_str(), "con");
-            assert_eq!(
-                id.shard_prefix(),
-                &id.as_str()["con_".len().."con_".len() + 2]
-            );
-            shards.insert(id.shard_prefix().to_owned());
+            let [first, second] = id.shard_prefixes();
+            assert_eq!(first, &id.as_str()["con_".len().."con_".len() + 2]);
+            assert_eq!(second, &id.as_str()["con_".len() + 2.."con_".len() + 4]);
+            first_level_shards.insert(first.to_owned());
+            leaf_shards.insert(format!("{first}/{second}"));
             assert!(
                 ids.insert(id.clone()),
                 "generated duplicate content id {id}"
             );
         }
-        // 512 draws over 256 shards: a generator with a fixed or clock-derived
-        // prefix would collapse into a handful of shards.
+        // 512 draws over 256 first-level and 65,536 leaf shards: a generator
+        // with a fixed or clock-derived prefix would collapse into a handful
+        // of shards.
         assert!(
-            shards.len() > 128,
-            "content id shard prefixes are not spread: {} distinct",
-            shards.len()
+            first_level_shards.len() > 128,
+            "content id first-level shards are not spread: {} distinct",
+            first_level_shards.len()
+        );
+        assert!(
+            leaf_shards.len() > 480,
+            "content id leaf shards are not spread: {} distinct",
+            leaf_shards.len()
         );
     }
 
