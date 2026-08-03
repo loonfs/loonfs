@@ -3459,7 +3459,7 @@ fn remote_undelete_recovers_through_http() {
 }
 
 #[test]
-fn mkdir_parents_get_noclobber_and_version_metadata() {
+fn mkdir_parents_get_noclobber_and_version() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -3501,15 +3501,28 @@ fn mkdir_parents_get_noclobber_and_version_metadata() {
     assert_success(&forced);
     assert_eq!(fs::read(&dest).expect("replaced"), b"remote bytes");
 
-    // --version is a real flag now, and neither form fabricates metadata.
+    // Every version form reports the package version without build metadata.
     let version_flag = harness.run(&["--version"]);
     assert_success(&version_flag);
-    assert!(!String::from_utf8_lossy(&version_flag.stdout).contains("unknown"));
+    assert_eq!(
+        String::from_utf8_lossy(&version_flag.stdout),
+        format!("loonfs {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    let version_command = harness.run(&["version"]);
+    assert_success(&version_command);
+    assert_eq!(
+        String::from_utf8_lossy(&version_command.stdout),
+        format!("{}\n", env!("CARGO_PKG_VERSION"))
+    );
     let version = harness.run(&["--json", "version"]);
     assert_success(&version);
-    let data = json_data(&version);
-    assert_ne!(data["commit"], "unknown");
-    assert_ne!(data["commit_date"], "unknown");
+    assert_eq!(
+        json_data(&version),
+        serde_json::json!({
+            "kind": "version",
+            "version": env!("CARGO_PKG_VERSION")
+        })
+    );
 }
 
 #[test]

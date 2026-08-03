@@ -5,12 +5,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-/// The string served by `--version`, with only the source metadata that the
-/// build can establish.
-pub(crate) const LONG_VERSION: &str = env!("LOONFS_LONG_VERSION");
-
 #[derive(Debug, Parser)]
-#[command(name = "loonfs", version = LONG_VERSION)]
+#[command(name = "loonfs", version)]
 pub(crate) struct Cli {
     /// Config file to use, ahead of LOONFS_CONFIG and the default location.
     #[arg(long, global = true, value_name = "PATH")]

@@ -34,9 +34,6 @@ tokio = { workspace = true, features = ["io-std"] }
 toml.workspace = true
 walkdir.workspace = true
 
-[build-dependencies]
-serde_json.workspace = true
-
 [dev-dependencies]
 ureq.workspace = true
 insta = { version = "1.39", features = ["json"] }
