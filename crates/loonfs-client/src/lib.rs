@@ -1562,10 +1562,18 @@ impl Client {
             return Ok(UploadTransport::Multipart);
         }
         let direct_put_algorithm = capabilities.direct_put_checksum_algorithm();
-        // A length nobody knows cannot be checked against a cap, and cannot
-        // be declared to a provider that wants the digest before the write.
+        // A length nobody knows cannot be checked against a cap. Where a
+        // whole-object write is on offer that is no reason to give up on
+        // it: the transport's first pass measures the payload without
+        // sending a byte, and that measurement re-decides the transport
+        // before anything moves. Falling straight to the service here would
+        // stream an unmeasured payload at a cap it may not fit, and where the
+        // deployment signs no multipart it would be discarding the only rung
+        // that could have carried it.
         let Some(size_bytes) = size_bytes else {
-            return Ok(UploadTransport::Proxied);
+            return Ok(
+                direct_put_algorithm.map_or(UploadTransport::Proxied, UploadTransport::DirectPut)
+            );
         };
         let proxy_cap = capabilities
             .limits

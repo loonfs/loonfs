@@ -14,8 +14,8 @@ use crate::transport::test_transport::{self, Outcome};
 use futures::stream::StreamExt;
 use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload, UploadMode};
 use loonfs_api::{
-    CapabilityDocument, ContentId, ContentRef, FEATURE_UPLOADS_DIRECT_PUT,
-    FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    direct_put_checksum_feature, CapabilityDocument, ContentId, ContentRef,
+    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -184,9 +184,14 @@ fn capabilities(direct_multipart: bool) -> Outcome {
 #[derive(Default, Clone, Copy)]
 struct Advertised {
     direct_multipart: bool,
-    /// Advertises `direct_put` with a SHA-256 claim, the algorithm the
-    /// S3-compatible providers enforce.
-    direct_put: bool,
+    /// The whole-object checksum this deployment says its provider
+    /// enforces, or `None` to advertise no `direct_put` at all.
+    ///
+    /// Providers do not agree on one -- the S3 family enforces SHA-256 and
+    /// GCS enforces CRC-32C -- so the shape is a parameter here for the same
+    /// reason it is a capability key on the wire: the client folds whichever
+    /// the deployment names.
+    direct_put: Option<ChecksumAlgorithm>,
     /// The service's own buffering cap, when the deployment advertises one.
     proxy_max_bytes: Option<u64>,
     /// The provider's single-request ceiling, when it advertises one.
@@ -198,9 +203,9 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
         FEATURE_UPLOADS_DIRECT_MULTIPART.to_owned(),
         advertised.direct_multipart,
     )]);
-    if advertised.direct_put {
+    if let Some(algorithm) = advertised.direct_put {
         features.insert(FEATURE_UPLOADS_DIRECT_PUT.to_owned(), true);
-        features.insert(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256.to_owned(), true);
+        features.insert(direct_put_checksum_feature(algorithm).to_owned(), true);
     }
     let mut limits = std::collections::BTreeMap::new();
     if let Some(cap) = advertised.proxy_max_bytes {
@@ -611,7 +616,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     let (source, _) = watched_source(&payload, 512);
     let transport = test_transport::script(vec![
         capabilities_for(Advertised {
-            direct_put: true,
+            direct_put: Some(ChecksumAlgorithm::Sha256),
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
@@ -635,6 +640,108 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     assert_eq!(object_write.body_bytes(), payload.len());
 }
 
+/// The reviewer's case: a payload nobody measured, on a deployment that
+/// signs no multipart — which is what the GCS adapter is.
+///
+/// A length nobody knows is not a reason to fall to the service. The
+/// whole-object write's own first pass measures the payload without sending
+/// a byte, and that measurement is what routes it. Falling straight to the
+/// proxy here would stream an unmeasured payload — a pipe, a `tar` on
+/// stdin — at a cap it does not fit, and fail at the far end after moving
+/// every byte, with the one transport that could have carried it never
+/// asked.
+#[tokio::test]
+async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
+    let payload = payload(64 * 1024);
+    let uploaded = content_ref(&payload);
+    let (sized, retention) = watched_source(&payload, 4 * 1024);
+    let (stream, _) = sized.into_stream();
+    // The pipe's view of the same bytes: no length to route on.
+    let source = PayloadSource::stream(stream);
+    assert_eq!(source.size_bytes(), None);
+
+    let transport = test_transport::script(vec![
+        // A GCS-shaped deployment: crc32c whole-object writes, no multipart
+        // API, and a proxy that would refuse this payload.
+        capabilities_for(Advertised {
+            direct_put: Some(ChecksumAlgorithm::Crc32c),
+            direct_multipart: false,
+            proxy_max_bytes: Some(1_024),
+            direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024 * 1024),
+        }),
+        begin_direct_put(uploaded.clone()),
+        Outcome::Success(Vec::new()),
+        completed(uploaded),
+        commit_landed(),
+    ]);
+
+    client()
+        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .await
+        .expect("an unmeasured payload past the proxy cap should take the direct write");
+
+    let object_write = transport
+        .sent()
+        .into_iter()
+        .find(|sent| sent.url.starts_with("http://object.invalid/"))
+        .expect("the payload went straight to object storage");
+    assert_eq!(object_write.body_bytes(), payload.len());
+    // And the measuring pass still never held it: it folded and spooled.
+    assert_eq!(retention.total_bytes(), payload.len() as u64);
+    assert!(
+        retention.peak_live_bytes() <= 8 * 1024,
+        "the measuring pass accumulated the payload; peak was {}",
+        retention.peak_live_bytes()
+    );
+}
+
+/// The other half of the same rule: measuring first does not push small
+/// payloads onto the direct write.
+///
+/// The pass decides nothing by itself — it produces a length, and the
+/// ordinary ladder routes on it. A payload the service will take goes
+/// through the service, exactly as it would have with its length known up
+/// front.
+#[tokio::test]
+async fn a_small_unknown_length_payload_still_proxies() {
+    let payload = payload(1_000);
+    let uploaded = content_ref(&payload);
+    let (sized, _) = watched_source(&payload, 512);
+    let (stream, _) = sized.into_stream();
+    let source = PayloadSource::stream(stream);
+    assert_eq!(source.size_bytes(), None);
+
+    let transport = test_transport::script(vec![
+        capabilities_for(Advertised {
+            direct_put: Some(ChecksumAlgorithm::Crc32c),
+            direct_multipart: false,
+            proxy_max_bytes: Some(4_096),
+            direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024 * 1024),
+        }),
+        begin_proxied(),
+        json(&UploadContentResponse {
+            namespace_id: namespace_id(),
+            upload_id: upload_id(),
+            content_ref: uploaded.clone(),
+        }),
+        completed(uploaded),
+        commit_landed(),
+    ]);
+
+    client()
+        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .await
+        .expect("a small unmeasured payload should still proxy");
+
+    assert!(
+        transport
+            .sent()
+            .into_iter()
+            .all(|sent| !sent.url.starts_with("http://object.invalid/")),
+        "a payload the service would take was sent straight to object storage"
+    );
+}
+
 /// A direct-put payload crosses the network in bounded pieces: the first
 /// pass measures it without holding it, and the second streams it from
 /// where that pass left it. Nothing on either side of the digest ever holds
@@ -646,7 +753,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
     let transport = test_transport::script(vec![
         capabilities_for(Advertised {
-            direct_put: true,
+            direct_put: Some(ChecksumAlgorithm::Sha256),
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
@@ -701,7 +808,7 @@ async fn a_wrong_size_hint_does_not_refuse_an_upload_that_actually_fits() {
     let source = source_declaring(&payload, 100_000, 512);
     let _transport = test_transport::script(vec![
         capabilities_for(Advertised {
-            direct_put: true,
+            direct_put: Some(ChecksumAlgorithm::Sha256),
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(4_096),
             ..Advertised::default()
@@ -725,7 +832,7 @@ async fn a_refusal_reports_the_measured_length_not_the_declared_one() {
     let payload = payload(50_000);
     let source = source_declaring(&payload, 100_000, 512);
     let _transport = test_transport::script(vec![capabilities_for(Advertised {
-        direct_put: true,
+        direct_put: Some(ChecksumAlgorithm::Sha256),
         proxy_max_bytes: Some(1_024),
         direct_put_max_bytes: Some(4_096),
         ..Advertised::default()
@@ -762,7 +869,7 @@ async fn a_file_backed_direct_put_re_reads_the_file_rather_than_spooling_it() {
 
     let transport = test_transport::script(vec![
         capabilities_for(Advertised {
-            direct_put: true,
+            direct_put: Some(ChecksumAlgorithm::Sha256),
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()

@@ -686,6 +686,13 @@ fn direct_put_prefix(provider: &str, base_prefix: Option<String>) -> String {
 /// the begin handler refuses any other algorithm, and completion compares a
 /// stored checksum to a promised one. Only the header spellings differ, and
 /// those are the parameter.
+///
+/// This suite and its sibling below are what earns GCS its capabilities, so
+/// they run before the deployment advertises any: set
+/// `GCS_DIRECT_TRANSFERS_PROVEN` in `loonfs-objectstore`'s `configured.rs`
+/// to `true`, run these against a real bucket, and commit the flip with what
+/// they showed. Against the default build they fail at the capability
+/// assertion, which is the gate working.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_direct_put_real_provider_round_trip() {
@@ -741,7 +748,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
     assert!(capabilities.supports("core.uploads.direct_put.checksum.crc32c"));
     assert!(
         !capabilities.supports("core.uploads.direct_multipart"),
-        "GCS has no S3-style multipart API to advertise"
+        "this adapter signs no multipart for GCS, so the key must be absent"
     );
 
     assert_gcs_completion_judges_the_object_that_is_there(&harness.client, &namespace_id).await;
@@ -970,8 +977,8 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
         .collect();
     let target = NamespacePath::parse(namespace, "/cap-bound.bin").expect("cap-bound target");
 
-    // GCS signs no multipart, so this whole-object write is the only
-    // direct transport there is — and the proxy will not take it.
+    // This adapter signs no multipart for GCS, so the whole-object write is
+    // the only direct transport on offer — and the proxy will not take it.
     harness
         .client
         .put_file_bytes(&target, &payload, &put_options("gcs-cap-bound"))

@@ -56,9 +56,11 @@ configuration the question a second time:
    the `amazonaws.com` or `amazonaws.com.cn` domain family, and an R2
    endpoint in the `r2.cloudflarestorage.com` family qualify. Any other
    endpoint URL is some other implementation of the S3 API, is not covered by
-   those runs, and does not qualify. GCS has nothing to decide here: its
-   configuration carries no endpoint override, so every capability it issues
-   is `https` to `storage.googleapis.com`.
+   those runs, and does not qualify. GCS has no endpoint to judge — its
+   configuration carries no override, so every capability it issues is
+   `https` to `storage.googleapis.com` — so it clears this bar the same way,
+   through a single flag that a credentialed run flips. Until that run is
+   recorded, GCS advertises no direct transfer and proxies every byte.
 
    The scheme is part of the test because a presigned URL is a bearer
    capability to read or write one object: issued over `http`, it and its
@@ -73,9 +75,10 @@ configuration the question a second time:
 Where both hold, the server advertises `core.uploads.direct_put` in its
 capability document and accepts the mode. Everywhere else the feature key is
 absent and beginning that mode answers `not_supported`. There is no override:
-an endpoint that has not been proven does not get the capability, because the
+a provider that has not been proven does not get the capability, because the
 whole point of the gate is that the provider — not LoonFS — is being trusted to
-enforce the preconditions.
+enforce the preconditions. An implementation passing its own unit tests is
+not that evidence; only a run against the live provider is.
 
 The digest a provider binds is its own, not a fixed one. The deployment names
 it in `core.uploads.direct_put.checksum.<algorithm>`, and the client folds
@@ -119,19 +122,35 @@ reference the grant carried.
 | AWS S3 | Yes | Yes | Yes | SigV4, SHA-256, `if-none-match: *` | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
 | Cloudflare R2 | Yes | Yes | Yes | SigV4, SHA-256, `if-none-match: *` | `r2.cloudflarestorage.com` |
 | Other S3-compatible endpoints | No | No | No | n/a | None — unproven |
-| Google Cloud Storage | Yes | Yes | No | GOOG4-RSA-SHA256, CRC-32C, generation 0 | `storage.googleapis.com` (no override exists) |
+| Google Cloud Storage | Built, withheld[^47] | Built, withheld[^47] | No | GOOG4-RSA-SHA256, CRC-32C, generation 0 | `storage.googleapis.com` (no override exists) |
 | Azure Blob Storage | No | No | No | n/a | n/a |
 | Local filesystem | No | No | No | n/a | n/a |
 
 The three transfer columns are separate because they are separate offers.
 `direct_get` comes with the bundle existing at all, and the two write
 directions are independent of each other: GCS is the case that makes this
-concrete, signing whole-object writes and reads while having no S3-style
-multipart API to open, so it advertises `direct_put` and not
-`direct_multipart`. Nothing is lost by that — GCS's single-request ceiling is
-1000x the S3 family's, so there is no object size at which a whole-object
-write stops being expressible. A client's upload ladder falls from parts, to
-one whole-object write, to the proxy, and refuses a payload none of them can
+concrete, signing whole-object writes and reads while advertising
+`direct_put` and not `direct_multipart`.
+
+That is a decision about this adapter, not a gap in the provider. Google
+does document an XML API multipart upload, and documents it as compatible
+with the S3 multipart API.[^46] This adapter does not implement it, for two
+reasons:
+
+- It is part of the same S3-interoperability surface whose precondition
+  handling conformance found unsound. Nothing has been run to show that
+  *this* corner of it behaves, and the create-only and checksum guarantees
+  direct transfers rest on are exactly what was wrong on the surface next to
+  it. It would need its own conformance run to earn the same trust the
+  native path is earning.
+- The large-object path GCS is headed for is the native resumable upload,
+  not S3-style parts. Implementing the interop multipart now would be
+  building the transport we intend to replace.
+
+Nothing is stranded meanwhile: GCS's single-request ceiling is 1000x the S3
+family's, so there is no object size at which the whole-object write stops
+being expressible. A client's upload ladder falls from parts, to one
+whole-object write, to the proxy, and refuses a payload none of them can
 carry rather than pushing it into the capped proxy.
 
 ## 4. Incremental writes and where they are real
@@ -245,3 +264,7 @@ The local provider is a development and test provider supported on Unix-family p
 [^44]: Microsoft Learn, "Scalability and performance targets for standard storage accounts": [https://learn.microsoft.com/en-us/azure/storage/common/scalability-targets-standard-account](https://learn.microsoft.com/en-us/azure/storage/common/scalability-targets-standard-account)
 
 [^45]: Microsoft Learn, "Performance checklist for Blob Storage": [https://learn.microsoft.com/en-us/azure/storage/blobs/storage-performance-checklist](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-performance-checklist)
+
+[^46]: Google Cloud Storage, "XML API multipart uploads": [https://cloud.google.com/storage/docs/multipart-uploads](https://cloud.google.com/storage/docs/multipart-uploads)
+
+[^47]: The signer, the readback, and the whole path are implemented and unit-covered, but a GCS deployment advertises neither key today: the capability is withheld until a credentialed conformance run against a live bucket has been recorded. See `GCS_DIRECT_TRANSFERS_PROVEN` in `crates/loonfs-objectstore/src/configured.rs`.

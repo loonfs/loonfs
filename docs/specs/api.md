@@ -932,25 +932,30 @@ Without an explicit opt-in, the feature key is absent and beginning
 available and is the default.
 
 The reference server offers `direct_put` only where its adapter can presign the
-required create-only, checksum-bound request *and* the configured endpoint is a
-first-party provider domain family the live conformance suite has run against.
-AWS S3 and Cloudflare R2 qualify through SigV4, and Google Cloud Storage
-through its native `GOOG4-RSA-SHA256` signed URLs — not through GCS's
-S3-interoperability surface, which conformance proved ignores preconditions.
-Custom S3-compatible endpoints, Azure Blob Storage, and the local filesystem
-are not offered `direct_put`, and there is no configuration override. Other
-implementations may use different headers or decline `direct_put` support.
+required create-only, checksum-bound request *and* the live conformance suite
+has been run against that provider. AWS S3 and Cloudflare R2 qualify today,
+through SigV4 on their own domain families. The Google Cloud Storage adapter
+signs the same guarantees natively with `GOOG4-RSA-SHA256` — not through GCS's
+S3-interoperability surface, which conformance proved ignores preconditions —
+but withholds the capability until a run against a live bucket is recorded, so
+a GCS deployment currently advertises no direct transfer. Custom S3-compatible
+endpoints, Azure Blob Storage, and the local filesystem are not offered
+`direct_put`, and there is no configuration override. Other implementations may
+use different headers or decline `direct_put` support.
 
 The signed request's shape is the provider's, not a fixed one, and the
 deployment names the digest it binds in
 `core.uploads.direct_put.checksum.<algorithm>`. A client folds that algorithm
 over its payload and never infers one from the backend.
 
-`direct_put` and `direct_multipart` are separate offers. A provider that can
-sign a whole-object write but has no S3-style multipart API advertises the
-first and not the second — Google Cloud Storage is exactly this case — and a
-client's transport ladder falls from parts to one whole-object write before it
-falls back to the proxy.
+`direct_put` and `direct_multipart` are separate offers, and a deployment may
+advertise the first and not the second — the reference server's Google Cloud
+Storage adapter is built that way, signing whole-object writes and reads while
+implementing no multipart signing. A client's transport ladder falls
+from parts to one whole-object write before it falls back to the proxy, and a
+source whose length is unknown takes the whole-object write wherever one is
+offered: that transport measures the payload before sending a byte, and the
+measurement is what routes it.
 
 A browser calling a presigned URL is talking to the provider, not to LoonFS,
 so cross-origin access is governed by the bucket's or container's own CORS

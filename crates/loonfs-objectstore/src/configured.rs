@@ -26,6 +26,29 @@ use std::sync::Arc;
 pub(crate) const AWS_S3_PROVEN_DOMAINS: &[&str] = &["amazonaws.com", "amazonaws.com.cn"];
 pub(crate) const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage.com"];
 
+/// Whether GCS's direct transfers have been proven against a live bucket.
+///
+/// The two S3-compatible providers earned their place in the lists above by
+/// a credentialed run of the conformance suite; this is the same bar,
+/// spelled as one flag because GCS has no endpoint override to key it on.
+/// It is `false` because that run has not happened yet: the signer, the
+/// readback, and the whole path are implemented and covered by unit tests,
+/// but no test has yet watched Google itself refuse a tampered checksum or a
+/// replayed create-only write, and the trust direct transfers rest on is
+/// exactly that refusal.
+///
+/// Flipping this to `true` belongs to the change that records a passing
+/// live run — nothing else in the build needs to move, and until then GCS
+/// deployments advertise no direct transfer and proxy every byte.
+///
+/// The run comes first and the flip second, which means doing it in that
+/// order locally: the ignored GCS suite in
+/// `crates/loonfs-server/tests/it/direct_put_real_provider.rs` asks a
+/// deployment for capabilities it does not yet advertise, so flip this,
+/// run the suite against a real bucket, and commit the flip with what the
+/// run showed.
+const GCS_DIRECT_TRANSFERS_PROVEN: bool = false;
+
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfiguredObjectStoreKind {
@@ -147,15 +170,29 @@ impl ConfiguredObjectStore {
     }
 
     /// Builds a native GCS store, and the reads and whole-object writes it
-    /// can authorize.
+    /// can authorize once [`GCS_DIRECT_TRANSFERS_PROVEN`] says a live run
+    /// has watched the provider enforce them.
     ///
-    /// GCS has no S3-style multipart API, so the bundle's multipart slot stays
-    /// empty rather than holding a signer that would fail. It needs no
-    /// endpoint-trust decision either: the configuration carries no endpoint
-    /// override, so every capability is `https` to Google's own host.
+    /// This adapter implements no multipart signing for GCS, so the bundle's
+    /// multipart slot stays empty rather than holding a signer that would
+    /// fail. It needs no endpoint-trust decision either: the configuration
+    /// carries no endpoint override, so every capability is `https` to
+    /// Google's own host.
     ///
     /// Construction fails when credentials, provider runtime, or key-prefix configuration is invalid.
     pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
+        Self::gcp_gcs_proven(config, GCS_DIRECT_TRANSFERS_PROVEN)
+    }
+
+    /// The same store with the live-conformance verdict passed in, so a test
+    /// can show what the flip turns on without waiting for it.
+    ///
+    /// The signer is built either way. It is the credential path the store's
+    /// own checksum readback needs, and building it is what makes an
+    /// unusable service-account key a startup failure rather than a surprise
+    /// at the first transfer — so `proven` decides only whether the bundle is
+    /// handed out, never whether it exists.
+    fn gcp_gcs_proven(config: GcpGcsStoreConfig, proven: bool) -> Result<Self> {
         let presigner = Arc::new(GcsV4Presigner::new(GcsPresignerConfig {
             bucket: config.bucket.clone(),
             service_account_key_path: config.service_account_key_path.clone(),
@@ -164,9 +201,8 @@ impl ConfiguredObjectStore {
         let store = GcpGcsStore::new(config)?;
         Ok(Self {
             inner: Arc::new(store),
-            direct_transfers: Some(
-                DirectTransferIssuers::read_only(presigner.clone()).with_put(presigner),
-            ),
+            direct_transfers: proven
+                .then(|| DirectTransferIssuers::read_only(presigner.clone()).with_put(presigner)),
         })
     }
 
@@ -304,20 +340,39 @@ mod tests {
         );
     }
 
-    /// GCS signs its own scheme, so its bundle carries reads and whole-object
-    /// writes; it has no S3-style multipart API, so that slot stays empty.
+    /// GCS advertises no direct transfer until a credentialed conformance
+    /// run has proven the provider enforces what the signatures bind.
+    ///
+    /// This is the same bar the S3-compatible providers cleared before their
+    /// domains went into the allowlists above. Trusting a signed precondition
+    /// that nothing has watched the provider honour is exactly the failure
+    /// the whole gate exists to prevent, and an implementation passing its
+    /// own unit tests is not that evidence.
+    ///
+    /// Flipping [`GCS_DIRECT_TRANSFERS_PROVEN`] fails this test, which is the
+    /// point: the flip and the run that justifies it land together.
+    #[test]
+    fn gcs_advertises_no_direct_transfer_until_a_live_run_proves_it() {
+        assert!(
+            gcs_store().direct_transfers().is_none(),
+            "an unproven provider must hand out no capability at all"
+        );
+    }
+
+    /// What the live-conformance flip turns on: reads and whole-object
+    /// writes, and no multipart, because this adapter signs none for GCS.
     /// The checksum and the ceiling come from the issuer, which is the only
     /// thing that knows them.
     #[test]
-    fn gcs_signs_puts_and_gets_and_offers_no_multipart() {
-        let transfers = gcs_store()
+    fn a_proven_gcs_deployment_signs_puts_and_gets_and_offers_no_multipart() {
+        let transfers = proven_gcs_store()
             .direct_transfers()
             .expect("gcs signs its native scheme");
         let put = transfers.put.expect("gcs signs whole-object writes");
 
         assert!(
             transfers.multipart.is_none(),
-            "GCS has no S3-style multipart API, which is spelled as an absent signer"
+            "this adapter signs no multipart for GCS, which is spelled as an absent signer"
         );
         assert_eq!(put.checksum_algorithm(), ChecksumAlgorithm::Crc32c);
         assert_eq!(put.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
@@ -328,7 +383,7 @@ mod tests {
     /// signature, exactly as the S3-compatible bundle's does.
     #[test]
     fn the_gcs_bundle_signs_native_generation_preconditions() {
-        let issuer = gcs_store()
+        let issuer = proven_gcs_store()
             .direct_transfers()
             .and_then(|transfers| transfers.put)
             .expect("gcs presigner");
@@ -393,9 +448,9 @@ mod tests {
             .direct_transfers()
             .is_none());
 
-        // GCS is proven by construction: its configuration carries no
-        // endpoint override, so there is no unproven endpoint to reach.
-        assert!(gcs_store().direct_transfers().is_some());
+        // GCS has no endpoint override to judge, so what gates it is the
+        // live-conformance flag instead — and that run has not happened.
+        assert!(gcs_store().direct_transfers().is_none());
 
         let azure = ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
             account_name: "devstoreaccount1".to_owned(),
@@ -492,14 +547,23 @@ mod tests {
     }
 
     fn gcs_store() -> ConfiguredObjectStore {
-        ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
+        ConfiguredObjectStore::gcp_gcs(gcs_config()).expect("construct gcs store")
+    }
+
+    /// The same deployment as it will be once a credentialed conformance run
+    /// has flipped [`GCS_DIRECT_TRANSFERS_PROVEN`].
+    fn proven_gcs_store() -> ConfiguredObjectStore {
+        ConfiguredObjectStore::gcp_gcs_proven(gcs_config(), true).expect("construct gcs store")
+    }
+
+    fn gcs_config() -> GcpGcsStoreConfig {
+        GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
             service_account_key_path: gcs_fixture_service_account_key_file("configured-store-gcs")
                 .display()
                 .to_string(),
             key_prefix: Some("tenant-a".to_owned()),
-        })
-        .expect("construct gcs store")
+        }
     }
 
     /// A reference whose storage checksum is the CRC-32C GCS enforces.
