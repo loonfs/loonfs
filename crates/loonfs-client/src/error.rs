@@ -39,6 +39,17 @@ pub enum ClientError {
         /// so the rare detailed error does not widen every client result.
         details: Option<Box<ErrorDetails>>,
     },
+    /// No upload transport this deployment offers can carry the payload.
+    ///
+    /// Raised before any byte moves, because the alternative is sending an
+    /// oversized payload into the capped proxy to be refused there.
+    #[error("payload of {size_bytes} bytes exceeds every upload transport this deployment offers: {reason}")]
+    UploadTooLarge {
+        /// Complete length of the payload that could not be carried.
+        size_bytes: u64,
+        /// The caps it exceeded, named so a caller can act on them.
+        reason: String,
+    },
     #[error("i/o error: {0}")]
     Io(String),
     #[error("json error: {0}")]

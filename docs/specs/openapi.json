@@ -3646,21 +3646,21 @@
       },
       "DirectPutContentClaim": {
         "type": "object",
-        "description": "What a `direct_put` client promises about bytes it has not written yet.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. The server signs both into the provider write\nand verifies them again at completion.",
+        "description": "What a `direct_put` client promises about bytes it has not written yet.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. The server signs both into the provider write\nand verifies them again at completion.\n\nThe digest names its own algorithm because providers do not agree on one:\neach binds into a presigned write whatever its API can enforce. The\ndeployment advertises which it is, and a claim in any other algorithm is\nrefused at begin rather than signed into a write the provider would\nreject.",
         "required": [
           "size_bytes",
-          "sha256"
+          "storage_checksum"
         ],
         "properties": {
-          "sha256": {
-            "type": "string",
-            "description": "SHA-256 over the complete payload, lowercase hex."
-          },
           "size_bytes": {
             "type": "integer",
             "format": "int64",
             "description": "Complete byte length the client will write.",
             "minimum": 0
+          },
+          "storage_checksum": {
+            "$ref": "#/components/schemas/StorageChecksum",
+            "description": "Whole-payload checksum the provider will be made to enforce, in the\nalgorithm this deployment advertises."
           }
         },
         "additionalProperties": false

@@ -12,7 +12,10 @@
 // Spec parsing panics with precise messages when a section is missing.
 
 use loonfs::{CapabilityDocument, FsReader, SharedObjectStore};
-use loonfs_api::PROFILE_QUERY_V0;
+use loonfs_api::{
+    direct_put_checksum_feature, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_QUERY_V0,
+    UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
 use std::collections::BTreeSet;
@@ -41,6 +44,14 @@ fn without_the_query_plane(mut document: CapabilityDocument) -> CapabilityDocume
 
 fn is_query_key(key: &str) -> bool {
     key.starts_with("query.")
+}
+
+/// A registry row whose key carries a `<placeholder>` documents a *family*
+/// of keys, not one key. Only a deployment that offers the parent feature
+/// advertises a member, so no runtime advertises one unconditionally; the
+/// members are pinned against their constants below instead.
+fn is_key_family(key: &str) -> bool {
+    key.contains('<')
 }
 
 fn spec_section<'a>(spec: &'a str, start: &str, end: &str) -> &'a str {
@@ -98,11 +109,29 @@ fn advertised_features_match_the_spec_feature_registry() {
 
     let runtime_registry: BTreeSet<String> = registry
         .into_iter()
-        .filter(|key| !is_query_key(key))
+        .filter(|key| !is_query_key(key) && !is_key_family(key))
         .collect();
     let advertised: BTreeSet<String> = embedded_capabilities().features.into_keys().collect();
     assert_eq!(
         advertised, runtime_registry,
         "advertised feature keys drifted from the api.md section 2.2 registry"
+    );
+}
+
+/// Every member of the `direct_put` checksum family is its parent feature
+/// plus the algorithm's own frozen wire spelling, and the spec documents the
+/// family under exactly that prefix. One naming rule, three copies pinned.
+#[test]
+fn direct_put_checksum_features_are_named_after_their_parent_and_algorithm() {
+    let family_prefix = format!("{FEATURE_UPLOADS_DIRECT_PUT}.checksum.");
+    for (algorithm, feature) in UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES {
+        assert_eq!(feature, format!("{family_prefix}{}", algorithm.as_str()));
+        assert_eq!(direct_put_checksum_feature(algorithm), feature);
+    }
+
+    let spec = std::fs::read_to_string(API_SPEC_PATH).expect("read docs/specs/api.md");
+    assert!(
+        spec_section(&spec, "### 2.2", "### 2.3").contains(&format!("| `{family_prefix}<")),
+        "the api.md registry must document the `{family_prefix}` family"
     );
 }

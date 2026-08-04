@@ -549,7 +549,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
             &harness.namespace_id,
             loonfs::DirectPutContentClaim {
                 size_bytes: bytes.len() as u64,
-                sha256: loonfs_api::StorageChecksum::sha256(bytes).value,
+                storage_checksum: loonfs_api::StorageChecksum::sha256(bytes),
             },
         )
         .await

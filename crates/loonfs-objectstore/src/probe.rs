@@ -24,7 +24,8 @@
 //! by prefix.
 //!
 //! This module does not decide whether a store may serve presigned direct
-//! uploads. That trust comes from [`crate::StoreConfig::direct_put_is_proven`],
+//! transfers. That trust is settled by whether
+//! [`crate::ConfiguredObjectStore::direct_transfers`] built a bundle at all,
 //! because a probe exercises the store's own request path and never a
 //! presigned capability handed to a client.
 

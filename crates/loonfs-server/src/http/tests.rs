@@ -360,7 +360,7 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
 
     blocking_store.block_next();
     let config = test_config(temp_dir.path(), "grep-shutdown-server");
-    let (_router, state) = super::app_with_store_and_transfer_issuer(config, store, None)
+    let (_router, state) = super::app_with_store_and_direct_transfers(config, store, None)
         .await
         .expect("build app");
     state
@@ -447,7 +447,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
         OperationClass::CompareAndSwap,
     ));
     let config = test_config(temp_dir.path(), "shutdown-order-server");
-    let (_router, state) = super::app_with_store_and_transfer_issuer(
+    let (_router, state) = super::app_with_store_and_direct_transfers(
         config,
         blocking.clone() as SharedObjectStore,
         None,
@@ -546,7 +546,7 @@ async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "grep-observer-server");
-    let (_router, state) = super::app_with_store_and_transfer_issuer(config, store, None)
+    let (_router, state) = super::app_with_store_and_direct_transfers(config, store, None)
         .await
         .expect("build app");
     let namespace_id = namespace_id("grep-observer");
@@ -2272,14 +2272,16 @@ fn assert_api_error<T: std::fmt::Debug>(
 /// verification) runs end to end without a real bucket.
 mod direct_download {
     use super::*;
-    use crate::http::app_with_store_and_transfer_issuer;
+    use crate::http::app_with_store_and_direct_transfers;
     use loonfs_api::{
-        RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
-        FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+        ChecksumAlgorithm, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
+        FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+        FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+        LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     };
     use loonfs_objectstore::presign::{
-        ObjectTransferIssuer, PresignedGetRequest, PresignedPartRequest, PresignedPutRequest,
-        PresignedUrl,
+        DirectGetIssuer, DirectPutIssuer, DirectTransferIssuers, PresignedGetRequest,
+        PresignedPutRequest, PresignedUrl,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -2296,39 +2298,38 @@ mod direct_download {
     /// client's own tests.
     const PROXY_CAP_BYTES: u64 = 1024;
 
+    /// The whole-object ceiling the loopback put issuer reports.
+    ///
+    /// Above [`loonfs_client::STREAMING_PUT_MIN_BYTES`], because a payload
+    /// below that never asks what transports are on offer at all — so a
+    /// ceiling under it could never be the thing a put ran into.
+    const LOOPBACK_DIRECT_PUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
     /// An issuer that hands out unsigned loopback URLs.
     ///
     /// It stands in for the signing half only. What a real presigner adds —
-    /// that the capability expires, and that `Range` stays outside the
-    /// signature — is pinned where it is decided: in the S3-compatible
-    /// presigner's own tests, and against a live provider in the ignored
-    /// suite.
+    /// that the capability expires, that `Range` stays outside the
+    /// signature, and that the provider enforces the digest — is pinned
+    /// where it is decided: in the S3-compatible presigner's own tests, and
+    /// against a live provider in the ignored suite.
+    ///
+    /// It implements the read and whole-object-write traits and not the
+    /// multipart one, which is exactly the provider shape this suite exists
+    /// to cover: each test composes the bundle it means to serve.
     #[derive(Debug)]
     struct LoopbackIssuer {
         object_base_url: String,
     }
 
-    impl ObjectTransferIssuer for LoopbackIssuer {
-        fn presign_put(
-            &self,
-            _request: PresignedPutRequest<'_>,
-            _now: SystemTime,
-        ) -> Result<PresignedUrl, ObjectStoreError> {
-            Err(ObjectStoreError::Configuration(
-                "the loopback issuer authorizes reads only".to_owned(),
-            ))
+    impl LoopbackIssuer {
+        fn at(object_base_url: impl Into<String>) -> Arc<Self> {
+            Arc::new(Self {
+                object_base_url: object_base_url.into(),
+            })
         }
+    }
 
-        fn presign_multipart_part(
-            &self,
-            _request: PresignedPartRequest<'_>,
-            _now: SystemTime,
-        ) -> Result<PresignedUrl, ObjectStoreError> {
-            Err(ObjectStoreError::Configuration(
-                "the loopback issuer authorizes reads only".to_owned(),
-            ))
-        }
-
+    impl DirectGetIssuer for LoopbackIssuer {
         fn presign_get(
             &self,
             request: PresignedGetRequest<'_>,
@@ -2343,10 +2344,33 @@ mod direct_download {
         }
     }
 
+    impl DirectPutIssuer for LoopbackIssuer {
+        fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+            ChecksumAlgorithm::Sha256
+        }
+
+        fn max_content_bytes(&self) -> u64 {
+            LOOPBACK_DIRECT_PUT_MAX_BYTES
+        }
+
+        fn presign_put(
+            &self,
+            request: PresignedPutRequest<'_>,
+            _now: SystemTime,
+        ) -> Result<PresignedUrl, ObjectStoreError> {
+            Ok(PresignedUrl {
+                method: "PUT".to_owned(),
+                url: format!("{}/{}", self.object_base_url, request.object_key),
+                headers: BTreeMap::new(),
+                expires_at_ms: u64::MAX,
+            })
+        }
+    }
+
     /// Serves objects out of the deployment's own store, the way a provider
-    /// answers a presigned read, and reports its base URL.
+    /// answers a presigned transfer, and reports its base URL.
     async fn serve_objects(store: SharedObjectStore) -> String {
-        async fn object(
+        async fn read_object(
             axum::extract::State(store): axum::extract::State<SharedObjectStore>,
             axum::extract::Path(key): axum::extract::Path<String>,
         ) -> axum::response::Response {
@@ -2362,8 +2386,27 @@ mod direct_download {
             }
         }
 
+        async fn write_object(
+            axum::extract::State(store): axum::extract::State<SharedObjectStore>,
+            axum::extract::Path(key): axum::extract::Path<String>,
+            body: bytes::Bytes,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            match store.put_if_absent(&key, body).await {
+                Ok(_) => axum::http::StatusCode::OK.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+                    .into_response(),
+            }
+        }
+
         let router = axum::Router::new()
-            .route("/{*key}", axum::routing::get(object))
+            .route("/{*key}", axum::routing::get(read_object).put(write_object))
+            // A provider takes whatever the presigned write carries; this
+            // double must not impose a limit of its own on top.
+            .layer(axum::extract::DefaultBodyLimit::disable())
             .with_state(store);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2375,18 +2418,33 @@ mod direct_download {
         format!("http://{addr}")
     }
 
-    /// Starts a deployment whose read cap is [`PROXY_CAP_BYTES`], with or
-    /// without an issuer, and returns a client pointed at it.
+    /// Starts a deployment whose read cap is [`PROXY_CAP_BYTES`], serving
+    /// whichever direct transfers the caller composed, and returns a client
+    /// pointed at it.
     async fn start(
         root: &Path,
         writer_id: &str,
-        issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+        direct_transfers: Option<DirectTransferIssuers>,
+    ) -> Client {
+        start_with_upload_cap(root, writer_id, direct_transfers, None).await
+    }
+
+    /// The same deployment with its *write* cap narrowed too, for the cases
+    /// about which transport a payload the proxy will not take ends up on.
+    async fn start_with_upload_cap(
+        root: &Path,
+        writer_id: &str,
+        direct_transfers: Option<DirectTransferIssuers>,
+        max_upload_bytes: Option<u64>,
     ) -> Client {
         let store: SharedObjectStore =
             Arc::new(LocalFsStore::new(root).expect("construct local store"));
         let mut config = test_config(root, writer_id);
         config.max_download_bytes = PROXY_CAP_BYTES;
-        let (router, _state) = app_with_store_and_transfer_issuer(config, store, issuer)
+        if let Some(max_upload_bytes) = max_upload_bytes {
+            config.max_upload_bytes = max_upload_bytes;
+        }
+        let (router, _state) = app_with_store_and_direct_transfers(config, store, direct_transfers)
             .await
             .expect("build app");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2419,8 +2477,8 @@ mod direct_download {
     async fn a_file_past_the_proxy_cap_round_trips_through_a_download_grant() {
         let temp_dir = tempdir().expect("tempdir");
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
-        let issuer: Arc<dyn ObjectTransferIssuer> = Arc::new(LoopbackIssuer { object_base_url });
-        let client = start(temp_dir.path(), "direct-download", Some(issuer)).await;
+        let transfers = DirectTransferIssuers::read_only(LoopbackIssuer::at(object_base_url));
+        let client = start(temp_dir.path(), "direct-download", Some(transfers)).await;
 
         let namespace = namespace_id("direct-download");
         client
@@ -2473,8 +2531,8 @@ mod direct_download {
     async fn a_grant_keeps_reading_the_revision_it_was_issued_for() {
         let temp_dir = tempdir().expect("tempdir");
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
-        let issuer: Arc<dyn ObjectTransferIssuer> = Arc::new(LoopbackIssuer { object_base_url });
-        let client = start(temp_dir.path(), "grant-pins", Some(issuer)).await;
+        let transfers = DirectTransferIssuers::read_only(LoopbackIssuer::at(object_base_url));
+        let client = start(temp_dir.path(), "grant-pins", Some(transfers)).await;
 
         let namespace = namespace_id("grant-pins");
         client
@@ -2565,42 +2623,158 @@ mod direct_download {
         );
     }
 
-    /// The three transfer capabilities are advertised together: they rest
-    /// on one proof, and a deployment offering the writes owes the read.
+    /// A provider that signs whole-object writes and reads but has no
+    /// multipart API advertises exactly that: each transport comes from its
+    /// own issuer, and the read comes from the bundle existing at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_transfer_capabilities_are_advertised_together() {
-        let transfer_features = [
-            FEATURE_UPLOADS_DIRECT_PUT,
-            FEATURE_UPLOADS_DIRECT_MULTIPART,
-            FEATURE_DOWNLOADS_DIRECT_GET,
-        ];
-
+    async fn a_provider_without_multipart_advertises_put_and_get_and_denies_multipart() {
         let temp_dir = tempdir().expect("tempdir");
-        let issuer: Arc<dyn ObjectTransferIssuer> = Arc::new(LoopbackIssuer {
-            object_base_url: "http://object.invalid".to_owned(),
-        });
-        let advertised = start(temp_dir.path(), "advertises", Some(issuer))
+        let issuer = LoopbackIssuer::at("http://object.invalid");
+        let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
+        let advertised = start(temp_dir.path(), "put-without-multipart", Some(transfers))
             .await
             .capabilities()
             .await
             .expect("capabilities");
-        for feature in transfer_features {
-            assert!(advertised.supports(feature), "missing `{feature}`");
-        }
+
+        assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT));
+        assert!(advertised.supports(FEATURE_DOWNLOADS_DIRECT_GET));
+        assert!(
+            !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
+            "a provider with no multipart API must not advertise one"
+        );
+        assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256));
+        assert_eq!(
+            advertised.direct_put_checksum_algorithm(),
+            Some(ChecksumAlgorithm::Sha256),
+            "a client folds the algorithm the deployment names, not one it assumed"
+        );
+        assert_eq!(
+            advertised
+                .limits
+                .get(LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES),
+            Some(&LOOPBACK_DIRECT_PUT_MAX_BYTES),
+            "the provider's own single-request ceiling is advertised, not the proxy's"
+        );
         assert_eq!(
             advertised.limits.get(LIMIT_DOWNLOAD_MAX_CONTENT_BYTES),
             Some(&PROXY_CAP_BYTES),
             "the proxy cap stays advertised: it is what tells a client which reads need a grant"
         );
+    }
 
-        let plain_dir = tempdir().expect("tempdir");
-        let advertised = start(plain_dir.path(), "advertises-none", None)
+    /// A store that authorizes nothing directly advertises none of the three.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deployment_without_a_bundle_advertises_no_direct_transfer() {
+        let temp_dir = tempdir().expect("tempdir");
+        let advertised = start(temp_dir.path(), "advertises-none", None)
             .await
             .capabilities()
             .await
             .expect("capabilities");
-        for feature in transfer_features {
+
+        for feature in [
+            FEATURE_UPLOADS_DIRECT_PUT,
+            FEATURE_UPLOADS_DIRECT_MULTIPART,
+            FEATURE_DOWNLOADS_DIRECT_GET,
+            FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256,
+        ] {
             assert!(!advertised.supports(feature), "unexpected `{feature}`");
+        }
+        assert!(!advertised
+            .limits
+            .contains_key(LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES));
+    }
+
+    /// The ladder's whole point: with no multipart API to open, a payload
+    /// too large for the proxy still reaches object storage — through one
+    /// presigned whole-object write, chosen by the client from what the
+    /// deployment advertised.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_large_file_takes_direct_put_where_multipart_is_not_offered() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let issuer = LoopbackIssuer::at(object_base_url);
+        let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
+        let client = start_with_upload_cap(
+            temp_dir.path(),
+            "ladder-direct-put",
+            Some(transfers),
+            Some(PROXY_CAP_BYTES),
+        )
+        .await;
+
+        let namespace = namespace_id("ladder-direct-put");
+        client
+            .create_namespace(&namespace)
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
+        // Large enough that the client looks for a direct transport at all,
+        // and far past the proxy cap, so nothing else could carry it.
+        let payload: Vec<u8> = (0..loonfs_client::STREAMING_PUT_MIN_BYTES as usize)
+            .map(|index| (index % 251) as u8)
+            .collect();
+
+        client
+            .put_file_bytes(&target, &payload, &replace_file_options())
+            .await
+            .expect("a large file goes straight to object storage");
+
+        // It came home through the grant, byte for byte, which proves the
+        // object the presigned write created is the one the commit named.
+        let grant = client
+            .begin_download(&target, None)
+            .await
+            .expect("download grant");
+        assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
+        let mut received = Vec::new();
+        client
+            .download_via_presigned_url(&grant, &mut received)
+            .await
+            .expect("stream the granted object");
+        assert_eq!(received, payload);
+    }
+
+    /// A payload no transport can carry is refused before any byte moves,
+    /// naming the caps it passed, rather than being pushed into the capped
+    /// proxy to fail there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_payload_past_every_transport_is_refused_with_the_caps_named() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        // Reads only: neither write direction is on offer, which is the
+        // shape that used to push an oversized payload into the proxy.
+        let transfers = DirectTransferIssuers::read_only(LoopbackIssuer::at(object_base_url));
+        let client = start_with_upload_cap(
+            temp_dir.path(),
+            "ladder-too-large",
+            Some(transfers),
+            Some(PROXY_CAP_BYTES),
+        )
+        .await;
+
+        let namespace = namespace_id("ladder-too-large");
+        client
+            .create_namespace(&namespace)
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/enormous.bin").expect("target");
+        let payload = vec![7u8; loonfs_client::STREAMING_PUT_MIN_BYTES as usize];
+
+        let error = client
+            .put_file_bytes(&target, &payload, &replace_file_options())
+            .await
+            .expect_err("no transport can carry this payload");
+        match &error {
+            ClientError::UploadTooLarge { size_bytes, reason } => {
+                assert_eq!(*size_bytes, payload.len() as u64);
+                assert!(
+                    reason.contains(FEATURE_UPLOADS_DIRECT_MULTIPART),
+                    "the refusal names what was missing: {reason}"
+                );
+            }
+            other => panic!("expected an upload-too-large refusal, got {other:?}"),
         }
     }
 }

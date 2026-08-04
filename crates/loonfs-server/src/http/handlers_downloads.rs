@@ -68,10 +68,14 @@ pub(super) async fn begin_download(
     AppJson(request): AppJson<BeginDownloadRequest>,
 ) -> Result<Json<BeginDownloadResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
-    // The same refusal `direct_put` gives, for the same reason and against
-    // the same predicate: an issuer exists only where this deployment's
-    // endpoint is one the live conformance suite has run against.
-    let Some(issuer) = state.transfer_issuer.as_ref() else {
+    // A store either authorizes direct transfers or it does not, and one
+    // that does can always sign a read — so this asks for the bundle, not
+    // for a direction within it.
+    let Some(issuer) = state
+        .direct_transfers
+        .as_ref()
+        .map(|transfers| &transfers.get)
+    else {
         return Err(ApiResponseError::not_supported(
             FEATURE_DOWNLOADS_DIRECT_GET,
             "direct_get requires an object store that can presign object reads; \

@@ -14,6 +14,7 @@ use loonfs::FsWriter;
 use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;
 use loonfs_api::{
+    direct_put_checksum_feature,
     v0::{
         AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
         CompleteUploadResponse, DirectMultipartUpload, DirectMultipartUploadOptions,
@@ -22,10 +23,10 @@ use loonfs_api::{
         UploadSessionStatus, UploadStatusResponse, ValidatedContentToken,
     },
     ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
 };
 use loonfs_objectstore::{
-    presign::{ObjectTransferIssuer, PresignedPartRequest, PresignedPutRequest},
+    presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
     ObjectStoreError,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -101,13 +102,47 @@ async fn begin_direct_put_upload(
     namespace_id: NamespaceId,
     claim: DirectPutContentClaim,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
-    let Some(issuer) = state.transfer_issuer.as_ref() else {
+    let Some(issuer) = state
+        .direct_transfers
+        .as_ref()
+        .and_then(|transfers| transfers.put.as_ref())
+    else {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_PUT,
             "direct_put requires an object store that can presign create-only, \
              checksum-bound uploads; this deployment's endpoint cannot",
         ));
     };
+    // The issuer is the one authority on both: it is what the capability
+    // document was built from, and what will sign this write.
+    let advertised = issuer.checksum_algorithm();
+    if claim.storage_checksum.algorithm != advertised {
+        return Err(ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!(
+                "direct_put here enforces a {advertised} checksum, not {}; \
+                 the advertised algorithm is the `{}` capability feature",
+                claim.storage_checksum.algorithm,
+                direct_put_checksum_feature(advertised),
+            ),
+        ));
+    }
+    let max_content_bytes = issuer.max_content_bytes();
+    if claim.size_bytes > max_content_bytes {
+        return Err(ApiResponseError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorCode::ContentTooLarge,
+            &format!(
+                "this deployment's provider accepts at most {max_content_bytes} bytes in one \
+                 direct_put request, and this claim declares {}; check the \
+                 `{LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES}` capability limit and use \
+                 `direct_multipart` for larger content when \
+                 `{FEATURE_UPLOADS_DIRECT_MULTIPART}` is advertised",
+                claim.size_bytes,
+            ),
+        ));
+    }
 
     let prepared = state
         .writer
@@ -148,7 +183,11 @@ async fn begin_direct_multipart_upload(
     namespace_id: NamespaceId,
     options: Option<DirectMultipartUploadOptions>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
-    if state.transfer_issuer.is_none() {
+    if state
+        .direct_transfers
+        .as_ref()
+        .is_none_or(|transfers| transfers.multipart.is_none())
+    {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_MULTIPART,
             "direct_multipart requires an object store that can presign checksum-bound \
@@ -210,7 +249,11 @@ pub(super) async fn sign_upload_parts(
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
-    let Some(issuer) = state.transfer_issuer.as_ref() else {
+    let Some(issuer) = state
+        .direct_transfers
+        .as_ref()
+        .and_then(|transfers| transfers.multipart.as_ref())
+    else {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_MULTIPART,
             "this deployment cannot presign multipart part uploads",
@@ -232,7 +275,7 @@ pub(super) async fn sign_upload_parts(
 }
 
 fn sign_parts(
-    issuer: &dyn ObjectTransferIssuer,
+    issuer: &dyn DirectMultipartIssuer,
     targets: &loonfs::uploads::MultipartPartTargets,
 ) -> Result<Vec<SignedUploadPart>, ApiResponseError> {
     let signing_time = presign_time();

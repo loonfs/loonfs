@@ -1597,9 +1597,11 @@ The `transport` is settled when the session opens and never changes. Each
   object, so it learns size and digest from the bytes as they pass and has
   nothing to record up front.
 - `direct_put`: `promised_content`, the content reference the presigned write
-  is signed against. Its SHA-256 is given to the provider, which refuses any
-  body that does not match, so the reference has to exist before the session
-  does; completion reads the stored object back against this same reference.
+  is signed against. Its `storage_checksum` is given to the provider, which
+  refuses any body that does not match, so the reference has to exist before
+  the session does; completion reads the stored object back against this same
+  reference. The reference already names its own algorithm, so a provider
+  that enforces something other than SHA-256 needs no new durable shape.
 - `direct_multipart`: `provider_upload_id`, the handle the provider's
   multipart upload is addressed by, and `part_size_bytes`, the geometry the
   session was opened with, which is a non-zero integer.

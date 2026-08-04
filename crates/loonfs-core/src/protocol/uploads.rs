@@ -360,20 +360,22 @@ fn multipart_parts(parts: &[CompletedUploadPart]) -> Result<Vec<MultipartPart>> 
 /// The digest is the client's, but it stops being a client claim the moment
 /// it is signed into the provider write: the provider refuses any body that
 /// does not hash to it, and completion re-checks the stored object against
-/// it. That is why the resulting reference may carry `whole_file_sha256`.
+/// it. That is why the resulting reference may carry `whole_file_sha256`
+/// — but only where the enforced checksum is itself a SHA-256. A provider
+/// that enforces something else has produced no SHA-256 for anyone to
+/// stand behind, and claiming one would be inventing evidence.
 fn direct_put_content_ref(
     content_id: ContentId,
     claim: &DirectPutContentClaim,
 ) -> Result<ContentRef> {
-    let storage_checksum = StorageChecksum {
-        algorithm: ChecksumAlgorithm::Sha256,
-        value: claim.sha256.clone(),
-    };
+    let storage_checksum = claim.storage_checksum.clone();
+    let whole_file_sha256 = (storage_checksum.algorithm == ChecksumAlgorithm::Sha256)
+        .then(|| storage_checksum.value.clone());
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
         content_id,
         size_bytes: claim.size_bytes,
-        whole_file_sha256: Some(storage_checksum.value.clone()),
+        whole_file_sha256,
         storage_checksum,
     };
     content_ref

@@ -31,15 +31,16 @@ use loonfs_api::{
         UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
         ValidatedContentToken,
     },
-    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
-    CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode, FilesystemOperation,
-    ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RevisionNo, StorageChecksum, StreamingChecksum, UploadId,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
+    ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
+    CreateCheckpointResponse, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
+    FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo, StorageChecksum, StreamingChecksum,
+    UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
@@ -331,6 +332,37 @@ struct UploadContinuity<'a> {
 struct StagedContent {
     content_ref: ContentRef,
     validated_content_token: Option<ValidatedContentToken>,
+}
+
+/// The transport one payload takes to object storage.
+///
+/// Which of these a deployment can offer is its own answer, read from the
+/// capability document: the two direct arms are independent of each other,
+/// so a provider that signs whole-object writes but has no multipart API to
+/// open is spelled by [`Self::DirectPut`] alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadTransport {
+    /// Parts, straight to object storage, retried one at a time.
+    Multipart,
+    /// One whole-object request, straight to object storage, carrying the
+    /// checksum this deployment's provider will enforce on it.
+    DirectPut(ChecksumAlgorithm),
+    /// Through the server, which writes the content object itself.
+    Proxied,
+}
+
+/// Reads a source to its end and holds it.
+///
+/// Only a transport that must know the payload's digest before it can ask
+/// for a write capability calls this, and only where nothing else can carry
+/// the bytes.
+async fn collect_source(source: PayloadSource) -> Result<Vec<u8>> {
+    let (mut stream, size_bytes) = source.into_stream();
+    let mut held = Vec::with_capacity(usize::try_from(size_bytes.unwrap_or(0)).unwrap_or(0));
+    while let Some(chunk) = stream.next().await {
+        held.extend_from_slice(&chunk.map_err(|error| ClientError::Io(error.to_string()))?);
+    }
+    Ok(held)
 }
 
 /// What a multipart upload has to work with.
@@ -1291,16 +1323,24 @@ impl Client {
         namespace_id: &NamespaceId,
         bytes: &[u8],
     ) -> Result<StagedContent> {
-        if bytes.len() as u64 >= STREAMING_PUT_MIN_BYTES && self.offers_direct_multipart().await {
-            return self
-                .stage_via_multipart(
+        match self
+            .choose_upload_transport(Some(bytes.len() as u64))
+            .await?
+        {
+            UploadTransport::Multipart => {
+                self.stage_via_multipart(
                     namespace_id,
                     MultipartPayload::Held(bytes),
                     UploadContinuity::default(),
                 )
-                .await;
+                .await
+            }
+            UploadTransport::DirectPut(algorithm) => {
+                self.stage_via_direct_put(namespace_id, bytes, algorithm)
+                    .await
+            }
+            UploadTransport::Proxied => self.stage_bytes_via_server(namespace_id, bytes).await,
         }
-        self.stage_bytes_via_server(namespace_id, bytes).await
     }
 
     /// Makes a streamed payload durable, choosing the transport the source
@@ -1315,29 +1355,147 @@ impl Client {
         source: PayloadSource,
         continuity: UploadContinuity<'_>,
     ) -> Result<StagedContent> {
-        // A source that knows it is small has nothing to gain from parts,
-        // exactly as a held payload of that size does not. A source that
-        // does not know its length cannot make that judgement, so it takes
-        // the transport that can carry any length.
-        let known_small = source
-            .size_bytes()
-            .is_some_and(|size_bytes| size_bytes < STREAMING_PUT_MIN_BYTES);
-        if !known_small && self.offers_direct_multipart().await {
-            let (stream, _) = source.into_stream();
-            return self
-                .stage_via_multipart(namespace_id, MultipartPayload::Streamed(stream), continuity)
-                .await;
+        match self.choose_upload_transport(source.size_bytes()).await? {
+            UploadTransport::Multipart => {
+                let (stream, _) = source.into_stream();
+                self.stage_via_multipart(
+                    namespace_id,
+                    MultipartPayload::Streamed(stream),
+                    continuity,
+                )
+                .await
+            }
+            // The only transport left for this payload signs its digest into
+            // the write, so the digest has to exist before the session does
+            // — and a source is read once. Holding the payload is what that
+            // costs, and it is only reached where no other transport can
+            // carry these bytes at all.
+            UploadTransport::DirectPut(algorithm) => {
+                let held = collect_source(source).await?;
+                self.stage_via_direct_put(namespace_id, &held, algorithm)
+                    .await
+            }
+            // Nothing to resume off this path: a proxied upload is one
+            // request with no session behind it, so there are no parts to
+            // have landed.
+            UploadTransport::Proxied => self.stage_source_via_server(namespace_id, source).await,
         }
-        // Nothing to resume off this path: a proxied upload is one request
-        // with no session behind it, so there are no parts to have landed.
-        self.stage_source_via_server(namespace_id, source).await
     }
 
-    /// Whether this deployment authorizes direct part uploads.
-    async fn offers_direct_multipart(&self) -> bool {
-        self.capabilities()
+    /// Picks the transport for one payload, best first.
+    ///
+    /// A payload below [`STREAMING_PUT_MIN_BYTES`] is judged exactly as it
+    /// always was — parts buy nothing under one part — and above it parts
+    /// win over one whole-object request, because a part can be retried on
+    /// its own. So a deployment that offers both is unaffected by the
+    /// whole-object rung existing at all; it is there for a provider that
+    /// can sign a write but has no multipart API to open.
+    ///
+    /// A payload no transport can carry is refused here, naming what it
+    /// exceeded, rather than being sent into the capped proxy to fail there.
+    async fn choose_upload_transport(&self, size_bytes: Option<u64>) -> Result<UploadTransport> {
+        // A payload that knows it is small takes the proxy without asking
+        // what else is on offer: no direct transport improves on one
+        // request under one part, so this is the one judgement a client
+        // makes on its own, and it costs no round trip to make.
+        if size_bytes.is_some_and(|size| size < STREAMING_PUT_MIN_BYTES) {
+            return Ok(UploadTransport::Proxied);
+        }
+        let Ok(capabilities) = self.capabilities().await else {
+            // A deployment that will not describe itself gets the transport
+            // that needs no description.
+            return Ok(UploadTransport::Proxied);
+        };
+        if capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART) {
+            return Ok(UploadTransport::Multipart);
+        }
+        // A length nobody knows cannot be checked against a cap, and cannot
+        // be declared to a provider that wants the digest before the write.
+        let Some(size_bytes) = size_bytes else {
+            return Ok(UploadTransport::Proxied);
+        };
+        let direct_put_cap = capabilities.direct_put_max_content_bytes();
+        if let Some(algorithm) = capabilities.direct_put_checksum_algorithm() {
+            if direct_put_cap.is_none_or(|cap| size_bytes <= cap)
+                && StreamingChecksum::for_algorithm(algorithm).is_some()
+            {
+                return Ok(UploadTransport::DirectPut(algorithm));
+            }
+        }
+        // Only a deployment that advertises a proxy cap can refuse on one.
+        let proxy_cap = match capabilities.limits.get(LIMIT_UPLOAD_MAX_CONTENT_BYTES) {
+            Some(&cap) if size_bytes > cap => cap,
+            _ => return Ok(UploadTransport::Proxied),
+        };
+        Err(ClientError::UploadTooLarge {
+            size_bytes,
+            reason: match direct_put_cap {
+                Some(cap) => format!(
+                    "the proxy takes at most {proxy_cap} bytes \
+                     (`{LIMIT_UPLOAD_MAX_CONTENT_BYTES}`), `direct_put` at most {cap} \
+                     (`{LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES}`), and \
+                     `{FEATURE_UPLOADS_DIRECT_MULTIPART}` is not advertised"
+                ),
+                None => format!(
+                    "the proxy takes at most {proxy_cap} bytes \
+                     (`{LIMIT_UPLOAD_MAX_CONTENT_BYTES}`), and neither \
+                     `{FEATURE_UPLOADS_DIRECT_MULTIPART}` nor a usable `direct_put` checksum is \
+                     advertised"
+                ),
+            },
+        })
+    }
+
+    /// Uploads one whole object straight to object storage.
+    ///
+    /// The digest is signed into the write the provider will enforce, so it
+    /// exists before the session does — which is the whole reason this
+    /// transport takes a payload already in hand. The algorithm is the
+    /// deployment's own, folded here in one pass.
+    async fn stage_via_direct_put(
+        &self,
+        namespace_id: &NamespaceId,
+        bytes: &[u8],
+        algorithm: ChecksumAlgorithm,
+    ) -> Result<StagedContent> {
+        let Some(mut digest) = StreamingChecksum::for_algorithm(algorithm) else {
+            return Err(ClientError::Http(format!(
+                "this build cannot produce the {algorithm} checksum this deployment's \
+                 direct_put requires"
+            )));
+        };
+        digest.update(bytes);
+        let begin = self
+            .begin_direct_put(
+                namespace_id,
+                DirectPutContentClaim {
+                    size_bytes: bytes.len() as u64,
+                    storage_checksum: digest.finish(),
+                },
+            )
+            .await?;
+        let Some(direct_put) = begin.direct_put else {
+            return Err(ClientError::Http(
+                "server accepted direct_put without a write capability".to_owned(),
+            ));
+        };
+        // A session owns an object nothing will finish writing, exactly as a
+        // multipart session does, so a failed transfer takes it down.
+        if let Err(error) = self
+            .upload_via_presigned_url(&direct_put.access, bytes)
             .await
-            .is_ok_and(|capabilities| capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART))
+        {
+            let _ = self.abort_upload(namespace_id, &begin.upload_id).await;
+            return Err(error);
+        }
+        let response = self
+            .complete_upload(
+                namespace_id,
+                &begin.upload_id,
+                &CompleteUploadRequest::for_content_ref(direct_put.content_ref),
+            )
+            .await?;
+        Ok(Self::staged_from_completion(response))
     }
 
     /// Uploads one object straight to object storage in bounded waves of
@@ -2157,7 +2315,7 @@ mod tests {
         let content_ref = test_content_ref(bytes);
         DirectPutContentClaim {
             size_bytes: content_ref.size_bytes,
-            sha256: content_ref.storage_checksum.value,
+            storage_checksum: content_ref.storage_checksum,
         }
     }
 

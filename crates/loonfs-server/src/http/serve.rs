@@ -13,7 +13,7 @@ use loonfs::{
 };
 use loonfs_api::NamespaceId;
 use loonfs_grep::{GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
-use loonfs_objectstore::presign::ObjectTransferIssuer;
+use loonfs_objectstore::presign::DirectTransferIssuers;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -41,7 +41,10 @@ pub(super) struct AppState {
     /// instrumented client the handles were built on, so a probe measures
     /// what production traffic measures.
     pub(super) probe_store: SharedObjectStore,
-    pub(super) transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+    /// The direct transfers this deployment can authorize, as its store
+    /// settled them at construction. Each feature is read from its own
+    /// field; nothing here re-derives what the store already decided.
+    pub(super) direct_transfers: Option<DirectTransferIssuers>,
     pub(super) grep_worker: Option<GrepWorker<SharedObjectStore>>,
     /// The grep query service: one process-wide decoded-block cache for
     /// grep's own segments, held here because grep is a composed extension
@@ -121,19 +124,14 @@ pub async fn app(config: ServerConfig) -> Result<(Router, FsWriter), ServerConfi
     // file-loaded ones fail at load.
     config.validate()?;
     let store = config.object_store()?;
-    // The one direct-put gate. A presigned URL is a capability handed to a
-    // client, and completion trusts the provider to have enforced the signed
-    // checksum and create-only preconditions rather than reading the bytes
-    // back — so an issuer exists only when the store can presign *and* the
-    // endpoint is one the live conformance suite has proven.
-    let transfer_issuer = config
-        .store
-        .direct_put_is_proven()
-        .then(|| store.transfer_issuer())
-        .flatten();
+    // The store settled this at construction: a bundle exists only where the
+    // provider can sign the preconditions direct transfers rest on and the
+    // endpoint is one the live conformance suite has proven. Nothing here
+    // asks configuration about it a second time.
+    let direct_transfers = store.direct_transfers();
     let store = store.into_shared();
     let (router, state) =
-        app_with_store_and_transfer_issuer(config, store, transfer_issuer).await?;
+        app_with_store_and_direct_transfers(config, store, direct_transfers).await?;
     Ok((router, state.writer))
 }
 
@@ -142,7 +140,7 @@ pub(super) async fn app_with_store(
     config: ServerConfig,
     store: SharedObjectStore,
 ) -> Result<Router, ServerConfigError> {
-    Ok(app_with_store_and_transfer_issuer(config, store, None)
+    Ok(app_with_store_and_direct_transfers(config, store, None)
         .await?
         .0)
 }
@@ -154,13 +152,13 @@ pub(super) async fn app_with_store_and_state(
     config: ServerConfig,
     store: SharedObjectStore,
 ) -> Result<(Router, AppState), ServerConfigError> {
-    app_with_store_and_transfer_issuer(config, store, None).await
+    app_with_store_and_direct_transfers(config, store, None).await
 }
 
-pub(super) async fn app_with_store_and_transfer_issuer(
+pub(super) async fn app_with_store_and_direct_transfers(
     config: ServerConfig,
     store: SharedObjectStore,
-    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+    direct_transfers: Option<DirectTransferIssuers>,
 ) -> Result<(Router, AppState), ServerConfigError> {
     let metrics = ServerMetrics::new();
     // Two switches decide automatic grep indexing and nothing else does:
@@ -248,7 +246,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         reader,
         admin,
         probe_store,
-        transfer_issuer,
+        direct_transfers,
         grep_worker,
         grep_service,
         grep_maintenance,
