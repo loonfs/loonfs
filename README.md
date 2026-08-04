@@ -52,69 +52,56 @@ loonfs namespace create {namespace_id}
 loonfs use {namespace_id}
 ```
 
-## Running a server
+## Server deployment
 
-Embedded mode gives one process at a time direct object-store access. Concurrent `loonfs` invocations against one namespace contend for the writer role: whichever acquires it last wins, and a command that loses fails with `writer_fenced`, naming both sessions. A fenced command commits nothing, so rerunning it is always safe — but fencing is a stop signal, not a retry loop, so put bulk work in one process or run the server for concurrent writers. To share a deployment across machines and let many clients write concurrently, run the reference server and point remote profiles at it:
+Use the server when multiple clients need to write to the same LoonFS deployment. Embedded clients talk directly to object storage and compete for the single-writer role; the server instead provides one shared writer for remote clients.
+
+### Local development
+
+Build the server and start it with the local filesystem example:
 
 ```bash
 cargo build --release -p loonfs-server
 ./target/release/loonfs-server --config configs/loonfs-server.local-fs.example.toml
 ```
 
-Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, and a `[store]` block; everything else defaults. Secrets need not live in the file: `auth_token` and `content_token_secret` fall back to `LOONFS_AUTH_TOKEN` and `LOONFS_CONTENT_TOKEN_SECRET`, and an `aws-s3` or `cloudflare-r2` store falls back to `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`. A value written in the file always wins. A server with no `[grep]` table composes no grep at all; the optional `[grep]` table selects `mode = "disabled" | "serve_only" | "maintain_only" | "serve_and_maintain"` (default `serve_and_maintain`) and the bounded per-step build/fold policy shown in the local-fs example. Grep index maintenance runs as one job under the writer's maintenance runner, driven by writes rather than by a timer or a store enumeration. Connect a client:
+The example listens on `127.0.0.1:9400` and uses `dev-token`. Configure a remote CLI profile to connect to it:
+
+```bash
+LOONFS_AUTH_TOKEN=dev-token loonfs init default --no-input \
+  --mode remote \
+  --server-url http://127.0.0.1:9400
+```
+
+### Production
+
+Start with the example in [configs/](configs) for your object store: `aws-s3`, `gcp-gcs`, `cloudflare-r2`, or `azure-abs`. Each file documents the provider credentials and optional server settings. Remove the example `auth_token` and `content_token_secret` values and supply real ones through the environment:
 
 ```bash
 export LOONFS_AUTH_TOKEN={auth_token}
-loonfs init default --no-input --mode remote --server-url http://127.0.0.1:9400
+export LOONFS_CONTENT_TOKEN_SECRET={content_token_secret}
 ```
 
-### Running a server in production
+Protect non-loopback connections with authentication and TLS because requests carry the bearer token and may return short-lived object-store URLs. By default, the server refuses to bind beyond localhost without an authentication token and either native TLS or an explicit declaration that a trusted proxy terminates TLS.
 
-Two things travel over the connection that must not travel in the clear: the
-bearer token on every request, and the presigned object-store URLs the
-transfer routes return in response bodies. Each of those URLs is a capability
-to write into or read out of your bucket, so anyone who can read the traffic
-can both impersonate the client and reach objects directly. A server that
-binds anything other than loopback therefore refuses to start unless it either
-terminates TLS itself or says out loud that something else does.
-
-Direct transfers go both ways, and that is a rule rather than a convenience:
-a deployment must be able to serve back whatever it let a client create. On
-S3 and R2 a client can upload an object of any size straight to the bucket,
-while a proxied read buffers the whole file and refuses anything past
-`max_download_bytes` (256 MiB by default) — so those deployments also hand
-out short-lived presigned reads, and `loonfs get` uses one whenever a file is
-larger than the server will proxy. Deployments that cannot presign proxy
-everything, which is safe because they cannot presign an upload either.
-
-Terminate TLS in the server by adding a `[tls]` table:
+To terminate TLS in LoonFS, set the public bind address and add a `[tls]` table:
 
 ```toml
 bind = "0.0.0.0:9400"
 
 [tls]
-cert_path = "/etc/loonfs/tls/server.crt"   # PEM chain, leaf first
-key_path  = "/etc/loonfs/tls/server.key"   # PEM PKCS#8, RSA, or EC key
+cert_path = "/etc/loonfs/tls/server.crt"
+key_path = "/etc/loonfs/tls/server.key"
 ```
 
-Both files are read once at startup, before the port is bound: a missing or
-malformed one fails the process instead of quietly serving plaintext. Clients
-then use an `https://` server URL. For a certificate a private CA issued,
-point the client at the CA bundle with `--ca-cert-path` (or `ca_cert_path` in
-the profile); it is added to the platform trust store rather than replacing
-it.
-
-If TLS terminates in front of LoonFS — a load balancer, an ingress
-controller, a sidecar — leave `[tls]` out and declare that:
+If a load balancer, ingress controller, or sidecar terminates TLS instead, leave `[tls]` out and acknowledge the trusted plaintext hop:
 
 ```toml
 bind = "0.0.0.0:9400"
 allow_remote_without_tls = true
 ```
 
-A loopback bind never requires either, so local development is unchanged. The
-same shape governs authentication: a non-loopback bind with no `auth_token`
-refuses to start unless `allow_unauthenticated_remote = true`.
+Connect remote clients with an `https://` server URL and the same `LOONFS_AUTH_TOKEN`. If a private CA issued the server certificate, pass its bundle with `--ca-cert-path`.
 
 ## Documentation
 
