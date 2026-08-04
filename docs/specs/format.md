@@ -640,10 +640,11 @@ happen only when retention and reference-safety rules allow it.
 
 Because deletion is logical, it is also revocable: the `undelete` operation
 records a *revoke* event in the tombstone family for the deletion's root
-inode and re-binds that inode under a visible parent. Tombstone rows carry
-a typed action — `set` (the subtree is deleted) or `revoke` naming the
-exact `(target_seq, target_delta_index)` deletion it cancels — and rows
-for one root are ordered by `(tombstone_seq, tombstone_delta_index)` with
+inode and re-binds that inode under a visible parent. Every tombstone row
+names its own `generation` — a `seq` and the `delta_index` that
+disambiguates it within that commit — and carries a typed action: `set`
+(the subtree is deleted) or `revoke` naming as its `target` the exact
+generation it cancels. Rows for one root are ordered by generation with
 the newest event winning: a `revoke` newest means no tombstone is active,
 and a later delete of the same root supersedes the revoke with a newer
 `set`. Newest-event-wins is the authoritative reduction; the revoke's
@@ -655,13 +656,29 @@ exact generation is the active one, so a stale recovery request can never
 cancel a later deletion. Only the root of a deletion can be undeleted —
 descendants are covered by the root's tombstone, not their own.
 
+A `set` also carries the binding the delete removed, as one
+`deleted_direntry` value holding the `parent_inode_id`, `name_key`, and
+`display_name` together. Tombstone rows are immortal, so this is where a
+deleted name survives after unbind rows age out, and it is the binding
+undelete restores in place. A delete addressed by inode has no name to
+record and writes `deleted_direntry` as `null`; the field is always
+written, so an encoding that omits it is not a deletion without a name but
+corruption. Only a `set` can carry one, and a `revoke` that does is
+corruption too — a partial binding is not expressible at all. This schema
+evolves in place at metadata-row version 1 before the first stable
+release; the implementation carries no compatibility shim for intermediate
+pre-release encodings, and in particular the earlier encoding that spelled
+the generation as `tombstone_seq` and `tombstone_delta_index` beside
+independent optional `parent_inode_id`, `name_key`, and `display_name`
+fields does not decode.
+
 Which deletions are recoverable *right now* is a separate question from the
 event history that decides it, and it has its own family. Materialization
 derives an `active-deletions` row from every tombstone event: a `set` adds a
 `listed` row keyed by `(deleted_at_seq, root_inode_id)` — the exact handle
-`undelete` takes — carrying the deletion's wall-clock stamp and the deleted
-binding's name, and a `revoke` adds a `removed` row repeating its target's
-key. The two rows for one deletion sort together with `removed` first, so an
+`undelete` takes — carrying the deletion's wall-clock stamp and a copy of
+its `deleted_direntry`, and a `revoke` adds a `removed` row repeating its
+target's key. The two rows for one deletion sort together with `removed` first, so an
 ascending scan sees a removal before the row it removes and reorganization
 drops the pair. Reading the recoverable set is therefore a range scan in
 deletion order, not a walk over every deletion the namespace ever recorded.
@@ -1325,6 +1342,12 @@ metadata deltas derived from the semantic operations: `create_inode`,
 `bind_direntry`, `unbind_direntry`, `append_file_revision`,
 `tombstone_subtree`, and `revoke_subtree_tombstone`. Raw bind/unbind/
 create-inode deltas are not standard client-facing commit operations.
+
+The two tombstone deltas carry the same values their rows do (section 2.5):
+`tombstone_subtree` states its `deleted_direntry`, as a whole binding or as
+`null`, and `revoke_subtree_tombstone` names its `target` generation. The
+delta's own generation is implied — its commit's sequence and its
+`delta_index` — so it is not written a second time.
 
 ### 3.6 Preconditions
 

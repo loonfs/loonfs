@@ -804,7 +804,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let mut tail: Vec<(String, ActiveDeletionRecord)> = self
             .row_states()
             .flat_map(|state| state.subtree_tombstones())
-            .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
+            .filter(|tombstone| tombstone.generation.seq <= visible_seq)
             .map(active_deletion_from_tombstone)
             .map(|record| (record.row_key(), record))
             .filter(|(row_key, _)| row_key.as_str() >= lower_bound.as_str())

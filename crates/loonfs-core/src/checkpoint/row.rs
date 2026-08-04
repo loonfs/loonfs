@@ -2,7 +2,9 @@
 //! row-key order.
 
 use crate::metadata::{active_deletion_from_tombstone, ActiveDeletionAction, MetadataState};
-use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{
+    ActiveDeletionRowAction, MetadataRow, MetadataTableFamily, TombstoneRowAction,
+};
 use loonfs_api::ChangeSeq;
 
 #[cfg(test)]
@@ -15,20 +17,13 @@ pub(super) fn metadata_states_equivalent(left: &MetadataState, right: &MetadataS
     })
 }
 
-fn tombstone_row_action(
-    action: &crate::metadata::SubtreeTombstoneAction,
-) -> loonfs_api::wire::manifest::TombstoneRowAction {
+fn tombstone_row_action(action: &crate::metadata::SubtreeTombstoneAction) -> TombstoneRowAction {
     use crate::metadata::SubtreeTombstoneAction;
-    use loonfs_api::wire::manifest::TombstoneRowAction;
     match action {
-        SubtreeTombstoneAction::Set => TombstoneRowAction::Set,
-        SubtreeTombstoneAction::Revoke {
-            target_seq,
-            target_delta_index,
-        } => TombstoneRowAction::Revoke {
-            target_seq: *target_seq,
-            target_delta_index: *target_delta_index,
+        SubtreeTombstoneAction::Set { deleted_direntry } => TombstoneRowAction::Set {
+            deleted_direntry: deleted_direntry.clone(),
         },
+        SubtreeTombstoneAction::Revoke { target } => TombstoneRowAction::Revoke { target: *target },
     }
 }
 
@@ -43,14 +38,10 @@ fn active_deletion_row(tombstone: &crate::metadata::SubtreeTombstoneRecord) -> M
         action: match record.action {
             ActiveDeletionAction::Listed {
                 deleted_at_ms,
-                parent_inode_id,
-                name_key,
-                display_name,
+                deleted_direntry,
             } => ActiveDeletionRowAction::Listed {
                 deleted_at_ms,
-                parent_inode_id,
-                name_key,
-                display_name,
+                deleted_direntry,
             },
             ActiveDeletionAction::Removed { revoked_at_seq } => {
                 ActiveDeletionRowAction::Removed { revoked_at_seq }
@@ -120,13 +111,9 @@ pub(super) fn manifest_rows_for_family(
             .iter()
             .map(|tombstone| MetadataRow::Tombstone {
                 root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-                tombstone_delta_index: tombstone.tombstone_delta_index,
+                generation: tombstone.generation,
                 action: tombstone_row_action(&tombstone.action),
                 deleted_at_ms: tombstone.deleted_at_ms,
-                parent_inode_id: tombstone.parent_inode_id,
-                name_key: tombstone.name_key.clone(),
-                display_name: tombstone.display_name.clone(),
             })
             .collect::<Vec<_>>(),
         MetadataTableFamily::ActiveDeletions => metadata_state
@@ -167,7 +154,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         MetadataRow::DirentryBind { bind_seq, .. } => *bind_seq,
         MetadataRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq,
         MetadataRow::Revision { committed_seq, .. } => *committed_seq,
-        MetadataRow::Tombstone { tombstone_seq, .. } => *tombstone_seq,
+        MetadataRow::Tombstone { generation, .. } => generation.seq,
         // A removal marker belongs to the run of the undelete that produced
         // it, not to the run of the deletion whose key it repeats.
         MetadataRow::ActiveDeletion {

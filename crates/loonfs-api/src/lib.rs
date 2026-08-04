@@ -179,19 +179,18 @@ mod tests {
         let _wal_delta = wire::wal::WalDelta::TombstoneSubtree {
             delta_index: 0,
             root_inode_id: InodeId(1),
-            parent_inode_id: None,
-            name_key: None,
-            display_name: None,
+            deleted_direntry: None,
         };
         let _manifest_row = wire::manifest::MetadataRow::Tombstone {
             root_inode_id: InodeId(1),
-            tombstone_seq: ChangeSeq(1),
-            tombstone_delta_index: 0,
-            action: wire::manifest::TombstoneRowAction::Set,
+            generation: wire::manifest::TombstoneGeneration {
+                seq: ChangeSeq(1),
+                delta_index: 0,
+            },
+            action: wire::manifest::TombstoneRowAction::Set {
+                deleted_direntry: None,
+            },
             deleted_at_ms: 4_000,
-            parent_inode_id: None,
-            name_key: None,
-            display_name: None,
         };
     }
 }

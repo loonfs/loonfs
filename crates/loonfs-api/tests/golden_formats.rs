@@ -26,8 +26,9 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
-    MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload, TombstoneRowAction,
+    decode_namespace_manifest_json, encode_namespace_manifest_json, DeletedDirentry,
+    MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
+    NamespaceManifestPayload, TombstoneGeneration, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
@@ -260,11 +261,12 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 4,
                 root_inode_id: InodeId(9),
-                parent_inode_id: Some(InodeId(1)),
-                name_key: Some(NameKey::parse("old.txt").expect("valid name key")),
-                display_name: Some(
-                    loonfs_api::DisplayName::parse("Old.txt").expect("valid display name"),
-                ),
+                deleted_direntry: Some(DeletedDirentry {
+                    parent_inode_id: InodeId(1),
+                    name_key: NameKey::parse("old.txt").expect("valid name key"),
+                    display_name: loonfs_api::DisplayName::parse("Old.txt")
+                        .expect("valid display name"),
+                }),
             },
         },
     ];
@@ -1484,9 +1486,7 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
-                parent_inode_id: None,
-                name_key: None,
-                display_name: None,
+                deleted_direntry: None,
             }),
             "tombstone_subtree",
         ),
@@ -1494,8 +1494,10 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::RevokeSubtreeTombstone {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
-                target_seq: ChangeSeq(1),
-                target_delta_index: 1,
+                target: TombstoneGeneration {
+                    seq: ChangeSeq(1),
+                    delta_index: 1,
+                },
             }),
             "revoke_subtree_tombstone",
         ),
@@ -1509,6 +1511,44 @@ fn wal_delta_wire_tags_match_spec_names() {
 // ---------------------------------------------------------------------------
 // Metadata SST blocks
 // ---------------------------------------------------------------------------
+
+/// A delete by path: the tombstone records the binding it removed.
+fn sample_tombstone_set_row() -> MetadataRow {
+    MetadataRow::Tombstone {
+        root_inode_id: InodeId(5),
+        generation: TombstoneGeneration {
+            seq: ChangeSeq(8),
+            delta_index: 0,
+        },
+        action: TombstoneRowAction::Set {
+            deleted_direntry: Some(DeletedDirentry {
+                parent_inode_id: InodeId(1),
+                name_key: name_key("docs-archive"),
+                display_name: loonfs_api::DisplayName::parse("Docs-Archive")
+                    .expect("valid display name"),
+            }),
+        },
+        deleted_at_ms: 4_000,
+    }
+}
+
+/// The undelete that cancels it, naming the exact generation it revokes.
+fn sample_tombstone_revoke_row() -> MetadataRow {
+    MetadataRow::Tombstone {
+        root_inode_id: InodeId(5),
+        generation: TombstoneGeneration {
+            seq: ChangeSeq(9),
+            delta_index: 0,
+        },
+        action: TombstoneRowAction::Revoke {
+            target: TombstoneGeneration {
+                seq: ChangeSeq(8),
+                delta_index: 0,
+            },
+        },
+        deleted_at_ms: 4_100,
+    }
+}
 
 fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
     use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
@@ -1579,31 +1619,8 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             revision_delta_index: 0,
             content_ref: sample_crc_content_ref(),
         },
-        MetadataRow::Tombstone {
-            root_inode_id: InodeId(5),
-            tombstone_seq: ChangeSeq(8),
-            tombstone_delta_index: 0,
-            action: TombstoneRowAction::Set,
-            deleted_at_ms: 4_000,
-            parent_inode_id: Some(InodeId(1)),
-            name_key: Some(name_key("docs-archive")),
-            display_name: Some(
-                loonfs_api::DisplayName::parse("Docs-Archive").expect("valid display name"),
-            ),
-        },
-        MetadataRow::Tombstone {
-            root_inode_id: InodeId(5),
-            tombstone_seq: ChangeSeq(9),
-            tombstone_delta_index: 0,
-            action: TombstoneRowAction::Revoke {
-                target_seq: ChangeSeq(8),
-                target_delta_index: 0,
-            },
-            deleted_at_ms: 4_100,
-            parent_inode_id: None,
-            name_key: None,
-            display_name: None,
-        },
+        sample_tombstone_set_row(),
+        sample_tombstone_revoke_row(),
     ];
     for row in &rows {
         let key = row.row_key();
@@ -1648,6 +1665,177 @@ fn sst_block_data_golden_decodes_to_sample_rows() {
     let block = decode_data_block(&stored, &handle).expect("decode golden data block");
     assert!(!block.rows.is_empty());
     assert_eq!(block.row_keys[0], block.rows[0].row_key());
+}
+
+/// The fixture above pins the segment's first block, and the tombstone
+/// family sorts last, so nothing pinned the rows that carry a deletion's
+/// binding and the generation a revoke names. This pins their block too.
+#[test]
+fn sst_block_data_tombstone_rows_match_golden_bytes() {
+    use loonfs_api::wire::sst_blocks::decode_index_block;
+    let built = sample_segment_blocks();
+    let index = decode_index_block(segment_section(&built.bytes, &built.index), &built.index)
+        .expect("decode index");
+    let last = index.last().expect("sample spans at least one block");
+    assert!(
+        last.last_key.starts_with("tombstone-"),
+        "the tombstone family sorts last: {}",
+        last.last_key
+    );
+    assert_matches_golden(
+        "sst_block_data_tombstones.v1.bin",
+        &unzstd(segment_section(&built.bytes, &last.block)),
+    );
+}
+
+#[test]
+fn sst_block_data_tombstone_golden_decodes_to_sample_rows() {
+    use loonfs_api::wire::sst_blocks::{decode_data_block, BlockHandle};
+    let payload = read_golden("sst_block_data_tombstones.v1.bin");
+    let stored = rezstd(&payload);
+    let handle = BlockHandle {
+        offset: 0,
+        stored_len: stored.len() as u32,
+        decoded_len: payload.len() as u32,
+        crc32c: crc32c::crc32c(&stored),
+    };
+    let block = decode_data_block(&stored, &handle).expect("decode golden tombstone block");
+    assert_eq!(
+        block.rows,
+        [sample_tombstone_set_row(), sample_tombstone_revoke_row()],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tombstone rows: the deleted binding is one value, or it is absent
+// ---------------------------------------------------------------------------
+
+/// Re-encodes a row as the CBOR map another writer would have produced, so a
+/// test can rewrite it entry by entry.
+fn row_cbor(row: &MetadataRow) -> ciborium::Value {
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(row, &mut encoded).expect("encode row");
+    ciborium::de::from_reader(encoded.as_slice()).expect("decode row map")
+}
+
+fn cbor_entry<'a>(value: &'a mut ciborium::Value, key: &str) -> &'a mut ciborium::Value {
+    &mut value
+        .as_map_mut()
+        .unwrap_or_else(|| panic!("the value holding `{key}` is a map"))
+        .iter_mut()
+        .find(|(entry_key, _)| entry_key.as_text() == Some(key))
+        .unwrap_or_else(|| panic!("map has `{key}` entry"))
+        .1
+}
+
+fn cbor_map_of(value: &mut ciborium::Value) -> &mut Vec<(ciborium::Value, ciborium::Value)> {
+    value.as_map_mut().expect("value is a map")
+}
+
+/// Returns the refusal an edited row produces, so the caller can pin which
+/// rule fired rather than only that something did.
+fn assert_row_is_corrupt(row: &ciborium::Value, why: &str) -> String {
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(row, &mut encoded).expect("encode edited row");
+    match ciborium::de::from_reader::<MetadataRow, _>(encoded.as_slice()) {
+        Ok(decoded) => panic!("{why}, but the row decoded as {decoded:?}"),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// The deleted binding is one value with three required parts. Two of the
+/// three is not a binding anyone can restore or render, and the decoder says
+/// so rather than filling the gap in with a default.
+#[test]
+fn tombstone_rows_reject_a_partial_deleted_direntry() {
+    for missing in ["parent_inode_id", "name_key", "display_name"] {
+        let mut row = row_cbor(&sample_tombstone_set_row());
+        let direntry = cbor_entry(cbor_entry(&mut row, "action"), "deleted_direntry");
+        cbor_map_of(direntry).retain(|(key, _)| key.as_text() != Some(missing));
+        let refusal = assert_row_is_corrupt(&row, "two thirds of a binding is not a binding");
+        assert!(
+            refusal.contains(&format!("missing field `{missing}`")),
+            "unexpected refusal: {refusal}"
+        );
+    }
+}
+
+/// Only a `set` deletes something, so only a `set` has a binding to record.
+/// A `revoke` carrying one is bytes no writer produces, and reading it as a
+/// revoke that happens to have extra baggage would hide that.
+#[test]
+fn tombstone_revoke_rows_reject_a_deleted_direntry() {
+    let mut row = row_cbor(&sample_tombstone_revoke_row());
+    cbor_map_of(cbor_entry(&mut row, "action")).push((
+        ciborium::Value::from("deleted_direntry"),
+        sample_deleted_direntry_cbor(),
+    ));
+    let refusal = assert_row_is_corrupt(&row, "a revoke has no binding to carry");
+    assert!(
+        refusal.contains("unknown field `deleted_direntry`"),
+        "unexpected refusal: {refusal}"
+    );
+}
+
+/// The pre-grouping layout, exactly as it was written before the generation
+/// and the binding each became a shape of their own: `tombstone_seq` and
+/// `tombstone_delta_index` beside three optional binding fields, and a `set`
+/// with nothing in it.
+#[test]
+fn tombstone_rows_reject_the_pre_grouping_flat_encoding() {
+    let row = row_cbor(&sample_tombstone_set_row());
+    assert_row_is_corrupt(
+        &with_flat_binding(with_flat_generation(row.clone())),
+        "the pre-grouping layout is not a row this format has",
+    );
+
+    // Each half of that encoding on its own, over a row that is otherwise
+    // current: neither is a spelling this row accepts.
+    let refusal = assert_row_is_corrupt(
+        &with_flat_generation(row.clone()),
+        "a tombstone states its generation as one value",
+    );
+    assert!(
+        refusal.contains("missing field `generation`"),
+        "unexpected refusal: {refusal}"
+    );
+    let refusal = assert_row_is_corrupt(
+        &with_flat_binding(row),
+        "a `set` states its binding, even when it has none",
+    );
+    assert!(
+        refusal.contains("missing field `deleted_direntry`"),
+        "unexpected refusal: {refusal}"
+    );
+}
+
+/// The set row's binding, as the CBOR map another writer would have written.
+fn sample_deleted_direntry_cbor() -> ciborium::Value {
+    let mut set = row_cbor(&sample_tombstone_set_row());
+    cbor_entry(cbor_entry(&mut set, "action"), "deleted_direntry").clone()
+}
+
+/// Spells the row's generation as the two loose fields it used to be.
+fn with_flat_generation(mut row: ciborium::Value) -> ciborium::Value {
+    let mut generation = cbor_entry(&mut row, "generation").clone();
+    let seq = cbor_entry(&mut generation, "seq").clone();
+    let delta_index = cbor_entry(&mut generation, "delta_index").clone();
+    let entries = cbor_map_of(&mut row);
+    entries.retain(|(key, _)| key.as_text() != Some("generation"));
+    entries.push((ciborium::Value::from("tombstone_seq"), seq));
+    entries.push((ciborium::Value::from("tombstone_delta_index"), delta_index));
+    row
+}
+
+/// Spells the deleted binding as the three loose row fields it used to be,
+/// leaving the `set` empty the way the old encoding left it.
+fn with_flat_binding(mut row: ciborium::Value) -> ciborium::Value {
+    *cbor_entry(&mut row, "action") = ciborium::Value::Map(vec![(
+        ciborium::Value::from("kind"),
+        ciborium::Value::from("set"),
+    )]);
+    cbor_map_of(&mut row).append(cbor_map_of(&mut sample_deleted_direntry_cbor()));
+    row
 }
 
 #[test]

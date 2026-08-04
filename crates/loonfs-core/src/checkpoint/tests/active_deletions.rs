@@ -11,34 +11,38 @@ use crate::metadata::{
     SubtreeTombstoneRecord,
 };
 use crate::path::read::{load_metadata_view, ReadLoadContext};
-use loonfs_api::wire::manifest::ActiveDeletionRowAction;
+use loonfs_api::wire::manifest::{ActiveDeletionRowAction, DeletedDirentry, TombstoneGeneration};
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
+
+fn generation(seq: u64) -> TombstoneGeneration {
+    TombstoneGeneration {
+        seq: ChangeSeq(seq),
+        delta_index: 0,
+    }
+}
 
 fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         root_inode_id,
-        tombstone_seq: ChangeSeq(seq),
-        tombstone_delta_index: 0,
+        generation: generation(seq),
         deleted_at_ms: 1_000 + seq,
-        parent_inode_id: Some(InodeId(1)),
-        name_key: Some(NameKey::parse(name).expect("name key")),
-        display_name: Some(DisplayName::parse(name).expect("display name")),
-        action: SubtreeTombstoneAction::Set,
+        action: SubtreeTombstoneAction::Set {
+            deleted_direntry: Some(DeletedDirentry {
+                parent_inode_id: InodeId(1),
+                name_key: NameKey::parse(name).expect("name key"),
+                display_name: DisplayName::parse(name).expect("display name"),
+            }),
+        },
     }
 }
 
 fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         root_inode_id,
-        tombstone_seq: ChangeSeq(seq),
-        tombstone_delta_index: 0,
+        generation: generation(seq),
         deleted_at_ms: 1_000 + seq,
-        parent_inode_id: None,
-        name_key: None,
-        display_name: None,
         action: SubtreeTombstoneAction::Revoke {
-            target_seq: ChangeSeq(target_seq),
-            target_delta_index: 0,
+            target: generation(target_seq),
         },
     }
 }
@@ -310,13 +314,23 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
         .into_iter()
         .filter_map(|(root_inode_id, records)| {
             let active = active_tombstone_from_records(records, head_seq)?;
+            let deleted_direntry = match active.action {
+                SubtreeTombstoneAction::Set { deleted_direntry } => deleted_direntry,
+                SubtreeTombstoneAction::Revoke { .. } => {
+                    unreachable!("the active tombstone is a set by construction")
+                }
+            };
             Some(TrashEntry {
                 root_inode_id,
-                deleted_at_seq: active.tombstone_seq,
+                deleted_at_seq: active.generation.seq,
                 deleted_at_ms: active.deleted_at_ms,
-                parent_inode_id: active.parent_inode_id,
-                name_key: active.name_key,
-                display_name: active.display_name,
+                parent_inode_id: deleted_direntry
+                    .as_ref()
+                    .map(|direntry| direntry.parent_inode_id),
+                name_key: deleted_direntry
+                    .as_ref()
+                    .map(|direntry| direntry.name_key.clone()),
+                display_name: deleted_direntry.map(|direntry| direntry.display_name),
             })
         })
         .collect()

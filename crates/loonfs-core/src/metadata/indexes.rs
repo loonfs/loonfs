@@ -147,7 +147,7 @@ impl MetadataIndexes {
         // a revoke as the newest record means no tombstone is active.
         self.tombstone_by_root
             .get(&root_inode_id)
-            .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set))
+            .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set { .. }))
             .cloned()
     }
 
@@ -240,7 +240,7 @@ impl MetadataIndexes {
     }
 
     pub(super) fn record_tombstone(&mut self, record: &SubtreeTombstoneRecord) {
-        self.indexed_seq = self.indexed_seq.max(record.tombstone_seq);
+        self.indexed_seq = self.indexed_seq.max(record.generation.seq);
         replace_if_newer_tombstone(
             &mut self.tombstone_by_root,
             record.root_inode_id,
@@ -369,5 +369,5 @@ fn bind_order_key(record: &DirentryBindRecord) -> (ChangeSeq, u32) {
 }
 
 fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {
-    (record.tombstone_seq, record.tombstone_delta_index)
+    (record.generation.seq, record.generation.delta_index)
 }

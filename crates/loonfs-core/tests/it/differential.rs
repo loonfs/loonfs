@@ -109,9 +109,7 @@ fn tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode_id,
-        parent_inode_id: None,
-        name_key: None,
-        display_name: None,
+        deleted_direntry: None,
     }]
 }
 
@@ -268,8 +266,8 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
             .map(|tombstone| {
                 (
                     tombstone.root_inode_id.0,
-                    tombstone.tombstone_seq.0,
-                    tombstone.tombstone_delta_index,
+                    tombstone.generation.seq.0,
+                    tombstone.generation.delta_index,
                 )
             })
             .collect(),

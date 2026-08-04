@@ -166,9 +166,7 @@ impl MetadataState {
                 WalDelta::TombstoneSubtree {
                     delta_index,
                     root_inode_id,
-                    parent_inode_id,
-                    name_key,
-                    display_name,
+                    deleted_direntry,
                 } => {
                     metadata_state
                         .subtree_tombstones
@@ -177,19 +175,22 @@ impl MetadataState {
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
                             deleted_at_ms: committed_at_ms,
-                            parent_inode_id: *parent_inode_id,
-                            name_key: name_key.as_ref().map(|key| key.as_str().to_owned()),
-                            display_name: display_name
+                            parent_inode_id: deleted_direntry
                                 .as_ref()
-                                .map(|name| name.as_str().to_owned()),
+                                .map(|direntry| direntry.parent_inode_id),
+                            name_key: deleted_direntry
+                                .as_ref()
+                                .map(|direntry| direntry.name_key.as_str().to_owned()),
+                            display_name: deleted_direntry
+                                .as_ref()
+                                .map(|direntry| direntry.display_name.as_str().to_owned()),
                             action: SubtreeTombstoneAction::Set,
                         });
                 }
                 WalDelta::RevokeSubtreeTombstone {
                     delta_index,
                     root_inode_id,
-                    target_seq,
-                    target_delta_index,
+                    target,
                 } => {
                     metadata_state
                         .subtree_tombstones
@@ -202,8 +203,8 @@ impl MetadataState {
                             name_key: None,
                             display_name: None,
                             action: SubtreeTombstoneAction::Revoke {
-                                target_seq: *target_seq,
-                                target_delta_index: *target_delta_index,
+                                target_seq: target.seq,
+                                target_delta_index: target.delta_index,
                             },
                         });
                 }

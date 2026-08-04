@@ -4,6 +4,7 @@
 use crate::control::WalSegmentPointer;
 use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
+use crate::manifest::{required_option, DeletedDirentry, TombstoneGeneration};
 use crate::{
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
     RevisionNo, WalSegmentId, WriterEpoch,
@@ -99,32 +100,25 @@ pub enum WalDelta {
         delta_index: u32,
         /// Inode at the root of the newly hidden subtree.
         root_inode_id: InodeId,
-        /// Directory that held the deleted binding, when the tombstone came
-        /// from a path delete. Carried so the deleted name survives on the
-        /// immortal tombstone row after unbind rows age out.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_inode_id: Option<InodeId>,
-        /// Canonical key of the deleted binding, when known.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name_key: Option<NameKey>,
-        /// User-facing spelling of the deleted binding, when known.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display_name: Option<DisplayName>,
+        /// The binding a path delete removed, carried so the deleted name
+        /// survives on the immortal tombstone row after unbind rows age
+        /// out; `null` for a delete addressed by inode. Stated either way
+        /// and never defaulted, so the pre-grouping layout — which spelled
+        /// the binding as three optional delta fields — does not decode.
+        #[serde(deserialize_with = "required_option")]
+        deleted_direntry: Option<DeletedDirentry>,
     },
-    /// Revokes exactly one subtree tombstone — the one recorded at
-    /// `(target_seq, target_delta_index)` — making the subtree eligible for
-    /// visibility again once re-bound. An immutable compensating event, not
-    /// an in-place row deletion: a later `TombstoneSubtree` for the same
-    /// root supersedes the revoke.
+    /// Revokes exactly one subtree tombstone — the one recorded at `target`
+    /// — making the subtree eligible for visibility again once re-bound. An
+    /// immutable compensating event, not an in-place row deletion: a later
+    /// `TombstoneSubtree` for the same root supersedes the revoke.
     RevokeSubtreeTombstone {
         /// Stable position of this compensating delta within its commit.
         delta_index: u32,
         /// Root inode whose selected tombstone is being revoked.
         root_inode_id: InodeId,
-        /// Commit sequence of the exact tombstone this delta compensates.
-        target_seq: ChangeSeq,
-        /// Delta position of the exact tombstone within `target_seq`.
-        target_delta_index: u32,
+        /// The exact tombstone generation this delta compensates.
+        target: TombstoneGeneration,
     },
 }
 

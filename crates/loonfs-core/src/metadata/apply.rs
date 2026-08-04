@@ -5,6 +5,7 @@ use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
     RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
+use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, CommitId};
 
@@ -110,39 +111,33 @@ impl MetadataState {
             WalDelta::TombstoneSubtree {
                 delta_index,
                 root_inode_id,
-                parent_inode_id,
-                name_key,
-                display_name,
+                deleted_direntry,
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
-                    tombstone_seq: committed_seq,
-                    tombstone_delta_index: *delta_index,
+                    generation: TombstoneGeneration {
+                        seq: committed_seq,
+                        delta_index: *delta_index,
+                    },
                     deleted_at_ms: committed_at_ms,
-                    parent_inode_id: *parent_inode_id,
-                    name_key: name_key.clone(),
-                    display_name: display_name.clone(),
-                    action: SubtreeTombstoneAction::Set,
+                    action: SubtreeTombstoneAction::Set {
+                        deleted_direntry: deleted_direntry.clone(),
+                    },
                 });
             }
             WalDelta::RevokeSubtreeTombstone {
                 delta_index,
                 root_inode_id,
-                target_seq,
-                target_delta_index,
+                target,
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
-                    tombstone_seq: committed_seq,
-                    tombstone_delta_index: *delta_index,
-                    deleted_at_ms: committed_at_ms,
-                    parent_inode_id: None,
-                    name_key: None,
-                    display_name: None,
-                    action: SubtreeTombstoneAction::Revoke {
-                        target_seq: *target_seq,
-                        target_delta_index: *target_delta_index,
+                    generation: TombstoneGeneration {
+                        seq: committed_seq,
+                        delta_index: *delta_index,
                     },
+                    deleted_at_ms: committed_at_ms,
+                    action: SubtreeTombstoneAction::Revoke { target: *target },
                 });
             }
         }

@@ -175,27 +175,15 @@ pub enum MetadataRow {
     Tombstone {
         /// Inode whose rooted subtree the event governs.
         root_inode_id: InodeId,
-        /// Commit sequence that published this tombstone event.
-        tombstone_seq: ChangeSeq,
-        /// Position that disambiguates the event within `tombstone_seq`.
-        tombstone_delta_index: u32,
+        /// Where this event sits in the namespace's history, and the
+        /// generation a later `revoke` names.
+        generation: TombstoneGeneration,
         /// What this event did; readers take the newest row per root and
         /// treat a `revoke` newest row as "no active tombstone".
         action: TombstoneRowAction,
         /// Wall-clock stamp of the recording commit. Observational, like
         /// every `committed_at_ms`.
         deleted_at_ms: u64,
-        /// Directory that held the deleted binding, for `set` rows from
-        /// path deletes; tombstone rows are immortal, so this is where a
-        /// deleted name survives after unbind rows age out.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_inode_id: Option<InodeId>,
-        /// Canonical key of the deleted binding, when known.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name_key: Option<NameKey>,
-        /// User-facing spelling of the deleted binding, when known.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display_name: Option<DisplayName>,
     },
     /// Names one deletion generation in the derived active-deletions family.
     ///
@@ -234,19 +222,72 @@ pub enum MetadataRow {
     },
 }
 
+/// Names one deletion generation: the commit that recorded a tombstone
+/// event and the position that disambiguates it inside that commit.
+///
+/// Shared by the tombstone row and the WAL delta that revokes one, so a
+/// revoke names its target in the same spelling everywhere.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct TombstoneGeneration {
+    /// Commit sequence that published the event.
+    pub seq: ChangeSeq,
+    /// Position that disambiguates the event within `seq`.
+    pub delta_index: u32,
+}
+
+/// The directory binding a path delete removed, described whole.
+///
+/// Tombstone rows are immortal, so this is where a deleted name survives
+/// after the unbind row ages out — and where undelete reads the binding it
+/// restores. The three fields describe one binding, so they travel as one:
+/// a tombstone either recorded a binding or it did not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeletedDirentry {
+    /// Directory that held the binding.
+    pub parent_inode_id: InodeId,
+    /// Canonical key the binding was reachable under.
+    pub name_key: NameKey,
+    /// User-facing spelling the binding carried.
+    pub display_name: DisplayName,
+}
+
+/// Reads an optional field that must still be written.
+///
+/// Serde reads a missing `Option` field as `None`, which would make an
+/// encoding that never had the field indistinguishable from one that stated
+/// its absence. A durable optional that distinguishes those two reads
+/// through here instead.
+pub(crate) fn required_option<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
 /// Tombstone-row event vocabulary (format spec, "Tombstones and deletion").
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TombstoneRowAction {
     /// The subtree rooted at the row's inode is deleted.
-    Set,
-    /// The deletion recorded at `(target_seq, target_delta_index)` is
-    /// revoked.
+    Set {
+        /// The binding the delete removed, or `null` for a delete addressed
+        /// by inode, which had no name to record. Stated either way and
+        /// never defaulted, so bytes without the field are the pre-grouping
+        /// layout — which spelled the binding as three optional row fields —
+        /// rather than a deletion that recorded no name.
+        #[serde(deserialize_with = "required_option")]
+        deleted_direntry: Option<DeletedDirentry>,
+    },
+    /// The deletion recorded at `target` is revoked. Only a `set` carries a
+    /// binding, so the revoke has no place to put one.
     Revoke {
-        /// Commit sequence of the exact `Set` event being compensated.
-        target_seq: ChangeSeq,
-        /// Delta position of the exact `Set` event within `target_seq`.
-        target_delta_index: u32,
+        /// The exact `set` event being compensated.
+        target: TombstoneGeneration,
     },
 }
 
@@ -268,17 +309,11 @@ pub enum ActiveDeletionRowAction {
         /// Wall-clock stamp of the deleting commit. Observational, like every
         /// `committed_at_ms`.
         deleted_at_ms: u64,
-        /// Directory that held the deleted binding, when the delete recorded
-        /// one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_inode_id: Option<InodeId>,
-        /// Canonical key of the deleted binding, when known.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name_key: Option<NameKey>,
-        /// User-facing spelling of the deleted binding as of the deletion,
-        /// when known.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display_name: Option<DisplayName>,
+        /// The binding the deletion removed, copied from the tombstone event
+        /// this row derives from, or `null` when it recorded none. Stated
+        /// either way, like the event's own.
+        #[serde(deserialize_with = "required_option")]
+        deleted_direntry: Option<DeletedDirentry>,
     },
     /// An undelete at `revoked_at_seq` cancelled the deletion this row's key
     /// names, so the listing skips the key.
@@ -388,8 +423,7 @@ impl MetadataRow {
             },
             Self::Tombstone {
                 root_inode_id,
-                tombstone_seq,
-                tombstone_delta_index,
+                generation,
                 // The action and binding context live in the value: revoke
                 // rows sort exactly like the deletions they cancel, so
                 // newest-per-root scans see them in one prefix pass.
@@ -397,7 +431,7 @@ impl MetadataRow {
             } => {
                 format!(
                     "tombstone-{:020}-{:020}-{:010}",
-                    root_inode_id.0, tombstone_seq.0, tombstone_delta_index
+                    root_inode_id.0, generation.seq.0, generation.delta_index
                 )
             }
             Self::ActiveDeletion {

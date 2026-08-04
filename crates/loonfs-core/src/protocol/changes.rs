@@ -201,15 +201,20 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             to_name: to_name.clone(),
         },
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
+        // The feed keeps parent and name as separate optional fields, so it
+        // projects both out of the one binding the tombstone recorded.
         [WalDelta::UnbindDirentry { child_inode_id, .. }, WalDelta::TombstoneSubtree {
             root_inode_id,
-            parent_inode_id,
-            display_name,
+            deleted_direntry,
             ..
         }] if child_inode_id == root_inode_id => FilesystemChange::Deleted {
             inode_id: *root_inode_id,
-            parent_inode_id: *parent_inode_id,
-            name: display_name.clone(),
+            parent_inode_id: deleted_direntry
+                .as_ref()
+                .map(|direntry| direntry.parent_inode_id),
+            name: deleted_direntry
+                .as_ref()
+                .map(|direntry| direntry.display_name.clone()),
         },
         // Undelete: revoke the exact deletion generation, re-bind the root.
         [WalDelta::RevokeSubtreeTombstone { root_inode_id, .. }, WalDelta::BindDirentry {

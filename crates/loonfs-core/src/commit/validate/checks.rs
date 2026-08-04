@@ -147,7 +147,7 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
                         inode_id: *inode_id,
                         root_inode_id: tombstone.root_inode_id,
-                        tombstone_seq: tombstone.tombstone_seq,
+                        tombstone_seq: tombstone.generation.seq,
                     }
                 })
                 .await?;
@@ -180,7 +180,7 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     CommitValidationError::DeleteFileCoveredByTombstone {
                         inode_id: *inode_id,
                         covering_root_inode_id: tombstone.root_inode_id,
-                        tombstone_seq: tombstone.tombstone_seq,
+                        tombstone_seq: tombstone.generation.seq,
                     }
                 })
                 .await?;
@@ -213,7 +213,7 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     CommitValidationError::RenameInodeUnderSubtreeTombstone {
                         inode_id: *inode_id,
                         root_inode_id: tombstone.root_inode_id,
-                        tombstone_seq: tombstone.tombstone_seq,
+                        tombstone_seq: tombstone.generation.seq,
                     }
                 })
                 .await?;
@@ -223,7 +223,7 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     |tombstone| CommitValidationError::RenameTargetParentUnderSubtreeTombstone {
                         parent_inode_id: *new_parent_inode_id,
                         root_inode_id: tombstone.root_inode_id,
-                        tombstone_seq: tombstone.tombstone_seq,
+                        tombstone_seq: tombstone.generation.seq,
                     },
                 )
                 .await?;
@@ -258,7 +258,7 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
                         root_inode_id: *root_inode_id,
                         covering_root_inode_id: tombstone.root_inode_id,
-                        tombstone_seq: tombstone.tombstone_seq,
+                        tombstone_seq: tombstone.generation.seq,
                     }
                 })
                 .await?;
@@ -311,11 +311,11 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                 // cancel a later delete of the same inode. The rule
                 // re-applies unchanged on every stale-head revalidation
                 // because the requested generation rides in the op.
-                if active.tombstone_seq != *deleted_at_seq {
+                if active.generation.seq != *deleted_at_seq {
                     return Err(CommitValidationError::UndeleteGenerationMismatch {
                         inode_id: *inode_id,
                         requested_seq: *deleted_at_seq,
-                        active_seq: active.tombstone_seq,
+                        active_seq: active.generation.seq,
                     }
                     .into());
                 }
@@ -333,8 +333,8 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    target_seq: active.tombstone_seq,
-                    target_delta_index: active.tombstone_delta_index,
+                    target_seq: active.generation.seq,
+                    target_delta_index: active.generation.delta_index,
                     revoke_tombstone_delta_index: reserve_delta_index(next_delta_index)?,
                     bind_delta_index: reserve_delta_index(next_delta_index)?,
                 }
@@ -464,7 +464,7 @@ async fn validate_create_parent_not_covered<V: CommitValidationView>(
         CommitValidationError::CreateUnderSubtreeTombstone {
             parent_inode_id,
             root_inode_id: tombstone.root_inode_id,
-            tombstone_seq: tombstone.tombstone_seq,
+            tombstone_seq: tombstone.generation.seq,
         }
     })
     .await
@@ -480,7 +480,7 @@ async fn validate_replace_target_not_covered<V: CommitValidationView>(
         CommitValidationError::ReplaceFileUnderSubtreeTombstone {
             inode_id,
             root_inode_id: tombstone.root_inode_id,
-            tombstone_seq: tombstone.tombstone_seq,
+            tombstone_seq: tombstone.generation.seq,
         }
     })
     .await

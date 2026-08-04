@@ -400,15 +400,26 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         } else {
             None
         };
+        // The entry keeps parent, key, and name as separate optional fields,
+        // so it projects all three out of the one binding the deletion
+        // recorded.
         let entries = deletions
             .into_iter()
             .map(|deletion| TrashEntry {
                 root_inode_id: deletion.root_inode_id,
                 deleted_at_seq: deletion.deleted_at_seq,
                 deleted_at_ms: deletion.deleted_at_ms,
-                parent_inode_id: deletion.parent_inode_id,
-                name_key: deletion.name_key,
-                display_name: deletion.display_name,
+                parent_inode_id: deletion
+                    .deleted_direntry
+                    .as_ref()
+                    .map(|direntry| direntry.parent_inode_id),
+                name_key: deletion
+                    .deleted_direntry
+                    .as_ref()
+                    .map(|direntry| direntry.name_key.clone()),
+                display_name: deletion
+                    .deleted_direntry
+                    .map(|direntry| direntry.display_name),
             })
             .collect();
         Ok(Page {

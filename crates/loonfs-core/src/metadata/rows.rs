@@ -3,7 +3,7 @@
 //! its append-only rows.
 
 use super::indexes::MetadataIndexes;
-use loonfs_api::wire::manifest::lookup_keys;
+use loonfs_api::wire::manifest::{lookup_keys, DeletedDirentry, TombstoneGeneration};
 use loonfs_api::{
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
@@ -124,21 +124,14 @@ pub struct RevisionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
-    /// The recording event's sequence: the delete's committed seq for a
-    /// `Set`, the undelete's committed seq for a `Revoke`.
-    pub tombstone_seq: ChangeSeq,
-    pub tombstone_delta_index: u32,
+    /// This event's own generation: the delete's committed position for a
+    /// `Set`, the undelete's for a `Revoke`.
+    pub generation: TombstoneGeneration,
     /// Wall-clock stamp of the recording commit.
     pub deleted_at_ms: u64,
-    /// Deleted-binding identity for `Set` rows from path deletes; the
-    /// tombstone row is immortal, so the deleted name lives here after
-    /// unbind rows age out.
-    pub parent_inode_id: Option<InodeId>,
-    pub name_key: Option<NameKey>,
-    pub display_name: Option<DisplayName>,
-    /// What this event did. Newest-by-(seq, delta) wins at every read
-    /// site: a `Set` newest means that deletion is active, a `Revoke`
-    /// newest means none is, and a later re-delete supersedes the revoke.
+    /// What this event did. Newest generation wins at every read site: a
+    /// `Set` newest means that deletion is active, a `Revoke` newest means
+    /// none is, and a later re-delete supersedes the revoke.
     pub action: SubtreeTombstoneAction,
 }
 
@@ -147,21 +140,21 @@ pub struct SubtreeTombstoneRecord {
 /// names the exact deletion generation it cancels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtreeTombstoneAction {
-    /// The subtree rooted here is deleted.
-    Set,
-    /// The deletion recorded at `(target_seq, target_delta_index)` is
-    /// revoked. Validation guarantees the target was the active generation
-    /// when the revoke committed.
-    Revoke {
-        target_seq: ChangeSeq,
-        target_delta_index: u32,
+    /// The subtree rooted here is deleted, removing the binding described
+    /// here when the delete came by path. The tombstone row is immortal, so
+    /// this is where a deleted name lives after unbind rows age out.
+    Set {
+        deleted_direntry: Option<DeletedDirentry>,
     },
+    /// The deletion recorded at `target` is revoked. Validation guarantees
+    /// the target was the active generation when the revoke committed.
+    Revoke { target: TombstoneGeneration },
 }
 
 /// The newest-event-wins active-tombstone rule, shared by every aggregation
-/// site: among records at or below `visible_seq`, the newest by
-/// `(tombstone_seq, tombstone_delta_index)` speaks for the root — a `Set`
-/// newest means that deletion is active, a `Revoke` newest means none is.
+/// site: among records at or below `visible_seq`, the newest generation
+/// speaks for the root — a `Set` newest means that deletion is active, a
+/// `Revoke` newest means none is.
 /// The newest event is authoritative WITHOUT consulting the revoke's
 /// target: commit validation guarantees a revoke only ever lands against
 /// the generation that was active, so for valid histories the two rules
@@ -176,9 +169,9 @@ pub(crate) fn active_tombstone_from_records(
 ) -> Option<SubtreeTombstoneRecord> {
     records
         .into_iter()
-        .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
-        .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
-        .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set))
+        .filter(|tombstone| tombstone.generation.seq <= visible_seq)
+        .max_by_key(|tombstone| tombstone.generation)
+        .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set { .. }))
 }
 
 /// One row of the derived `ActiveDeletions` family: the current-state view of
@@ -203,9 +196,7 @@ pub(crate) enum ActiveDeletionAction {
     /// details.
     Listed {
         deleted_at_ms: u64,
-        parent_inode_id: Option<InodeId>,
-        name_key: Option<NameKey>,
-        display_name: Option<DisplayName>,
+        deleted_direntry: Option<DeletedDirentry>,
     },
     /// An undelete cancelled the deletion, so the listing skips the key.
     Removed { revoked_at_seq: ChangeSeq },
@@ -225,21 +216,19 @@ pub(crate) fn active_deletion_from_tombstone(
     tombstone: &SubtreeTombstoneRecord,
 ) -> ActiveDeletionRecord {
     match &tombstone.action {
-        SubtreeTombstoneAction::Set => ActiveDeletionRecord {
+        SubtreeTombstoneAction::Set { deleted_direntry } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
-            deleted_at_seq: tombstone.tombstone_seq,
+            deleted_at_seq: tombstone.generation.seq,
             action: ActiveDeletionAction::Listed {
                 deleted_at_ms: tombstone.deleted_at_ms,
-                parent_inode_id: tombstone.parent_inode_id,
-                name_key: tombstone.name_key.clone(),
-                display_name: tombstone.display_name.clone(),
+                deleted_direntry: deleted_direntry.clone(),
             },
         },
-        SubtreeTombstoneAction::Revoke { target_seq, .. } => ActiveDeletionRecord {
+        SubtreeTombstoneAction::Revoke { target } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
-            deleted_at_seq: *target_seq,
+            deleted_at_seq: target.seq,
             action: ActiveDeletionAction::Removed {
-                revoked_at_seq: tombstone.tombstone_seq,
+                revoked_at_seq: tombstone.generation.seq,
             },
         },
     }
@@ -265,16 +254,12 @@ impl ActiveDeletionRecord {
         match self.action {
             ActiveDeletionAction::Listed {
                 deleted_at_ms,
-                parent_inode_id,
-                name_key,
-                display_name,
+                deleted_direntry,
             } => Some(RecoverableDeletion {
                 root_inode_id: self.root_inode_id,
                 deleted_at_seq: self.deleted_at_seq,
                 deleted_at_ms,
-                parent_inode_id,
-                name_key,
-                display_name,
+                deleted_direntry,
             }),
             ActiveDeletionAction::Removed { .. } => None,
         }
@@ -287,9 +272,9 @@ pub(crate) struct RecoverableDeletion {
     pub(crate) root_inode_id: InodeId,
     pub(crate) deleted_at_seq: ChangeSeq,
     pub(crate) deleted_at_ms: u64,
-    pub(crate) parent_inode_id: Option<InodeId>,
-    pub(crate) name_key: Option<NameKey>,
-    pub(crate) display_name: Option<DisplayName>,
+    /// The binding the delete removed, and so the one undelete restores in
+    /// place; `None` when the deletion recorded no binding.
+    pub(crate) deleted_direntry: Option<DeletedDirentry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
