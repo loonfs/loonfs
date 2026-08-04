@@ -675,7 +675,6 @@ fn classify_durable_content_error(error: &DurableContentValidationError) -> Erro
         | DurableContentValidationError::MissingContentObject { .. }
         | DurableContentValidationError::ContentLengthMismatch { .. }
         | DurableContentValidationError::ContentChecksumMismatch { .. }
-        | DurableContentValidationError::ContentChecksumUnverifiable { .. }
         | DurableContentValidationError::ContentStoreMismatch { .. } => ErrorCode::NamespaceCorrupt,
         DurableContentValidationError::Store { .. } => ErrorCode::ServerError,
     }

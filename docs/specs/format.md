@@ -240,16 +240,19 @@ field as a decision rather than a hint.
 algorithm is its own field, so the value carries no prefix; provider APIs that
 report base64 are converted at the adapter).
 
-`sha256` and `crc64nvme` both have producers. Every path that moves bytes
+Every algorithm in that list is producible, and the list is closed: an
+algorithm spelling a reader does not know fails to decode rather than
+decoding into a value nothing can recompute. Every path that moves bytes
 through LoonFS hashes them and produces `sha256`. Direct multipart upload
 produces `crc64nvme`: an S3-compatible provider assembles a multipart object
 without any party hashing the whole stream, and the CRC-64/NVME it computes
 over the assembly is the only full-object evidence that will ever exist for
-those bytes. Such a reference therefore carries no `whole_file_sha256`, by
-the provenance rule above, and reads verify it by recomputing that CRC.
-`crc32c` decodes and round-trips with no producer; a reference carrying a
-checksum an implementation cannot recompute must fail its reads rather than
-pass them unverified.
+those bytes. `crc32c` is the full-object checksum Google Cloud Storage
+computes and reports, and is likewise the only evidence for an object
+transferred straight to it. A reference produced either way carries no
+`whole_file_sha256`, by the provenance rule above, and reads verify it by
+recomputing that CRC. A reference carrying a checksum an implementation
+cannot recompute must fail its reads rather than pass them unverified.
 
 Metadata materialization tables include canonical metadata families and
 validated derived families. The canonical families are `inodes`,

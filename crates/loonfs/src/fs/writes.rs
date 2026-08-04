@@ -9,7 +9,7 @@ use crate::{
     CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceJobId, MaintenanceStepOptions,
     MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
-use crate::{ChecksumAlgorithm, CommittedChange, FilesystemChange};
+use crate::{CommittedChange, FilesystemChange};
 use crate::{Result, RuntimeError};
 use loonfs_api::{EffectiveLimit, ErrorCode, StorageChecksum};
 use loonfs_core::NamespaceEngine;
@@ -33,20 +33,17 @@ enum StagedPayload<'a> {
 }
 
 impl StagedPayload<'_> {
-    /// Whether the staged bytes produce this checksum. `None` is a refusal
-    /// to answer, never agreement.
+    /// Whether the staged bytes produce this checksum.
+    ///
+    /// `None` is a refusal to answer, never agreement. Held bytes never
+    /// refuse — every algorithm in the vocabulary is one this build can
+    /// recompute — so the only refusal left is a streamed payload being
+    /// asked for a digest nobody folded over it.
     fn matches(&self, expected: &StorageChecksum) -> Option<bool> {
         match self {
-            Self::Bytes(bytes) => expected.matches(bytes),
+            Self::Bytes(bytes) => Some(expected.matches(bytes)),
             Self::Streamed(content_ref) => {
-                let observed = if content_ref.storage_checksum.algorithm == expected.algorithm {
-                    Some(content_ref.storage_checksum.value.as_str())
-                } else if expected.algorithm == ChecksumAlgorithm::Sha256 {
-                    content_ref.whole_file_sha256.as_deref()
-                } else {
-                    None
-                };
-                Some(observed? == expected.value)
+                Some(content_ref.digest_under(expected.algorithm)? == expected.value)
             }
         }
     }
@@ -91,21 +88,12 @@ fn sole_committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
 
 /// Whether the committed reference provably holds the bytes just staged.
 ///
-/// The evidence is the trusted whole-file digest when one exists, and
-/// otherwise the reference's own storage checksum — which for a
-/// provider-assembled multipart object is the only full-object evidence
-/// there is. Only a digest this build can recompute, over bytes that agree,
-/// proves anything: a digest that disagrees and a digest this build cannot
-/// recompute are both unproven, and both leave the conflict standing.
+/// The evidence is whatever the reference holds its own bytes to. Only that
+/// digest, over a staged payload that can answer for it and agrees, proves
+/// anything: a digest that disagrees and a digest the staged payload cannot
+/// answer for are both unproven, and both leave the conflict standing.
 fn staged_matches_committed(staged: &StagedPayload<'_>, content_ref: &ContentRef) -> bool {
-    let evidence = match &content_ref.whole_file_sha256 {
-        Some(digest) => StorageChecksum {
-            algorithm: ChecksumAlgorithm::Sha256,
-            value: digest.clone(),
-        },
-        None => content_ref.storage_checksum.clone(),
-    };
-    staged.matches(&evidence) == Some(true)
+    staged.matches(&content_ref.verifiable_checksum()) == Some(true)
 }
 
 impl FsWriter {
@@ -160,8 +148,8 @@ impl FsWriter {
     /// the commit id actually committed and rebuilding this request's
     /// fingerprint around it: an identical value plus bytes that provably
     /// agree means the operation had already succeeded. Anything else —
-    /// a different path, behavior, guard, message, or payload, or content
-    /// this build cannot compare — surfaces the conflict.
+    /// a different path, behavior, guard, message, or payload — surfaces
+    /// the conflict.
     ///
     /// The freshly staged duplicate object is then referenced by nothing.
     /// That is by design, not a leak: it is a completed upload session's
@@ -286,8 +274,8 @@ impl FsWriter {
     /// separately.
     ///
     /// Nothing weaker counts: every way of failing to prove the two requests
-    /// are the same — including a comparison this build cannot make — leaves
-    /// the original conflict standing, never agreement.
+    /// are the same — including the staged payload having no answer to give
+    /// — leaves the original conflict standing, never agreement.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
@@ -924,30 +912,49 @@ fn maybe_auto_step_after_publish(
 #[cfg(test)]
 mod tests {
     use super::{staged_matches_committed, StagedPayload};
-    use crate::{ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind};
+    use crate::{ContentId, ContentRef, ContentRefKind};
     use loonfs_api::StorageChecksum;
 
-    /// A reference whose only full-object evidence is a digest this build
-    /// has no implementation for. Nothing mints one today, which is exactly
-    /// why the reconciliation has to say what it does when one arrives.
+    /// A reference whose only full-object evidence is a CRC-32C, as a direct
+    /// transfer to Google Cloud Storage leaves behind.
     fn crc32c_ref(bytes: &[u8]) -> ContentRef {
         ContentRef {
             kind: ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum {
-                algorithm: ChecksumAlgorithm::Crc32c,
-                value: "0f5c0a1e".to_owned(),
-            },
+            storage_checksum: StorageChecksum::crc32c(bytes),
             whole_file_sha256: None,
         }
     }
 
+    /// A CRC-32C-only commit is reconciled like any other: the staged bytes
+    /// recompute it, so a retry over the same payload proves it did this
+    /// work and a retry over different bytes does not.
     #[test]
-    fn a_digest_this_build_cannot_compare_leaves_the_reuse_conflict_standing() {
+    fn a_crc32c_committed_reference_is_compared_against_the_staged_bytes() {
         let bytes = b"retried payload";
         let committed = crc32c_ref(bytes);
-        let staged = StagedPayload::Bytes(bytes);
+
+        assert!(staged_matches_committed(
+            &StagedPayload::Bytes(bytes),
+            &committed
+        ));
+        assert!(!staged_matches_committed(
+            &StagedPayload::Bytes(b"some other payload"),
+            &committed
+        ));
+    }
+
+    /// A streamed payload is gone by the time the retry asks, so it answers
+    /// only for the digests that were folded over it. Being asked for one
+    /// nobody computed is a refusal, and a refusal leaves the conflict
+    /// standing.
+    #[test]
+    fn a_digest_nobody_folded_over_the_streamed_payload_leaves_the_conflict_standing() {
+        let bytes = b"retried payload";
+        let committed = crc32c_ref(bytes);
+        let hashed = ContentRef::blob_v1(ContentId::generate(), bytes);
+        let staged = StagedPayload::Streamed(&hashed);
 
         assert_eq!(
             staged.matches(&committed.storage_checksum),
@@ -955,6 +962,9 @@ mod tests {
             "the fixture must reach the refusal, not a comparison"
         );
         assert!(!staged_matches_committed(&staged, &committed));
+
+        // The same streamed payload does answer for the digest it folded.
+        assert!(staged_matches_committed(&staged, &hashed));
     }
 
     #[test]

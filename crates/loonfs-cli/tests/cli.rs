@@ -1373,6 +1373,7 @@ fn leave_a_partial_download(
     let mut note = serde_json::json!({
         "content_id": content_ref["content_id"],
         "size_bytes": content_ref["size_bytes"],
+        "storage_checksum": content_ref["storage_checksum"],
     });
     if let Some(sha256) = content_ref.get("whole_file_sha256") {
         note["whole_file_sha256"] = sha256.clone();

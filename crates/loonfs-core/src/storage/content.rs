@@ -7,8 +7,8 @@ use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
-    AuthoritativePathEntry, ChecksumAlgorithm, ContentId, ContentRef, ContentRefValidationError,
-    ContentStoreId, NamespaceId, Sha256, StorageChecksum, StreamingChecksum,
+    AuthoritativePathEntry, ContentId, ContentRef, ContentRefValidationError, ContentStoreId,
+    NamespaceId, Sha256, StorageChecksum, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteRange, ByteStream, ObjectStore, ObjectStoreError, PutMode};
@@ -62,13 +62,6 @@ pub enum DurableContentValidationError {
         object_key: String,
         expected: String,
         actual: String,
-    },
-    #[error(
-        "content checksum for `{object_key}` uses `{algorithm}`, which this build cannot recompute"
-    )]
-    ContentChecksumUnverifiable {
-        object_key: String,
-        algorithm: ChecksumAlgorithm,
     },
     #[error(
         "stored content belongs to content store `{actual}`, not namespace-bound store `{expected}`"
@@ -247,10 +240,9 @@ pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// the verifying digest is folded as they go, so a 50 GiB object costs one
 /// chunk of memory rather than 50 GiB. It verifies exactly what the buffered
 /// read verifies — the declared size, and the reference's trusted whole-file
-/// SHA-256 when it has one, otherwise its own storage checksum, which for a
-/// provider-assembled object is the only full-object evidence there is. A
-/// reference whose checksum this build cannot recompute is refused when the
-/// stream is opened, before any byte is fetched, rather than after.
+/// SHA-256 when it has one, otherwise its own storage checksum, which for an
+/// object this deployment did not hash itself is the only full-object
+/// evidence there is.
 ///
 /// The object is immutable and named by a random content id, so nothing can
 /// rewrite it under a reader: chunk *n* and chunk *n+1* are always from the
@@ -293,8 +285,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// One `HeadObject` proves the object exists and is exactly as long as
     /// the reference claims before any payload moves, which is what lets a
     /// wrong-sized object fail without a partial answer having been handed
-    /// out. The reference's checksum algorithm is resolved here for the same
-    /// reason.
+    /// out.
     /// `start_offset` is where the caller already is: bytes below it are
     /// never fetched, and [`Self::fold_resumed_prefix`] is how they still
     /// reach the digest.
@@ -308,13 +299,8 @@ impl<S: ObjectStore> FileContentStream<S> {
     ) -> Result<Self, DurableContentValidationError> {
         let object_key = content_object_key_for_ref(content_store_id, &content_ref)?;
         validate_content_size(&store, &object_key, &content_ref).await?;
-        let expected = verifiable_checksum(&content_ref);
-        let digest = StreamingChecksum::for_algorithm(expected.algorithm).ok_or({
-            DurableContentValidationError::ContentChecksumUnverifiable {
-                object_key: object_key.clone(),
-                algorithm: content_ref.storage_checksum.algorithm,
-            }
-        })?;
+        let expected = content_ref.verifiable_checksum();
+        let digest = StreamingChecksum::for_algorithm(expected.algorithm);
         Ok(Self {
             store,
             entry,
@@ -448,8 +434,7 @@ impl<S: ObjectStore> FileContentStream<S> {
         // Closing consumes the digest, which is why this runs exactly once.
         let digest = std::mem::replace(
             &mut self.digest,
-            StreamingChecksum::for_algorithm(self.expected.algorithm)
-                .expect("an algorithm this stream already folded stays recomputable"),
+            StreamingChecksum::for_algorithm(self.expected.algorithm),
         );
         let actual = digest.finish();
         if actual != self.expected {
@@ -501,11 +486,9 @@ pub(crate) fn content_object_key_for_ref(
 /// Checks fetched bytes against everything the reference claims about them.
 ///
 /// The whole-file SHA-256 is the check whenever it is present; a reference
-/// that carries only a CRC — which direct multipart produces, because a
-/// provider-assembled object is never hashed by us — is verified by that
-/// CRC instead. A reference whose checksum this build cannot recompute is
-/// refused rather than waved through: an unverifiable read is not a
-/// verified one.
+/// that carries only a CRC — which a direct transfer produces, because an
+/// object assembled by the provider or written by the client is never hashed
+/// by us — is verified by that CRC instead.
 fn validate_loaded_content_bytes(
     object_key: String,
     content_ref: &ContentRef,
@@ -520,26 +503,14 @@ fn validate_loaded_content_bytes(
         });
     }
 
-    let expected = verifiable_checksum(content_ref);
-    match expected.matches(bytes) {
-        Some(true) => {}
-        Some(false) => {
-            let actual = match expected.algorithm {
-                ChecksumAlgorithm::Sha256 => StorageChecksum::sha256(bytes),
-                _ => StorageChecksum::crc64nvme(bytes),
-            };
-            return Err(DurableContentValidationError::ContentChecksumMismatch {
-                object_key,
-                expected: describe_checksum(&expected),
-                actual: describe_checksum(&actual),
-            });
-        }
-        None => {
-            return Err(DurableContentValidationError::ContentChecksumUnverifiable {
-                object_key,
-                algorithm: content_ref.storage_checksum.algorithm,
-            })
-        }
+    let expected = content_ref.verifiable_checksum();
+    if !expected.matches(bytes) {
+        let actual = StorageChecksum::compute(expected.algorithm, bytes);
+        return Err(DurableContentValidationError::ContentChecksumMismatch {
+            object_key,
+            expected: describe_checksum(&expected),
+            actual: describe_checksum(&actual),
+        });
     }
 
     Ok(ValidatedDurableContent {
@@ -547,19 +518,6 @@ fn validate_loaded_content_bytes(
         object_key,
         file_size_bytes: actual_size,
     })
-}
-
-/// The checksum a read holds these bytes to: the trusted whole-file digest
-/// when one exists, and otherwise the reference's own storage checksum,
-/// which for a provider-assembled object is the only evidence there is.
-fn verifiable_checksum(content_ref: &ContentRef) -> StorageChecksum {
-    match &content_ref.whole_file_sha256 {
-        Some(digest) => StorageChecksum {
-            algorithm: ChecksumAlgorithm::Sha256,
-            value: digest.clone(),
-        },
-        None => content_ref.storage_checksum.clone(),
-    }
 }
 
 fn describe_checksum(checksum: &StorageChecksum) -> String {
@@ -800,8 +758,8 @@ mod tests {
     };
     use bytes::Bytes;
     use loonfs_api::{
-        AuthoritativePathEntry, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind,
-        ContentStoreId, StorageChecksum,
+        AuthoritativePathEntry, ContentId, ContentRef, ContentRefKind, ContentStoreId,
+        StorageChecksum,
     };
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -904,26 +862,39 @@ mod tests {
         ));
     }
 
-    /// A reference whose only evidence is a CRC this build cannot recompute
-    /// must fail the read rather than be waved through unverified.
+    /// A direct transfer to Google Cloud Storage produces a reference whose
+    /// only evidence is the CRC-32C that provider computed. Reads verify it
+    /// like any other full-object evidence, and a wrong object fails on it.
     #[tokio::test]
-    async fn read_refuses_a_reference_it_cannot_verify() {
+    async fn read_verifies_a_reference_whose_only_evidence_is_a_crc32c() {
         let (_temp_dir, store, content_store_id) = test_store();
-        let bytes = b"crc only";
-        let mut content_ref = content_ref(bytes);
-        content_ref.whole_file_sha256 = None;
-        content_ref.storage_checksum = StorageChecksum {
-            algorithm: ChecksumAlgorithm::Crc32c,
-            value: "00000000".to_owned(),
+        let bytes = b"transferred straight to the provider";
+        let content_ref = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::generate(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::crc32c(bytes),
+            whole_file_sha256: None,
         };
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
-        let err = read_durable_content_bytes(&store, &content_store_id, &content_ref)
+        let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
             .await
-            .expect_err("unverifiable checksum");
+            .expect("a crc32c-only reference verifies by its crc");
+        assert_eq!(read.bytes, bytes);
+
+        // Same length, different bytes: only the checksum can tell.
+        let (_temp_dir, store, content_store_id) = test_store();
+        let planted = ContentRef {
+            storage_checksum: StorageChecksum::crc32c(b"transferred straight to the PROVIDER"),
+            ..content_ref
+        };
+        put_content_object(&store, &content_store_id, &planted, bytes).await;
         assert!(matches!(
-            err,
-            DurableContentValidationError::ContentChecksumUnverifiable { .. }
+            read_durable_content_bytes(&store, &content_store_id, &planted)
+                .await
+                .expect_err("crc mismatch"),
+            DurableContentValidationError::ContentChecksumMismatch { .. }
         ));
     }
 
@@ -1280,32 +1251,117 @@ mod tests {
         );
     }
 
-    /// A reference whose only evidence is a checksum this build cannot
-    /// recompute is refused before any byte moves, not after — a streamed
-    /// read that discovered this at the end would already have handed
-    /// unverifiable bytes to its caller.
+    /// A CRC-32C-only reference is what a direct transfer to Google Cloud
+    /// Storage leaves behind, and a streamed read of one is verified like any
+    /// other: folded chunk by chunk, closed at the end, and failed when the
+    /// object is not what the reference says.
     #[tokio::test]
-    async fn a_streamed_read_refuses_a_reference_it_cannot_verify_before_reading() {
+    async fn a_streamed_read_verifies_a_reference_whose_only_evidence_is_a_crc32c() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = payload(2 * TEST_CHUNK_BYTES as usize + 5);
+        let content_ref = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::generate(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::crc32c(&bytes),
+            whole_file_sha256: None,
+        };
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        let mut fetched = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+            fetched.extend_from_slice(&chunk);
+        }
+        assert_eq!(fetched, bytes);
+
+        let (_temp_dir, store, content_store_id) = test_store();
+        let planted = ContentRef {
+            storage_checksum: StorageChecksum::crc32c(&payload(bytes.len() + 1)),
+            ..content_ref
+        };
+        put_content_object(&store, &content_store_id, &planted, &bytes).await;
+        let mut stream = open_stream(&store, &content_store_id, &planted)
+            .await
+            .expect("open stream");
+        let verdict = loop {
+            match stream.next_chunk().await {
+                Ok(Some(_)) => continue,
+                #[allow(clippy::panic, reason = "the failure this test exists to catch")]
+                Ok(None) => panic!("an object that is not the reference's verified"),
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            matches!(
+                verdict,
+                CoreError::DurableContent(
+                    DurableContentValidationError::ContentChecksumMismatch { .. }
+                )
+            ),
+            "unexpected verdict: {verdict}"
+        );
+    }
+
+    /// A CRC folds forward from a running value, so a resumed read of a
+    /// CRC-32C-only reference closes over the prefix it never fetched
+    /// exactly as a hashed one does.
+    #[tokio::test]
+    async fn a_resumed_crc32c_read_folds_the_prefix_into_the_same_verdict() {
         let (_temp_dir, inner, content_store_id) = test_store();
         let store = CountingStore::new(inner, KeyPredicate::content_blob());
-        let bytes = b"crc only";
-        let mut content_ref = content_ref(bytes);
-        content_ref.whole_file_sha256 = None;
-        content_ref.storage_checksum = StorageChecksum {
-            algorithm: ChecksumAlgorithm::Crc32c,
-            value: "00000000".to_owned(),
+        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let content_ref = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::generate(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::crc32c(&bytes),
+            whole_file_sha256: None,
         };
-        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        let held = TEST_CHUNK_BYTES as usize;
 
         store.reset();
-        let err = open_stream(&store, &content_store_id, &content_ref)
+        let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
             .await
-            .expect_err("unverifiable checksum");
-        assert!(matches!(
-            err,
-            DurableContentValidationError::ContentChecksumUnverifiable { .. }
-        ));
-        assert_eq!(store.count(OperationClass::Read), 0);
+            .expect("open stream");
+        stream.fold_resumed_prefix(&bytes[..held]);
+        let mut fetched = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+            fetched.extend_from_slice(&chunk);
+        }
+        assert_eq!(fetched, bytes[held..]);
+        assert_eq!(
+            store.count(OperationClass::Read),
+            1,
+            "one chunk was left to fetch, so one ranged read happened"
+        );
+
+        // The prefix is part of the verdict here too: wrong bytes below the
+        // resume point fail the whole read.
+        let mut wrong = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+            .await
+            .expect("open stream");
+        wrong.fold_resumed_prefix(&vec![0u8; held]);
+        let verdict = loop {
+            match wrong.next_chunk().await {
+                Ok(Some(_)) => continue,
+                #[allow(clippy::panic, reason = "the failure this test exists to catch")]
+                Ok(None) => panic!("a prefix that is not the object's verified"),
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            matches!(
+                verdict,
+                CoreError::DurableContent(
+                    DurableContentValidationError::ContentChecksumMismatch { .. }
+                )
+            ),
+            "unexpected verdict: {verdict}"
+        );
     }
 
     /// The same evidence the buffered read holds bytes to, folded chunk by

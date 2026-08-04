@@ -106,8 +106,8 @@ pub use commit_identity::{
     put_retry_fingerprint, semantic_commit_fingerprint, SemanticFingerprintError,
 };
 pub use content::{
-    ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc64Nvme, Sha256,
-    StorageChecksum, StreamingChecksum,
+    ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc32c, Crc64Nvme,
+    Sha256, StorageChecksum, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};

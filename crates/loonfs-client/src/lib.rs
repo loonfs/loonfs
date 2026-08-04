@@ -31,13 +31,13 @@ use loonfs_api::{
         UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
         ValidatedContentToken,
     },
-    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
-    ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
-    CreateCheckpointResponse, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo, Sha256, StorageChecksum, UploadId,
+    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
+    CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode, FilesystemOperation,
+    ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RevisionNo, StorageChecksum, StreamingChecksum, UploadId,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
 };
@@ -83,49 +83,29 @@ enum UploadedContent<'a> {
 impl UploadedContent<'_> {
     /// Whether the upload's bytes produce this checksum.
     ///
-    /// `None` is a refusal to answer — the algorithm is one this build
-    /// cannot recompute, or one nobody computed over the streamed payload —
-    /// and a caller must never read it as agreement.
+    /// `None` is a refusal to answer, and a caller must never read it as
+    /// agreement. Held bytes never refuse — every algorithm in the
+    /// vocabulary is one this client can recompute — so the only refusal
+    /// left is a streamed payload being asked for a digest nobody folded
+    /// over it.
     fn matches(&self, expected: &StorageChecksum) -> Option<bool> {
         match self {
-            Self::Bytes(bytes) => expected.matches(bytes),
+            Self::Bytes(bytes) => Some(expected.matches(bytes)),
             Self::Streamed(content_ref) => {
-                let observed = digest_of(content_ref, expected.algorithm)?;
-                Some(observed == expected.value)
+                Some(content_ref.digest_under(expected.algorithm)? == expected.value)
             }
         }
     }
 }
 
-/// The digest a reference carries under one algorithm, if it carries one.
-fn digest_of(content_ref: &ContentRef, algorithm: ChecksumAlgorithm) -> Option<&str> {
-    if content_ref.storage_checksum.algorithm == algorithm {
-        return Some(&content_ref.storage_checksum.value);
-    }
-    match algorithm {
-        ChecksumAlgorithm::Sha256 => content_ref.whole_file_sha256.as_deref(),
-        _ => None,
-    }
-}
-
 /// Whether the committed reference provably holds the bytes just uploaded.
 ///
-/// The evidence is the trusted whole-file digest when the server has one,
-/// and otherwise the reference's own storage checksum — which for a
-/// provider-assembled multipart object is the only full-object evidence
-/// that exists. Only a digest this client can recompute, over bytes that
-/// agree, proves anything: a digest that disagrees and a digest this client
-/// cannot recompute are both unproven, and both leave the conflict
-/// standing.
+/// The evidence is whatever the reference holds its own bytes to. Only that
+/// digest, over an upload that can answer for it and agrees, proves
+/// anything: a digest that disagrees and a digest the upload cannot answer
+/// for are both unproven, and both leave the conflict standing.
 fn uploaded_matches_committed(uploaded: &UploadedContent<'_>, content_ref: &ContentRef) -> bool {
-    let evidence = match &content_ref.whole_file_sha256 {
-        Some(digest) => StorageChecksum {
-            algorithm: ChecksumAlgorithm::Sha256,
-            value: digest.clone(),
-        },
-        None => content_ref.storage_checksum.clone(),
-    };
-    uploaded.matches(&evidence) == Some(true)
+    uploaded.matches(&content_ref.verifiable_checksum()) == Some(true)
 }
 
 /// What a reuse conflict says the commit id already landed as: where, and
@@ -209,7 +189,12 @@ pub struct DirectDownloadStream {
     body: payload::PayloadStream,
     expected: ContentRef,
     path: AbsolutePath,
-    sha256: Option<Sha256>,
+    /// The checksum the complete object must produce, folded so far. The
+    /// grant's reference names it, so an object nobody hashed for us — a
+    /// provider-assembled multipart, or a direct transfer described only by
+    /// the provider's own CRC — is checked on the way past rather than
+    /// taken on trust.
+    digest: StreamingChecksum,
     size_bytes: u64,
     /// Offset this stream was opened at: zero for the whole object, and the
     /// length of what the caller already holds for a resumed download.
@@ -226,14 +211,12 @@ impl DirectDownloadStream {
     /// from the object's first byte.
     ///
     /// A resumed download still checks the whole object's digest, so the
-    /// bytes it will never receive have to be folded into the same hash as
+    /// bytes it will never receive have to be folded into the same digest as
     /// the ones it does. Feeding the wrong bytes fails the download at its
     /// end, which is right: the grant's reference is the authority on what
     /// the object holds, not the partial copy on the caller's disk.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
-        if let Some(sha256) = self.sha256.as_mut() {
-            sha256.update(bytes);
-        }
+        self.digest.update(bytes);
         self.prefix_folded = self.prefix_folded.saturating_add(bytes.len() as u64);
     }
 
@@ -261,9 +244,7 @@ impl DirectDownloadStream {
                         self.path, self.expected.size_bytes
                     )));
                 }
-                if let Some(sha256) = self.sha256.as_mut() {
-                    sha256.update(&chunk);
-                }
+                self.digest.update(&chunk);
                 Ok(Some(chunk))
             }
             Some(Err(error)) => {
@@ -281,18 +262,23 @@ impl DirectDownloadStream {
                         self.path, self.size_bytes, self.expected.size_bytes
                     )));
                 }
-                if let (Some(sha256), Some(expected_sha256)) = (
-                    self.sha256.take(),
-                    self.expected.whole_file_sha256.as_deref(),
-                ) {
-                    let observed = sha256.finish().value;
-                    if observed != expected_sha256 {
-                        return Err(ClientError::Http(format!(
-                            "direct download of `{}` hashed to {observed}, not the \
-                             {expected_sha256} the grant named",
-                            self.path
-                        )));
-                    }
+                let expected = self.expected.verifiable_checksum();
+                // Closing consumes the digest; `finished` is what keeps this
+                // from running a second time over an empty one.
+                let observed = std::mem::replace(
+                    &mut self.digest,
+                    StreamingChecksum::for_algorithm(expected.algorithm),
+                )
+                .finish();
+                if observed != expected {
+                    return Err(ClientError::Http(format!(
+                        "direct download of `{}` produced {}:{}, not the {}:{} the grant named",
+                        self.path,
+                        observed.algorithm,
+                        observed.value,
+                        expected.algorithm,
+                        expected.value
+                    )));
                 }
                 Ok(None)
             }
@@ -755,11 +741,9 @@ impl Client {
             body,
             expected: download.content_ref.clone(),
             path: download.absolute_path.clone(),
-            sha256: download
-                .content_ref
-                .whole_file_sha256
-                .as_ref()
-                .map(|_| Sha256::new()),
+            digest: StreamingChecksum::for_algorithm(
+                download.content_ref.verifiable_checksum().algorithm,
+            ),
             // The counter measures the whole object, not this response, so
             // the length check at the end lands where it always did.
             size_bytes: start_offset,
@@ -1676,9 +1660,8 @@ impl Client {
     /// available: it reads back what the commit id actually committed and
     /// compares it against the request just made. The same content under
     /// the same message means the operation had already succeeded and the
-    /// original answer is returned; anything else — different bytes, a
-    /// different message, or content this build cannot compare — surfaces
-    /// the conflict.
+    /// original answer is returned; anything else — different bytes or a
+    /// different message — surfaces the conflict.
     ///
     /// The freshly uploaded duplicate object is then referenced by nothing.
     /// That is by design, not a leak: content garbage collection reclaims an
@@ -1860,8 +1843,8 @@ impl Client {
     /// separately.
     ///
     /// Nothing weaker counts: every way of failing to prove the two requests
-    /// are the same — including a comparison this client cannot make —
-    /// leaves the original conflict standing, never agreement.
+    /// are the same — including the upload having no answer to give — leaves
+    /// the original conflict standing, never agreement.
     async fn reconcile_commit_id_reuse(
         &self,
         spec: &NamespacePath,
@@ -2178,28 +2161,46 @@ mod tests {
         }
     }
 
-    /// A reference whose only full-object evidence is a digest this client
-    /// has no implementation for. No server mints one today, which is
-    /// exactly why the reconciliation has to say what it does when one
-    /// arrives.
+    /// A reference whose only full-object evidence is a CRC-32C, as a direct
+    /// transfer to Google Cloud Storage leaves behind.
     fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef {
             kind: loonfs_api::ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum {
-                algorithm: ChecksumAlgorithm::Crc32c,
-                value: "0f5c0a1e".to_owned(),
-            },
+            storage_checksum: StorageChecksum::crc32c(bytes),
             whole_file_sha256: None,
         }
     }
 
+    /// A CRC-32C-only commit is reconciled like any other: the uploaded
+    /// bytes recompute it, so a retry over the same payload proves it did
+    /// this work and a retry over different bytes does not.
     #[test]
-    fn a_digest_this_client_cannot_compare_leaves_the_reuse_conflict_standing() {
+    fn a_crc32c_committed_reference_is_compared_against_the_uploaded_bytes() {
         let bytes = b"retried payload";
         let committed = crc32c_content_ref(bytes);
-        let uploaded = UploadedContent::Bytes(bytes);
+
+        assert!(uploaded_matches_committed(
+            &UploadedContent::Bytes(bytes),
+            &committed
+        ));
+        assert!(!uploaded_matches_committed(
+            &UploadedContent::Bytes(b"some other payload"),
+            &committed
+        ));
+    }
+
+    /// A one-pass payload is gone by the time the retry asks, so it answers
+    /// only for the digests that were folded over it. Being asked for one
+    /// nobody computed is a refusal, and a refusal leaves the conflict
+    /// standing.
+    #[test]
+    fn a_digest_nobody_folded_over_the_streamed_payload_leaves_the_conflict_standing() {
+        let bytes = b"retried payload";
+        let committed = crc32c_content_ref(bytes);
+        let hashed = test_content_ref(bytes);
+        let uploaded = UploadedContent::Streamed(&hashed);
 
         assert_eq!(
             uploaded.matches(&committed.storage_checksum),
@@ -2207,6 +2208,9 @@ mod tests {
             "the fixture must reach the refusal, not a comparison"
         );
         assert!(!uploaded_matches_committed(&uploaded, &committed));
+
+        // The same one-pass payload does answer for the digest it folded.
+        assert!(uploaded_matches_committed(&uploaded, &hashed));
     }
 
     #[test]
