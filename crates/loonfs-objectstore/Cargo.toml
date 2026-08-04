@@ -17,6 +17,7 @@ http.workspace = true
 http-body.workspace = true
 loonfs-api.workspace = true
 object_store.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hmac.workspace = true

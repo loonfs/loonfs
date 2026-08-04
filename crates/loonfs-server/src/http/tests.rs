@@ -2298,10 +2298,10 @@ mod direct_download {
     use super::*;
     use crate::http::app_with_store_and_direct_transfers;
     use loonfs_api::{
-        ChecksumAlgorithm, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
+        ChecksumAlgorithm, RevisionNo, StorageChecksum, FEATURE_DOWNLOADS_DIRECT_GET,
         FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-        FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-        LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+        FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC32C, FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256,
+        LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     };
     use loonfs_objectstore::presign::{
         DirectGetIssuer, DirectPutIssuer, DirectTransferIssuers, PresignedGetRequest,
@@ -2343,12 +2343,35 @@ mod direct_download {
     #[derive(Debug)]
     struct LoopbackIssuer {
         object_base_url: String,
+        /// The whole-object checksum this stand-in provider enforces.
+        ///
+        /// Providers do not agree on one -- the S3 family verifies SHA-256
+        /// and GCS verifies CRC-32C -- so the shape is a parameter here for
+        /// the same reason it is a trait method in the real issuers: the
+        /// client folds whichever the deployment names.
+        checksum_algorithm: ChecksumAlgorithm,
     }
 
     impl LoopbackIssuer {
+        /// The S3-compatible shape: a whole-object SHA-256.
         fn at(object_base_url: impl Into<String>) -> Arc<Self> {
+            Self::with_checksum(object_base_url, ChecksumAlgorithm::Sha256)
+        }
+
+        /// The GCS shape: a whole-object CRC-32C. Callers pair it with a
+        /// bundle carrying no multipart signer, which is the rest of that
+        /// shape.
+        fn crc32c_at(object_base_url: impl Into<String>) -> Arc<Self> {
+            Self::with_checksum(object_base_url, ChecksumAlgorithm::Crc32c)
+        }
+
+        fn with_checksum(
+            object_base_url: impl Into<String>,
+            checksum_algorithm: ChecksumAlgorithm,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 object_base_url: object_base_url.into(),
+                checksum_algorithm,
             })
         }
     }
@@ -2370,7 +2393,7 @@ mod direct_download {
 
     impl DirectPutIssuer for LoopbackIssuer {
         fn checksum_algorithm(&self) -> ChecksumAlgorithm {
-            ChecksumAlgorithm::Sha256
+            self.checksum_algorithm
         }
 
         fn max_content_bytes(&self) -> u64 {
@@ -2461,8 +2484,26 @@ mod direct_download {
         direct_transfers: Option<DirectTransferIssuers>,
         max_upload_bytes: Option<u64>,
     ) -> Client {
-        let store: SharedObjectStore =
-            Arc::new(LocalFsStore::new(root).expect("construct local store"));
+        start_with_store(
+            Arc::new(LocalFsStore::new(root).expect("construct local store")),
+            root,
+            writer_id,
+            direct_transfers,
+            max_upload_bytes,
+        )
+        .await
+    }
+
+    /// The same deployment over a caller-supplied store, for the cases where
+    /// what the provider reports back about an object is the thing under
+    /// test.
+    async fn start_with_store(
+        store: SharedObjectStore,
+        root: &Path,
+        writer_id: &str,
+        direct_transfers: Option<DirectTransferIssuers>,
+        max_upload_bytes: Option<u64>,
+    ) -> Client {
         let mut config = test_config(root, writer_id);
         config.max_download_bytes = PROXY_CAP_BYTES;
         if let Some(max_upload_bytes) = max_upload_bytes {
@@ -2492,6 +2533,78 @@ mod direct_download {
     /// double. Both see the same objects because both are the same root.
     fn object_store_at(root: &Path) -> SharedObjectStore {
         Arc::new(LocalFsStore::new(root).expect("construct local store for the object double"))
+    }
+
+    /// A store that reports an object's stored checksum as a CRC-32C, the way
+    /// a GCS provider answers.
+    ///
+    /// The reference local store reports SHA-256, which is the readback that
+    /// pairs with an S3-compatible issuer. A provider's readback algorithm
+    /// and its `direct_put` issuer's algorithm have to be the same one, or
+    /// completion compares two digests of different kinds and refuses every
+    /// upload — so a CRC-32C issuer needs a CRC-32C readback beneath it, and
+    /// this double supplies one.
+    #[derive(Debug)]
+    struct Crc32cReadbackStore {
+        inner: LocalFsStore,
+    }
+
+    #[async_trait::async_trait]
+    impl loonfs_objectstore::ObjectStore for Crc32cReadbackStore {
+        async fn head(
+            &self,
+            key: &str,
+        ) -> Result<Option<loonfs_objectstore::ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn head_stored_checksum(
+            &self,
+            key: &str,
+        ) -> Result<Option<loonfs_objectstore::StoredObjectChecksum>, ObjectStoreError> {
+            let Some(bytes) = self.inner.get(key, None).await? else {
+                return Ok(None);
+            };
+            Ok(Some(loonfs_objectstore::StoredObjectChecksum {
+                size_bytes: bytes.len() as u64,
+                storage_checksum: StorageChecksum::crc32c(&bytes),
+            }))
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<loonfs_objectstore::ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<loonfs_objectstore::ByteRange>,
+        ) -> Result<Option<bytes::Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: bytes::Bytes,
+            mode: loonfs_objectstore::PutMode,
+        ) -> Result<loonfs_objectstore::ObjectMetadata, ObjectStoreError> {
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> futures::stream::BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
     }
 
     /// The audit's case in miniature: a file this deployment will not
@@ -2685,6 +2798,91 @@ mod direct_download {
             Some(&PROXY_CAP_BYTES),
             "the proxy cap stays advertised: it is what tells a client which reads need a grant"
         );
+    }
+
+    /// The GCS shape, end to end, with no GCS-specific code anywhere above
+    /// the object-store adapter.
+    ///
+    /// A bundle that signs reads and CRC-32C whole-object writes and has no
+    /// multipart API is served by the same handler, carried by the same
+    /// client ladder, and completed by the same rule as the S3-compatible
+    /// one. The client learns `crc32c` from the capability document, folds
+    /// exactly that digest over the payload in its one measuring pass, and
+    /// the ref the commit records says so — with no `whole_file_sha256`,
+    /// because nobody computed a SHA-256 over these bytes and the format does
+    /// not let one be conjured.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_crc32c_provider_without_multipart_carries_a_file_end_to_end() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let issuer = LoopbackIssuer::crc32c_at(object_base_url);
+        let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
+        let store: SharedObjectStore = Arc::new(Crc32cReadbackStore {
+            inner: LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        });
+        let client = start_with_store(
+            store,
+            temp_dir.path(),
+            "ladder-crc32c-put",
+            Some(transfers),
+            Some(PROXY_CAP_BYTES),
+        )
+        .await;
+
+        // The deployment names crc32c, and names only crc32c.
+        let advertised = client.capabilities().await.expect("capabilities");
+        assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT));
+        assert!(advertised.supports(FEATURE_DOWNLOADS_DIRECT_GET));
+        assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC32C));
+        assert!(!advertised.supports(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256));
+        assert!(
+            !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
+            "GCS has no S3-style multipart API to advertise"
+        );
+        assert_eq!(
+            advertised.direct_put_checksum_algorithm(),
+            Some(ChecksumAlgorithm::Crc32c)
+        );
+
+        let namespace = namespace_id("ladder-crc32c-put");
+        client
+            .create_namespace(&namespace)
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
+        // Large enough that the client looks for a direct transport at all,
+        // and far past the proxy cap, so nothing else could carry it.
+        let payload: Vec<u8> = (0..loonfs_client::STREAMING_PUT_MIN_BYTES as usize)
+            .map(|index| (index % 251) as u8)
+            .collect();
+
+        client
+            .put_file_bytes(&target, &payload, &replace_file_options())
+            .await
+            .expect("a large file goes straight to object storage under a crc32c claim");
+
+        let grant = client
+            .begin_download(&target, None)
+            .await
+            .expect("download grant");
+        assert_eq!(
+            grant.content_ref.storage_checksum,
+            StorageChecksum::crc32c(&payload),
+            "the recorded ref carries the digest the provider was made to enforce"
+        );
+        assert_eq!(
+            grant.content_ref.whole_file_sha256, None,
+            "no trustworthy party hashed these bytes with SHA-256, so the ref claims none"
+        );
+
+        // And it comes home byte for byte through the read half of the same
+        // bundle, which is the symmetry the bundle type exists to guarantee.
+        let mut received = Vec::new();
+        client
+            .download_via_presigned_url(&grant, &mut received)
+            .await
+            .expect("stream the granted object");
+        assert_eq!(received, payload);
     }
 
     /// A store that authorizes nothing directly advertises none of the three.

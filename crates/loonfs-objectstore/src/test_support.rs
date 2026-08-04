@@ -24,3 +24,43 @@ impl MonotonicTimer for SteppingTimer {
         self.now_ms.fetch_add(self.step_ms, Ordering::SeqCst)
     }
 }
+
+/// A service-account JSON whose RSA key is real enough to sign with and
+/// belongs to nobody: it was generated for this repository and names a
+/// project that does not exist.
+///
+/// The GCS adapters parse this file at construction, so a placeholder string
+/// where the private key goes no longer stands in for one. `disable_oauth`
+/// keeps the provider client from reaching for a token it will never need.
+pub(crate) const GCS_FIXTURE_SERVICE_ACCOUNT_KEY: &str = r#"{"type":"service_account","project_id":"loonfs-tests","private_key_id":"0123456789abcdef0123456789abcdef01234567","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCqCPHn1DoDzQWc\nQ1RyndwGugUhuWxYV7GhyutLbFVs2+40StJf6UYGJgkKLIaJ5o9X5fSVzHbTnI90\ngA7Hcl3LeVmUBqf3Vzt1ZQaWxWSRrcCnqtvkh3VJ4o4wp/KVRx10o+9MZ5+s5BvB\n9HTnkjzYuz7RwqYPj9oayXWB3Zy4Ba8+yFKc29X77TbdAtUeeaSywi8MOUmUOyzN\nj4/1bniDkj7efPy0nA2m+Rlv+Jgfygs7WLXu3cscCQa2/JMSyfle1tRD+OEVac5y\nzfPu7X6AHNsYPwOjFTtZxAQxcNTjM1Icw+D9001XTe3NiHkTVe1n3L5oVx5VtgsM\nOc3wdLh9AgMBAAECggEADlajw5dvbvuegf9hgyrRr5WHMkFXJBn9BjY84kbX606e\nhzVaCTF8MK+Lapq3m7BgHRrspacwzAZzSHE2DdaUl0B779Ih3ucxweQLirJJmUlM\nKjdrxJkxqFHdCLhY6gKttrTOTKSeX+96ccAiDZcU33fmw7yE0WIhk8mySYm9Gf1p\nasLr2tyxIdAt0rGN6DtlHNGI0gzZU7QZT/rUErLmhsD2dSiACU/mOvJNUB37Prhp\nMhNasQUZMB74duNXliM/NzLg2VEZkXgahXbGkyzMjt5b/lmF7EGR4W9/2AqeWPDl\n4OkVC2GXCXwLgNbNK6UlCSQlAIh1eX3eaENax2QfNwKBgQDi0t1Ok3zzHc69MRCN\nf5fmKsLPd41aJbjEva5a+t/HW9SK4gvKlf5YBb4mmogT5gqDRqhH2A2tD6wh1+Or\nd5y2ffZPkRkr14XWbKlIgnTAJZhMETkzlHQ3VgTaUmQuPQWpu3i/2m2Q9MxkNJQa\nOVnb136/CFKmWhzIM+ymd/3SJwKBgQC/6BG2bwXPCp7OB8k13a5JlK7b3AXx9Cz8\nzJcQ0qzWXjdtnfJbPULem+bWpoBdd7ha4odOgM7bZ08tvjG8EG0ZoYbn3ZvIHWkf\nZREkmuR0iAKVthjQvTHb7CauTgQiAKhT09+YKj8zFQc5X2h//2AR69hlwyAxNGWj\nvrgoG5HauwKBgGHt1lyhctXoLaUjNNlSmDtohNlb7WxZUu+mUUu4ersw24/mzl51\n6e0I9bLnDw9AR5OsAuWZ0zW/yXqHIiWaq89ijOCHbc2u7HrKSUAkCtIWqS1WVlL9\nqjtl6Qx1fAk2kWZZqWVzodBu0HwG81ZrIm+3F2LU7hIiX8DUIj0xGyYLAoGBALcN\nNUAQfLj2B269bIduEh5rrbNYF2+omvT0bjCE1IqSSkrMO24ebFeM3E7peU4usXI3\n3BrcsPQFgjg+0I/0Fy04r0ciUsM6kph4vjZtbPde+SA3F0qc/R8rDeZ70mNgvy9e\nzUwHGEuwhjiKslJNlSTjE4JV8rIcqcrcVCslySWbAoGAcpdodegs1nrDYXgfG/Uc\nG5R+zoAKdoHLtPWyAkVjXMC9qzMhhXcqqtsoKsZs9LbDiwM7+ANjdU9OcPAtw+c6\nSMF4yP4CnQLvdNRiJ7W4VcAYI4fC7Yvlc0cgz8BAMtVJOTuhOwwLs08kJRk6qVLe\nxZ1xhCJtVIW6SUf+s5lL6xE=\n-----END PRIVATE KEY-----\n","client_email":"loonfs-presign-fixture@loonfs-tests.iam.gserviceaccount.com","client_id":"000000000000000000000","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","disable_oauth":true}"#;
+
+/// The service account [`GCS_FIXTURE_SERVICE_ACCOUNT_KEY`] names, which the
+/// signer writes into the credential query parameter.
+pub(crate) const GCS_FIXTURE_CLIENT_EMAIL: &str =
+    "loonfs-presign-fixture@loonfs-tests.iam.gserviceaccount.com";
+
+/// Writes the fixture key to a fresh temporary file and returns its path,
+/// because every GCS constructor takes the key as a path to read.
+///
+/// Each call gets its own directory. A wall-clock stamp alone does not
+/// guarantee that: several tests ask for this fixture under the same label,
+/// the clock's resolution is coarser than the gap between them, and two
+/// callers landing on one directory then truncate and re-write the same file
+/// while the other is reading it. The counter is what actually makes the
+/// path unique within a run; the stamp separates runs.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn gcs_fixture_service_account_key_file(label: &str) -> std::path::PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    // Test-only unique paths are an entropy boundary, not protocol time.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("loonfs-objectstore-{label}-{stamp}-{ordinal}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("service-account.json");
+    std::fs::write(&path, GCS_FIXTURE_SERVICE_ACCOUNT_KEY).expect("write fixture service account");
+    path
+}

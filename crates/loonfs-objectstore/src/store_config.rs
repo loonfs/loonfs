@@ -108,7 +108,12 @@ pub enum StoreConfig {
     GcpGcs {
         /// GCS bucket that acts as the physical store root.
         bucket: String,
-        /// Filesystem path to the service-account JSON used for authentication.
+        /// Filesystem path to the service-account JSON.
+        ///
+        /// Used twice, from the one file: the provider client authenticates
+        /// with it, and its RSA private key signs the direct-transfer URLs
+        /// this deployment hands to clients. A key that cannot do the second
+        /// fails startup rather than quietly withdrawing direct transfers.
         service_account_key_path: String,
         /// Logical prefix applied inside the bucket, or `None` to expose its root.
         #[serde(default, skip_serializing_if = "Option::is_none")]

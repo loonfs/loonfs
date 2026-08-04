@@ -40,6 +40,7 @@ utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 async-trait.workspace = true
+base64.workspace = true
 loonfs-client.workspace = true
 loonfs-test-support = { path = "../loonfs-test-support" }
 rcgen.workspace = true

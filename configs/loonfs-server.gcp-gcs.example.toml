@@ -16,5 +16,10 @@ writer_id = "loonfs-server-gcp"
 [store]
 kind = "gcp-gcs"
 bucket = "your-bucket"
+# The provider client authenticates with this key, and its RSA private key
+# also signs the direct upload and download URLs handed to clients. The
+# service account therefore needs object read and create rights on the
+# bucket, plus the ability to sign — which for a downloaded service-account
+# key it has by holding the key. Startup fails if the file cannot sign.
 service_account_key_path = "/path/to/service-account.json"
 key_prefix = "loonfs-demo"

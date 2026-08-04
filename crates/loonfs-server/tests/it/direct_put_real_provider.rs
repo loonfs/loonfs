@@ -1,6 +1,7 @@
 // Ignored real-provider tests exercise the full server/client/direct-object-store path.
 
 use crate::common::{start_server, test_config};
+use base64::Engine as _;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
@@ -9,8 +10,8 @@ use loonfs_api::{
         DirectPutContentClaim, ObjectTransferAccess, UploadPartChecksumClaim,
         ValidatedContentToken,
     },
-    ChangeSeq, CommitId, CommitRequest, CommitResponse, DestinationBehavior, FilesystemOperation,
-    NamespaceId, StorageChecksum,
+    ChangeSeq, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse, DestinationBehavior,
+    FilesystemOperation, NamespaceId, StorageChecksum,
 };
 use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
 use loonfs_objectstore::ObjectStore;
@@ -21,17 +22,54 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const AUTH_TOKEN: &str = "test-token";
 const CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
-const SIGNED_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 /// The part size the reference server hands out. A live payload is cut to
 /// this so it lands on a known part count; the assertions check the server
 /// still says so.
 const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 
-/// What a direct-put client declares about bytes it is holding.
-fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
+/// The proxy caps the GCS capability suite narrows its deployment to.
+///
+/// Small on purpose: what makes an object one this deployment will not proxy
+/// is the cap rather than the byte count, so the behavior is identical at a
+/// megabyte and at 256 MiB and this suite does not push the larger figure
+/// through a real provider on every run.
+const PROXY_CAP_BYTES: u64 = 1024 * 1024;
+
+/// The provider-specific spellings a signed write carries.
+///
+/// Every provider binds the same two things into the signature — the digest
+/// the body must hash to and a create-only precondition — under its own
+/// header names. The proofs below tamper with those headers by name, so the
+/// name is a parameter rather than a constant.
+#[derive(Debug, Clone, Copy)]
+struct SignedWriteHeaders {
+    checksum: &'static str,
+    create_only: &'static str,
+    /// The whole-object digest this provider validates.
+    checksum_algorithm: ChecksumAlgorithm,
+}
+
+/// AWS S3 and Cloudflare R2: a signed SHA-256 and `if-none-match: *`.
+const S3_SIGNED_WRITE: SignedWriteHeaders = SignedWriteHeaders {
+    checksum: "x-amz-checksum-sha256",
+    create_only: "if-none-match",
+    checksum_algorithm: ChecksumAlgorithm::Sha256,
+};
+
+/// Google Cloud Storage's native API: a signed `x-goog-hash` carrying a
+/// CRC-32C, and a zero object generation for create-only.
+const GCS_SIGNED_WRITE: SignedWriteHeaders = SignedWriteHeaders {
+    checksum: "x-goog-hash",
+    create_only: "x-goog-if-generation-match",
+    checksum_algorithm: ChecksumAlgorithm::Crc32c,
+};
+
+/// What a direct-put client declares about bytes it is holding, in the
+/// algorithm this deployment advertised.
+fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> DirectPutContentClaim {
     DirectPutContentClaim {
         size_bytes: bytes.len() as u64,
-        storage_checksum: StorageChecksum::sha256(bytes),
+        storage_checksum: StorageChecksum::compute(algorithm, bytes),
     }
 }
 
@@ -39,21 +77,24 @@ fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_direct_put_real_provider_round_trip() {
     let config = AwsS3DirectPutConfig::from_env().expect("load AWS S3 direct-put environment");
-    direct_put_round_trip(test_config(
-        StoreConfig::AwsS3 {
-            bucket: config.bucket,
-            region: config.region,
-            endpoint_url: config.endpoint,
-            access_key_id: config.access_key_id.into(),
-            secret_access_key: config.secret_access_key.into(),
-            session_token: config.session_token.map(Into::into),
-            key_prefix: Some(config.prefix),
-            force_path_style: false,
-        },
-        AUTH_TOKEN,
-        CONTENT_TOKEN_SECRET,
-        "direct-put-aws-s3",
-    ))
+    direct_put_round_trip(
+        S3_SIGNED_WRITE,
+        test_config(
+            StoreConfig::AwsS3 {
+                bucket: config.bucket,
+                region: config.region,
+                endpoint_url: config.endpoint,
+                access_key_id: config.access_key_id.into(),
+                secret_access_key: config.secret_access_key.into(),
+                session_token: config.session_token.map(Into::into),
+                key_prefix: Some(config.prefix),
+                force_path_style: false,
+            },
+            AUTH_TOKEN,
+            CONTENT_TOKEN_SECRET,
+            "direct-put-aws-s3",
+        ),
+    )
     .await;
 }
 
@@ -62,23 +103,26 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
 async fn cloudflare_r2_direct_put_real_provider_round_trip() {
     let config =
         CloudflareR2DirectPutConfig::from_env().expect("load Cloudflare R2 direct-put environment");
-    direct_put_round_trip(test_config(
-        StoreConfig::CloudflareR2 {
-            bucket: config.bucket,
-            account_id: config.account_id,
-            endpoint_url: config.endpoint,
-            access_key_id: config.access_key_id.into(),
-            secret_access_key: config.secret_access_key.into(),
-            key_prefix: Some(config.prefix),
-        },
-        AUTH_TOKEN,
-        CONTENT_TOKEN_SECRET,
-        "direct-put-r2",
-    ))
+    direct_put_round_trip(
+        S3_SIGNED_WRITE,
+        test_config(
+            StoreConfig::CloudflareR2 {
+                bucket: config.bucket,
+                account_id: config.account_id,
+                endpoint_url: config.endpoint,
+                access_key_id: config.access_key_id.into(),
+                secret_access_key: config.secret_access_key.into(),
+                key_prefix: Some(config.prefix),
+            },
+            AUTH_TOKEN,
+            CONTENT_TOKEN_SECRET,
+            "direct-put-r2",
+        ),
+    )
     .await;
 }
 
-async fn direct_put_round_trip(config: ServerConfig) {
+async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerConfig) {
     let harness = start_server(config).await;
 
     let namespace = "direct-put-e2e";
@@ -93,6 +137,12 @@ async fn direct_put_round_trip(config: ServerConfig) {
         .await
         .expect("fetch capabilities");
     assert!(capabilities.supports("core.uploads.direct_put"));
+    // The deployment names the digest its provider enforces, and it is the
+    // one this provider's signed write actually carries.
+    assert_eq!(
+        capabilities.direct_put_checksum_algorithm(),
+        Some(signed_write.checksum_algorithm)
+    );
 
     harness
         .client
@@ -100,13 +150,17 @@ async fn direct_put_round_trip(config: ServerConfig) {
         .await
         .expect("create namespace");
 
-    assert_wrong_direct_put_bytes_rejected(&harness.client, &namespace_id).await;
-    assert_direct_put_requires_signed_checksum_header(&harness.client, &namespace_id).await;
-    assert_direct_put_is_no_replace(&harness.client, &namespace_id).await;
+    assert_wrong_direct_put_bytes_rejected(&harness.client, &namespace_id, signed_write).await;
+    assert_direct_put_requires_its_signed_headers(&harness.client, &namespace_id, signed_write)
+        .await;
+    assert_direct_put_is_no_replace(&harness.client, &namespace_id, signed_write).await;
 
     let begin = harness
         .client
-        .begin_direct_put(&namespace_id, direct_put_claim(bytes))
+        .begin_direct_put(
+            &namespace_id,
+            direct_put_claim(bytes, signed_write.checksum_algorithm),
+        )
         .await
         .expect("begin direct put");
     let direct_put = begin.direct_put.expect("direct-put access");
@@ -115,9 +169,15 @@ async fn direct_put_round_trip(config: ServerConfig) {
     let content_ref = direct_put.content_ref.clone();
     assert_eq!(content_ref.size_bytes, bytes.len() as u64);
     assert_eq!(
-        content_ref.whole_file_sha256.as_deref(),
-        Some(content_ref.storage_checksum.value.as_str())
+        content_ref.storage_checksum.algorithm,
+        signed_write.checksum_algorithm
     );
+    // A trusted whole-file SHA-256 exists only where the provider validated
+    // one. On a CRC-32C provider nobody hashed these bytes with SHA-256, and
+    // the ref says so rather than repeating the CRC under a second name.
+    let expected_sha256 = (signed_write.checksum_algorithm == ChecksumAlgorithm::Sha256)
+        .then(|| content_ref.storage_checksum.value.clone());
+    assert_eq!(content_ref.whole_file_sha256, expected_sha256);
 
     harness
         .client
@@ -254,11 +314,18 @@ fn fetch_range(url: &str, first: usize, last: usize) -> Vec<u8> {
     bytes
 }
 
-async fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &NamespaceId) {
+async fn assert_wrong_direct_put_bytes_rejected(
+    client: &Client,
+    namespace_id: &NamespaceId,
+    signed_write: SignedWriteHeaders,
+) {
     let bytes = b"expected direct put bytes\n";
     let wrong_bytes = b"wrong direct put bytes\n";
     let begin = client
-        .begin_direct_put(namespace_id, direct_put_claim(bytes))
+        .begin_direct_put(
+            namespace_id,
+            direct_put_claim(bytes, signed_write.checksum_algorithm),
+        )
         .await
         .expect("begin wrong-bytes direct put");
     let direct_put = begin.direct_put.expect("wrong-bytes direct-put access");
@@ -282,44 +349,89 @@ async fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &
     );
 }
 
-async fn assert_direct_put_requires_signed_checksum_header(
+/// Both signed headers are load-bearing, and neither can be dropped or
+/// rewritten in flight.
+///
+/// The provider recomputes the signature over what it received, so a request
+/// missing a signed header — or carrying a different value for one — is not
+/// the request that was signed. Omission and tampering are checked
+/// separately: a provider could plausibly reject the first as malformed
+/// while quietly accepting the second, and only the second is what an
+/// attacker holding a capability would actually try.
+async fn assert_direct_put_requires_its_signed_headers(
     client: &Client,
     namespace_id: &NamespaceId,
+    signed_write: SignedWriteHeaders,
 ) {
-    let bytes = b"direct put bytes without checksum header\n";
-    let begin = client
-        .begin_direct_put(namespace_id, direct_put_claim(bytes))
-        .await
-        .expect("begin missing-checksum direct put");
-    let direct_put = begin
-        .direct_put
-        .expect("missing-checksum direct-put access");
-    let content_ref = direct_put.content_ref.clone();
-    let access_without_checksum =
-        presigned_access_without_header(&direct_put.access, SIGNED_CHECKSUM_HEADER);
+    let bytes = b"direct put bytes with the signed headers meddled with\n";
+    let other_bytes = b"some other object entirely\n";
+    let other_checksum = StorageChecksum::compute(signed_write.checksum_algorithm, other_bytes);
 
-    expect_client_rejection(
-        client
-            .upload_via_presigned_url(&access_without_checksum, bytes)
-            .await,
-        "missing-checksum direct put",
-    );
-    expect_client_rejection(
-        client
-            .complete_upload(
+    for (label, meddle) in [
+        (
+            "checksum header omitted",
+            Meddle::Remove(signed_write.checksum),
+        ),
+        (
+            "create-only header omitted",
+            Meddle::Remove(signed_write.create_only),
+        ),
+        (
+            "checksum header rewritten to another object's digest",
+            Meddle::Replace(
+                signed_write.checksum,
+                provider_checksum_header_value(signed_write, &other_checksum),
+            ),
+        ),
+        (
+            "create-only precondition rewritten to allow replacement",
+            Meddle::Replace(signed_write.create_only, relaxed_precondition(signed_write)),
+        ),
+    ] {
+        let begin = client
+            .begin_direct_put(
                 namespace_id,
-                &begin.upload_id,
-                &CompleteUploadRequest::for_content_ref(content_ref),
+                direct_put_claim(bytes, signed_write.checksum_algorithm),
             )
-            .await,
-        "complete missing-checksum direct put",
-    );
+            .await
+            .expect("begin meddled direct put");
+        let direct_put = begin.direct_put.expect("meddled direct-put access");
+        let content_ref = direct_put.content_ref.clone();
+
+        expect_client_rejection(
+            client
+                .upload_via_presigned_url(&meddle.apply(&direct_put.access), bytes)
+                .await,
+            label,
+        );
+        // And the object was never created, so completion has nothing to
+        // find and hands out no token.
+        expect_client_rejection(
+            client
+                .complete_upload(
+                    namespace_id,
+                    &begin.upload_id,
+                    &CompleteUploadRequest::for_content_ref(content_ref),
+                )
+                .await,
+            &format!("complete after {label}"),
+        );
+    }
 }
 
-async fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &NamespaceId) {
+/// The create-only precondition holds against a replay of the very same
+/// capability, and the object the first write created is untouched.
+async fn assert_direct_put_is_no_replace(
+    client: &Client,
+    namespace_id: &NamespaceId,
+    signed_write: SignedWriteHeaders,
+) {
     let bytes = b"duplicate direct put bytes\n";
     let begin = client
-        .begin_direct_put(namespace_id, direct_put_claim(bytes))
+        .begin_direct_put(
+            namespace_id,
+            direct_put_claim(bytes, signed_write.checksum_algorithm),
+        )
         .await
         .expect("begin duplicate direct put");
     let direct_put = begin.direct_put.expect("duplicate direct-put access");
@@ -344,31 +456,80 @@ async fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &Namespa
         )
         .await
         .expect("complete first direct put");
-    assert!(complete.validated_content_token.is_some());
+    assert!(
+        complete.validated_content_token.is_some(),
+        "the refused replay left the first object exactly as it was written"
+    );
 }
 
-fn presigned_access_without_header(
-    access: &ObjectTransferAccess,
-    header: &str,
-) -> ObjectTransferAccess {
-    match access {
-        ObjectTransferAccess::PresignedUrl {
+/// The complete header value this provider expects for a given digest.
+///
+/// GCS names the algorithm inside the value and spells the digest in base64;
+/// the S3 family names the algorithm in the header and spells the digest in
+/// base64 too. Both are produced here so a tampering proof can offer a
+/// well-formed value for the wrong object rather than a malformed one.
+fn provider_checksum_header_value(
+    signed_write: SignedWriteHeaders,
+    checksum: &StorageChecksum,
+) -> String {
+    let raw = loonfs_api::wire::hex::hex_decode_bytes(&checksum.value).expect("checksum is hex");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+    if signed_write.checksum.starts_with("x-goog") {
+        // GCS names the algorithm inside the value; the S3 family names it in
+        // the header.
+        format!("{}={encoded}", checksum.algorithm.as_str())
+    } else {
+        encoded
+    }
+}
+
+/// A precondition value that would let the write replace an existing object,
+/// which is exactly what the signature must stop.
+fn relaxed_precondition(signed_write: SignedWriteHeaders) -> String {
+    if signed_write.create_only.starts_with("x-goog") {
+        // Any live generation, rather than "must not exist".
+        "1".to_owned()
+    } else {
+        // An etag no object has, rather than "must not exist".
+        "\"never-matches-any-etag\"".to_owned()
+    }
+}
+
+/// One edit to a signed header set, applied to an issued capability.
+enum Meddle {
+    Remove(&'static str),
+    Replace(&'static str, String),
+}
+
+impl Meddle {
+    fn apply(&self, access: &ObjectTransferAccess) -> ObjectTransferAccess {
+        let ObjectTransferAccess::PresignedUrl {
             method,
             url,
             headers,
             expires_at_ms,
-        } => {
-            let mut headers = headers.clone();
-            assert!(
-                headers.remove(header).is_some(),
-                "presigned access did not include expected header `{header}`"
-            );
-            ObjectTransferAccess::PresignedUrl {
-                method: method.clone(),
-                url: url.clone(),
-                headers,
-                expires_at_ms: *expires_at_ms,
+        } = access;
+        let mut headers = headers.clone();
+        match self {
+            Self::Remove(header) => {
+                assert!(
+                    headers.remove(*header).is_some(),
+                    "presigned access did not include expected header `{header}`"
+                );
             }
+            Self::Replace(header, value) => {
+                let previous = headers.insert((*header).to_owned(), value.clone());
+                assert!(
+                    previous.is_some_and(|previous| &previous != value),
+                    "presigned access did not include a different `{header}` to replace"
+                );
+            }
+        }
+        ObjectTransferAccess::PresignedUrl {
+            method: method.clone(),
+            url: url.clone(),
+            headers,
+            expires_at_ms: *expires_at_ms,
         }
     }
 }
@@ -441,6 +602,31 @@ impl CloudflareR2DirectPutConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct GcpGcsDirectPutConfig {
+    bucket: String,
+    service_account_key_path: String,
+    prefix: String,
+}
+
+impl GcpGcsDirectPutConfig {
+    fn from_env() -> Result<Self, ProviderEnvError> {
+        Ok(Self {
+            bucket: required_env("LOONFS_TEST_GCS_BUCKET")?,
+            service_account_key_path: required_env("LOONFS_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH")?,
+            prefix: direct_put_prefix("gcp-gcs", optional_env("LOONFS_TEST_GCS_PREFIX")),
+        })
+    }
+
+    fn store(self) -> StoreConfig {
+        StoreConfig::GcpGcs {
+            bucket: self.bucket,
+            service_account_key_path: self.service_account_key_path,
+            key_prefix: Some(self.prefix),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ProviderEnvError {
     Missing { name: &'static str },
     Empty { name: &'static str },
@@ -490,6 +676,328 @@ fn direct_put_prefix(provider: &str, base_prefix: Option<String>) -> String {
         std::process::id(),
         provider
     )
+}
+
+/// The same round trip on Google Cloud Storage, through its native V4 signed
+/// URLs rather than the banned S3-interoperability surface.
+///
+/// Everything above the object-store adapter is the same code path the S3
+/// providers take: the client learns `crc32c` from the capability document,
+/// the begin handler refuses any other algorithm, and completion compares a
+/// stored checksum to a promised one. Only the header spellings differ, and
+/// those are the parameter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires real GCP GCS credentials"]
+async fn gcp_gcs_direct_put_real_provider_round_trip() {
+    let config = GcpGcsDirectPutConfig::from_env().expect("load GCP GCS direct-put environment");
+    direct_put_round_trip(
+        GCS_SIGNED_WRITE,
+        test_config(
+            config.store(),
+            AUTH_TOKEN,
+            CONTENT_TOKEN_SECRET,
+            "direct-put-gcp-gcs",
+        ),
+    )
+    .await;
+}
+
+/// The GCS proofs the shared round trip does not reach: what the provider
+/// does with capabilities that are scoped, replayed, expired, or ranged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires real GCP GCS credentials"]
+async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
+    let config = GcpGcsDirectPutConfig::from_env().expect("load GCP GCS direct-put environment");
+    let store_config = config.clone().store();
+    let mut server_config = test_config(
+        config.store(),
+        AUTH_TOKEN,
+        CONTENT_TOKEN_SECRET,
+        "gcs-signed-capabilities",
+    );
+    // Narrow both proxy caps so a modest payload is genuinely past them.
+    // What makes an object "too big to proxy" is the cap, not the byte
+    // count, so this suite proves the behavior without moving a gigabyte
+    // through a real provider on every run.
+    server_config.max_upload_bytes = PROXY_CAP_BYTES;
+    server_config.max_download_bytes = PROXY_CAP_BYTES;
+    let harness = start_server(server_config).await;
+
+    let namespace = "gcs-capabilities";
+    let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
+    harness
+        .client
+        .create_namespace(&namespace_id)
+        .await
+        .expect("create namespace");
+
+    let capabilities = harness
+        .client
+        .capabilities()
+        .await
+        .expect("fetch capabilities");
+    assert!(capabilities.supports("core.uploads.direct_put"));
+    assert!(capabilities.supports("core.downloads.direct_get"));
+    assert!(capabilities.supports("core.uploads.direct_put.checksum.crc32c"));
+    assert!(
+        !capabilities.supports("core.uploads.direct_multipart"),
+        "GCS has no S3-style multipart API to advertise"
+    );
+
+    assert_gcs_completion_judges_the_object_that_is_there(&harness.client, &namespace_id).await;
+    assert_gcs_signed_writes_land_under_the_configured_prefix(&harness, &store_config).await;
+    assert_gcs_read_capability_serves_ranges_and_resumes(&harness, namespace).await;
+    assert_gcs_expired_capability_is_refused(&harness.client, &namespace_id).await;
+    assert_gcs_cap_bound_object_moves_only_directly(&harness, namespace).await;
+
+    delete_everything_under_the_run_prefix(&store_config).await;
+    harness.server.abort();
+}
+
+/// Completion reads the object back and judges it. A promise that does not
+/// describe what is actually stored fails, and a failed completion hands out
+/// no content token — so nothing unproven can reach a commit.
+async fn assert_gcs_completion_judges_the_object_that_is_there(
+    client: &Client,
+    namespace_id: &NamespaceId,
+) {
+    let bytes = b"gcs completion reads the object back\n";
+    let begin = client
+        .begin_direct_put(
+            namespace_id,
+            direct_put_claim(bytes, ChecksumAlgorithm::Crc32c),
+        )
+        .await
+        .expect("begin direct put");
+    let direct_put = begin.direct_put.expect("direct-put access");
+    let content_ref = direct_put.content_ref.clone();
+    client
+        .upload_via_presigned_url(&direct_put.access, bytes)
+        .await
+        .expect("upload the promised bytes");
+
+    // A ref claiming the wrong length, and one claiming the wrong digest,
+    // each describe an object that is not the one stored.
+    let wrong_size = loonfs_api::ContentRef {
+        size_bytes: content_ref.size_bytes + 1,
+        ..content_ref.clone()
+    };
+    let wrong_checksum = loonfs_api::ContentRef {
+        storage_checksum: StorageChecksum::crc32c(b"some other object entirely\n"),
+        ..content_ref.clone()
+    };
+    for (label, claimed) in [
+        ("wrong size", wrong_size),
+        ("wrong checksum", wrong_checksum),
+    ] {
+        let refused = client
+            .complete_upload(
+                namespace_id,
+                &begin.upload_id,
+                &CompleteUploadRequest::for_content_ref(claimed),
+            )
+            .await;
+        expect_client_rejection(refused, &format!("complete with a {label}"));
+    }
+
+    // The honest promise completes, against the very same stored object.
+    let complete = client
+        .complete_upload(
+            namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest::for_content_ref(content_ref.clone()),
+        )
+        .await
+        .expect("complete the honest promise");
+    assert_eq!(complete.content_ref, content_ref);
+    assert!(complete.validated_content_token.is_some());
+    assert_eq!(
+        content_ref.storage_checksum,
+        StorageChecksum::crc32c(bytes),
+        "the readback and the promise met on the crc32c GCS actually stored"
+    );
+    assert_eq!(
+        content_ref.whole_file_sha256, None,
+        "no trustworthy party hashed these bytes with SHA-256"
+    );
+}
+
+/// Every object a signed write creates lands beneath the deployment's
+/// configured key prefix, so a capability cannot address the bucket outside
+/// this deployment's scope.
+async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
+    harness: &crate::common::TestServer,
+    store_config: &StoreConfig,
+) {
+    let namespace_id = NamespaceId::parse("gcs-capabilities").expect("valid namespace id");
+    let bytes = b"gcs prefix scoping\n";
+    let begin = harness
+        .client
+        .begin_direct_put(
+            &namespace_id,
+            direct_put_claim(bytes, ChecksumAlgorithm::Crc32c),
+        )
+        .await
+        .expect("begin direct put");
+    let direct_put = begin.direct_put.expect("direct-put access");
+    let ObjectTransferAccess::PresignedUrl { url, .. } = &direct_put.access;
+    let StoreConfig::GcpGcs {
+        bucket, key_prefix, ..
+    } = store_config
+    else {
+        unreachable!("this proof runs on GCS")
+    };
+    let prefix = key_prefix.as_deref().expect("this run configures a prefix");
+    assert!(
+        url.starts_with(&format!(
+            "https://storage.googleapis.com/{bucket}/{prefix}/"
+        )),
+        "a signed write addressed something outside the deployment's prefix: {url}"
+    );
+
+    harness
+        .client
+        .upload_via_presigned_url(&direct_put.access, bytes)
+        .await
+        .expect("upload under the prefix");
+
+    // The store scopes every key beneath the same prefix, so listing its
+    // root is exactly this run's objects — and the new one is among them.
+    let store = store_config
+        .configured_object_store()
+        .expect("build a store")
+        .into_shared();
+    let keys = store.list_prefix("").await.expect("list the run prefix");
+    assert!(
+        keys.iter()
+            .any(|key| key.contains(direct_put.content_ref.content_id.as_str())),
+        "the object a signed write created is not under the run prefix"
+    );
+}
+
+/// One read capability serves the whole object, arbitrary windows of it, and
+/// a resumption that stitches a prefix already in hand to the rest.
+async fn assert_gcs_read_capability_serves_ranges_and_resumes(
+    harness: &crate::common::TestServer,
+    namespace: &str,
+) {
+    let payload: Vec<u8> = (0..96 * 1024).map(|offset| (offset % 251) as u8).collect();
+    let target = NamespacePath::parse(namespace, "/ranged.bin").expect("ranged target");
+    harness
+        .client
+        .put_file_bytes(&target, &payload, &put_options("gcs-ranged"))
+        .await
+        .expect("stage an object to read back");
+
+    let grant = harness
+        .client
+        .begin_download(&target, None)
+        .await
+        .expect("begin download");
+    let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
+    assert!(
+        headers.is_empty(),
+        "a read capability requires the client to send nothing, which is what leaves \
+         `Range` free"
+    );
+
+    // The whole object, then three disjoint windows off the one URL that
+    // reassemble into it exactly.
+    let mut received = Vec::new();
+    harness
+        .client
+        .download_via_presigned_url(&grant, &mut received)
+        .await
+        .expect("read the whole object");
+    assert_eq!(received, payload);
+
+    let cuts = [0, 12_345, 60_000, payload.len()];
+    let mut reassembled = Vec::new();
+    for window in cuts.windows(2) {
+        reassembled.extend_from_slice(&fetch_range(url, window[0], window[1] - 1));
+    }
+    assert_eq!(
+        reassembled, payload,
+        "three windows off one capability did not reassemble the object"
+    );
+
+    // A resumption: a prefix already in hand, and the remainder fetched with
+    // a `Range` the signature never covered.
+    let already_have = 40_000;
+    let mut resumed = payload[..already_have].to_vec();
+    resumed.extend_from_slice(&fetch_range(url, already_have, payload.len() - 1));
+    assert_eq!(
+        resumed, payload,
+        "a resumed read did not fold to the object"
+    );
+}
+
+/// A capability stops working when it expires, which is what bounds the
+/// damage of one leaking.
+async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id: &NamespaceId) {
+    let bytes = b"gcs expiry\n";
+    let begin = client
+        .begin_direct_put(
+            namespace_id,
+            direct_put_claim(bytes, ChecksumAlgorithm::Crc32c),
+        )
+        .await
+        .expect("begin direct put");
+    let direct_put = begin.direct_put.expect("direct-put access");
+    let ObjectTransferAccess::PresignedUrl { url, .. } = &direct_put.access;
+
+    // Rewrite the capability's own lifetime to one already spent. The
+    // signature covered the original, so this is refused twice over — which
+    // is the point: neither the expiry nor the signature can be edited in
+    // flight.
+    let expired = url.replace("X-Goog-Expires=900", "X-Goog-Expires=1");
+    assert_ne!(&expired, url, "the capability did not carry an expiry");
+    let response = ureq::put(&expired).send_bytes(bytes);
+    assert!(
+        response.is_err(),
+        "a capability with an edited lifetime was accepted"
+    );
+}
+
+/// An object past the deployment's proxy caps moves only directly, in both
+/// directions, and the proxy still refuses it.
+async fn assert_gcs_cap_bound_object_moves_only_directly(
+    harness: &crate::common::TestServer,
+    namespace: &str,
+) {
+    let payload: Vec<u8> = (0..4 * PROXY_CAP_BYTES as usize)
+        .map(|offset| (offset % 251) as u8)
+        .collect();
+    let target = NamespacePath::parse(namespace, "/cap-bound.bin").expect("cap-bound target");
+
+    // GCS signs no multipart, so this whole-object write is the only
+    // direct transport there is — and the proxy will not take it.
+    harness
+        .client
+        .put_file_bytes(&target, &payload, &put_options("gcs-cap-bound"))
+        .await
+        .expect("an object past the proxy cap takes the whole-object direct write");
+
+    let grant = harness
+        .client
+        .begin_download(&target, None)
+        .await
+        .expect("an object past the read cap is served by grant");
+    let mut received = Vec::new();
+    harness
+        .client
+        .download_via_presigned_url(&grant, &mut received)
+        .await
+        .expect("read the granted object");
+    assert_eq!(received, payload);
+
+    // And the proxy still says no, which is what made the grant necessary.
+    // `get_file_bytes` is the plain proxied read with no fallback, so this
+    // asks the proxy directly rather than re-running the ladder.
+    expect_client_rejection(
+        harness.client.get_file_bytes(&target).await,
+        "proxied read of an object past the read cap",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

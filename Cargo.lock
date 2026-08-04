@@ -1322,6 +1322,7 @@ dependencies = [
  "http-body",
  "loonfs-api",
  "object_store",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -1338,6 +1339,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "bytes",
  "clap",
  "futures",
