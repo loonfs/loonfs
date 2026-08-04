@@ -122,7 +122,7 @@ reference the grant carried.
 | AWS S3 | Yes | Yes | Yes | SigV4, SHA-256, `if-none-match: *` | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
 | Cloudflare R2 | Yes | Yes | Yes | SigV4, SHA-256, `if-none-match: *` | `r2.cloudflarestorage.com` |
 | Other S3-compatible endpoints | No | No | No | n/a | None — unproven |
-| Google Cloud Storage | Built, withheld[^47] | Built, withheld[^47] | No | GOOG4-RSA-SHA256, CRC-32C, generation 0 | `storage.googleapis.com` (no override exists) |
+| Google Cloud Storage | Yes[^47] | Yes[^47] | No | GOOG4-RSA-SHA256, CRC-32C, generation 0 | `storage.googleapis.com` (no override exists) |
 | Azure Blob Storage | No | No | No | n/a | n/a |
 | Local filesystem | No | No | No | n/a | n/a |
 
@@ -267,4 +267,4 @@ The local provider is a development and test provider supported on Unix-family p
 
 [^46]: Google Cloud Storage, "XML API multipart uploads": [https://cloud.google.com/storage/docs/multipart-uploads](https://cloud.google.com/storage/docs/multipart-uploads)
 
-[^47]: The signer, the readback, and the whole path are implemented and unit-covered, but a GCS deployment advertises neither key today: the capability is withheld until a credentialed conformance run against a live bucket has been recorded. See `GCS_DIRECT_TRANSFERS_PROVEN` in `crates/loonfs-objectstore/src/configured.rs`.
+[^47]: Proven by a credentialed conformance run against a live bucket: the provider conformance assertions and both signed direct-transfer tests (the round trip, and the scoped, bounded, single-use capability checks) passed. `GCS_DIRECT_TRANSFERS_PROVEN` in `crates/loonfs-objectstore/src/configured.rs` records the run.

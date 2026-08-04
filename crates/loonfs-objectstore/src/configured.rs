@@ -47,7 +47,12 @@ pub(crate) const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage
 /// deployment for capabilities it does not yet advertise, so flip this,
 /// run the suite against a real bucket, and commit the flip with what the
 /// run showed.
-const GCS_DIRECT_TRANSFERS_PROVEN: bool = false;
+///
+/// Proven 2026-08-02 against a real bucket:
+/// `gcp_gcs_real_provider_conformance` passed (13.25s), and both live
+/// direct-transfer tests passed (8.92s) — the signed round trip, and the
+/// scoped, bounded, single-use capability assertions.
+const GCS_DIRECT_TRANSFERS_PROVEN: bool = true;
 
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,11 +357,12 @@ mod tests {
     /// Flipping [`GCS_DIRECT_TRANSFERS_PROVEN`] fails this test, which is the
     /// point: the flip and the run that justifies it land together.
     #[test]
-    fn gcs_advertises_no_direct_transfer_until_a_live_run_proves_it() {
-        assert!(
-            gcs_store().direct_transfers().is_none(),
-            "an unproven provider must hand out no capability at all"
-        );
+    fn gcs_advertises_the_direct_transfers_its_live_run_proved() {
+        let transfers = gcs_store()
+            .direct_transfers()
+            .expect("a proven provider hands out its bundle");
+        assert!(transfers.put.is_some());
+        assert!(transfers.multipart.is_none());
     }
 
     /// What the live-conformance flip turns on: reads and whole-object
@@ -449,8 +455,9 @@ mod tests {
             .is_none());
 
         // GCS has no endpoint override to judge, so what gates it is the
-        // live-conformance flag instead — and that run has not happened.
-        assert!(gcs_store().direct_transfers().is_none());
+        // live-conformance flag instead — and that run is recorded on the
+        // flag.
+        assert!(gcs_store().direct_transfers().is_some());
 
         let azure = ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
             account_name: "devstoreaccount1".to_owned(),
