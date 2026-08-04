@@ -250,17 +250,12 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
         MetadataRow::Tombstone { .. } => FIXED_ROW_OVERHEAD,
         MetadataRow::ActiveDeletion { action, .. } => match action {
             ActiveDeletionRowAction::Listed {
-                name_key,
-                display_name,
-                ..
+                deleted_direntry, ..
             } => {
                 ALLOCATED_ROW_OVERHEAD
-                    + name_key
-                        .as_ref()
-                        .map_or(0, |name_key| name_key.as_str().len())
-                    + display_name
-                        .as_ref()
-                        .map_or(0, |display_name| display_name.as_str().len())
+                    + deleted_direntry.as_ref().map_or(0, |direntry| {
+                        direntry.name_key.as_str().len() + direntry.display_name.as_str().len()
+                    })
             }
             ActiveDeletionRowAction::Removed { .. } => FIXED_ROW_OVERHEAD,
         },

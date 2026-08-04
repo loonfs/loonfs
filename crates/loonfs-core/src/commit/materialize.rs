@@ -2,6 +2,7 @@
 //! results.
 
 use super::{PreparedCommit, ResolvedBinding, ValidatedOp};
+use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{ContentRef, InodeId, InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
@@ -240,9 +241,7 @@ pub(super) fn materialize_validated_op(
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
                     root_inode_id: *inode_id,
-                    parent_inode_id: Some(source_binding.parent_inode_id),
-                    name_key: Some(source_binding.name_key.clone()),
-                    display_name: Some(source_binding.display_name.clone()),
+                    deleted_direntry: Some(deleted_direntry(source_binding)),
                 },
             );
             CommitOpResult::DeleteFile {
@@ -291,9 +290,7 @@ pub(super) fn materialize_validated_op(
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
                     root_inode_id: *root_inode_id,
-                    parent_inode_id: Some(source_binding.parent_inode_id),
-                    name_key: Some(source_binding.name_key.clone()),
-                    display_name: Some(source_binding.display_name.clone()),
+                    deleted_direntry: Some(deleted_direntry(source_binding)),
                 },
             );
             CommitOpResult::DeleteSubtree {
@@ -321,8 +318,10 @@ pub(super) fn materialize_validated_op(
                 WalDelta::RevokeSubtreeTombstone {
                     delta_index: *revoke_tombstone_delta_index,
                     root_inode_id: *inode_id,
-                    target_seq: *target_seq,
-                    target_delta_index: *target_delta_index,
+                    target: TombstoneGeneration {
+                        seq: *target_seq,
+                        delta_index: *target_delta_index,
+                    },
                 },
             );
             push_delta(
@@ -344,6 +343,17 @@ pub(super) fn materialize_validated_op(
     };
 
     (deltas, result)
+}
+
+/// The binding a delete retires, as the tombstone records it: the same
+/// three fields the unbind delta carries, minus the ones that identify the
+/// exact bind generation being retired.
+fn deleted_direntry(binding: &ResolvedBinding) -> DeletedDirentry {
+    DeletedDirentry {
+        parent_inode_id: binding.parent_inode_id,
+        name_key: binding.name_key.clone(),
+        display_name: binding.display_name.clone(),
+    }
 }
 
 fn push_unbind_delta(

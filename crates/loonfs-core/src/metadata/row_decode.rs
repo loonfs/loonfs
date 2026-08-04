@@ -7,9 +7,10 @@
 use crate::error::CoreError;
 use crate::metadata::{
     ActiveDeletionAction, ActiveDeletionRecord, CommitReceiptRecord, DirentryBindRecord,
-    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
+    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneAction,
+    SubtreeTombstoneRecord,
 };
-use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow};
+use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, TombstoneRowAction};
 
 /// The scanned table can only hold `expected_kind` rows; the foreign row's
 /// self-keyed row key names its actual kind and identity.
@@ -106,20 +107,12 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
     }
 }
 
-fn subtree_tombstone_action(
-    action: &loonfs_api::wire::manifest::TombstoneRowAction,
-) -> super::rows::SubtreeTombstoneAction {
-    use super::rows::SubtreeTombstoneAction;
-    use loonfs_api::wire::manifest::TombstoneRowAction;
+fn subtree_tombstone_action(action: TombstoneRowAction) -> SubtreeTombstoneAction {
     match action {
-        TombstoneRowAction::Set => SubtreeTombstoneAction::Set,
-        TombstoneRowAction::Revoke {
-            target_seq,
-            target_delta_index,
-        } => SubtreeTombstoneAction::Revoke {
-            target_seq: *target_seq,
-            target_delta_index: *target_delta_index,
-        },
+        TombstoneRowAction::Set { deleted_direntry } => {
+            SubtreeTombstoneAction::Set { deleted_direntry }
+        }
+        TombstoneRowAction::Revoke { target } => SubtreeTombstoneAction::Revoke { target },
     }
 }
 
@@ -129,22 +122,14 @@ pub(crate) fn tombstone_from_manifest_row(
     match row {
         MetadataRow::Tombstone {
             root_inode_id,
-            tombstone_seq,
-            tombstone_delta_index,
+            generation,
             action,
             deleted_at_ms,
-            parent_inode_id,
-            name_key,
-            display_name,
         } => Ok(SubtreeTombstoneRecord {
             root_inode_id,
-            tombstone_seq,
-            tombstone_delta_index,
+            generation,
             deleted_at_ms,
-            parent_inode_id,
-            name_key,
-            display_name,
-            action: subtree_tombstone_action(&action),
+            action: subtree_tombstone_action(action),
         }),
         other => Err(foreign_row("tombstone", &other)),
     }
@@ -164,14 +149,10 @@ pub(crate) fn active_deletion_from_manifest_row(
             action: match action {
                 ActiveDeletionRowAction::Listed {
                     deleted_at_ms,
-                    parent_inode_id,
-                    name_key,
-                    display_name,
+                    deleted_direntry,
                 } => ActiveDeletionAction::Listed {
                     deleted_at_ms,
-                    parent_inode_id,
-                    name_key,
-                    display_name,
+                    deleted_direntry,
                 },
                 ActiveDeletionRowAction::Removed { revoked_at_seq } => {
                     ActiveDeletionAction::Removed { revoked_at_seq }
@@ -206,6 +187,7 @@ pub(crate) fn commit_receipt_from_manifest_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_api::wire::manifest::TombstoneGeneration;
     use loonfs_api::{ChangeSeq, InodeId};
 
     fn foreign() -> MetadataRow {
@@ -234,13 +216,14 @@ mod tests {
         assert!(commit_receipt_from_manifest_row(foreign()).is_err());
         let tombstone = MetadataRow::Tombstone {
             root_inode_id: InodeId(1),
-            tombstone_seq: ChangeSeq(1),
-            tombstone_delta_index: 0,
-            action: loonfs_api::wire::manifest::TombstoneRowAction::Set,
+            generation: TombstoneGeneration {
+                seq: ChangeSeq(1),
+                delta_index: 0,
+            },
+            action: TombstoneRowAction::Set {
+                deleted_direntry: None,
+            },
             deleted_at_ms: 4_000,
-            parent_inode_id: None,
-            name_key: None,
-            display_name: None,
         };
         assert!(inode_from_manifest_row(tombstone).is_err());
     }

@@ -126,7 +126,7 @@ pub(super) async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Si
                  `{}` from seq `{}`",
                 visible_path.as_str(),
                 tombstone.root_inode_id,
-                tombstone.tombstone_seq,
+                tombstone.generation.seq,
             )));
         }
         current_inode = bound_child.child_inode_id;
