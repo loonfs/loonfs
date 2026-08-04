@@ -7,6 +7,9 @@
 //! and kebab-case, documented by the examples in `configs/`.
 
 use crate::abs::AzureAbsStoreConfig;
+use crate::configured::{
+    endpoint_host_is_proven, AWS_S3_PROVEN_DOMAINS, CLOUDFLARE_R2_PROVEN_DOMAINS,
+};
 use crate::gcs::GcpGcsStoreConfig;
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use crate::secret::SecretString;
@@ -182,39 +185,12 @@ impl StoreConfig {
         }
     }
 
-    /// Whether this endpoint is one whose direct-put preconditions the live
-    /// conformance suite has actually proven.
-    ///
-    /// `direct_put` hands a client a presigned URL and then trusts the
-    /// provider to have enforced the signed checksum and create-only
-    /// preconditions — completion never reads the bytes back. Only
-    /// first-party AWS S3 and Cloudflare R2 endpoints have been run against
-    /// that suite, so only they earn the trust. An endpoint override outside
-    /// the provider's own domain family is some other implementation of the
-    /// S3 API and is not covered by those runs.
-    ///
-    /// Providers without a presigner at all (local filesystem, GCS, Azure)
-    /// never reach this question: `direct_put` is unavailable for them
-    /// because [`ConfiguredObjectStore::transfer_issuer`] returns `None`.
-    pub fn direct_put_is_proven(&self) -> bool {
-        match self {
-            StoreConfig::AwsS3 { endpoint_url, .. } => match endpoint_url {
-                None => true,
-                Some(endpoint_url) => endpoint_in_domain_families(
-                    endpoint_url,
-                    &["amazonaws.com", "amazonaws.com.cn"],
-                ),
-            },
-            StoreConfig::CloudflareR2 { endpoint_url, .. } => {
-                endpoint_in_domain_families(endpoint_url, &["r2.cloudflarestorage.com"])
-            }
-            StoreConfig::LocalFs { .. }
-            | StoreConfig::GcpGcs { .. }
-            | StoreConfig::AzureAbs { .. } => false,
-        }
-    }
-
     /// Builds the configured runtime object store for this provider.
+    ///
+    /// Whether the result can authorize direct transfers is settled here, by
+    /// construction: read
+    /// [`ConfiguredObjectStore::direct_transfers`](crate::ConfiguredObjectStore::direct_transfers)
+    /// rather than asking this configuration a second time.
     pub fn configured_object_store(&self) -> crate::object_store::Result<ConfiguredObjectStore> {
         match self {
             StoreConfig::LocalFs { root, key_prefix } => {
@@ -352,6 +328,11 @@ impl StoreConfig {
                 )?;
                 if let Some(url) = endpoint_url {
                     validate_absolute_http_url("store.endpoint_url", url)?;
+                    require_tls_on_proven_domains(
+                        "store.endpoint_url",
+                        url,
+                        AWS_S3_PROVEN_DOMAINS,
+                    )?;
                 }
             }
             StoreConfig::CloudflareR2 {
@@ -375,6 +356,11 @@ impl StoreConfig {
                     secret_access_key.expose(),
                 )?;
                 validate_absolute_http_url("store.endpoint_url", endpoint_url)?;
+                require_tls_on_proven_domains(
+                    "store.endpoint_url",
+                    endpoint_url,
+                    CLOUDFLARE_R2_PROVEN_DOMAINS,
+                )?;
             }
             StoreConfig::GcpGcs {
                 bucket,
@@ -474,6 +460,35 @@ fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
+/// Refuses a provider's own domain addressed over plain `http`.
+///
+/// Reaching one of these endpoints without TLS is a misconfiguration, not a
+/// choice: they all serve TLS, and the deployment would otherwise mint
+/// presigned URLs — bearer capabilities to read or write one object — into
+/// cleartext. Any other host is left alone: a private gateway on `http` is a
+/// legitimate setup, and it simply earns no direct transfers.
+fn require_tls_on_proven_domains(
+    field: &'static str,
+    value: &str,
+    domain_families: &[&str],
+) -> Result<(), StoreConfigError> {
+    let Ok(uri) = value.trim().parse::<Uri>() else {
+        // Shape was already reported by the caller's URL validation.
+        return Ok(());
+    };
+    if uri.scheme_str() == Some("https") || !endpoint_host_is_proven(&uri, domain_families) {
+        return Ok(());
+    }
+    Err(StoreConfigError::InvalidField {
+        field,
+        reason: format!(
+            "`{}` is a provider endpoint and must be reached over https: a presigned URL is a \
+             bearer capability, and http would put it on the wire in cleartext",
+            uri.host().unwrap_or_default()
+        ),
+    })
+}
+
 fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), StoreConfigError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -512,22 +527,6 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), St
     }
 
     Ok(())
-}
-
-fn endpoint_in_domain_families(endpoint_url: &str, domain_families: &[&str]) -> bool {
-    let Ok(uri) = endpoint_url.parse::<Uri>() else {
-        return false;
-    };
-    let Some(host) = uri.host() else {
-        return false;
-    };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    domain_families.iter().any(|domain| {
-        host == *domain
-            || host
-                .strip_suffix(domain)
-                .is_some_and(|prefix| prefix.ends_with('.'))
-    })
 }
 
 #[cfg(test)]
@@ -598,72 +597,59 @@ access_key = "key"
         }
     }
 
+    /// A provider's own endpoint on plain `http` is a misconfiguration, and
+    /// the message says what to do about it. Any other host is left alone —
+    /// a private gateway on `http` is a legitimate setup that simply earns
+    /// no direct transfers.
     #[test]
-    fn direct_put_is_proven_only_for_first_party_s3_and_r2_endpoints() {
-        let aws_default = parse(
-            r#"
+    fn a_provider_endpoint_without_tls_is_rejected_by_name() {
+        for (contents, host) in [
+            (
+                r#"
 kind = "aws-s3"
 bucket = "bucket"
 region = "us-east-1"
+endpoint_url = "http://bucket.s3.amazonaws.com"
 access_key_id = "access"
 secret_access_key = "secret"
 "#,
-        );
-        let aws_first_party = parse(
-            r#"
-kind = "aws-s3"
-bucket = "bucket"
-region = "cn-north-1"
-endpoint_url = "https://bucket.s3.cn-north-1.amazonaws.com.cn"
-access_key_id = "access"
-secret_access_key = "secret"
-"#,
-        );
-        let aws_custom = parse(
-            r#"
-kind = "aws-s3"
-bucket = "bucket"
-region = "us-east-1"
-endpoint_url = "https://gateway.example"
-access_key_id = "access"
-secret_access_key = "secret"
-"#,
-        );
-        let r2_first_party = parse(
-            r#"
+                "bucket.s3.amazonaws.com",
+            ),
+            (
+                r#"
 kind = "cloudflare-r2"
 bucket = "bucket"
 account_id = "account"
-endpoint_url = "https://account.r2.cloudflarestorage.com"
+endpoint_url = "http://account.r2.cloudflarestorage.com"
 access_key_id = "access"
 secret_access_key = "secret"
 "#,
-        );
-        let r2_custom = parse(
-            r#"
-kind = "cloudflare-r2"
-bucket = "bucket"
-account_id = "account"
-endpoint_url = "https://gateway.example"
-access_key_id = "access"
-secret_access_key = "secret"
-"#,
-        );
-        let gcs = parse(
-            r#"
-kind = "gcp-gcs"
-bucket = "bucket"
-service_account_key_path = "/tmp/service-account.json"
-"#,
-        );
+                "account.r2.cloudflarestorage.com",
+            ),
+        ] {
+            match parse(contents).validate() {
+                Err(StoreConfigError::InvalidField { field, reason }) => {
+                    assert_eq!(field, "store.endpoint_url");
+                    assert!(reason.contains(host), "{reason}");
+                    assert!(reason.contains("https"), "{reason}");
+                }
+                other => panic!("expected an https requirement, got {other:?}"),
+            }
+        }
 
-        assert!(aws_default.direct_put_is_proven());
-        assert!(aws_first_party.direct_put_is_proven());
-        assert!(!aws_custom.direct_put_is_proven());
-        assert!(r2_first_party.direct_put_is_proven());
-        assert!(!r2_custom.direct_put_is_proven());
-        // GCS has no presigner at all, so it never reaches the question.
-        assert!(!gcs.direct_put_is_proven());
+        // A gateway that is nobody's provider domain keeps working on http.
+        parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+endpoint_url = "http://127.0.0.1:9000"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        )
+        .validate()
+        .expect("a private http gateway is a valid configuration");
     }
 
     #[test]

@@ -31,7 +31,7 @@ const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
     DirectPutContentClaim {
         size_bytes: bytes.len() as u64,
-        sha256: StorageChecksum::sha256(bytes).value,
+        storage_checksum: StorageChecksum::sha256(bytes),
     }
 }
 

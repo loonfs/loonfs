@@ -125,6 +125,7 @@ Registered limit keys:
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. |
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `core.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
+| `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds what the service buffers on a client's behalf; this one is the provider's own single-request ceiling and is typically far larger. A claim above it answers `content_too_large` at begin, rather than being signed into a write the provider would refuse. Advertised only alongside `core.uploads.direct_put`. |
 | `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through a download grant (`POST .../filesystem/downloads`) when `core.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
@@ -149,9 +150,10 @@ hoc.
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a `gc`-restricted maintenance step (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
-| `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the selected provider profile proves the signed preconditions or the deployment explicitly opts into an unproven endpoint. Raw object keys and caller-managed object-store writes are not part of this feature. |
-| `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It rests on the same proven-endpoint condition as `core.uploads.direct_put`, plus the provider's multipart control operations, so the two keys are advertised together. |
-| `core.downloads.direct_get` | Taking download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`). | The server returns a short-lived presigned GET capability for the content object behind one path and revision. It rests on the same proven-endpoint condition as the two upload keys and is advertised with them, because a deployment that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
+| `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the deployment's provider can sign a write that binds a whole-object checksum and a create-only precondition, on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
+| `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `storage_checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
+| `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
+| `core.downloads.direct_get` | Taking download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`). | The server returns a short-lived presigned GET capability for the content object behind one path and revision. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0` currently has required ops only and no feature keys. `acl.*` keys
@@ -854,22 +856,35 @@ declares what it can know — how many bytes it holds and what they hash to —
 and nothing about where they go: the server owns content identity, so a
 client can never aim a signed write at an object it chose.
 
-The claim is required *here*, at begin, and cannot move: the SHA-256 is
+The claim is required *here*, at begin, and cannot move: the digest is
 signed into the header the provider enforces on the write, so the presigned
 URL cannot exist before the digest does. That is the one place a LoonFS
 client must read its payload before uploading it, and it is why
 `direct_multipart` — whose whole-object claim is never signed into anything
 — claims at completion instead.
 
+The claim names its algorithm, because providers do not agree on one: each
+binds into a presigned write whatever its own API can enforce. The
+deployment says which it is, in the
+`core.uploads.direct_put.checksum.<algorithm>` feature it advertises, and a
+claim in any other algorithm answers `invalid_request` at begin rather than
+being signed into a write the provider would refuse. A client reads that key
+and folds that digest over its payload while staging.
+
 ```json
 {
   "mode": "direct_put",
   "content": {
     "size_bytes": 1234,
-    "sha256": "<64 lowercase hex>"
+    "storage_checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" }
   }
 }
 ```
+
+`size_bytes` must be at most `upload.direct_put_max_content_bytes`, the
+provider's own single-request ceiling; a larger claim answers
+`content_too_large` at begin. Content past it moves as
+`direct_multipart` where that is advertised.
 
 The response includes only a short-lived transfer capability, never raw object-store credentials or a caller-managed object key. Required headers are provider-issued and must be echoed by the client; for example, an S3-compatible deployment may return:
 
@@ -924,6 +939,11 @@ the local filesystem are not offered `direct_put`, and there is no
 configuration override. Other implementations may use different headers or
 decline `direct_put` support.
 
+`direct_put` and `direct_multipart` are separate offers. A provider that can
+sign a whole-object write but has no S3-style multipart API advertises the
+first and not the second, and a client's transport ladder falls from parts to
+one whole-object write before it falls back to the proxy.
+
 After the client uploads bytes to the presigned URL, it calls complete with the
 `content_ref` the server returned at begin. Completion **verifies rather than
 trusts**: it reads the object's provider-stored full-object checksum and size
@@ -960,7 +980,7 @@ does not know its length takes the default and keeps asking for part URLs
 until its stream ends.
 
 **The two direct modes claim their content at opposite ends, and the reason
-is signing.** A `direct_put` client must declare its SHA-256 at begin
+is signing.** A `direct_put` client must declare its digest at begin
 because that digest is signed into the request header the provider will
 enforce — there is no presigned URL to hand out until it exists. A
 `direct_multipart` client declares nothing at begin because nothing about
@@ -1561,7 +1581,7 @@ no other's:
 
 ```json
 { "mode": "service_proxied" }
-{ "mode": "direct_put", "content": { "size_bytes": 1234, "sha256": "<64 hex>" } }
+{ "mode": "direct_put", "content": { "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "<64 hex>" } } }
 { "mode": "direct_multipart", "multipart": { "part_size_bytes": 8388608 } }
 ```
 
@@ -1636,12 +1656,46 @@ Two bounds are worth planning for. A provider assembles at most 10,000
 parts, so a session carries at most `part_size_bytes × 10_000` bytes and a
 longer payload is refused when it asks to authorize the part past that
 ceiling — a client that knows its payload is very large asks for a larger
-part size at begin. And a deployment that does not advertise
-`core.uploads.direct_multipart` cannot authorize part uploads at all; the
-same source then goes to `PUT /content` as a streaming request body, which
-the server hashes as it forwards it on. A body whose length is unknown is
-sent with chunked transfer encoding, and the server's incremental
-accounting against `upload.max_content_bytes` is what bounds it.
+part size at begin.
+
+**Choosing a transport.** A payload smaller than one part gains nothing from
+any direct transport and goes to `PUT /content`. Above that, a client works
+down the transports its deployment advertises:
+
+1. `direct_multipart`, where advertised. Parts win because each is retried on
+   its own and nothing has to know the payload's length in advance.
+2. `direct_put`, where advertised and `size_bytes` is at most
+   `upload.direct_put_max_content_bytes`. This is the rung a provider that
+   can sign a write but has no multipart API to open offers. It is the one
+   transport that reads the payload twice, because the digest is signed into
+   the write and so must be complete before the first body byte: one pass
+   folds the digest and counts the bytes, the second sends them. Neither pass
+   has to hold the payload — a file is simply re-opened, and any other source
+   is spooled to disk as the first pass reads it.
+3. `PUT /content` as a streaming request body, where `size_bytes` is at most
+   `upload.max_content_bytes`. The server hashes the payload as it forwards
+   it on. A body whose length is unknown is sent with chunked transfer
+   encoding, and the server's incremental accounting is what bounds it.
+
+Every rung is judged against the advertised limits, never against an assumed
+one: a payload under one part is not thereby known to fit
+`upload.max_content_bytes`, since a deployment may set that cap anywhere. A
+payload that none of the three can carry should be refused by the client,
+naming the limits it passed, rather than sent into the proxy to be refused
+there.
+
+**A declared length is a hint, and only a measured one may refuse.** A source
+may state its length up front, and that is what picks the rung — but it is
+not a promise, and a client that refused an upload on a wrong hint would turn
+a bad guess into a failed transfer. So a refusal, and the `size_bytes` a
+`direct_put` claim carries, come only from bytes the client has actually
+counted. Where the hint says nothing can carry the payload and a whole-object
+write is on offer, that transport is still the right one to try: its first
+pass measures the payload without sending anything, and whatever follows —
+the upload, a different rung, or a refusal — is decided on what it found. A
+source whose length is unknown cannot be checked against any limit up front,
+so it takes `direct_multipart` where that is advertised and `PUT /content`
+otherwise, and both discover the length as they send.
 
 **Receipt expiry and re-minting.** The `validated_content_token` is the
 upload's receipt: it is minted only from a session the store already says is
@@ -1721,9 +1775,10 @@ That is the whole rule, and it is why this exists: `direct_put` and
 `direct_multipart` let a client write an object of any size, while a proxied
 read buffers the file for one response and refuses anything past
 `download.max_content_bytes`. Without a read that does not buffer, a
-deployment could hold a file it had no way to return. So the read capability
-is offered on exactly the deployments that offer the write ones, and
-`core.downloads.direct_get` is advertised with them.
+deployment could hold a file it had no way to return. So
+`core.downloads.direct_get` is advertised by every deployment that offers
+any direct write — the read is not a separate decision, and a deployment
+that offers none of them cannot have created such a file in the first place.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a path and, optionally,
 the revision to read — the same two things the proxied read takes:

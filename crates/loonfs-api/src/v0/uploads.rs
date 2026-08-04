@@ -3,7 +3,7 @@
 //! presigned-access envelope. Content moves through these shapes; the
 //! metadata that later references it commits through [`super::commits`].
 
-use crate::{ContentRef, NamespaceId, UploadId};
+use crate::{ContentRef, NamespaceId, StorageChecksum, UploadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -13,14 +13,21 @@ use std::collections::BTreeMap;
 /// key it has not been given — so a direct upload declares only what it can
 /// know about its own bytes. The server signs both into the provider write
 /// and verifies them again at completion.
+///
+/// The digest names its own algorithm because providers do not agree on one:
+/// each binds into a presigned write whatever its API can enforce. The
+/// deployment advertises which it is, and a claim in any other algorithm is
+/// refused at begin rather than signed into a write the provider would
+/// reject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DirectPutContentClaim {
     /// Complete byte length the client will write.
     pub size_bytes: u64,
-    /// SHA-256 over the complete payload, lowercase hex.
-    pub sha256: String,
+    /// Whole-payload checksum the provider will be made to enforce, in the
+    /// algorithm this deployment advertises.
+    pub storage_checksum: StorageChecksum,
 }
 
 /// What a `direct_multipart` client says about the object it finished
@@ -429,7 +436,7 @@ mod tests {
         BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, DirectPutContentClaim,
         DirectPutUpload, ObjectTransferAccess, UploadMode, UploadSessionStatus,
     };
-    use crate::{ContentId, ContentRef, NamespaceId, UploadId};
+    use crate::{ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, StorageChecksum, UploadId};
     use std::collections::BTreeMap;
 
     #[test]
@@ -458,8 +465,8 @@ mod tests {
     fn a_begin_request_carrying_another_modes_fields_does_not_decode() {
         for body in [
             r#"{"mode":"service_proxied","multipart":{"part_size_bytes":8388608}}"#,
-            r#"{"mode":"service_proxied","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
-            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
+            r#"{"mode":"service_proxied","content":{"size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
             // A direct put with nothing to sign is not a direct put.
             r#"{"mode":"direct_put"}"#,
         ] {
@@ -522,7 +529,7 @@ mod tests {
     #[test]
     fn a_direct_put_claim_names_only_size_and_digest() {
         let request: BeginUploadRequest = serde_json::from_str(
-            r#"{"mode":"direct_put","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
+            r#"{"mode":"direct_put","content":{"size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
         )
         .expect("decode direct-put begin request");
         assert_eq!(
@@ -530,19 +537,33 @@ mod tests {
             BeginUploadRequest::DirectPut {
                 content: DirectPutContentClaim {
                     size_bytes: 5,
-                    sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                        .to_owned(),
+                    storage_checksum: StorageChecksum {
+                        algorithm: ChecksumAlgorithm::Sha256,
+                        value: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                            .to_owned(),
+                    },
                 },
             }
         );
 
         assert!(
             serde_json::from_str::<DirectPutContentClaim>(
-                r#"{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","content_id":"con_0123456789abcdef0123456789abcdef"}"#
+                r#"{"size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},"content_id":"con_0123456789abcdef0123456789abcdef"}"#
             )
             .is_err(),
             "a client must not be able to name the content object"
         );
+    }
+
+    /// The claim names its algorithm, so a provider that enforces something
+    /// other than SHA-256 is expressible without a wire change.
+    #[test]
+    fn a_direct_put_claim_carries_whatever_algorithm_the_provider_enforces() {
+        let claim: DirectPutContentClaim = serde_json::from_str(
+            r#"{"size_bytes":5,"storage_checksum":{"algorithm":"crc32c","value":"a1b2c3d4"}}"#,
+        )
+        .expect("decode a non-sha256 direct-put claim");
+        assert_eq!(claim.storage_checksum.algorithm, ChecksumAlgorithm::Crc32c);
     }
 
     #[test]

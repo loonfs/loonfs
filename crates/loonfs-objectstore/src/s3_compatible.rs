@@ -7,7 +7,10 @@
 use crate::keyspace::parse_endpoint_url;
 use crate::object_store::Result;
 use crate::presign::PresignedUrl;
-use crate::presign::{S3CompatiblePresigner, S3PresignerConfig};
+use crate::presign::{
+    S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
+    CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+};
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
@@ -98,6 +101,9 @@ struct S3CompatibleConfig {
     /// gives the provider a stored full-object checksum that
     /// [`ObjectStore::head_stored_checksum`] can read back.
     sha256_upload_checksum: bool,
+    /// This provider's documented maximum for a single PUT, carried through
+    /// to the signer so a direct-put issuer can advertise it.
+    direct_put_max_content_bytes: u64,
 }
 
 /// Implements the LoonFS storage contract on an S3-API endpoint.
@@ -143,6 +149,7 @@ impl S3CompatibleStore {
             key_prefix: config.key_prefix,
             force_path_style: config.force_path_style,
             sha256_upload_checksum: true,
+            direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
         })
     }
 
@@ -181,6 +188,7 @@ impl S3CompatibleStore {
             // presigned direct paths carry their own enforced checksum
             // headers independent of this flag.
             sha256_upload_checksum: false,
+            direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
         })
     }
 
@@ -202,6 +210,7 @@ impl S3CompatibleStore {
             session_token: config.session_token.clone(),
             key_prefix: config.key_prefix.clone(),
             force_path_style: config.force_path_style,
+            direct_put_max_content_bytes: config.direct_put_max_content_bytes,
         })?;
 
         let io_runtime = StoreIoRuntime::new()?;
@@ -632,7 +641,10 @@ fn object_store_endpoint_url(
 
 #[cfg(test)]
 mod tests {
-    use super::{object_store_endpoint_url, S3CompatibleConfig, S3CompatibleStore};
+    use super::{
+        object_store_endpoint_url, S3CompatibleConfig, S3CompatibleStore,
+        AWS_S3_MAX_DIRECT_PUT_BYTES,
+    };
 
     fn test_config() -> S3CompatibleConfig {
         S3CompatibleConfig {
@@ -646,6 +658,7 @@ mod tests {
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
             sha256_upload_checksum: true,
+            direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
         }
     }
 

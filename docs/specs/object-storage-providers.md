@@ -32,21 +32,32 @@ signature but silently ignores either precondition breaks that argument.
 HMAC-compatible gateways have been observed doing exactly that.
 
 Two things must both hold for direct-put to be available, and
-`StoreConfig::direct_put_is_proven` plus `ConfiguredObjectStore::transfer_issuer`
-are the code that decides:
+`ConfiguredObjectStore::direct_transfers` is the code that decides — building
+the bundle *is* the decision, so nothing above the object-store crate asks
+configuration the question a second time:
 
 1. **The adapter can presign a request that binds the content ref's digest.**
-   Only the S3-compatible adapters (AWS S3 and Cloudflare R2) issue one: a
-   presigned PUT carrying a signed `x-amz-checksum-sha256` and
-   `if-none-match: *`. GCS and Azure Blob can presign and enforce create-only,
-   but validate only CRC32C/MD5, so neither can bind the SHA-256 a content ref
-   is addressed by; the local filesystem has no signing surface.
-2. **The endpoint is one the live conformance suite has actually run against.**
-   An AWS S3 endpoint with no override, an override in the `amazonaws.com` or
-   `amazonaws.com.cn` domain family, and an R2 endpoint in the
-   `r2.cloudflarestorage.com` family qualify. Any other endpoint URL is some
-   other implementation of the S3 API, is not covered by those runs, and does
-   not qualify.
+   Only the S3-compatible adapters (AWS S3 and Cloudflare R2) issue one
+   today: a presigned PUT carrying a signed `x-amz-checksum-sha256` and
+   `if-none-match: *`. GCS and Azure Blob can presign and enforce create-only
+   but validate only CRC32C/MD5, neither of which the claim could name until
+   now; the local filesystem has no signing surface at all.
+2. **The endpoint is one the live conformance suite has actually run against,
+   reached over TLS.** An AWS S3 endpoint with no override, an override in
+   the `amazonaws.com` or `amazonaws.com.cn` domain family, and an R2
+   endpoint in the `r2.cloudflarestorage.com` family qualify. Any other
+   endpoint URL is some other implementation of the S3 API, is not covered by
+   those runs, and does not qualify.
+
+   The scheme is part of the test because a presigned URL is a bearer
+   capability to read or write one object: issued over `http`, it and its
+   signed headers would cross the network in cleartext for anyone on the path
+   to replay. So one of these domains on `http` earns no direct transfers,
+   and config validation rejects it outright, by name, saying https is
+   required — reaching a provider's own endpoint without TLS is a
+   misconfiguration rather than a choice. A private gateway on `http` is
+   left alone: it is a legitimate setup that simply earns no direct
+   transfers, for reason 2 above.
 
 Where both hold, the server advertises `core.uploads.direct_put` in its
 capability document and accepts the mode. Everywhere else the feature key is
@@ -54,6 +65,13 @@ absent and beginning that mode answers `not_supported`. There is no override:
 an endpoint that has not been proven does not get the capability, because the
 whole point of the gate is that the provider — not LoonFS — is being trusted to
 enforce the preconditions.
+
+The digest a provider binds is its own, not a fixed one. The deployment names
+it in `core.uploads.direct_put.checksum.<algorithm>`, and the client folds
+that digest while staging; a claim in any other algorithm is refused at
+begin. The provider's single-request ceiling is advertised the same way, as
+`upload.direct_put_max_content_bytes` — 5 GiB on AWS S3, and 5 MiB less than
+that on R2, which documents the smaller single-part maximum of the two.
 
 This never weakens ordinary uploads. The server-mediated upload path is
 available on every supported store and is the default wherever direct-put is
@@ -63,25 +81,30 @@ not offered.
 deployment must be able to serve back whatever it let a client create. A
 proxied read buffers the whole file for one response and refuses anything
 past `download.max_content_bytes`, so a store that can presign writes and
-not reads could hold an object it had no way to return. The same predicate
-therefore gates both: where direct-put is offered, `core.downloads.direct_get`
-is offered too, and where it is not, neither is — which is safe precisely
-because such a deployment cannot presign an upload either, so nothing larger
+not reads could hold an object it had no way to return. That is why the read
+is not optional in the bundle a provider constructs: any deployment offering
+a direct write offers `core.downloads.direct_get` too, and one offering no
+direct transfer at all cannot presign an upload either, so nothing larger
 than it will proxy can be created through it. A presigned read binds nothing
 beyond the object key; a client checks the arriving bytes against the content
 reference the grant carried.
 
-| Provider | Direct transfers offered | Proven endpoints |
-| --- | --- | --- |
-| AWS S3 | Yes | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
-| Cloudflare R2 | Yes | `r2.cloudflarestorage.com` |
-| Other S3-compatible endpoints | No | None — unproven |
-| Google Cloud Storage | No | n/a |
-| Azure Blob Storage | No | n/a |
-| Local filesystem | No | n/a |
+| Provider | `direct_get` | `direct_put` | `direct_multipart` | Proven endpoints |
+| --- | --- | --- | --- | --- |
+| AWS S3 | Yes | Yes | Yes | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
+| Cloudflare R2 | Yes | Yes | Yes | `r2.cloudflarestorage.com` |
+| Other S3-compatible endpoints | No | No | No | None — unproven |
+| Google Cloud Storage | No | No | No | n/a |
+| Azure Blob Storage | No | No | No | n/a |
+| Local filesystem | No | No | No | n/a |
 
-"Direct transfers" is one column because it is one decision: `direct_put`,
-`direct_multipart`, and `direct_get` are advertised together or not at all.
+The three are separate columns because they are separate offers. `direct_get`
+comes with the bundle existing at all, and the two write directions are
+independent of each other: a provider that can sign a whole-object write but
+has no S3-style multipart API to open advertises `direct_put` and not
+`direct_multipart`. A client's upload ladder falls from parts, to one
+whole-object write, to the proxy, and refuses a payload none of them can
+carry rather than pushing it into the capped proxy.
 
 ## 4. Incremental writes and where they are real
 

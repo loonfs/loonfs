@@ -11,14 +11,26 @@ use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions};
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    ErrorCode, ForkNamespaceRequest, ListCheckpointsResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, ReleaseCheckpointResponse, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    CapabilityDocument, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, ErrorCode, ForkNamespaceRequest, ListCheckpointsResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, ReleaseCheckpointResponse,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
+    UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES,
 };
+
+/// Advertises a feature, or removes the key: an absent key and an
+/// advertised-false key both mean unsupported, and the document stays small.
+fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: bool) {
+    if supported {
+        capabilities.features.insert(feature.to_owned(), true);
+    } else {
+        capabilities.features.remove(feature);
+    }
+}
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct DeleteNamespaceQuery {
@@ -47,22 +59,50 @@ pub(super) async fn capabilities(
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let mut capabilities = state.reader.capabilities();
-    // Every direct transport rests on the same proof: an endpoint whose
-    // signed preconditions the live conformance suite has exercised. A
-    // deployment that cannot presign one cannot presign the others — and
-    // the read belongs with the writes for a second reason: a deployment
-    // that lets a client create an object too large to proxy back has to
-    // be able to hand it back.
-    for feature in [
+    // Each direct transport is advertised from the issuer that performs it,
+    // so a provider that signs whole-object writes but has no multipart API
+    // says exactly that. The read is advertised for the bundle as a whole:
+    // a deployment that lets a client create an object too large to proxy
+    // back has to be able to hand it back.
+    let direct_put = state
+        .direct_transfers
+        .as_ref()
+        .and_then(|transfers| transfers.put.as_ref());
+    set_feature(
+        &mut capabilities,
         FEATURE_UPLOADS_DIRECT_PUT,
+        direct_put.is_some(),
+    );
+    set_feature(
+        &mut capabilities,
         FEATURE_UPLOADS_DIRECT_MULTIPART,
+        state
+            .direct_transfers
+            .as_ref()
+            .is_some_and(|transfers| transfers.multipart.is_some()),
+    );
+    set_feature(
+        &mut capabilities,
         FEATURE_DOWNLOADS_DIRECT_GET,
-    ] {
-        if state.transfer_issuer.is_some() {
-            capabilities.features.insert(feature.to_owned(), true);
-        } else {
-            capabilities.features.remove(feature);
-        }
+        state.direct_transfers.is_some(),
+    );
+    // A direct-put client has to fold the provider's own whole-object
+    // checksum while staging, so the deployment names which one it is —
+    // read from the issuer, the same authority the begin handler validates
+    // a claim against.
+    let advertised_algorithm = direct_put.map(|issuer| issuer.checksum_algorithm());
+    for (algorithm, feature) in UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES {
+        set_feature(
+            &mut capabilities,
+            feature,
+            advertised_algorithm == Some(algorithm),
+        );
+    }
+    if let Some(issuer) = direct_put {
+        capabilities.limits.insert(
+            LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES.to_owned(),
+            issuer.max_content_bytes(),
+        );
     }
     capabilities.limits.insert(
         LIMIT_UPLOAD_MAX_CONTENT_BYTES.to_owned(),

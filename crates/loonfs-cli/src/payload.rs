@@ -106,8 +106,10 @@ fn counted_source(source: PayloadSource, progress: Arc<ProgressReporter>) -> Pay
     if !progress.enabled() {
         return source;
     }
-    let (stream, size_bytes) = source.into_stream();
-    let counted =
+    // Counting is all this adds, so the source keeps everything else it knew
+    // — including that a file-backed payload can simply be re-opened if the
+    // transport has to read it twice.
+    source.map_stream(|stream| {
         futures::stream::unfold((stream, progress), |(mut stream, progress)| async move {
             match stream.next().await {
                 Some(Ok(chunk)) => {
@@ -121,11 +123,8 @@ fn counted_source(source: PayloadSource, progress: Arc<ProgressReporter>) -> Pay
                 }
             }
         })
-        .boxed();
-    match size_bytes {
-        Some(size_bytes) => PayloadSource::sized_stream(counted, size_bytes),
-        None => PayloadSource::stream(counted),
-    }
+        .boxed()
+    })
 }
 
 /// Restates a source in the object store's terms, which is how the embedded

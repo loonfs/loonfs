@@ -51,7 +51,7 @@ use self::handlers_uploads::{
 use self::serve::AppState;
 #[cfg(test)]
 use self::serve::{
-    app_with_store, app_with_store_and_state, app_with_store_and_transfer_issuer,
+    app_with_store, app_with_store_and_direct_transfers, app_with_store_and_state,
     build_handles_with_metrics_jsonl_path, serve_on,
 };
 use axum::extract::{MatchedPath, Request, State};

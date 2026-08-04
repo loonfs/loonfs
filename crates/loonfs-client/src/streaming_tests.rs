@@ -5,12 +5,18 @@
 //! out chunks whose owners report when they are released, so the peak is
 //! how much of the payload the uploader was holding at once — a number that
 //! is exact, deterministic, and says nothing about the allocator.
+#![allow(clippy::panic)]
+// Transport-choice tests panic in unexpected match arms for precise
+// diagnostics.
 
 use super::*;
 use crate::transport::test_transport::{self, Outcome};
 use futures::stream::StreamExt;
-use loonfs_api::v0::{DirectMultipartUpload, UploadMode};
-use loonfs_api::{CapabilityDocument, ContentId, ContentRef, PROFILE_CORE_V0, PROTOCOL_VERSION};
+use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload, UploadMode};
+use loonfs_api::{
+    CapabilityDocument, ContentId, ContentRef, FEATURE_UPLOADS_DIRECT_PUT,
+    FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256, PROFILE_CORE_V0, PROTOCOL_VERSION,
+};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -109,6 +115,18 @@ fn watched_source(payload: &[u8], chunk_bytes: usize) -> (PayloadSource, Arc<Ret
     (PayloadSource::sized_stream(stream, size_bytes), retention)
 }
 
+/// A source that declares a length it does not deliver.
+///
+/// `PayloadSource::sized_stream` documents its length as a hint, and this is
+/// what a wrong one looks like: the bytes are what they are, and only they
+/// may decide what is claimed or refused.
+fn source_declaring(payload: &[u8], declared: u64, chunk_bytes: usize) -> PayloadSource {
+    let chunks: Vec<Vec<u8>> = payload.chunks(chunk_bytes).map(<[u8]>::to_vec).collect();
+    let stream =
+        futures::stream::iter(chunks.into_iter().map(|bytes| Ok(Bytes::from(bytes)))).boxed();
+    PayloadSource::sized_stream(stream, declared)
+}
+
 fn payload(len: usize) -> Vec<u8> {
     (0..len).map(|offset| (offset % 251) as u8).collect()
 }
@@ -156,16 +174,65 @@ fn json(value: &impl serde::Serialize) -> Outcome {
 /// A capability document advertising whichever upload transports the test
 /// wants the deployment to offer.
 fn capabilities(direct_multipart: bool) -> Outcome {
-    let document = CapabilityDocument {
+    capabilities_for(Advertised {
+        direct_multipart,
+        ..Advertised::default()
+    })
+}
+
+/// What a scripted deployment says about its upload transports.
+#[derive(Default, Clone, Copy)]
+struct Advertised {
+    direct_multipart: bool,
+    /// Advertises `direct_put` with a SHA-256 claim, the algorithm the
+    /// S3-compatible providers enforce.
+    direct_put: bool,
+    /// The service's own buffering cap, when the deployment advertises one.
+    proxy_max_bytes: Option<u64>,
+    /// The provider's single-request ceiling, when it advertises one.
+    direct_put_max_bytes: Option<u64>,
+}
+
+fn capabilities_for(advertised: Advertised) -> Outcome {
+    let mut features = std::collections::BTreeMap::from([(
+        FEATURE_UPLOADS_DIRECT_MULTIPART.to_owned(),
+        advertised.direct_multipart,
+    )]);
+    if advertised.direct_put {
+        features.insert(FEATURE_UPLOADS_DIRECT_PUT.to_owned(), true);
+        features.insert(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256.to_owned(), true);
+    }
+    let mut limits = std::collections::BTreeMap::new();
+    if let Some(cap) = advertised.proxy_max_bytes {
+        limits.insert(LIMIT_UPLOAD_MAX_CONTENT_BYTES.to_owned(), cap);
+    }
+    if let Some(cap) = advertised.direct_put_max_bytes {
+        limits.insert(LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES.to_owned(), cap);
+    }
+    json(&CapabilityDocument {
         protocol_version: PROTOCOL_VERSION.to_owned(),
         profiles: vec![PROFILE_CORE_V0.to_owned()],
-        features: std::collections::BTreeMap::from([(
-            FEATURE_UPLOADS_DIRECT_MULTIPART.to_owned(),
-            direct_multipart,
-        )]),
-        limits: std::collections::BTreeMap::new(),
-    };
-    json(&document)
+        features,
+        limits,
+    })
+}
+
+fn begin_direct_put(content_ref: ContentRef) -> Outcome {
+    json(&BeginUploadResponse {
+        namespace_id: namespace_id(),
+        upload_id: upload_id(),
+        mode: UploadMode::DirectPut,
+        direct_put: Some(DirectPutUpload {
+            content_ref,
+            access: ObjectTransferAccess::PresignedUrl {
+                method: "PUT".to_owned(),
+                url: "http://object.invalid/content".to_owned(),
+                headers: std::collections::BTreeMap::new(),
+                expires_at_ms: u64::MAX,
+            },
+        }),
+        direct_multipart: None,
+    })
 }
 
 fn begin_multipart() -> Outcome {
@@ -492,17 +559,20 @@ async fn a_proxied_put_streams_its_body() {
     );
 }
 
-/// A source the deployment cannot take parts from, and that says it is
-/// small, goes through the server rather than opening a one-part multipart
-/// session.
+/// A small source goes through the server — but because the deployment's
+/// advertised cap says it fits, not because the client assumed it would.
+/// The document is read once and cached, so the round trip is paid at most
+/// once per client however many puts follow.
 #[tokio::test]
-async fn a_small_sized_source_skips_the_part_machinery() {
+async fn a_small_sized_source_proxies_against_the_advertised_cap() {
     let payload = payload(1_000);
     let uploaded = content_ref(&payload);
     let (source, _) = watched_source(&payload, 512);
-    let _transport = test_transport::script(vec![
-        // No capability request at all: a source that knows it is small
-        // never asks whether parts are on offer.
+    let transport = test_transport::script(vec![
+        capabilities_for(Advertised {
+            proxy_max_bytes: Some(4_096),
+            ..Advertised::default()
+        }),
         begin_proxied(),
         json(&UploadContentResponse {
             namespace_id: namespace_id(),
@@ -513,10 +583,220 @@ async fn a_small_sized_source_skips_the_part_machinery() {
         commit_landed(),
     ]);
 
-    client()
+    let client = client();
+    client
         .put_file_stream(&spec(), source, &PutFileOptions::default())
         .await
         .expect("a small streamed put should land");
+
+    assert_eq!(
+        transport
+            .sent()
+            .iter()
+            .filter(|sent| sent.url.ends_with("/v0/capabilities"))
+            .count(),
+        1,
+        "the capability document is fetched once and cached on the client"
+    );
+}
+
+/// The reviewer's case: a payload the service will not buffer, on a
+/// deployment with no multipart API. Being under one part says nothing
+/// about whether the service would take it, so the whole-object write is
+/// what carries it — the fast path may not assume a cap it never read.
+#[tokio::test]
+async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
+    let payload = payload(1_025);
+    let uploaded = content_ref(&payload);
+    let (source, _) = watched_source(&payload, 512);
+    let transport = test_transport::script(vec![
+        capabilities_for(Advertised {
+            direct_put: true,
+            proxy_max_bytes: Some(1_024),
+            direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
+            ..Advertised::default()
+        }),
+        begin_direct_put(uploaded.clone()),
+        Outcome::Success(Vec::new()),
+        completed(uploaded),
+        commit_landed(),
+    ]);
+
+    client()
+        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .await
+        .expect("a payload past the proxy cap should take the direct write");
+
+    let object_write = transport
+        .sent()
+        .into_iter()
+        .find(|sent| sent.url.starts_with("http://object.invalid/"))
+        .expect("the payload went straight to object storage");
+    assert_eq!(object_write.body_bytes(), payload.len());
+}
+
+/// A direct-put payload crosses the network in bounded pieces: the first
+/// pass measures it without holding it, and the second streams it from
+/// where that pass left it. Nothing on either side of the digest ever holds
+/// the payload whole.
+#[tokio::test]
+async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
+    let payload = payload(TEST_PAYLOAD_BYTES);
+    let uploaded = content_ref(&payload);
+    let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
+    let transport = test_transport::script(vec![
+        capabilities_for(Advertised {
+            direct_put: true,
+            proxy_max_bytes: Some(1_024),
+            direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
+            ..Advertised::default()
+        }),
+        begin_direct_put(uploaded.clone()),
+        Outcome::Success(Vec::new()),
+        completed(uploaded),
+        commit_landed(),
+    ]);
+
+    client()
+        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .await
+        .expect("a large streamed direct put should land");
+
+    // Pass one: the source's own chunks were folded and spooled, never
+    // accumulated.
+    assert_eq!(retention.total_bytes(), TEST_PAYLOAD_BYTES as u64);
+    assert!(
+        retention.peak_live_bytes() <= 2 * TEST_PART_BYTES,
+        "the measuring pass accumulated the payload; peak was {}",
+        retention.peak_live_bytes()
+    );
+
+    // Pass two: the request body arrived in many bounded pieces, so no
+    // single allocation ever held the payload.
+    let object_write = transport
+        .sent()
+        .into_iter()
+        .find(|sent| sent.url.starts_with("http://object.invalid/"))
+        .expect("the payload went straight to object storage");
+    assert_eq!(object_write.body_bytes(), TEST_PAYLOAD_BYTES);
+    assert!(
+        object_write.body_chunks.len() > 1,
+        "a payload sent in one piece was assembled whole somewhere"
+    );
+    assert!(
+        object_write.largest_body_chunk() <= crate::payload::SOURCE_CHUNK_BYTES,
+        "one body piece was larger than a source read: {} bytes",
+        object_write.largest_body_chunk()
+    );
+}
+
+/// A declared length is a hint, so a wrong one may not end an upload. Here
+/// it says nothing can carry the payload; the measuring pass finds that
+/// something can, and the upload lands.
+#[tokio::test]
+async fn a_wrong_size_hint_does_not_refuse_an_upload_that_actually_fits() {
+    let payload = payload(2_000);
+    let uploaded = content_ref(&payload);
+    // Declares far more than the largest transport would take.
+    let source = source_declaring(&payload, 100_000, 512);
+    let _transport = test_transport::script(vec![
+        capabilities_for(Advertised {
+            direct_put: true,
+            proxy_max_bytes: Some(1_024),
+            direct_put_max_bytes: Some(4_096),
+            ..Advertised::default()
+        }),
+        begin_direct_put(uploaded.clone()),
+        Outcome::Success(Vec::new()),
+        completed(uploaded),
+        commit_landed(),
+    ]);
+
+    client()
+        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .await
+        .expect("a payload that actually fits must not be refused on a hint");
+}
+
+/// When nothing really can carry the payload, the refusal reports what the
+/// client measured — never the length the source declared.
+#[tokio::test]
+async fn a_refusal_reports_the_measured_length_not_the_declared_one() {
+    let payload = payload(50_000);
+    let source = source_declaring(&payload, 100_000, 512);
+    let _transport = test_transport::script(vec![capabilities_for(Advertised {
+        direct_put: true,
+        proxy_max_bytes: Some(1_024),
+        direct_put_max_bytes: Some(4_096),
+        ..Advertised::default()
+    })]);
+
+    let error = client()
+        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .await
+        .expect_err("no transport can carry this payload");
+    match error {
+        ClientError::UploadTooLarge { size_bytes, reason } => {
+            assert_eq!(
+                size_bytes,
+                payload.len() as u64,
+                "the refusal must name the measured length, not the declared one"
+            );
+            assert!(reason.contains("4096"), "{reason}");
+        }
+        other => panic!("expected an upload-too-large refusal, got {other:?}"),
+    }
+}
+
+/// A file-backed source is the dominant case, and it pays nothing extra:
+/// the second pass re-opens the file the caller named, so the payload is
+/// never copied anywhere — not into memory and not into a spool.
+#[tokio::test]
+async fn a_file_backed_direct_put_re_reads_the_file_rather_than_spooling_it() {
+    let payload = payload(TEST_PAYLOAD_BYTES);
+    let uploaded = content_ref(&payload);
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("payload.bin");
+    std::fs::write(&path, &payload).expect("write the payload");
+    let source = PayloadSource::open_file(&path).await.expect("open payload");
+
+    let transport = test_transport::script(vec![
+        capabilities_for(Advertised {
+            direct_put: true,
+            proxy_max_bytes: Some(1_024),
+            direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
+            ..Advertised::default()
+        }),
+        begin_direct_put(uploaded.clone()),
+        Outcome::Success(Vec::new()),
+        completed(uploaded),
+        commit_landed(),
+    ]);
+
+    client()
+        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .await
+        .expect("a file-backed direct put should land");
+
+    // Only the caller's own file was ever written; the upload added none.
+    let left_behind: Vec<_> = std::fs::read_dir(directory.path())
+        .expect("read the directory back")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.file_name())
+        .collect();
+    assert_eq!(
+        left_behind,
+        vec![std::ffi::OsString::from("payload.bin")],
+        "a file-backed payload should be re-read, not copied"
+    );
+
+    let object_write = transport
+        .sent()
+        .into_iter()
+        .find(|sent| sent.url.starts_with("http://object.invalid/"))
+        .expect("the payload went straight to object storage");
+    assert_eq!(object_write.body_bytes(), TEST_PAYLOAD_BYTES);
+    assert!(object_write.largest_body_chunk() <= crate::payload::SOURCE_CHUNK_BYTES);
 }
 
 /// Sends one streamed body to a socket that only reads and reports the

@@ -1,8 +1,8 @@
 //! Presigner for S3-compatible providers (AWS S3, Cloudflare R2).
 
 use super::{
-    ObjectTransferIssuer, PresignedGetRequest, PresignedPartRequest, PresignedPutRequest,
-    PresignedUrl,
+    DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, PresignedGetRequest,
+    PresignedPartRequest, PresignedPutRequest, PresignedUrl,
 };
 use crate::keyspace::{parse_endpoint_url, scope_object_key};
 use crate::object_store::Result;
@@ -36,6 +36,23 @@ const S3_CRC64NVME_ALGORITHM: &str = "CRC64NVME";
 pub(crate) const S3_CHECKSUM_MODE_HEADER: &str = "x-amz-checksum-mode";
 const MAX_PRESIGN_EXPIRY: u64 = 7 * 24 * 60 * 60;
 
+/// AWS S3's documented maximum for a single `PutObject`: 5 GiB. A larger
+/// object has to be uploaded in parts.
+///
+/// Amazon S3 user guide, "Uploading objects": the largest object that can be
+/// uploaded in a single PUT is 5 GB, and the provider answers
+/// `EntityTooLarge` above it.
+pub const AWS_S3_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
+/// Cloudflare R2's documented maximum for a single-part upload: 5 MiB less
+/// than 5 GiB.
+///
+/// Cloudflare R2 limits, "Maximum upload size — 5 GiB (single-part)", whose
+/// footnote gives the exact figure as 5 MiB below 5 GiB (4.995 GiB). R2's
+/// ceiling is the smaller of the two S3-compatible providers, so it is
+/// stated separately rather than assumed equal to AWS's.
+pub const CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
+
 /// Supplies explicit SigV4 credentials and endpoint addressing for direct-put URLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct S3PresignerConfig {
@@ -55,6 +72,11 @@ pub struct S3PresignerConfig {
     pub key_prefix: Option<String>,
     /// Selects path-style bucket addressing instead of virtual-hosted style.
     pub force_path_style: bool,
+    /// This endpoint's documented maximum for a single PUT, reported by
+    /// [`DirectPutIssuer::max_content_bytes`]. The S3-compatible providers
+    /// do not agree on it, so each names its own
+    /// ([`AWS_S3_MAX_DIRECT_PUT_BYTES`], [`CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES`]).
+    pub direct_put_max_content_bytes: u64,
 }
 
 /// Issues checksum-bound, create-only SigV4 PUT capabilities for S3-compatible providers.
@@ -67,7 +89,7 @@ impl S3CompatiblePresigner {
     /// Creates a presigner after validating required bucket, region, and credential values.
     ///
     /// Blank required values fail immediately; endpoint, key-prefix, content,
-    /// expiry, and signing-time failures surface when [`ObjectTransferIssuer::presign_put`] runs.
+    /// expiry, and signing-time failures surface when [`DirectPutIssuer::presign_put`] runs.
     pub fn new(config: S3PresignerConfig) -> Result<Self> {
         if config.bucket.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
@@ -364,7 +386,16 @@ impl S3CompatiblePresigner {
     }
 }
 
-impl ObjectTransferIssuer for S3CompatiblePresigner {
+impl DirectPutIssuer for S3CompatiblePresigner {
+    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+        // The signed header this presigner binds a body to.
+        ChecksumAlgorithm::Sha256
+    }
+
+    fn max_content_bytes(&self) -> u64 {
+        self.config.direct_put_max_content_bytes
+    }
+
     fn presign_put(
         &self,
         request: PresignedPutRequest<'_>,
@@ -379,7 +410,9 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
             now,
         )
     }
+}
 
+impl DirectMultipartIssuer for S3CompatiblePresigner {
     fn presign_multipart_part(
         &self,
         request: PresignedPartRequest<'_>,
@@ -406,7 +439,9 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
             now,
         )
     }
+}
 
+impl DirectGetIssuer for S3CompatiblePresigner {
     fn presign_get(
         &self,
         request: PresignedGetRequest<'_>,
@@ -519,8 +554,10 @@ fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{S3CompatiblePresigner, S3PresignerConfig};
-    use crate::presign::{ObjectTransferIssuer, PresignedGetRequest, PresignedPutRequest};
+    use super::{S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES};
+    use crate::presign::{
+        DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
+    };
     use crate::ObjectStoreError;
     use loonfs_api::{ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, StorageChecksum};
     use std::time::{Duration, UNIX_EPOCH};
@@ -545,6 +582,7 @@ mod tests {
             session_token: None,
             key_prefix: key_prefix.map(ToOwned::to_owned),
             force_path_style: false,
+            direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
         })
         .expect("signer")
     }
@@ -745,6 +783,7 @@ mod tests {
             session_token: Some("debug-session-token".into()),
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: false,
+            direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
         };
 
         let config_debug = format!("{config:?}");

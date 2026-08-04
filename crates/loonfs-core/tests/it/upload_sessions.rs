@@ -12,7 +12,7 @@ use loonfs_api::{
     wire::control::{ControlObjectKind, UploadSessionState, UploadSessionTransport},
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
-use loonfs_api::{ContentId, StorageChecksum};
+use loonfs_api::{ChecksumAlgorithm, ContentId, StorageChecksum};
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
 };
@@ -48,7 +48,7 @@ async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
 fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
     DirectPutContentClaim {
         size_bytes: bytes.len() as u64,
-        sha256: StorageChecksum::sha256(bytes).value,
+        storage_checksum: StorageChecksum::sha256(bytes),
     }
 }
 
@@ -187,7 +187,10 @@ async fn begin_direct_put_rejects_a_malformed_claim_without_creating_a_session()
     // reject is a malformed claim about its own bytes.
     let claim = DirectPutContentClaim {
         size_bytes: 5,
-        sha256: "not-a-sha256".to_owned(),
+        storage_checksum: StorageChecksum {
+            algorithm: ChecksumAlgorithm::Sha256,
+            value: "not-a-sha256".to_owned(),
+        },
     };
     let error = begin_direct_put_upload_target(&store, &namespace_id, claim, &context)
         .await
