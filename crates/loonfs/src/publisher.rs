@@ -808,9 +808,12 @@ impl NamespacePublisher {
                 return Err(CoreError::ShuttingDown);
             }
             match state.queue.back_mut() {
-                // A delete already queued at the tail is the same barrier:
-                // both callers get its outcome.
-                Some(WorkItem::Delete(pending)) => pending.waiters.push(sender),
+                // A delete queued with the same options is the same request:
+                // both callers share its outcome. Different options ask for
+                // different operations and settle separately, in order.
+                Some(WorkItem::Delete(pending)) if pending.options == options => {
+                    pending.waiters.push(sender);
+                }
                 _ => state.queue.push_back(WorkItem::Delete(PendingDelete {
                     options,
                     waiters: vec![sender],
