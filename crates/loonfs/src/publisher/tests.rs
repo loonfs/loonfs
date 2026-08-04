@@ -376,6 +376,41 @@ async fn wait_for_queued_delete(publisher: &NamespacePublisher) {
     }
 }
 
+/// Queued delete items and the waiters they hold, worker-untaken.
+fn queued_delete_shape(state: &NamespacePublisherState) -> (usize, usize) {
+    state
+        .queue
+        .iter()
+        .fold((0, 0), |(items, waiters), item| match item {
+            WorkItem::Delete(pending) => (items + 1, waiters + pending.waiters.len()),
+            _ => (items, waiters),
+        })
+}
+
+/// Yields until the queued deletes hold at least `expected` waiters.
+async fn wait_for_queued_delete_waiters(publisher: &NamespacePublisher, expected: usize) {
+    while queued_delete_shape(&publisher_state(publisher)).1 < expected {
+        tokio::task::yield_now().await;
+    }
+}
+
+fn spawn_delete(
+    publisher: &NamespacePublisher,
+    options: DeleteNamespaceOptions,
+) -> tokio::task::JoinHandle<DeleteResult> {
+    let publisher = publisher.clone();
+    tokio::spawn(async move { publisher.submit_delete(options).await })
+}
+
+/// Bounded: a stranded delete waiter is a hang, and a hang must fail
+/// the test.
+async fn settle_delete(handle: tokio::task::JoinHandle<DeleteResult>, label: &str) -> DeleteResult {
+    timeout(Duration::from_secs(10), handle)
+        .await
+        .unwrap_or_else(|_| panic!("{label} must settle, not hang"))
+        .unwrap_or_else(|err| panic!("{label} task failed: {err}"))
+}
+
 /// A publisher with no owning registry, exercising the unowned-task
 /// fallback the production paths reserve for a dropped registry. The
 /// caller keeps `runtime` alive; the publisher holds its bits weakly.
@@ -1050,6 +1085,177 @@ async fn second_delete_during_inflight_delete_settles_both() {
         .expect("orphan waiter answered")
         .expect_err("admitted behind the delete");
     assert_eq!(orphan_error.code(), ErrorCode::NamespaceDeleted);
+}
+
+/// Two deletes pending at the queue tail with equal options are one
+/// request: one queue item, and both callers share its outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identical_pending_deletes_coalesce_into_one_outcome() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let shared = store.clone() as SharedStore;
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+
+    recv_commit(
+        admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("seed", "seed"),
+        ),
+        "seed",
+    )
+    .await;
+
+    // A blocked publication holds the worker, so both deletes stay
+    // pending at the tail together.
+    store.block_next();
+    let gate = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("gate", "gate"),
+    );
+    store.wait_until_blocked().await;
+
+    let options = DeleteNamespaceOptions {
+        expected_head_seq: Some(ChangeSeq(2)),
+    };
+    let first = spawn_delete(&publisher, options);
+    wait_for_queued_delete_waiters(&publisher, 1).await;
+    let second = spawn_delete(&publisher, options);
+    wait_for_queued_delete_waiters(&publisher, 2).await;
+    assert_eq!(
+        queued_delete_shape(&publisher_state(&publisher)),
+        (1, 2),
+        "equal options coalesce into one pending delete"
+    );
+
+    store.release();
+    recv_commit(gate, "gate").await;
+    let first = settle_delete(first, "first delete")
+        .await
+        .expect("first delete succeeds");
+    let second = settle_delete(second, "second delete")
+        .await
+        .expect("second delete succeeds");
+    assert_eq!(first.head_seq, ChangeSeq(2));
+    assert_eq!(second.head_seq, ChangeSeq(2));
+}
+
+/// Deletes with different preconditions are different requests: each is
+/// its own queue item, and each settles against its own options.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_deletes_with_different_preconditions_settle_separately() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let shared = store.clone() as SharedStore;
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+
+    recv_commit(
+        admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("seed", "seed"),
+        ),
+        "seed",
+    )
+    .await;
+
+    store.block_next();
+    let gate = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("gate", "gate"),
+    );
+    store.wait_until_blocked().await;
+
+    let stale = spawn_delete(
+        &publisher,
+        DeleteNamespaceOptions {
+            expected_head_seq: Some(ChangeSeq(1)),
+        },
+    );
+    wait_for_queued_delete_waiters(&publisher, 1).await;
+    let unconditional = spawn_delete(&publisher, DeleteNamespaceOptions::default());
+    wait_for_queued_delete_waiters(&publisher, 2).await;
+    assert_eq!(
+        queued_delete_shape(&publisher_state(&publisher)),
+        (2, 2),
+        "different options stay separate pending deletes"
+    );
+
+    store.release();
+    recv_commit(gate, "gate").await;
+    let stale_error = settle_delete(stale, "stale delete")
+        .await
+        .expect_err("the gate publication moved the head past its precondition");
+    assert_eq!(stale_error.code(), ErrorCode::StaleHead);
+    let deleted = settle_delete(unconditional, "unconditional delete")
+        .await
+        .expect("the unconditional delete lands after the stale one fails");
+    assert_eq!(deleted.head_seq, ChangeSeq(2));
+}
+
+/// A stale delete queued behind a valid one settles as
+/// `namespace_deleted` — it never inherits the other delete's success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let shared = store.clone() as SharedStore;
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+
+    recv_commit(
+        admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("seed", "seed"),
+        ),
+        "seed",
+    )
+    .await;
+
+    store.block_next();
+    let gate = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("gate", "gate"),
+    );
+    store.wait_until_blocked().await;
+
+    let valid = spawn_delete(
+        &publisher,
+        DeleteNamespaceOptions {
+            expected_head_seq: Some(ChangeSeq(2)),
+        },
+    );
+    wait_for_queued_delete_waiters(&publisher, 1).await;
+    let stale = spawn_delete(
+        &publisher,
+        DeleteNamespaceOptions {
+            expected_head_seq: Some(ChangeSeq(1)),
+        },
+    );
+    wait_for_queued_delete_waiters(&publisher, 2).await;
+
+    store.release();
+    recv_commit(gate, "gate").await;
+    let landed = settle_delete(valid, "valid delete")
+        .await
+        .expect("the delete whose precondition holds lands");
+    assert_eq!(landed.head_seq, ChangeSeq(2));
+    let stale_error = settle_delete(stale, "stale delete")
+        .await
+        .expect_err("a precondition the tombstone outran");
+    assert_eq!(stale_error.code(), ErrorCode::NamespaceDeleted);
 }
 
 /// Commit admission races a delete already queued behind an in-flight
