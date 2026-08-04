@@ -7,7 +7,7 @@ use crate::common::{control, grep_with, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, FsAdmin, FsReader, FsWriter, MaintenanceStepKind, MaintenanceStepOptions,
+    DestinationBehavior, FsAdmin, FsReader, FsWriter, MaintenancePlan, MetadataMaintenanceOptions,
     MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::{AbsolutePath, GrepRequest, GrepResponse};
@@ -242,10 +242,11 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .admin
         .maintenance_step_namespace(
             &fixture.namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                only: Some(MaintenanceStepKind::WalFlush),
-                ..MaintenanceStepOptions::default()
+            MaintenancePlan {
+                metadata: Some(MetadataMaintenanceOptions {
+                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                }),
+                ..MaintenancePlan::default()
             },
         )
         .await
@@ -319,10 +320,11 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .admin
         .maintenance_step_namespace(
             &fixture.namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                only: Some(MaintenanceStepKind::WalFlush),
-                ..MaintenanceStepOptions::default()
+            MaintenancePlan {
+                metadata: Some(MetadataMaintenanceOptions {
+                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                }),
+                ..MaintenancePlan::default()
             },
         )
         .await

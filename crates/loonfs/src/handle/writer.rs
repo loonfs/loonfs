@@ -199,7 +199,7 @@ impl FsWriter {
     /// through [`FsAdmin`](crate::FsAdmin), so the publication drain waits
     /// only on client work and its pending set can only shrink. A step
     /// already running finishes normally, and its chain then ends rather
-    /// than passing its permit on, because a shut admission book releases
+    /// than passing its permit on, because a closed admission book releases
     /// the permit instead of handing it to the next key.
     ///
     /// Takes `&self` because `FsWriter` is [`Clone`] and exclusivity is
@@ -213,7 +213,7 @@ impl FsWriter {
     pub async fn shutdown(&self) -> Result<()> {
         // Both closes belong above the first await, for the reason the doc
         // gives. Nothing may move below `drain`.
-        self.bits.maintenance.shut_down();
+        self.bits.maintenance.close_admission();
         self.publisher.close_admission();
         self.publisher.drain().await?;
         self.bits.maintenance.drain().await

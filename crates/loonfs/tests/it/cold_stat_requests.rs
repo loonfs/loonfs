@@ -10,8 +10,8 @@
 //! wave count.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
-    PutFileOptions,
+    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
+    MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::AbsolutePath;
@@ -130,9 +130,11 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         admin
             .maintenance_step_namespace(
                 &namespace_id,
-                MaintenanceStepOptions {
-                    max_wal_tail_segments: 1,
-                    ..MaintenanceStepOptions::default()
+                MaintenancePlan {
+                    metadata: Some(MetadataMaintenanceOptions {
+                        max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                    }),
+                    ..MaintenancePlan::default()
                 },
             )
             .await

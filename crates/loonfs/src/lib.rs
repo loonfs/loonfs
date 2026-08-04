@@ -60,13 +60,13 @@ pub use loonfs_api::{
     DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileRevision,
     FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest, GcResponse, InodeId,
     InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, ManifestId, NameKey,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
-    RevisionNo, UploadId, WalFlushStepOutcome, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
-    PROFILE_CORE_V0, PROTOCOL_VERSION,
+    MaintenanceStepRequest, MaintenanceStepResponse, ManifestId, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, NameKey, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    Page, PageRequest, PaginationPolicy, ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    RetainedCandidates, RetainedReason, RevisionNo, UploadId, WalFlushStepOutcome,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{MetadataTableCacheConfig, Recency};
 pub use loonfs_core::limits::{
@@ -158,8 +158,9 @@ pub use maintenance_runner::{
 };
 pub use options::{
     gc_config_from_request, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, MaintenanceStepOptions, MoveOptions,
-    PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, UndeleteOptions,
+    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, MaintenancePlan,
+    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
+    RestoreRevisionOptions, UndeleteOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

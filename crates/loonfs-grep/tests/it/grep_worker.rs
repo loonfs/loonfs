@@ -9,7 +9,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter,
-    GcConfig, MaintenanceStepKind, MaintenanceStepOptions, NamespaceId, PutFileOptions,
+    GcConfig, MaintenancePlan, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
     SharedObjectStore,
 };
 use loonfs_api::wire::control::CheckpointRecordLifecycle;
@@ -373,10 +373,11 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     admin
         .maintenance_step_namespace(
             &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                only: Some(MaintenanceStepKind::WalFlush),
-                ..MaintenanceStepOptions::default()
+            MaintenancePlan {
+                metadata: Some(MetadataMaintenanceOptions {
+                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                }),
+                ..MaintenancePlan::default()
             },
         )
         .await
@@ -384,13 +385,15 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     let floor = admin
         .maintenance_step_namespace(
             &namespace_id,
-            MaintenanceStepOptions {
-                only: Some(MaintenanceStepKind::Retention),
-                ..MaintenanceStepOptions::default()
+            MaintenancePlan {
+                advance_retention: true,
+                ..MaintenancePlan::default()
             },
         )
         .await
-        .expect("advance retention");
+        .expect("advance retention")
+        .retention
+        .expect("retention selected");
     assert!(floor.retention_floor_seq > ChangeSeq(0));
 
     // The feed can no longer reach the watermark, which the worker must

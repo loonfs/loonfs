@@ -4820,16 +4820,17 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["checkpoint_id"], checkpoint_id.as_str());
 
-        // `admin flush` runs a maintenance step restricted to the WAL
-        // flush, so it reports a step: the flush part acted, the parts `only`
-        // excluded report `not_needed`.
+        // `admin flush` runs one metadata-upkeep pass at a threshold of one
+        // segment, so it reports both halves and nothing else.
         let flush = harness.run(&["--json", "admin", "flush", "--profile", profile]);
         assert_success(&flush);
         let flush_data = json_data(&flush);
         assert_eq!(flush_data["kind"], "maintenance_stepped");
         assert_eq!(flush_data["namespace_id"], "demo");
-        assert_eq!(flush_data["reorganize"]["kind"], "not_needed");
-        assert!(flush_data["gc"].is_null());
+        assert_eq!(flush_data["metadata"]["reorganize"]["kind"], "not_needed");
+        assert!(flush_data["metadata"]["wal_flush"].is_object());
+        assert!(flush_data.get("retention").is_none());
+        assert!(flush_data.get("gc").is_none());
 
         let release = harness.run(&[
             "--json",
@@ -4862,7 +4863,9 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let retention_data = json_data(&retention);
         assert_eq!(retention_data["kind"], "maintenance_stepped");
         assert_eq!(retention_data["namespace_id"], "demo");
-        assert_eq!(retention_data["retention_floor_seq"], 2);
+        assert_eq!(retention_data["retention"]["retention_floor_seq"], 2);
+        // `retention-advance` names one action, so the report carries one.
+        assert!(retention_data.get("metadata").is_none());
 
         // The checkpoint above already covers the head, so a step reports
         // not-needed identically in both modes.
@@ -4871,11 +4874,12 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let step_data = json_data(&step);
         assert_eq!(step_data["kind"], "maintenance_stepped");
         assert_eq!(step_data["namespace_id"], "demo");
-        assert_eq!(step_data["wal_flush"]["kind"], "not_needed");
-        assert_eq!(step_data["reorganize"]["kind"], "not_needed");
-        // An unrestricted step never advances the floor on its own; it
-        // reports the floor the earlier retention-advance established.
-        assert_eq!(step_data["retention_floor_seq"], 2);
+        assert_eq!(step_data["metadata"]["wal_flush"]["kind"], "not_needed");
+        assert_eq!(step_data["metadata"]["reorganize"]["kind"], "not_needed");
+        // A step without `--retention` never advances the floor, and says
+        // nothing about it: the floor is `status_before`'s to report.
+        assert!(step_data.get("retention").is_none());
+        assert_eq!(step_data["status_before"]["retention_floor_seq"], 2);
         assert_eq!(step_data["status_before"]["namespace_id"], "demo");
         assert!(step_data.get("gc").is_none());
 

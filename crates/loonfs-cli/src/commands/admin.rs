@@ -15,8 +15,8 @@ use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
-    ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepKind,
-    MaintenanceStepRequest,
+    ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepRequest,
+    MetadataMaintenanceRequest,
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
@@ -59,11 +59,14 @@ async fn run_admin_step(
     args: AdminStepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
+    // Metadata upkeep is what `step` means; the flags add the two actions
+    // that cost something an operator has to ask for.
     let request = MaintenanceStepRequest {
-        max_wal_tail_segments: args.max_wal_tail_segments,
-        retention: args.retention.then_some(true),
+        metadata: Some(MetadataMaintenanceRequest {
+            max_wal_tail_segments: args.max_wal_tail_segments,
+        }),
+        advance_retention: args.retention,
         gc: args.gc.then(GcRequest::default),
-        only: None,
     };
     let response = context
         .target
@@ -108,16 +111,14 @@ async fn run_admin_gc(
             .maintenance_step(
                 &context.namespace,
                 MaintenanceStepRequest {
-                    max_wal_tail_segments: None,
-                    retention: None,
                     gc: Some(request.clone()),
-                    only: Some(MaintenanceStepKind::Gc),
+                    ..MaintenanceStepRequest::default()
                 },
             )
             .await
             .map_err(|error| context.fail(kind, error))?
             .gc
-            .expect("gc report present when the step opted in");
+            .expect("a step selecting collection reports its pass");
         let next_cursor = pass.next_cursor.clone();
         progress.pass_completed(gc_pass_line(&pass));
         match &mut response {
@@ -301,6 +302,11 @@ async fn run_admin_checkpoint_release(
     })
 }
 
+/// One metadata-upkeep pass at a threshold of one segment.
+///
+/// The fold an operator asks for explicitly runs whatever the tail length,
+/// and the reorganization unit rides along: upkeep is one action, and the
+/// output reports both halves.
 async fn run_admin_flush(
     kind: CommandKind,
     config_path: &Path,
@@ -312,12 +318,10 @@ async fn run_admin_flush(
         .maintenance_step(
             &context.namespace,
             MaintenanceStepRequest {
-                // The WAL flush an operator asks for explicitly runs whatever
-                // the tail length, so the threshold drops to one segment.
-                max_wal_tail_segments: Some(1),
-                retention: None,
-                gc: None,
-                only: Some(MaintenanceStepKind::WalFlush),
+                metadata: Some(MetadataMaintenanceRequest {
+                    max_wal_tail_segments: Some(1),
+                }),
+                ..MaintenanceStepRequest::default()
             },
         )
         .await
@@ -342,10 +346,8 @@ async fn run_admin_retention_advance(
         .maintenance_step(
             &context.namespace,
             MaintenanceStepRequest {
-                max_wal_tail_segments: None,
-                retention: None,
-                gc: None,
-                only: Some(MaintenanceStepKind::Retention),
+                advance_retention: true,
+                ..MaintenanceStepRequest::default()
             },
         )
         .await

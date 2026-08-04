@@ -25,7 +25,7 @@ within a plane is expressed as **named features** (section 2).
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
-| `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps (WAL flush, metadata reorganization, retention-floor advancement, and garbage collection, together or one at a time). Future maintenance triggers (index builds) arrive as features in this plane. | Optional |
+| `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Future maintenance triggers (index builds) arrive as features in this plane. | Optional |
 | `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
@@ -149,7 +149,7 @@ hoc.
 | --- | --- | --- |
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a `gc`-restricted maintenance step (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
+| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the deployment's provider can sign a write that binds a whole-object checksum and a create-only precondition, on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `storage_checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
@@ -634,27 +634,39 @@ never reports a `target_seq`. A client waiting for the index to catch up
 captures one sequence before it starts waiting and stops there, rather than
 chasing a head that keeps moving.
 
-One maintenance step does four things in order: folds the visible WAL tail
-into metadata tables and advances the metadata root once the tail reaches
-`max_wal_tail_segments`, merges one bounded metadata reorganization unit,
-and — each strictly opt-in — advances the retention floor (only when the
-body carries `retention: true`) and runs one bounded garbage-collection
-pass (only when the body carries `gc`). None of it creates a checkpoint
-record.
+A maintenance step selects its actions by naming them, and runs the ones it
+named in a fixed order:
 
-Each part reports separately in the response: `wal_flush`, `reorganize`,
-`retention_floor_seq`, and `gc`. Races and supersessions are outcomes, not
-errors. Compare `retention_floor_seq` with `status_before.retention_floor_seq`
-to see whether the floor moved.
+| Field | Action |
+| --- | --- |
+| `metadata` | Folds the visible WAL tail into metadata tables and advances the metadata root once the tail reaches `max_wal_tail_segments`, then merges one bounded metadata reorganization unit. The two are one action: folding a tail is what creates the delta runs a merge consumes. |
+| `advance_retention` | Advances the retention floor to the flushed manifest head. |
+| `gc` | Runs one bounded garbage-collection pass. |
 
-The body is optional. `max_wal_tail_segments` overrides the flush threshold,
-and a value above the write-rejection threshold is rejected as
-`invalid_request`. `retention: true` opts into advancing the retention
-floor to the flushed manifest head; nothing surrenders replay history
-unless it is present. `gc` opts into sweeping and overrides
-`grace_window_ms`, bounds one invocation with `max_objects`, and resumes with
-`cursor`; a grace window below the derived safety floor or a zero budget is
-rejected as `invalid_request`. Upload sessions and the content they leave
+A body that names no action is rejected as `invalid_request`, which includes
+sending no body at all. None of the actions creates a checkpoint record.
+
+Each action reports separately in the response, under the field that
+selected it: `metadata` (carrying `wal_flush` and `reorganize`), `retention`
+(carrying `retention_floor_seq`), and `gc`. An absent report means the body
+did not name that action — it never means an action ran and found nothing to
+do, which is what the outcomes inside a report say. Compare
+`retention.retention_floor_seq` with `status_before.retention_floor_seq` to
+see whether the floor moved. Races and supersessions are outcomes, not
+errors.
+
+A deleted namespace accepts a step that names `gc` alone, which is how its
+reclaimable state is collected; naming anything else is refused with
+`namespace_deleted`, because a tombstone has nothing to flush, reorganize,
+or retain.
+
+Inside `metadata`, `max_wal_tail_segments` overrides the flush threshold;
+zero, and any value above the write-rejection threshold, are rejected as
+`invalid_request`. Nothing surrenders replay history unless
+`advance_retention` is true. `gc` overrides `grace_window_ms`, bounds one
+invocation with `max_objects`, and resumes with `cursor`; a grace window
+below the derived safety floor or a zero budget is rejected as
+`invalid_request`. Upload sessions and the content they leave
 behind are not under `grace_window_ms` alone: a session carries its own
 lease, and how long a completed session's content is protected is derived
 rather than configured (format spec, "Garbage collection", rule 11).
@@ -671,11 +683,6 @@ segments therefore keeps that content rather than reclaiming it — a pass with
 room for the whole scan collects it later. Step-driven GC defaults
 `max_objects` to 1024 and returns any `next_cursor` for a later step rather
 than looping internally. Nothing sweeps unless `gc` is present.
-
-`only` restricts the step to one sub-step — `wal_flush`, `reorganize`,
-`retention`, or `gc` — for operators who want exactly one of them; naming
-`retention` or `gc` this way is itself the opt-in. An unrestricted step
-runs the two opted-in sub-steps after flush and reorganization.
 
 The retention floor bounds incremental replay only. File revision history
 is never pruned: a revisions listing is always complete, however far the
@@ -794,8 +801,8 @@ The first is the **metadata retention floor**. It bounds incremental replay:
 below it, the WAL history a client could have replayed is surrendered, and
 the segments holding it become collectable. Nothing advances it on its own —
 no maintenance job exists for it — so it moves only when an operator asks
-(`POST .../maintenance/step` with `retention: true`, or `loonfs admin
-retention-advance`). File revision history is never affected, however far
+(`POST .../maintenance/step` with `advance_retention: true`, or `loonfs
+admin retention-advance`). File revision history is never affected, however far
 the floor has moved.
 
 The second is the **content reclamation grace**, a little over seven days.
@@ -1215,7 +1222,7 @@ reads, commits, forks, status, re-creation of the id — fails with
 Deletion itself reclaims nothing, but a deleted namespace's derived state —
 WAL segments, metadata tables and manifests, and checkpoint records that
 protect nothing live — becomes garbage once the tombstone is in place. A
-maintenance step restricted to `gc` runs against the tombstone and ages
+maintenance step that selects `gc` alone runs against the tombstone and ages
 that state out under the normal grace rules; the head survives as the
 tombstone so the id stays retired. Content blobs live in a shared content
 store outside the namespace prefix, and the same pass reclaims each one

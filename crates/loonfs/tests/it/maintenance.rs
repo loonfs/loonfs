@@ -6,9 +6,8 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CreateNamespaceOptions, ErrorCode, MaintenanceStepKind,
-    MaintenanceStepOptions, ManifestId, PutFileOptions, RuntimeError, SharedObjectStore,
-    WalFlushStepOutcome,
+    ChangeSeq, CommitId, CreateNamespaceOptions, ErrorCode, MaintenancePlan, ManifestId,
+    PutFileOptions, ReorganizeStepOutcome, RuntimeError, SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, wal_head, wal_segment_prefix};
@@ -105,7 +104,7 @@ fn namespace_status_and_step_reject_missing_namespace() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_step_namespace_blocking(&namespace_id, MaintenanceStepOptions::default()),
+        fs.maintenance_step_namespace_blocking(&namespace_id, MaintenancePlan::metadata()),
         ErrorCode::NamespaceNotFound,
     );
 }
@@ -129,7 +128,7 @@ fn namespace_status_and_step_reject_a_namespace_whose_head_is_gone() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_step_namespace_blocking(&namespace_id, MaintenanceStepOptions::default()),
+        fs.maintenance_step_namespace_blocking(&namespace_id, MaintenancePlan::metadata()),
         ErrorCode::NamespaceNotFound,
     );
 }
@@ -151,19 +150,11 @@ fn maintenance_step_below_threshold_is_not_needed() {
     .expect("put file");
 
     let step = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 2,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
+        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(2))
         .expect("maintenance step");
     assert_eq!(step.namespace_id, namespace_id);
     assert_eq!(step.status_before.wal_tail_segments, 1);
-    assert_eq!(step.wal_flush, WalFlushStepOutcome::NotNeeded);
+    assert_eq!(upkeep(&step).wal_flush, WalFlushStepOutcome::NotNeeded);
 }
 
 #[test]
@@ -183,19 +174,11 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     .expect("put file");
 
     let step = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
+        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
         .expect("maintenance step");
     assert_eq!(step.status_before.head_seq, ChangeSeq(1));
     assert_eq!(
-        step.wal_flush,
+        upkeep(&step).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1)
         }
@@ -238,41 +221,43 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
     )
     .expect("put file");
 
-    // A full step flushes, but never surrenders replay history on its own.
+    // A plan that names only upkeep flushes, and reports no retention at
+    // all — replay history is never surrendered unnamed.
     let step = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
+        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
         .expect("step without retention");
     assert_eq!(
-        step.wal_flush,
+        upkeep(&step).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1)
         }
     );
-    assert_eq!(step.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(step.retention, None);
+    assert_eq!(
+        fs.namespace_status_blocking(&namespace_id)
+            .expect("status")
+            .retention_floor_seq,
+        ChangeSeq(0)
+    );
 
-    // Opting in advances the floor to the flushed manifest head.
+    // Naming it advances the floor to the flushed manifest head.
     let step = fs
         .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                retention: true,
-                gc: None,
-                only: None,
+            MaintenancePlan {
+                advance_retention: true,
+                ..metadata_plan(1)
             },
         )
         .expect("step with retention");
-    assert_eq!(step.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(
+        step.retention
+            .expect("retention selected")
+            .retention_floor_seq,
+        ChangeSeq(1)
+    );
 
-    // Restricting a step to the retention sub-step is itself the opt-in.
+    // A plan naming retention alone is the same opt-in.
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/second.txt",
@@ -280,35 +265,53 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
         PutFileOptions::default(),
     )
     .expect("put second file");
-    fs.maintenance_step_namespace_blocking(
-        &namespace_id,
-        MaintenanceStepOptions {
-            max_wal_tail_segments: 1,
-            retention: false,
-            gc: None,
-            only: None,
-        },
-    )
-    .expect("flush second segment");
+    fs.maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+        .expect("flush second segment");
     let step = fs
         .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                retention: false,
-                gc: None,
-                only: Some(MaintenanceStepKind::Retention),
+            MaintenancePlan {
+                advance_retention: true,
+                ..MaintenancePlan::default()
             },
         )
         .expect("retention-only step");
-    assert_eq!(step.retention_floor_seq, ChangeSeq(2));
+    assert_eq!(
+        step.retention
+            .expect("retention selected")
+            .retention_floor_seq,
+        ChangeSeq(2)
+    );
+    assert_eq!(step.metadata, None, "an unnamed action reports nothing");
+}
+
+/// A plan that names nothing is not a step, whichever surface built it.
+#[test]
+fn a_plan_that_names_nothing_is_rejected() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "empty-plan-test");
+    let namespace_id = namespace_id("demo");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let error = fs
+        .maintenance_step_namespace_blocking(&namespace_id, MaintenancePlan::default())
+        .expect_err("an empty plan should fail");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    match error {
+        RuntimeError::Config(message) => assert!(
+            message.contains("at least one action"),
+            "unexpected message: {message}"
+        ),
+        other => panic!("expected config error, got {other:?}"),
+    }
 }
 
 /// The typed names are one name each over the one step path: what they do
-/// is exactly the `only:`-restricted step, and what they report agrees
-/// with it.
+/// is exactly the step with that one action named, and what they report
+/// agrees with it.
 #[test]
-fn the_typed_wrappers_are_the_only_restricted_steps() {
+fn the_typed_wrappers_are_single_action_steps() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "typed-wrapper-test");
     let namespace_id = namespace_id("demo");
@@ -317,7 +320,8 @@ fn the_typed_wrappers_are_the_only_restricted_steps() {
         .expect("create namespace");
     assert_eq!(
         fs.flush_wal_blocking(&namespace_id)
-            .expect("flush an empty tail"),
+            .expect("flush an empty tail")
+            .wal_flush,
         WalFlushStepOutcome::NotNeeded,
         "the wrapper folds a tail; it does not publish a manifest for a namespace with none"
     );
@@ -329,16 +333,23 @@ fn the_typed_wrappers_are_the_only_restricted_steps() {
         PutFileOptions::default(),
     )
     .expect("put first file");
+    let flushed = fs
+        .flush_wal_blocking(&namespace_id)
+        .expect("flush the tail");
     assert_eq!(
-        fs.flush_wal_blocking(&namespace_id)
-            .expect("flush the tail"),
+        flushed.wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1)
         }
     );
+    assert_eq!(
+        flushed.reorganize,
+        ReorganizeStepOutcome::NotNeeded,
+        "the upkeep pass reports its reorganization half rather than hiding it"
+    );
 
-    // The same request written out longhand: a one-segment threshold and
-    // the flush sub-step, which is all the wrapper is.
+    // The same request written out longhand: a metadata-only plan at a
+    // one-segment threshold, which is all the wrapper is.
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/second.txt",
@@ -347,18 +358,10 @@ fn the_typed_wrappers_are_the_only_restricted_steps() {
     )
     .expect("put second file");
     let longhand = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                retention: false,
-                gc: None,
-                only: Some(MaintenanceStepKind::WalFlush),
-            },
-        )
-        .expect("flush-only step");
+        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+        .expect("upkeep-only step");
     assert_eq!(
-        longhand.wal_flush,
+        upkeep(&longhand).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(2)
         },
@@ -373,21 +376,22 @@ fn the_typed_wrappers_are_the_only_restricted_steps() {
     let advanced = fs
         .advance_retention_floor_blocking(&namespace_id)
         .expect("advance retention");
-    assert_eq!(advanced.namespace_id, namespace_id);
     assert_eq!(advanced.retention_floor_seq, checkpoint.checkpoint_seq);
     let longhand = fs
         .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                retention: false,
-                gc: None,
-                only: Some(MaintenanceStepKind::Retention),
+            MaintenancePlan {
+                advance_retention: true,
+                ..MaintenancePlan::default()
             },
         )
         .expect("retention-only step");
     assert_eq!(
-        longhand.retention_floor_seq, advanced.retention_floor_seq,
+        longhand
+            .retention
+            .expect("retention selected")
+            .retention_floor_seq,
+        advanced.retention_floor_seq,
         "advancing an already-advanced floor is idempotent through either name"
     );
     assert_eq!(
@@ -413,16 +417,8 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         PutFileOptions::default(),
     )
     .expect("put first file");
-    fs.maintenance_step_namespace_blocking(
-        &namespace_id,
-        MaintenanceStepOptions {
-            max_wal_tail_segments: 1,
-            retention: false,
-            gc: None,
-            only: None,
-        },
-    )
-    .expect("first maintenance step");
+    fs.maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+        .expect("first maintenance step");
 
     fs.put_file_bytes_blocking(
         &namespace_id,
@@ -432,18 +428,10 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     )
     .expect("put second file");
     let step = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
+        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
         .expect("second maintenance step");
     assert_eq!(
-        step.wal_flush,
+        upkeep(&step).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(2)
         }
@@ -517,95 +505,24 @@ fn maintenance_step_counts_segments_not_commits() {
     assert_eq!(status.wal_tail_segments, 1);
 
     let step = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 2,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
+        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(2))
         .expect("maintenance step");
-    assert_eq!(step.wal_flush, WalFlushStepOutcome::NotNeeded);
+    assert_eq!(upkeep(&step).wal_flush, WalFlushStepOutcome::NotNeeded);
 
     fs.mutate_blocking(&namespace_id, create_directory_request("create-c", "/c"))
         .expect("second segment commit");
 
     let step = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 2,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
+        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(2))
         .expect("maintenance step at segment threshold");
     assert_eq!(step.status_before.head_seq, ChangeSeq(3));
     assert_eq!(step.status_before.wal_tail_segments, 2);
     assert_eq!(
-        step.wal_flush,
+        upkeep(&step).wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(3)
         }
     );
-}
-
-#[test]
-fn maintenance_step_rejects_zero_threshold() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "step-config-test");
-    let namespace_id = namespace_id("demo");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    let error = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 0,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
-        .expect_err("zero threshold should fail");
-    match error {
-        RuntimeError::Config(message) => assert!(message.contains("max_wal_tail_segments")),
-        other => panic!("expected config error, got {other:?}"),
-    }
-}
-
-#[test]
-fn maintenance_step_rejects_thresholds_above_the_write_rejection_cap() {
-    // A threshold above the cap would make the step report `not needed`
-    // while every publish is rejected with `maintenance_required`.
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "step-config-test");
-    let namespace_id = namespace_id("demo");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    let error = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 129,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
-        .expect_err("over-cap threshold should fail");
-    match error {
-        RuntimeError::Config(message) => assert!(
-            message.contains("write-rejection threshold"),
-            "unexpected message: {message}"
-        ),
-        other => panic!("expected config error, got {other:?}"),
-    }
 }
 
 #[test]
@@ -631,19 +548,11 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
 
     raw_store.fail_root_cas();
     let step = fs
-        .maintenance_step_namespace_blocking(
-            &namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                retention: false,
-                gc: None,
-                only: None,
-            },
-        )
+        .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
         .expect("maintenance step should not fail on metadata root publish race");
 
     assert_eq!(
-        step.wal_flush,
+        upkeep(&step).wal_flush,
         WalFlushStepOutcome::RaceLost {
             observed_head_seq: ChangeSeq(1)
         }

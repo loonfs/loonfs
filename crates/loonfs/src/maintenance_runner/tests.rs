@@ -744,7 +744,7 @@ async fn shutdown_clears_pending_work_and_refuses_later_nudges() {
     runner.handle().nudge(TEST_JOB, &queued);
     assert!(runner.is_pending(TEST_JOB, &queued));
 
-    runner.shut_down();
+    runner.close_admission();
     assert!(
         !runner.is_pending(TEST_JOB, &queued),
         "shutdown drops work still waiting for a permit"
@@ -801,7 +801,7 @@ async fn work_claimed_before_a_shutdown_is_refused_and_gives_its_permit_back() {
         .expect("the claim lands first");
     assert_eq!(runner.running_steps(), 1);
 
-    runner.shut_down();
+    runner.close_admission();
     runner.drain().await.expect("nothing is scheduled yet");
 
     spawn_chain(&runner.inner, claimed);

@@ -14,8 +14,8 @@ use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ByteStream, ChangeSeq, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, ListChangesOptions, MaintenanceStepKind, MaintenanceStepOptions,
-    NamespaceId, PutFileOptions, ReorganizeStepOutcome, RevisionNo,
+    DestinationBehavior, ListChangesOptions, MaintenancePlan, NamespaceId, PutFileOptions,
+    ReorganizeStepOutcome, RevisionNo,
 };
 use loonfs_api::ErrorCode;
 use tempfile::tempdir;
@@ -565,13 +565,15 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .admin
         .maintenance_step_namespace(
             &namespace_id,
-            MaintenanceStepOptions {
-                only: Some(MaintenanceStepKind::Retention),
-                ..MaintenanceStepOptions::default()
+            MaintenancePlan {
+                advance_retention: true,
+                ..MaintenancePlan::default()
             },
         )
         .await
-        .expect("advance retention floor");
+        .expect("advance retention floor")
+        .retention
+        .expect("retention selected");
     assert!(
         advanced.retention_floor_seq >= first.committed_seq,
         "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",
@@ -645,13 +647,15 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
         .admin
         .maintenance_step_namespace(
             &namespace_id,
-            MaintenanceStepOptions {
-                only: Some(MaintenanceStepKind::Retention),
-                ..MaintenanceStepOptions::default()
+            MaintenancePlan {
+                advance_retention: true,
+                ..MaintenancePlan::default()
             },
         )
         .await
-        .expect("advance retention floor");
+        .expect("advance retention floor")
+        .retention
+        .expect("retention selected");
     assert!(
         advanced.retention_floor_seq > first.committed_seq,
         "the floor must pass the commit for this to test anything: floor {:?}, commit {:?}",
@@ -667,15 +671,11 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     for _ in 0..32 {
         let step = runtime
             .admin
-            .maintenance_step_namespace(
-                &namespace_id,
-                MaintenanceStepOptions {
-                    only: Some(MaintenanceStepKind::Reorganize),
-                    ..MaintenanceStepOptions::default()
-                },
-            )
+            .maintenance_step_namespace(&namespace_id, MaintenancePlan::metadata())
             .await
-            .expect("reorganize step");
+            .expect("upkeep step")
+            .metadata
+            .expect("metadata selected");
         if matches!(step.reorganize, ReorganizeStepOutcome::NotNeeded) {
             break;
         }

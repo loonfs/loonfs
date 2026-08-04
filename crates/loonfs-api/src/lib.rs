@@ -143,10 +143,10 @@ pub use v0::{
     DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, ErrorDetails,
     FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
     GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepKind,
-    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
-    TrashEntry, WalFlushStepOutcome,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
+    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    RetainedCandidates, RetainedReason, TrashEntry, WalFlushStepOutcome,
 };
 
 #[cfg(test)]

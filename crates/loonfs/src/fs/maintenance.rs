@@ -9,12 +9,13 @@ use crate::FsAdmin;
 use crate::NamespaceStatusResponse;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenanceStepKind,
-    MaintenanceStepOptions, MaintenanceStepResponse, NamespaceId, ReleaseCheckpointResponse,
-    ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
+    ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenancePlan,
+    MaintenanceStepResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{Result, RuntimeError};
 use loonfs_core::cache::load_namespace_head_summary;
+use std::num::NonZeroU64;
 
 impl FsAdmin {
     /// A mutating engine under this handle's actor identity.
@@ -64,16 +65,15 @@ impl FsAdmin {
 
     /// Runs one bounded maintenance step against a namespace.
     ///
-    /// A full step does four things in order: flush the visible WAL tail
-    /// once it reaches `options.max_wal_tail_segments`, merge one bounded
-    /// metadata reorganization unit, and — each strictly opt-in — advance
-    /// the retention floor (`options.retention`) and run one bounded
-    /// garbage-collection pass (`options.gc`). Nothing surrenders replay
-    /// history or sweeps objects unless the caller asked for it.
-    /// `options.only` restricts the step to a single sub-step.
+    /// Selection is presence: the step runs exactly the actions `plan`
+    /// carries, in the order metadata upkeep, retention advance, garbage
+    /// collection. Nothing surrenders replay history or sweeps objects
+    /// unless the plan named it, and a plan naming nothing is rejected
+    /// rather than answered with an empty report.
     ///
-    /// Every part reports separately. Losing the head race or being
-    /// superseded by another publisher is an outcome, not an error.
+    /// Every action reports separately, and an absent report means the plan
+    /// did not select that action. Losing the head race or being superseded
+    /// by another publisher is an outcome, not an error.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.maintenance.step",
@@ -88,47 +88,35 @@ impl FsAdmin {
     pub async fn maintenance_step_namespace(
         &self,
         namespace_id: &NamespaceId,
-        options: MaintenanceStepOptions,
+        plan: MaintenancePlan,
     ) -> Result<MaintenanceStepResponse> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        let mut options = options;
-        if let Some(gc) = &mut options.gc {
-            if gc.max_objects.is_none() {
-                gc.max_objects = Some(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
-            }
-        }
-        if options.max_wal_tail_segments == 0 {
+        if plan.is_empty() {
             return Err(RuntimeError::Config(
-                "max_wal_tail_segments must be greater than zero".to_owned(),
+                "a maintenance step must select at least one action".to_owned(),
             ));
         }
-        // A threshold above the write-rejection cap would make the step
-        // answer `not needed` while every publish is being rejected — the
-        // one tool that relieves backpressure refusing to act.
-        let reject_writes_at_segments =
-            loonfs_core::publish::WalTailPolicy::DEFAULT.reject_writes_at_segments;
-        if options.max_wal_tail_segments > reject_writes_at_segments {
-            return Err(RuntimeError::Config(format!(
-                "max_wal_tail_segments may not exceed the write-rejection threshold \
-                 ({reject_writes_at_segments})"
-            )));
+        let mut plan = plan;
+        if let Some(gc) = &mut plan.gc {
+            // Every pass a step runs is bounded, however the plan reached
+            // here; only a direct `gc_namespace` call sweeps unbounded.
+            gc.max_objects
+                .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
         }
-
-        let runs = |kind: MaintenanceStepKind| options.only.is_none_or(|only| only == kind);
+        let collects_only = plan.gc.is_some() && plan.metadata.is_none() && !plan.advance_retention;
         let status_before = match self.namespace_status(namespace_id).await {
             Ok(status) => status,
             // A tombstoned namespace keeps reclaimable derived state — WAL
             // segments, tables, manifests, checkpoint records — until GC
-            // ages it out, and a GC-only step is the reclamation path. It
-            // proceeds against the tombstone; the summary comes from the
-            // two control objects that outlive reclamation, because the
-            // manifest and chain a live summary consults may already be
-            // reaped. Full steps still refuse: a tombstone has nothing to
-            // flush or reorganize.
+            // ages it out, and a collection-only step is the reclamation
+            // path. It proceeds against the tombstone; the summary comes
+            // from the two control objects that outlive reclamation,
+            // because the manifest and chain a live summary consults may
+            // already be reaped. Any other plan still refuses: a tombstone
+            // has nothing to flush, reorganize, or retain.
             Err(RuntimeError::Core(error))
-                if error.code() == ErrorCode::NamespaceDeleted
-                    && options.only == Some(MaintenanceStepKind::Gc) =>
+                if error.code() == ErrorCode::NamespaceDeleted && collects_only =>
             {
                 let summary = loonfs_core::cache::load_deleted_namespace_head_summary(
                     self.core.store(),
@@ -145,12 +133,47 @@ impl FsAdmin {
             }
             Err(error) => return Err(error),
         };
-        let observed_head_seq = status_before.head_seq;
 
-        let wal_flush = if runs(MaintenanceStepKind::WalFlush)
-            && status_before.wal_tail_segments >= options.max_wal_tail_segments
-        {
-            match self.run_step_wal_flush(namespace_id).await {
+        let metadata = if let Some(options) = plan.metadata {
+            Some(
+                self.run_metadata(namespace_id, options, &status_before)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let retention = if plan.advance_retention {
+            Some(self.run_retention(namespace_id).await?)
+        } else {
+            None
+        };
+        let gc = if let Some(config) = &plan.gc {
+            Some(self.gc_namespace(namespace_id, config).await?)
+        } else {
+            None
+        };
+
+        Ok(MaintenanceStepResponse {
+            namespace_id: namespace_id.clone(),
+            status_before,
+            metadata,
+            retention,
+            gc,
+        })
+    }
+
+    /// The one metadata-upkeep implementation: fold the visible WAL tail
+    /// once it has reached the threshold, then merge one reorganization
+    /// unit. The two travel together because the fold is what creates the
+    /// delta runs the merge consumes.
+    async fn run_metadata(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MetadataMaintenanceOptions,
+        status_before: &NamespaceStatusResponse,
+    ) -> Result<MetadataMaintenanceResponse> {
+        let wal_flush = if status_before.wal_tail_segments >= options.max_wal_tail_segments.get() {
+            match self.run_wal_flush(namespace_id).await {
                 Ok(flush) => match flush.outcome {
                     FlushWalOutcome::Published => WalFlushStepOutcome::Flushed {
                         manifest_head_seq: flush.manifest_head_seq,
@@ -163,62 +186,30 @@ impl FsAdmin {
                     }
                 },
                 Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
-                    WalFlushStepOutcome::RaceLost { observed_head_seq }
+                    WalFlushStepOutcome::RaceLost {
+                        observed_head_seq: status_before.head_seq,
+                    }
                 }
                 Err(error) => return Err(error),
             }
         } else {
             WalFlushStepOutcome::NotNeeded
         };
-
-        let reorganize = if runs(MaintenanceStepKind::Reorganize) {
-            match self.run_step_reorganization(namespace_id).await? {
-                loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
-                    ReorganizeStepOutcome::NotNeeded
-                }
-                loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {
-                    ReorganizeStepOutcome::UnitPublished
-                }
-                loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
-                    ReorganizeStepOutcome::BudgetExhausted
-                }
-                loonfs_core::MetadataReorganizeOutcome::Superseded => {
-                    ReorganizeStepOutcome::Superseded
-                }
+        let reorganize = match self.run_reorganization(namespace_id).await? {
+            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
+                ReorganizeStepOutcome::NotNeeded
             }
-        } else {
-            ReorganizeStepOutcome::NotNeeded
+            loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {
+                ReorganizeStepOutcome::UnitPublished
+            }
+            loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                ReorganizeStepOutcome::BudgetExhausted
+            }
+            loonfs_core::MetadataReorganizeOutcome::Superseded => ReorganizeStepOutcome::Superseded,
         };
-
-        // Retention advance is idempotent: with nothing new to cover it
-        // reports the floor already in place. It never runs implicitly —
-        // an unattended deployment retains its full replay history until an
-        // operator opts in here or restricts a step to this sub-step.
-        let retention_runs = match options.only {
-            Some(only) => only == MaintenanceStepKind::Retention,
-            None => options.retention,
-        };
-        let retention_floor_seq = if retention_runs {
-            self.run_step_retention(namespace_id)
-                .await?
-                .retention_floor_seq
-        } else {
-            status_before.retention_floor_seq
-        };
-
-        let gc = if runs(MaintenanceStepKind::Gc) {
-            self.run_step_gc(namespace_id, options.gc.as_ref()).await?
-        } else {
-            None
-        };
-
-        Ok(MaintenanceStepResponse {
-            namespace_id: namespace_id.clone(),
-            status_before,
+        Ok(MetadataMaintenanceResponse {
             wal_flush,
             reorganize,
-            retention_floor_seq,
-            gc,
         })
     }
 
@@ -227,7 +218,7 @@ impl FsAdmin {
     /// `loonfs-core`'s `reorganize_metadata`). Explicit steps stay bounded at
     /// one unit per call; the returned outcome lets writer-scheduled
     /// background work keep folding until nothing is left.
-    async fn run_step_reorganization(
+    async fn run_reorganization(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::MetadataReorganizeOutcome> {
@@ -269,24 +260,13 @@ impl FsAdmin {
         Ok(report.outcome)
     }
 
-    async fn run_step_gc(
-        &self,
-        namespace_id: &NamespaceId,
-        config: Option<&crate::GcConfig>,
-    ) -> Result<Option<crate::GcResponse>> {
-        let Some(config) = config else {
-            return Ok(None);
-        };
-        Ok(Some(self.gc_namespace(namespace_id, config).await?))
-    }
-
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.
     ///
     /// Bounded calls return an enumeration cursor; every resume rebuilds the
     /// current live roots. A step sweeps only when asked — here, or through
-    /// [`MaintenanceStepOptions::gc`] — and the one thing that asks on its
-    /// own is a writer's collection job, which schedules a pass for each
-    /// upload deadline that writer created.
+    /// [`MaintenancePlan::gc`] — and the one thing that asks on its own is a
+    /// writer's collection job, which schedules a pass for each upload
+    /// deadline that writer created.
     pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -373,42 +353,47 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Flushes the visible WAL tail into metadata tables and advances the
-    /// metadata root, creating no checkpoint record.
+    /// Runs one metadata-upkeep pass at a threshold of one segment, so any
+    /// visible WAL tail is folded.
     ///
     /// One name over the one step path: exactly
-    /// [`Self::maintenance_step_namespace`] restricted to
-    /// [`MaintenanceStepKind::WalFlush`], with the threshold at a single
-    /// segment so any visible tail is folded. A namespace with an empty
-    /// tail has nothing to fold and reports
-    /// [`WalFlushStepOutcome::NotNeeded`]: this is the flush an operator
-    /// asks for, not a way to publish a manifest for a namespace that has
-    /// never been written to.
-    pub async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<WalFlushStepOutcome> {
+    /// [`Self::maintenance_step_namespace`] with a metadata-only plan. The
+    /// reorganization unit rides along and is reported beside the fold —
+    /// upkeep is one action, and folding a tail is what creates the delta
+    /// runs a merge consumes. A namespace with an empty tail has nothing to
+    /// fold and reports [`WalFlushStepOutcome::NotNeeded`]: this is the
+    /// flush an operator asks for, not a way to publish a manifest for a
+    /// namespace that has never been written to.
+    pub async fn flush_wal(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<MetadataMaintenanceResponse> {
         let step = self
             .maintenance_step_namespace(
                 namespace_id,
-                MaintenanceStepOptions {
-                    max_wal_tail_segments: 1,
-                    only: Some(MaintenanceStepKind::WalFlush),
-                    ..MaintenanceStepOptions::default()
+                MaintenancePlan {
+                    metadata: Some(MetadataMaintenanceOptions {
+                        max_wal_tail_segments: NonZeroU64::MIN,
+                    }),
+                    ..MaintenancePlan::default()
                 },
             )
             .await?;
-        Ok(step.wal_flush)
+        Ok(step
+            .metadata
+            .expect("a plan selecting metadata upkeep reports it"))
     }
 
     /// Advances the namespace retention floor when a verified checkpoint
     /// makes it safe.
     ///
     /// One name over the one step path: exactly
-    /// [`Self::maintenance_step_namespace`] restricted to
-    /// [`MaintenanceStepKind::Retention`]. It keeps a name of its own
-    /// because of what it costs — advancing the floor abandons the replay
-    /// history below it, which is a decision rather than upkeep. Nothing
-    /// schedules it: no maintenance job exists for retention, so an
-    /// unattended deployment keeps its whole history until a call arrives
-    /// here.
+    /// [`Self::maintenance_step_namespace`] with a retention-only plan. It
+    /// keeps a name of its own because of what it costs — advancing the
+    /// floor abandons the replay history below it, which is a decision
+    /// rather than upkeep. Nothing schedules it: no maintenance job exists
+    /// for retention, so an unattended deployment keeps its whole history
+    /// until a call arrives here.
     pub async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
@@ -416,20 +401,19 @@ impl FsAdmin {
         let step = self
             .maintenance_step_namespace(
                 namespace_id,
-                MaintenanceStepOptions {
-                    only: Some(MaintenanceStepKind::Retention),
-                    ..MaintenanceStepOptions::default()
+                MaintenancePlan {
+                    advance_retention: true,
+                    ..MaintenancePlan::default()
                 },
             )
             .await?;
-        Ok(AdvanceRetentionResponse {
-            namespace_id: step.namespace_id,
-            retention_floor_seq: step.retention_floor_seq,
-        })
+        Ok(step
+            .retention
+            .expect("a plan selecting a retention advance reports it"))
     }
 
-    /// The one implementation both the full step and [`Self::flush_wal`]
-    /// reach: fold the tail, advance the root, invalidate what the fold
+    /// The one implementation both the step and [`Self::flush_wal`] reach:
+    /// fold the tail, advance the root, invalidate what the fold
     /// invalidated.
     #[tracing::instrument(
         level = "info",
@@ -442,7 +426,7 @@ impl FsAdmin {
             store_kind = tracing::field::Empty,
         )
     )]
-    async fn run_step_wal_flush(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
+    async fn run_wal_flush(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let result = self
@@ -453,14 +437,10 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// The one implementation both the full step and
-    /// [`Self::advance_retention_floor`] reach. Reached only through
-    /// [`MaintenanceStepKind::Retention`] or `options.retention`: nothing
-    /// surrenders replay history without being asked.
-    async fn run_step_retention(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<AdvanceRetentionResponse> {
+    /// The one implementation both the step and
+    /// [`Self::advance_retention_floor`] reach. Reached only through a plan
+    /// that names it: nothing surrenders replay history without being asked.
+    async fn run_retention(&self, namespace_id: &NamespaceId) -> Result<AdvanceRetentionResponse> {
         let result = self
             .engine(namespace_id)
             .advance_retention_floor()

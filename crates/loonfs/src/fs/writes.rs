@@ -6,7 +6,7 @@ use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
     ChangeSeq, CommitId, CommitResponse, ContentRef, CopyOptions, CoreError,
-    CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceJobId, MaintenanceStepOptions,
+    CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceJobId, MetadataMaintenanceOptions,
     MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
 use crate::{CommittedChange, FilesystemChange};
@@ -900,7 +900,11 @@ fn maybe_auto_step_after_publish(
     namespace_id: &NamespaceId,
     wal_tail_segments: u64,
 ) {
-    if wal_tail_segments < MaintenanceStepOptions::default().max_wal_tail_segments {
+    if wal_tail_segments
+        < MetadataMaintenanceOptions::default()
+            .max_wal_tail_segments
+            .get()
+    {
         return;
     }
     writer
