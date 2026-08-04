@@ -6,8 +6,8 @@ use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
 use crate::object_store::{Result, SharedObjectStore};
 use crate::presign::{
-    DirectTransferIssuers, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
-    CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+    DirectTransferIssuers, GcsPresignerConfig, GcsV4Presigner, S3CompatiblePresigner,
+    S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
 };
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig, S3CompatibleStore};
 use http::Uri;
@@ -146,14 +146,27 @@ impl ConfiguredObjectStore {
         })
     }
 
-    /// Builds a native GCS store without direct-transfer issuance.
+    /// Builds a native GCS store, and the reads and whole-object writes it
+    /// can authorize.
+    ///
+    /// GCS has no S3-style multipart API, so the bundle's multipart slot stays
+    /// empty rather than holding a signer that would fail. It needs no
+    /// endpoint-trust decision either: the configuration carries no endpoint
+    /// override, so every capability is `https` to Google's own host.
     ///
     /// Construction fails when credentials, provider runtime, or key-prefix configuration is invalid.
     pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
+        let presigner = Arc::new(GcsV4Presigner::new(GcsPresignerConfig {
+            bucket: config.bucket.clone(),
+            service_account_key_path: config.service_account_key_path.clone(),
+            key_prefix: config.key_prefix.clone(),
+        })?);
         let store = GcpGcsStore::new(config)?;
         Ok(Self {
             inner: Arc::new(store),
-            direct_transfers: None,
+            direct_transfers: Some(
+                DirectTransferIssuers::read_only(presigner.clone()).with_put(presigner),
+            ),
         })
     }
 
@@ -244,14 +257,17 @@ mod tests {
     use crate::presign::{
         DirectTransferIssuers, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
         AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
+        GCP_GCS_MAX_DIRECT_PUT_BYTES,
     };
     use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
+    use crate::test_support::gcs_fixture_service_account_key_file;
     use crate::ObjectStore;
     use crate::ObjectStoreError;
     use bytes::Bytes;
     use loonfs_api::ChecksumAlgorithm;
     use loonfs_api::ContentId;
     use loonfs_api::ContentRef;
+    use loonfs_api::StorageChecksum;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -259,7 +275,6 @@ mod tests {
 
     const AZURITE_ACCOUNT_KEY: &str =
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
-    const FAKE_GCS_SERVICE_ACCOUNT_KEY: &str = r#"{"private_key":"private_key","private_key_id":"private_key_id","client_email":"client_email","disable_oauth":true}"#;
 
     #[tokio::test]
     async fn configured_local_fs_scopes_optional_key_prefix() {
@@ -287,6 +302,66 @@ mod tests {
                 .expect("list scoped prefix"),
             vec![head_key]
         );
+    }
+
+    /// GCS signs its own scheme, so its bundle carries reads and whole-object
+    /// writes; it has no S3-style multipart API, so that slot stays empty.
+    /// The checksum and the ceiling come from the issuer, which is the only
+    /// thing that knows them.
+    #[test]
+    fn gcs_signs_puts_and_gets_and_offers_no_multipart() {
+        let transfers = gcs_store()
+            .direct_transfers()
+            .expect("gcs signs its native scheme");
+        let put = transfers.put.expect("gcs signs whole-object writes");
+
+        assert!(
+            transfers.multipart.is_none(),
+            "GCS has no S3-style multipart API, which is spelled as an absent signer"
+        );
+        assert_eq!(put.checksum_algorithm(), ChecksumAlgorithm::Crc32c);
+        assert_eq!(put.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
+    }
+
+    /// The write GCS authorizes is addressed beneath the configured prefix and
+    /// carries the create-only precondition and the checksum in its
+    /// signature, exactly as the S3-compatible bundle's does.
+    #[test]
+    fn the_gcs_bundle_signs_native_generation_preconditions() {
+        let issuer = gcs_store()
+            .direct_transfers()
+            .and_then(|transfers| transfers.put)
+            .expect("gcs presigner");
+
+        let signed = issuer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key:
+                        "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef",
+                    content_ref: &crc32c_content_ref(),
+                    expires_in: Duration::from_secs(900),
+                },
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .expect("presign");
+
+        assert!(signed
+            .url
+            .starts_with("https://storage.googleapis.com/bucket/tenant-a/content-stores/"));
+        assert_eq!(
+            signed
+                .headers
+                .get("x-goog-if-generation-match")
+                .map(String::as_str),
+            Some("0")
+        );
+        assert!(signed
+            .headers
+            .get("x-goog-hash")
+            .is_some_and(|value| value.starts_with("crc32c=")));
+        // The S3 family's spellings never appear on a native GCS capability.
+        assert!(!signed.headers.contains_key("if-none-match"));
+        assert!(!signed.url.contains("X-Amz-"));
     }
 
     /// Only a provider that can presign, on an endpoint the live conformance
@@ -318,15 +393,9 @@ mod tests {
             .direct_transfers()
             .is_none());
 
-        let gcs_service_account_key_path =
-            fake_gcs_service_account_key_file("configured-store-gcs-kind");
-        let gcs = ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
-            bucket: "bucket".to_owned(),
-            service_account_key_path: gcs_service_account_key_path.display().to_string(),
-            key_prefix: Some("tenant-a".to_owned()),
-        })
-        .expect("construct gcs store");
-        assert!(gcs.direct_transfers().is_none());
+        // GCS is proven by construction: its configuration carries no
+        // endpoint override, so there is no unproven endpoint to reach.
+        assert!(gcs_store().direct_transfers().is_some());
 
         let azure = ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
             account_name: "devstoreaccount1".to_owned(),
@@ -422,6 +491,26 @@ mod tests {
         .expect("construct s3 store")
     }
 
+    fn gcs_store() -> ConfiguredObjectStore {
+        ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
+            bucket: "bucket".to_owned(),
+            service_account_key_path: gcs_fixture_service_account_key_file("configured-store-gcs")
+                .display()
+                .to_string(),
+            key_prefix: Some("tenant-a".to_owned()),
+        })
+        .expect("construct gcs store")
+    }
+
+    /// A reference whose storage checksum is the CRC-32C GCS enforces.
+    fn crc32c_content_ref() -> ContentRef {
+        ContentRef {
+            storage_checksum: StorageChecksum::crc32c(b"hello"),
+            whole_file_sha256: None,
+            ..ContentRef::blob_v1(ContentId::generate(), b"hello")
+        }
+    }
+
     fn r2_store(endpoint_url: &str) -> ConfiguredObjectStore {
         ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
             bucket: "bucket".to_owned(),
@@ -512,12 +601,6 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("loonfs-objectstore-{label}-{stamp}"));
         fs::create_dir_all(&path).expect("create temp dir");
-        path
-    }
-
-    fn fake_gcs_service_account_key_file(label: &str) -> PathBuf {
-        let path = unique_temp_dir(label).join("service-account.json");
-        fs::write(&path, FAKE_GCS_SERVICE_ACCOUNT_KEY).expect("write fake service account key");
         path
     }
 }

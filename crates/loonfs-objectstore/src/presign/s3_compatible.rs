@@ -6,9 +6,9 @@ use super::{
 };
 use crate::keyspace::{parse_endpoint_url, scope_object_key};
 use crate::object_store::Result;
-use crate::presign::aws_sigv4::{
-    aws_dates, canonical_query_string, hex_lower, hmac_sha256, normalize_header_value,
-    percent_encode_path, percent_encode_segment,
+use crate::presign::v4::{
+    canonical_query_string, hex_lower, hmac_sha256, normalize_header_value, percent_encode_path,
+    percent_encode_segment, signing_dates, unix_ms,
 };
 use crate::secret::SecretString;
 use crate::ObjectStoreError;
@@ -255,7 +255,7 @@ impl S3CompatiblePresigner {
         }
 
         let endpoint = self.endpoint(object_key)?;
-        let dates = aws_dates(object_key, now)?;
+        let dates = signing_dates(object_key, now)?;
         let credential_scope = format!(
             "{}/{}/s3/aws4_request",
             dates.short_date, self.config.region
@@ -285,7 +285,7 @@ impl S3CompatiblePresigner {
         query.extend([
             ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
             ("X-Amz-Credential".to_owned(), credential),
-            ("X-Amz-Date".to_owned(), dates.amz_date.clone()),
+            ("X-Amz-Date".to_owned(), dates.timestamp.clone()),
             ("X-Amz-Expires".to_owned(), expires_in.as_secs().to_string()),
             ("X-Amz-SignedHeaders".to_owned(), signed_headers.clone()),
         ]);
@@ -300,7 +300,7 @@ impl S3CompatiblePresigner {
         let hashed_request = hex_lower(&Sha256::digest(canonical_request.as_bytes()));
         let string_to_sign = format!(
             "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-            dates.amz_date, credential_scope, hashed_request
+            dates.timestamp, credential_scope, hashed_request
         );
         let signing_key = signing_key(
             self.config.secret_access_key.expose(),
@@ -533,16 +533,6 @@ struct S3Endpoint {
     scheme: String,
     host: String,
     canonical_uri: String,
-}
-
-fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64> {
-    let duration = time.duration_since(std::time::UNIX_EPOCH).map_err(|err| {
-        ObjectStoreError::transport(
-            object_key,
-            format!("system time is before unix epoch: {err}"),
-        )
-    })?;
-    Ok(duration.as_millis() as u64)
 }
 
 fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {

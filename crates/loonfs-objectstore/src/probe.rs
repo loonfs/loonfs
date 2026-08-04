@@ -903,8 +903,9 @@ mod tests {
             .is_empty());
     }
 
-    /// A store that cannot report stored checksums — GCS and Azure Blob
-    /// Storage are both this case, and it is an answer rather than a fault.
+    /// A store that cannot report stored checksums — Azure Blob Storage and
+    /// the local filesystem's provider-less path are this case, and it is an
+    /// answer rather than a fault.
     #[derive(Debug)]
     struct NoStoredChecksumStore {
         inner: LocalFsStore,

@@ -44,6 +44,10 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "rin
 regex = { version = "1.11", default-features = false, features = ["std", "perf"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 regex-syntax = "0.8"
+# Already in the tree beneath rustls and rcgen. Named directly because the GCS
+# presigner signs `GOOG4-RSA-SHA256` with an RSA key, which the hash and MAC
+# crates this workspace already carries cannot do.
+ring = "0.17"
 # `ring`, not the crate default `aws-lc-rs`: the rustls stack is already in
 # the tree as a transitive dependency built on ring, and the default provider
 # would pull a second, native-toolchain crypto backend in beside it.

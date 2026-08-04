@@ -2,13 +2,24 @@
 
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::object_store::Result;
+use crate::presign::{stored_crc32c, GcsPresignerConfig, GcsV4Presigner, PresignedUrl};
 use crate::store_io_runtime::StoreIoRuntime;
-use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
+use crate::{
+    ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig, StoredObjectChecksum,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs_api::StorageChecksum;
+use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::GoogleCloudStorageBuilder;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+/// Lifetime of the internally signed request used for checksum readback. It
+/// is issued immediately and never handed out, so it only needs to outlive
+/// one round trip and its clock skew.
+const CHECKSUM_HEAD_TTL: Duration = Duration::from_secs(60);
 
 /// Supplies explicit credentials and key scoping for the native Google Cloud Storage adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +42,14 @@ pub struct GcpGcsStoreConfig {
 #[derive(Debug)]
 pub struct GcpGcsStore {
     inner: ProviderObjectStore,
+    /// Signs the one request the provider client cannot express: the metadata
+    /// read that reports an object's stored CRC-32C back. The V4 signer this
+    /// crate already owns for direct-transfer URLs expresses it, so the store
+    /// needs no second credential path.
+    request_signer: GcsV4Presigner,
+    /// Sends that signed request over the store's own IO runtime and timeout
+    /// scheme, exactly like every provider-client request.
+    http: HttpClient,
     /// Keeps the HTTP IO runtime alive for the provider client's lifetime;
     /// the connector inside the client holds only a handle onto it.
     _io_runtime: StoreIoRuntime,
@@ -53,7 +72,17 @@ impl GcpGcsStore {
             ));
         }
 
+        let request_signer = GcsV4Presigner::new(GcsPresignerConfig {
+            bucket: config.bucket.clone(),
+            service_account_key_path: config.service_account_key_path.clone(),
+            key_prefix: config.key_prefix.clone(),
+        })?;
+
         let io_runtime = StoreIoRuntime::new()?;
+        let http = io_runtime
+            .connector()
+            .connect(&crate::provider_object_store::provider_client_options())
+            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
         let builder = GoogleCloudStorageBuilder::new()
             .with_http_connector(io_runtime.connector())
             .with_client_options(crate::provider_object_store::provider_client_options())
@@ -76,8 +105,44 @@ impl GcpGcsStore {
 
         Ok(Self {
             inner,
+            request_signer,
+            http,
             _io_runtime: io_runtime,
         })
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn signing_time() -> SystemTime {
+        // A V4 signature is dated, so this internally issued request enters
+        // wall time here. Nothing durable is derived from it.
+        SystemTime::now()
+    }
+
+    /// Issues one internally signed request and returns its status and headers.
+    ///
+    /// The metadata read this serves carries no body in either direction, so
+    /// it lands on the store's own HTTP client, runtime, and timeouts without
+    /// reading one.
+    async fn execute_signed(&self, key: &str, signed: PresignedUrl) -> Result<http::Response<()>> {
+        let mut builder = http::Request::builder()
+            .method(signed.method.as_str())
+            .uri(&signed.url);
+        for (name, value) in &signed.headers {
+            builder = builder.header(name, value);
+        }
+        let request = builder
+            .body(HttpRequestBody::empty())
+            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+        let response = self
+            .http
+            .execute(request)
+            .await
+            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+
+        let mut parts = http::Response::new(());
+        *parts.status_mut() = response.status();
+        *parts.headers_mut() = response.headers().clone();
+        Ok(parts)
     }
 
     fn generation_as_compare_token(metadata: ObjectMetadata) -> ObjectMetadata {
@@ -105,6 +170,65 @@ impl ObjectStore for GcpGcsStore {
             .head(key)
             .await?
             .map(Self::generation_as_compare_token))
+    }
+
+    /// Reads size and the stored CRC-32C back from one signed metadata
+    /// request.
+    ///
+    /// GCS reports the stored checksum in `x-goog-hash` on an ordinary object
+    /// request, so this is a `HEAD` and nothing more. The provider client
+    /// surfaces neither that header nor any other checksum, which is why the
+    /// request is signed here rather than asked of the client.
+    ///
+    /// An object GCS acknowledges but reports no usable CRC-32C for is an
+    /// error, never a size-only answer: completion compares a stored checksum
+    /// against a promised one, and there is nothing to compare.
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        let signed = self.request_signer.presign_head_stored_checksum(
+            key,
+            CHECKSUM_HEAD_TTL,
+            Self::signing_time(),
+        )?;
+        let response = self.execute_signed(key, signed).await?;
+
+        let status = response.status();
+        if status == http::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if status == http::StatusCode::FORBIDDEN || status == http::StatusCode::UNAUTHORIZED {
+            return Err(ObjectStoreError::PermissionDenied {
+                object_key: key.to_owned(),
+                message: format!("provider refused the checksum head with {status}"),
+            });
+        }
+        if !status.is_success() {
+            // A HEAD carries no body to quote, so the status is the whole
+            // diagnostic the provider gives us.
+            return Err(ObjectStoreError::transport(
+                key,
+                format!("checksum head failed with {status}"),
+            ));
+        }
+
+        let headers = response.headers();
+        let storage_checksum = stored_crc32c_from_headers(headers).ok_or_else(|| {
+            ObjectStoreError::transport(
+                key,
+                "provider reported no crc32c for this object".to_owned(),
+            )
+        })?;
+        let size_bytes = headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                ObjectStoreError::transport(key, "checksum head reported no content length")
+            })?;
+
+        Ok(Some(StoredObjectChecksum {
+            size_bytes,
+            storage_checksum,
+        }))
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
@@ -141,20 +265,31 @@ impl ObjectStore for GcpGcsStore {
     }
 }
 
+/// Finds the stored CRC-32C among a metadata response's hash headers.
+///
+/// GCS reports its hashes either as one comma-joined `x-goog-hash` value or
+/// as a header line per algorithm, and promises no order between them. Every
+/// value is searched, so which spelling arrives cannot decide whether the
+/// checksum is found — reading only the first header line would miss a
+/// crc32c that happened to follow an md5.
+fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<StorageChecksum> {
+    headers
+        .get_all("x-goog-hash")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(stored_crc32c)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{GcpGcsStore, GcpGcsStoreConfig};
+    use super::{stored_crc32c_from_headers, GcpGcsStore, GcpGcsStoreConfig};
+    use crate::test_support::gcs_fixture_service_account_key_file;
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    const FAKE_SERVICE_ACCOUNT_KEY: &str = r#"{"private_key":"private_key","private_key_id":"private_key_id","client_email":"client_email","disable_oauth":true}"#;
 
     #[tokio::test]
     async fn invalid_keys_are_rejected_before_generation_tokens() {
-        let service_account_key_path = fake_service_account_key_file("gcs-invalid-key");
+        let service_account_key_path = gcs_fixture_service_account_key_file("gcs-invalid-key");
         let store = GcpGcsStore::new(GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
             service_account_key_path: service_account_key_path.display().to_string(),
@@ -182,20 +317,71 @@ mod tests {
         ));
     }
 
-    fn fake_service_account_key_file(label: &str) -> PathBuf {
-        let path = unique_temp_dir(label).join("service-account.json");
-        fs::write(&path, FAKE_SERVICE_ACCOUNT_KEY).expect("write fake service account key");
-        path
+    /// The store signs its own checksum readback, so a key that cannot sign
+    /// stops the store from being built at all rather than surfacing as a
+    /// failure on the first completion.
+    #[test]
+    fn a_service_account_key_that_cannot_sign_stops_the_store_from_being_built() {
+        let dir = gcs_fixture_service_account_key_file("gcs-unsignable")
+            .parent()
+            .expect("fixture dir")
+            .to_path_buf();
+        let unsignable = dir.join("unsignable.json");
+        std::fs::write(
+            &unsignable,
+            br#"{"client_email":"a@b.iam.gserviceaccount.com","private_key":"private_key","disable_oauth":true}"#,
+        )
+        .expect("write unsignable service account key");
+
+        assert!(matches!(
+            GcpGcsStore::new(GcpGcsStoreConfig {
+                bucket: "bucket".to_owned(),
+                service_account_key_path: unsignable.display().to_string(),
+                key_prefix: None,
+            }),
+            Err(ObjectStoreError::Configuration(_))
+        ));
     }
 
-    #[allow(clippy::disallowed_methods)]
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("loonfs-objectstore-{label}-{stamp}"));
-        fs::create_dir_all(&path).expect("create temp dir");
-        path
+    /// GCS spells its hash report two ways and orders it however it likes, so
+    /// the readback finds the crc32c in each of them. Reading only the first
+    /// header line would complete an upload on an md5 it cannot check, or
+    /// fail one whose crc32c was simply second.
+    #[test]
+    fn the_stored_crc32c_is_found_however_gcs_spells_its_hash_header() {
+        let crc32c_of_hello = "9a71bb4c";
+        let md5 = "md5=XUFAKrxLKna5cZ2REBfFkg==";
+        let crc32c = "crc32c=mnG7TA==";
+
+        for values in [
+            vec![crc32c],
+            vec![&format!("{md5},{crc32c}")],
+            vec![&format!("{crc32c},{md5}")],
+            // A header line per algorithm, with the crc32c second.
+            vec![md5, crc32c],
+            vec![crc32c, md5],
+        ] {
+            let mut headers = http::HeaderMap::new();
+            for value in &values {
+                headers.append(
+                    "x-goog-hash",
+                    http::HeaderValue::from_str(value).expect("header value"),
+                );
+            }
+            assert_eq!(
+                stored_crc32c_from_headers(&headers).map(|checksum| checksum.value),
+                Some(crc32c_of_hello.to_owned()),
+                "crc32c not found in {values:?}"
+            );
+        }
+
+        // An object GCS describes without a crc32c is described without one.
+        let mut md5_only = http::HeaderMap::new();
+        md5_only.append(
+            "x-goog-hash",
+            http::HeaderValue::from_static("md5=XUFAKrxLKna5cZ2REBfFkg=="),
+        );
+        assert_eq!(stored_crc32c_from_headers(&md5_only), None);
+        assert_eq!(stored_crc32c_from_headers(&http::HeaderMap::new()), None);
     }
 }

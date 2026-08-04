@@ -1,4 +1,12 @@
-//! AWS Signature Version 4 primitives used to presign S3-compatible URLs.
+//! Version-4 signing primitives, shared by the two schemes this crate signs.
+//!
+//! AWS `AWS4-HMAC-SHA256` and Google `GOOG4-RSA-SHA256` are the same
+//! construction: the same canonical-request shape, the same timestamp
+//! spellings, the same percent-encoding, the same `<date>/<location>/<service>/<terminator>`
+//! credential scope. They differ in the literals each writes into those slots
+//! and in the primitive that produces the signature. Only the parts that are
+//! genuinely identical live here; each scheme's own literals and signature
+//! primitive stay in its own presigner.
 
 use crate::object_store::Result;
 use crate::ObjectStoreError;
@@ -6,13 +14,15 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The two date spellings a V4 signature carries: the credential scope's day
+/// and the request's full timestamp, which must agree.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AwsSigV4Dates {
+pub(crate) struct SigningDates {
     pub(crate) short_date: String,
-    pub(crate) amz_date: String,
+    pub(crate) timestamp: String,
 }
 
-pub(crate) fn aws_dates(object_key: &str, time: SystemTime) -> Result<AwsSigV4Dates> {
+pub(crate) fn signing_dates(object_key: &str, time: SystemTime) -> Result<SigningDates> {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .map_err(|err| {
@@ -30,10 +40,22 @@ pub(crate) fn aws_dates(object_key: &str, time: SystemTime) -> Result<AwsSigV4Da
     let second = seconds_of_day % 60;
     let short_date = format!("{year:04}{month:02}{day:02}");
 
-    Ok(AwsSigV4Dates {
-        amz_date: format!("{short_date}T{hour:02}{minute:02}{second:02}Z"),
+    Ok(SigningDates {
+        timestamp: format!("{short_date}T{hour:02}{minute:02}{second:02}Z"),
         short_date,
     })
+}
+
+/// Unix milliseconds for a signing instant, used to report when an issued
+/// capability stops working.
+pub(crate) fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64> {
+    let duration = time.duration_since(UNIX_EPOCH).map_err(|err| {
+        ObjectStoreError::transport(
+            object_key,
+            format!("system time is before unix epoch: {err}"),
+        )
+    })?;
+    Ok(duration.as_millis() as u64)
 }
 
 pub(crate) fn canonical_query_string(query: &BTreeMap<String, String>) -> String {
