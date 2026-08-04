@@ -1629,7 +1629,7 @@ The `state` carries what its own phase of the lifecycle needs. `open` carries
 exactly one place — the `completed` state — so no reader has to decide which
 of two copies is authoritative, and no writer can leave them disagreeing.
 
-Two invariants are checked when the record is read, because the shape cannot
+Four invariants are checked when the record is read, because the shape cannot
 express them:
 
 - Every content reference the record holds — the transport's promise, the
@@ -1638,14 +1638,20 @@ express them:
   could verify one while publishing the other.
 - The record carries a `transport` and a `state`. Neither has a default and
   neither may be omitted.
+- Only a `service_proxied` session holds `staged_content`: the other
+  transports write past the service, so nothing here validated their bytes.
+- A `direct_put` session's `completed` reference equals its
+  `promised_content` in full, which is the reference the provider enforced
+  and completion read back.
 
-A record that fails either is rejected outright, like any other corruption.
-This schema evolves in place at control-object version 1 before the first
-stable release; the implementation carries no compatibility shim for
-intermediate pre-release encodings, and in particular the earlier encoding
-that spelled the transport as a bare `mode` beside independent optional
-`claimed_checksum`, `direct_put_content_ref`, `provider_multipart_upload_id`,
-`multipart_part_size_bytes`, and `staged_content_ref` fields does not decode.
+A record that fails any of them is rejected outright, like any other
+corruption. This schema evolves in place at control-object version 1 before
+the first stable release; the implementation carries no compatibility shim
+for intermediate pre-release encodings, and in particular the earlier
+encoding that spelled the transport as a bare `mode` beside independent
+optional `claimed_checksum`, `direct_put_content_ref`,
+`provider_multipart_upload_id`, `multipart_part_size_bytes`, and
+`staged_content_ref` fields does not decode.
 
 Three rules apply:
 
