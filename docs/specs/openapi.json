@@ -3209,7 +3209,7 @@
       },
       "ChecksumAlgorithm": {
         "type": "string",
-        "description": "Algorithm of a stored full-object checksum.\n\nEvery algorithm here covers the complete object. There is deliberately no\nchecksum-*type* field: full-object coverage is an invariant of this\nformat, established when the object is written, never read back from a\nprovider. (Cloudflare R2 never reports `x-amz-checksum-type` at all, so a\ntype read back would be unavailable exactly where it would matter.)\n\n[`ChecksumAlgorithm::Sha256`] and [`ChecksumAlgorithm::Crc64nvme`] both\nhave producers: every path that moves bytes through LoonFS hashes them,\nand direct multipart upload carries the CRC-64/NVME the S3-compatible\nproviders compute over the assembled object. `Crc32c` decodes and\nround-trips without a producer.",
+        "description": "Algorithm of a stored full-object checksum.\n\nEvery algorithm here covers the complete object. There is deliberately no\nchecksum-*type* field: full-object coverage is an invariant of this\nformat, established when the object is written, never read back from a\nprovider. (Cloudflare R2 never reports `x-amz-checksum-type` at all, so a\ntype read back would be unavailable exactly where it would matter.)\n\nEvery algorithm here is producible by this build, and the vocabulary is\nclosed: an algorithm spelling this build does not know fails to decode\nrather than decoding into a value nothing can recompute. So a\n`ChecksumAlgorithm` in hand always names evidence that can be checked,\nand the read, retry, and resume paths never have to carry a \"cannot\ntell\" answer. Adding a variant is therefore adding a producer for it.",
         "enum": [
           "sha256",
           "crc64nvme",

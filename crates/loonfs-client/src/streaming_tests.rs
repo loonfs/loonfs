@@ -628,7 +628,7 @@ fn streamed_evidence_answers_only_the_digests_it_has() {
     assert_eq!(streamed.matches(&StorageChecksum::sha256(bytes)), None);
 }
 
-/// Held bytes can answer any digest this build knows, which is why the
+/// Held bytes can answer any digest in the vocabulary, which is why the
 /// buffered path never has to refuse.
 #[test]
 fn held_evidence_recomputes_whatever_it_is_asked() {
@@ -636,8 +636,13 @@ fn held_evidence_recomputes_whatever_it_is_asked() {
     let held = UploadedContent::Bytes(bytes);
     assert_eq!(held.matches(&StorageChecksum::sha256(bytes)), Some(true));
     assert_eq!(held.matches(&StorageChecksum::crc64nvme(bytes)), Some(true));
+    assert_eq!(held.matches(&StorageChecksum::crc32c(bytes)), Some(true));
     assert_eq!(
         held.matches(&StorageChecksum::sha256(b"something else")),
+        Some(false)
+    );
+    assert_eq!(
+        held.matches(&StorageChecksum::crc32c(b"something else")),
         Some(false)
     );
 }

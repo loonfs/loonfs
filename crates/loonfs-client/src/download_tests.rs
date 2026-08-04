@@ -123,6 +123,105 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
     );
 }
 
+/// A reference whose only full-object evidence is a CRC-32C, as a direct
+/// transfer to Google Cloud Storage leaves behind.
+fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
+    ContentRef {
+        kind: loonfs_api::ContentRefKind::BlobV1,
+        content_id: ContentId::generate(),
+        size_bytes: bytes.len() as u64,
+        storage_checksum: loonfs_api::StorageChecksum::crc32c(bytes),
+        whole_file_sha256: None,
+    }
+}
+
+/// An object nobody hashed for us is described only by the provider's own
+/// CRC, and that is what the download checks it against. A grant carrying
+/// one is not a grant whose bytes go unchecked.
+#[tokio::test]
+async fn a_crc32c_only_grant_verifies_the_bytes_it_receives() {
+    let payload = b"transferred straight to the provider".to_vec();
+    let content_ref = crc32c_content_ref(&payload);
+    let client = client();
+
+    // Same length, different bytes: only the CRC can tell the two apart.
+    let served = b"transferred straight to the PROVIDER".to_vec();
+    assert_eq!(served.len(), payload.len());
+    let _guard =
+        test_transport::script([Outcome::Success(payload.clone()), Outcome::Success(served)]);
+
+    let mut sink = Vec::new();
+    let written = client
+        .download_via_presigned_url(
+            &grant(content_ref.clone(), "http://example.invalid/object"),
+            &mut sink,
+        )
+        .await
+        .expect("granted object");
+    assert_eq!(written, payload.len() as u64);
+    assert_eq!(sink, payload);
+
+    let mut sink = Vec::new();
+    let error = client
+        .download_via_presigned_url(
+            &grant(content_ref, "http://example.invalid/object"),
+            &mut sink,
+        )
+        .await
+        .expect_err("bytes that are not the granted object");
+    assert!(
+        matches!(&error, ClientError::Http(message) if message.contains("grant named")),
+        "unexpected error: {error}"
+    );
+}
+
+/// A CRC folds forward from a running value, so a resumed download of a
+/// CRC-32C-only grant closes over the prefix it never received exactly as a
+/// hashed one does.
+#[tokio::test]
+async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
+    let payload = b"the first half and then the second half".to_vec();
+    let held = 10;
+    let content_ref = crc32c_content_ref(&payload);
+    let client = client();
+
+    let _guard = test_transport::script([
+        Outcome::Success(payload[held..].to_vec()),
+        Outcome::Success(payload[held..].to_vec()),
+    ]);
+    let mut download = client
+        .open_direct_download_at(
+            &grant(content_ref.clone(), "http://example.invalid/object"),
+            held as u64,
+        )
+        .await
+        .expect("resumed grant");
+    download.fold_resumed_prefix(&payload[..held]);
+    while download.next_chunk().await.expect("chunk").is_some() {}
+
+    // A prefix that is not the object's fails the whole download.
+    let mut download = client
+        .open_direct_download_at(
+            &grant(content_ref, "http://example.invalid/object"),
+            held as u64,
+        )
+        .await
+        .expect("resumed grant");
+    download.fold_resumed_prefix(&vec![0u8; held]);
+    let error = loop {
+        match download.next_chunk().await {
+            Ok(Some(_)) => continue,
+            #[allow(clippy::panic, reason = "the failure this test exists to catch")]
+            Ok(None) => panic!("a prefix that is not the object's verified"),
+            Err(error) => break error,
+        }
+    };
+    assert!(
+        matches!(&error, ClientError::Http(message) if message.contains("grant named")),
+        "unexpected error: {error}"
+    );
+}
+
 /// The happy path over the same seam: the declared length and digest both
 /// hold, every byte reaches the sink, and the count comes back.
 #[tokio::test]

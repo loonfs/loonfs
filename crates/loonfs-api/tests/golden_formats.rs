@@ -148,10 +148,10 @@ fn sample_crc_content_ref() -> ContentRef {
 /// Pins the durable JSON of a content reference for every checksum algorithm
 /// the format defines.
 ///
-/// Only `sha256` has a producer today. The CRC variants are pinned anyway:
-/// direct multipart will write full-object CRC-64/NVME, and this fixture is
-/// what proves that arriving producer needs no format change — and what fails
-/// if someone reshapes the reference in the meantime.
+/// One reference per algorithm in the vocabulary, so the durable bytes of
+/// each are pinned independently of which write path happens to mint it: a
+/// producer arriving for one of them must need no format change, and this
+/// fixture is what fails if someone reshapes the reference on the way.
 #[test]
 fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
     let references = [

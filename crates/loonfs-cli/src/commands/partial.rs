@@ -10,7 +10,7 @@
 
 use crate::backend::FileDownload;
 use crate::error::CliError;
-use loonfs_api::{ContentRef, RevisionNo};
+use loonfs_api::{ContentRef, RevisionNo, StorageChecksum};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -32,11 +32,18 @@ const FOLD_CHUNK_BYTES: usize = 1024 * 1024;
 /// is a different file. The rest is recorded because a partial disagreeing
 /// with any of it is not worth resuming either, and because a note this
 /// build cannot read at all is the same answer — start over.
+///
+/// The storage checksum is the reference's own evidence whatever produced
+/// it, which is the only thing an object nobody hashed for us carries. The
+/// whole-file SHA-256 is recorded beside it when there is one rather than
+/// instead of it, because the two are different claims about the same
+/// bytes and a note that dropped either would be a weaker match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PartialMeta {
     content_id: String,
     size_bytes: u64,
+    storage_checksum: StorageChecksum,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     whole_file_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,6 +56,7 @@ impl PartialMeta {
         Self {
             content_id: content_ref.content_id.to_string(),
             size_bytes: content_ref.size_bytes,
+            storage_checksum: content_ref.storage_checksum.clone(),
             whole_file_sha256: content_ref.whole_file_sha256.clone(),
             revision_no: revision_no.map(|revision_no| revision_no.0),
         }
@@ -219,10 +227,22 @@ fn unreadable_note(error: serde_json::Error) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::{ContentId, ContentRef};
+    use loonfs_api::{ContentId, ContentRef, ContentRefKind};
 
     fn meta_for(bytes: &[u8]) -> PartialMeta {
         PartialMeta::describe(&ContentRef::blob_v1(ContentId::generate(), bytes), None)
+    }
+
+    /// A reference whose only full-object evidence is a CRC-32C, as a direct
+    /// transfer to Google Cloud Storage leaves behind.
+    fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
+        ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::generate(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::crc32c(bytes),
+            whole_file_sha256: None,
+        }
     }
 
     /// A partial whose note matches the content being fetched is picked up
@@ -283,5 +303,49 @@ mod tests {
         // Bytes with no note beside them say nothing about themselves.
         std::fs::remove_file(&meta_path).expect("remove note");
         assert_eq!(resumable_bytes(&destination, &meta), 0);
+    }
+
+    /// A file whose only evidence is a CRC-32C is described and resumed like
+    /// any other: the note carries the reference's own checksum, so content
+    /// nobody hashed for us is still identified on disk rather than being
+    /// content a rerun has to start over on.
+    #[test]
+    fn a_crc32c_only_note_describes_and_resumes_its_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("file.bin");
+        let content_ref = crc32c_content_ref(b"0123456789");
+        let meta = PartialMeta::describe(&content_ref, None);
+
+        let encoded = serde_json::to_vec(&meta).expect("encode the note");
+        let document: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("decode the note as a document");
+        assert_eq!(document["storage_checksum"]["algorithm"], "crc32c");
+        assert!(
+            document.get("whole_file_sha256").is_none(),
+            "a digest nobody computed is absent, not null: {document}"
+        );
+
+        std::fs::write(
+            sibling(&destination, PARTIAL_SUFFIX).expect("partial path"),
+            b"0123",
+        )
+        .expect("write partial");
+        std::fs::write(
+            sibling(&destination, META_SUFFIX).expect("meta path"),
+            &encoded,
+        )
+        .expect("write note");
+        assert_eq!(resumable_bytes(&destination, &meta), 4);
+
+        // The checksum is part of the match: the same id and length under a
+        // different digest is not the content this run resolved.
+        let other = PartialMeta::describe(
+            &ContentRef {
+                storage_checksum: StorageChecksum::crc32c(b"9876543210"),
+                ..content_ref
+            },
+            None,
+        );
+        assert_eq!(resumable_bytes(&destination, &other), 0);
     }
 }

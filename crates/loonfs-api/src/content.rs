@@ -72,11 +72,12 @@ impl<'de> Deserialize<'de> for ContentRefKind {
 /// provider. (Cloudflare R2 never reports `x-amz-checksum-type` at all, so a
 /// type read back would be unavailable exactly where it would matter.)
 ///
-/// [`ChecksumAlgorithm::Sha256`] and [`ChecksumAlgorithm::Crc64nvme`] both
-/// have producers: every path that moves bytes through LoonFS hashes them,
-/// and direct multipart upload carries the CRC-64/NVME the S3-compatible
-/// providers compute over the assembled object. `Crc32c` decodes and
-/// round-trips without a producer.
+/// Every algorithm here is producible by this build, and the vocabulary is
+/// closed: an algorithm spelling this build does not know fails to decode
+/// rather than decoding into a value nothing can recompute. So a
+/// `ChecksumAlgorithm` in hand always names evidence that can be checked,
+/// and the read, retry, and resume paths never have to carry a "cannot
+/// tell" answer. Adding a variant is therefore adding a producer for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -130,59 +131,62 @@ pub struct StorageChecksum {
 }
 
 impl StorageChecksum {
-    /// Builds the SHA-256 storage checksum for these complete bytes.
-    pub fn sha256(bytes: &[u8]) -> Self {
-        Self {
-            algorithm: ChecksumAlgorithm::Sha256,
-            value: hex_encode_bytes(&Sha2Sha256::digest(bytes)),
-        }
-    }
-
-    /// Builds the CRC-64/NVME storage checksum for these complete bytes.
-    pub fn crc64nvme(bytes: &[u8]) -> Self {
-        let mut digest = Crc64Nvme::new();
+    /// Builds the `algorithm` checksum for these complete bytes.
+    ///
+    /// The one-shot forms below are this with the algorithm spelled out, so
+    /// a payload held whole and one delivered in pieces cannot drift: both
+    /// close the same digest.
+    pub fn compute(algorithm: ChecksumAlgorithm, bytes: &[u8]) -> Self {
+        let mut digest = StreamingChecksum::for_algorithm(algorithm);
         digest.update(bytes);
         digest.finish()
     }
 
+    /// Builds the SHA-256 storage checksum for these complete bytes.
+    pub fn sha256(bytes: &[u8]) -> Self {
+        Self::compute(ChecksumAlgorithm::Sha256, bytes)
+    }
+
+    /// Builds the CRC-64/NVME storage checksum for these complete bytes.
+    pub fn crc64nvme(bytes: &[u8]) -> Self {
+        Self::compute(ChecksumAlgorithm::Crc64nvme, bytes)
+    }
+
+    /// Builds the CRC-32C storage checksum for these complete bytes.
+    pub fn crc32c(bytes: &[u8]) -> Self {
+        Self::compute(ChecksumAlgorithm::Crc32c, bytes)
+    }
+
     /// Reports whether these bytes produce this exact checksum.
-    ///
-    /// `None` means the algorithm has no implementation here, which is a
-    /// refusal to verify rather than a verification: a caller must never
-    /// read it as agreement.
-    pub fn matches(&self, bytes: &[u8]) -> Option<bool> {
-        let recomputed = match self.algorithm {
-            ChecksumAlgorithm::Sha256 => Self::sha256(bytes),
-            ChecksumAlgorithm::Crc64nvme => Self::crc64nvme(bytes),
-            ChecksumAlgorithm::Crc32c => return None,
-        };
-        Some(recomputed.value == self.value)
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        Self::compute(self.algorithm, bytes).value == self.value
     }
 }
 
 /// One full-object checksum folded over a payload delivered in pieces.
 ///
 /// This is the streaming form of [`StorageChecksum::matches`], for a reader
-/// that verifies an object it never holds whole. The two agree about what
-/// this build can recompute: [`StreamingChecksum::for_algorithm`] answers
-/// `None` for exactly the algorithms `matches` refuses to judge, so an
-/// unverifiable checksum is refused before any bytes move rather than after.
+/// that verifies an object it never holds whole. Both cover the whole
+/// vocabulary, so a checksum a buffered read would judge is one a streaming
+/// read can fold — the two can never disagree about whether an object is
+/// checkable, only about what it hashes to.
 #[derive(Debug)]
 pub enum StreamingChecksum {
     /// SHA-256 folded over the payload.
     Sha256(Sha256),
     /// CRC-64/NVME folded over the payload.
     Crc64nvme(Crc64Nvme),
+    /// CRC-32C folded over the payload.
+    Crc32c(Crc32c),
 }
 
 impl StreamingChecksum {
-    /// Starts an empty digest for `algorithm`, or `None` when this build
-    /// cannot recompute that algorithm.
-    pub fn for_algorithm(algorithm: ChecksumAlgorithm) -> Option<Self> {
+    /// Starts an empty digest for `algorithm`.
+    pub fn for_algorithm(algorithm: ChecksumAlgorithm) -> Self {
         match algorithm {
-            ChecksumAlgorithm::Sha256 => Some(Self::Sha256(Sha256::new())),
-            ChecksumAlgorithm::Crc64nvme => Some(Self::Crc64nvme(Crc64Nvme::new())),
-            ChecksumAlgorithm::Crc32c => None,
+            ChecksumAlgorithm::Sha256 => Self::Sha256(Sha256::new()),
+            ChecksumAlgorithm::Crc64nvme => Self::Crc64nvme(Crc64Nvme::new()),
+            ChecksumAlgorithm::Crc32c => Self::Crc32c(Crc32c::new()),
         }
     }
 
@@ -191,6 +195,7 @@ impl StreamingChecksum {
         match self {
             Self::Sha256(digest) => digest.update(bytes),
             Self::Crc64nvme(digest) => digest.update(bytes),
+            Self::Crc32c(digest) => digest.update(bytes),
         }
     }
 
@@ -199,6 +204,7 @@ impl StreamingChecksum {
         match self {
             Self::Sha256(digest) => digest.finish(),
             Self::Crc64nvme(digest) => digest.finish(),
+            Self::Crc32c(digest) => digest.finish(),
         }
     }
 }
@@ -243,6 +249,49 @@ impl Crc64Nvme {
 impl fmt::Debug for Crc64Nvme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Crc64Nvme").finish_non_exhaustive()
+    }
+}
+
+/// CRC-32C (Castagnoli) over a payload delivered in pieces.
+///
+/// This is the full-object checksum Google Cloud Storage computes and
+/// reports, so a transfer that never passes through LoonFS is described by
+/// it and nothing else. A CRC folds forward from a running value, so the
+/// same digest serves a whole-object read and a resumed one: the prefix
+/// already on disk goes in first, the fetched remainder after it, and the
+/// closed value covers the object either way.
+#[derive(Default)]
+pub struct Crc32c {
+    crc: u32,
+}
+
+impl Crc32c {
+    /// Starts an empty digest.
+    pub fn new() -> Self {
+        Self { crc: 0 }
+    }
+
+    /// Folds the next piece of the payload in, in order.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.crc = crc32c::crc32c_append(self.crc, bytes);
+    }
+
+    /// Closes the digest over everything fed so far.
+    ///
+    /// The value is the big-endian spelling of the 32-bit result, which is
+    /// what the raw checksum bytes are on the wire and therefore what the
+    /// hex here has to be.
+    pub fn finish(self) -> StorageChecksum {
+        StorageChecksum {
+            algorithm: ChecksumAlgorithm::Crc32c,
+            value: hex_encode_bytes(&self.crc.to_be_bytes()),
+        }
+    }
+}
+
+impl fmt::Debug for Crc32c {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Crc32c").finish_non_exhaustive()
     }
 }
 
@@ -372,6 +421,43 @@ impl ContentRef {
         }
     }
 
+    /// The checksum this reference holds its bytes to.
+    ///
+    /// The trusted whole-file digest when one exists, and otherwise the
+    /// reference's own storage checksum — which for an object a provider
+    /// assembled or a client wrote directly is the only full-object evidence
+    /// there is. Reads, resumed reads, and retry reconciliation all judge
+    /// against this one answer, so no two of them can hold the same
+    /// reference to different evidence.
+    pub fn verifiable_checksum(&self) -> StorageChecksum {
+        match &self.whole_file_sha256 {
+            Some(digest) => StorageChecksum {
+                algorithm: ChecksumAlgorithm::Sha256,
+                value: digest.clone(),
+            },
+            None => self.storage_checksum.clone(),
+        }
+    }
+
+    /// The digest this reference carries under `algorithm`, when it carries
+    /// one at all.
+    ///
+    /// A reference describes its object with the checksum whoever wrote it
+    /// produced, plus a whole-file SHA-256 when the write path hashed the
+    /// bytes itself. Asking for anything else answers `None`: a digest
+    /// nobody computed over these bytes cannot be conjured from the ones
+    /// that were, and a retry comparing against it must refuse rather than
+    /// guess.
+    pub fn digest_under(&self, algorithm: ChecksumAlgorithm) -> Option<&str> {
+        if self.storage_checksum.algorithm == algorithm {
+            return Some(&self.storage_checksum.value);
+        }
+        match algorithm {
+            ChecksumAlgorithm::Sha256 => self.whole_file_sha256.as_deref(),
+            ChecksumAlgorithm::Crc64nvme | ChecksumAlgorithm::Crc32c => None,
+        }
+    }
+
     /// Reports whether the reference is well formed enough to publish.
     ///
     /// This is a shape check on the reference itself; proving that the
@@ -427,8 +513,8 @@ fn validate_checksum_value(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc64Nvme,
-        StorageChecksum, StreamingChecksum,
+        ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc32c,
+        Crc64Nvme, StorageChecksum, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -469,6 +555,30 @@ mod tests {
                 serde_json::from_str(&encoded).expect("decode algorithm");
             assert_eq!(decoded, algorithm);
         }
+    }
+
+    /// An algorithm spelling this build does not know is rejected at decode
+    /// rather than kept as an unknown value, unlike
+    /// [`ContentRefKind::Unsupported`], which exists so a relaying reader
+    /// cannot destroy a newer kind.
+    ///
+    /// The asymmetry is deliberate and load-bearing: nothing here relays a
+    /// checksum it did not verify, so an algorithm that survived decoding
+    /// would be evidence nothing could check. Rejecting at the boundary is
+    /// what makes every `ChecksumAlgorithm` value in memory recomputable,
+    /// and therefore what lets reads, retries, and resumes have no "cannot
+    /// tell" answer to carry.
+    #[test]
+    fn an_unknown_checksum_algorithm_fails_to_decode() {
+        assert!(serde_json::from_str::<ChecksumAlgorithm>("\"md5\"").is_err());
+
+        let json = r#"{
+            "kind": "blob_v1",
+            "content_id": "con_0123456789abcdef0123456789abcdef",
+            "size_bytes": 5,
+            "storage_checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
+        }"#;
+        assert!(serde_json::from_str::<ContentRef>(json).is_err());
     }
 
     #[test]
@@ -544,6 +654,22 @@ mod tests {
         );
     }
 
+    /// The catalog check value for CRC-32C (Castagnoli), the one the RFC
+    /// 3720 iSCSI CRC and Google Cloud Storage both mean by "crc32c". Like
+    /// the CRC-64/NVME vector above it is an external anchor: it fixes the
+    /// polynomial and the big-endian byte order of the canonical hex against
+    /// a published value rather than against whatever this build happens to
+    /// compute, so a GCS-minted reference and one produced here agree.
+    #[test]
+    fn crc32c_matches_its_catalog_check_value() {
+        assert_eq!(StorageChecksum::crc32c(b"123456789").value, "e3069283");
+        assert_eq!(
+            StorageChecksum::crc32c(b"").value,
+            "00000000",
+            "the empty payload is the identity"
+        );
+    }
+
     /// The streaming form exists so parts can be hashed on the way past
     /// without the whole object ever being held, so it must agree with the
     /// one-shot form over the same bytes.
@@ -558,8 +684,21 @@ mod tests {
         assert_eq!(streamed.finish(), StorageChecksum::crc64nvme(&payload));
     }
 
+    /// A resumed read folds a prefix it already holds and then the bytes it
+    /// fetches, so a CRC has to close over the two halves exactly as it
+    /// closes over the whole.
+    #[test]
+    fn a_crc32c_folded_over_a_prefix_and_the_rest_equals_the_whole_payload() {
+        let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
+        let mut streamed = Crc32c::new();
+        streamed.update(&payload[..1500]);
+        streamed.update(&payload[1500..]);
+
+        assert_eq!(streamed.finish(), StorageChecksum::crc32c(&payload));
+    }
+
     /// A verifying reader folds the same checksum the one-shot check
-    /// computes, and refuses the same algorithms it refuses — a reader that
+    /// computes, for every algorithm the vocabulary has — a reader that
     /// disagreed with [`StorageChecksum::matches`] would accept or reject
     /// objects the buffered read would not.
     #[test]
@@ -568,40 +707,51 @@ mod tests {
         for expected in [
             StorageChecksum::sha256(&payload),
             StorageChecksum::crc64nvme(&payload),
+            StorageChecksum::crc32c(&payload),
         ] {
-            let mut streaming = StreamingChecksum::for_algorithm(expected.algorithm)
-                .expect("a producing algorithm folds");
+            let mut streaming = StreamingChecksum::for_algorithm(expected.algorithm);
             for chunk in payload.chunks(97) {
                 streaming.update(chunk);
             }
             assert_eq!(streaming.finish(), expected);
         }
-        assert!(StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc32c).is_none());
     }
 
-    /// A checksum this build cannot recompute must answer "cannot tell",
-    /// never "matches".
+    /// Every algorithm in the vocabulary is comparable, so a checksum in
+    /// hand is always a question with an answer.
     #[test]
-    fn checksum_matching_refuses_rather_than_agrees_when_it_cannot_recompute() {
+    fn every_algorithm_compares_bytes_against_the_checksum_they_produce() {
+        for algorithm in [
+            ChecksumAlgorithm::Sha256,
+            ChecksumAlgorithm::Crc64nvme,
+            ChecksumAlgorithm::Crc32c,
+        ] {
+            let expected = StorageChecksum::compute(algorithm, b"hello");
+            assert_eq!(expected.algorithm, algorithm);
+            assert!(expected.matches(b"hello"));
+            assert!(!expected.matches(b"other"));
+        }
+    }
+
+    /// The evidence a read holds an object to is one answer, whichever
+    /// surface asks: the trusted whole-file digest when there is one, and
+    /// the reference's own checksum when it is all there is.
+    #[test]
+    fn a_reference_names_the_whole_file_digest_as_its_evidence_when_it_has_one() {
+        let hashed = ContentRef::blob_v1(content_id(), b"hello");
         assert_eq!(
-            StorageChecksum::sha256(b"hello").matches(b"hello"),
-            Some(true)
+            hashed.verifiable_checksum(),
+            StorageChecksum::sha256(b"hello")
         );
+
+        let crc_only = ContentRef {
+            storage_checksum: StorageChecksum::crc32c(b"hello"),
+            whole_file_sha256: None,
+            ..hashed
+        };
         assert_eq!(
-            StorageChecksum::sha256(b"hello").matches(b"other"),
-            Some(false)
-        );
-        assert_eq!(
-            StorageChecksum::crc64nvme(b"hello").matches(b"hello"),
-            Some(true)
-        );
-        assert_eq!(
-            StorageChecksum {
-                algorithm: ChecksumAlgorithm::Crc32c,
-                value: "00000000".to_owned(),
-            }
-            .matches(b"hello"),
-            None
+            crc_only.verifiable_checksum(),
+            StorageChecksum::crc32c(b"hello")
         );
     }
 

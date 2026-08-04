@@ -288,7 +288,7 @@ pub fn put_retry_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ContentId;
+    use crate::{ContentId, ContentRefKind, StorageChecksum};
 
     /// Pins the exact stored fingerprint for a fixed one-operation request.
     ///
@@ -419,6 +419,54 @@ mod tests {
             fingerprint,
             "v0:sha256:3febc279ebb36c013f734095bebdba3c0a59bf8cbd82d205b53adbf00c112d59"
         );
+    }
+
+    /// The retry leg, over the pinned value above: whatever algorithm the
+    /// original commit's reference landed with, a retry reading it back
+    /// recomputes the same fingerprint.
+    ///
+    /// This is what lets a retry prove sameness in two independent steps —
+    /// the fingerprint says the two requests are the same mutation, and the
+    /// digest evidence says the two payloads are the same bytes. A checksum
+    /// inside the preimage would collapse them into one weaker check and
+    /// make a CRC-only commit unreplayable.
+    #[test]
+    fn a_put_retry_reaches_the_pinned_fingerprint_under_every_checksum_algorithm() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let content_id =
+            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id");
+        let bytes = b"pinned put bytes";
+
+        for content_ref in [
+            ContentRef::blob_v1(content_id.clone(), bytes),
+            ContentRef {
+                kind: ContentRefKind::BlobV1,
+                content_id: content_id.clone(),
+                size_bytes: bytes.len() as u64,
+                storage_checksum: StorageChecksum::crc32c(bytes),
+                whole_file_sha256: None,
+            },
+            ContentRef {
+                kind: ContentRefKind::BlobV1,
+                content_id: content_id.clone(),
+                size_bytes: bytes.len() as u64,
+                storage_checksum: StorageChecksum::crc64nvme(bytes),
+                whole_file_sha256: None,
+            },
+        ] {
+            assert_eq!(
+                put_retry_fingerprint(
+                    &namespace_id,
+                    &AbsolutePath::parse("/docs/report.txt").expect("path"),
+                    DestinationBehavior::NoReplace,
+                    None,
+                    None,
+                    &content_ref,
+                )
+                .expect("retry fingerprint"),
+                "v0:sha256:3febc279ebb36c013f734095bebdba3c0a59bf8cbd82d205b53adbf00c112d59"
+            );
+        }
     }
 
     fn create_dir(path: &str) -> FilesystemOperation {
