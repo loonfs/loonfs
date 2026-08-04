@@ -13,6 +13,7 @@ use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
 use crate::protocol::{
     load_publish_metadata_view, PublishTailOptions, PublishTailProjection, PublishTailWeight,
+    PublishViewEffect,
 };
 use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -215,8 +216,8 @@ pub struct ResultingReadState {
     pub tail_rows: Arc<MetadataState>,
 }
 
-/// Writer-session state for one namespace: the epoch this session acquired
-/// and its terminal fencing record.
+/// Writer-session state for one namespace: never acquired, holding the epoch
+/// this session acquired, or terminally fenced.
 ///
 /// This is authoritative session state, not a cache of durable state —
 /// nothing in the store can rebuild "this session was fenced". Runtimes keep
@@ -227,15 +228,18 @@ pub struct ResultingReadState {
 /// documented one-shot semantics: each one-shot commit is its own
 /// acquisition decision.
 #[derive(Debug, Default)]
-pub struct WriterSessionState {
+pub enum WriterSessionState {
+    /// No epoch yet: the session's first publish acquires one.
+    #[default]
+    Unacquired,
     /// Epoch acquired lazily on this session's first publish and reused for
     /// its lifetime; no per-publish acquisition CAS.
-    acquired_writer: Option<AcquiredWriter>,
+    Acquired(AcquiredWriter),
     /// Terminal fencing record. Once another session supersedes our epoch,
     /// every later publish fails with `writer_fenced` without touching the
     /// store; the session never reacquires on its own. Reacquisition is an
     /// explicit caller decision, left to a future takeover API.
-    fenced: Option<WriterFence>,
+    Fenced(WriterFence),
 }
 
 /// Shared handle to one namespace's [`WriterSessionState`].
@@ -294,11 +298,11 @@ impl NamespaceCommitEngine {
         self
     }
 
-    pub fn invalidate(&mut self) {
-        // Drops only the tail projection. The acquired epoch and fencing
-        // are session state, not cached state: the epoch's validity is
-        // re-checked against the head on every publish view load, and a
-        // fenced session stays fenced.
+    /// Drops the rebuildable tail projection and nothing else. The acquired
+    /// epoch and fencing are session state, not cached state: the epoch's
+    /// validity is re-checked against the head on every publish view load,
+    /// and a fenced session stays fenced.
+    pub fn invalidate_projection(&mut self) {
         self.publish_tail_projection = None;
     }
 
@@ -324,12 +328,12 @@ impl NamespaceCommitEngine {
         store: &S,
         context: &MutationContext,
     ) -> Result<AcquiredWriter> {
-        let already_acquired = {
-            let session = self.lock_session();
-            if let Some(fence) = &session.fenced {
-                return Err(CoreError::WriterFenced(fence.clone()));
+        let already_acquired = match &*self.lock_session() {
+            WriterSessionState::Fenced(fence) => {
+                return Err(CoreError::WriterFenced(fence.clone()))
             }
-            session.acquired_writer.clone()
+            WriterSessionState::Acquired(acquired_writer) => Some(acquired_writer.clone()),
+            WriterSessionState::Unacquired => None,
         };
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
@@ -338,12 +342,12 @@ impl NamespaceCommitEngine {
             .await
             .map_err(CoreError::WriterEpoch)?;
         let mut session = self.lock_session();
-        if let Some(fence) = session.fenced.clone() {
+        if let WriterSessionState::Fenced(fence) = &*session {
             // Another engine sharing this session observed fencing while we
             // were acquiring; the session stays fenced.
-            return Err(CoreError::WriterFenced(fence));
+            return Err(CoreError::WriterFenced(fence.clone()));
         }
-        session.acquired_writer = Some(acquired_writer.clone());
+        *session = WriterSessionState::Acquired(acquired_writer.clone());
         Ok(acquired_writer)
     }
 
@@ -370,9 +374,7 @@ impl NamespaceCommitEngine {
         )
         .await;
         if let Err(CoreError::WriterFenced(fence)) = &deleted {
-            let mut session = self.lock_session();
-            session.fenced = Some(fence.clone());
-            session.acquired_writer = None;
+            *self.lock_session() = WriterSessionState::Fenced(fence.clone());
         }
         deleted
     }
@@ -416,11 +418,9 @@ impl NamespaceCommitEngine {
         {
             Ok(value) => value,
             Err(error) => {
-                self.invalidate();
+                self.invalidate_projection();
                 if let CoreError::WriterFenced(fence) = &error {
-                    let mut session = self.lock_session();
-                    session.fenced = Some(fence.clone());
-                    session.acquired_writer = None;
+                    *self.lock_session() = WriterSessionState::Fenced(fence.clone());
                 }
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
@@ -456,9 +456,12 @@ impl NamespaceCommitEngine {
             self.timer.as_ref(),
         )
         .await;
-        let resulting_head = published.resulting_head.clone();
+        let resulting_head = match &published.effect {
+            PublishViewEffect::Advanced { head, .. } => Some(head.clone()),
+            PublishViewEffect::Unchanged | PublishViewEffect::Invalidated => None,
+        };
         let wal_tail_segments =
-            self.update_publish_tail_projection(projection, &published, tail_options);
+            self.update_publish_tail_projection(projection, published.effect, tail_options);
         // Seedable only when the CAS landed unambiguously and the updated
         // projection survived (it carries the post-publish tail and etag).
         let resulting_read_state = match (resulting_head, self.publish_tail_projection.as_ref()) {
@@ -481,39 +484,54 @@ impl NamespaceCommitEngine {
         }
     }
 
+    /// Folds one batch's effect into the retained tail projection, and
+    /// reports the WAL-tail length the caller schedules maintenance on.
     fn update_publish_tail_projection(
         &mut self,
         mut projection: PublishTailProjection,
-        published: &crate::protocol::PublishBatchAgainstViewResult,
+        effect: PublishViewEffect,
         tail_options: &PublishTailOptions,
     ) -> u64 {
-        if !published.published_records.is_empty() {
-            projection.wal_tail_segments = projection.wal_tail_segments.saturating_add(1);
-        }
-        let wal_tail_segments = projection.wal_tail_segments;
-        let Some(resulting_head) = published.resulting_head.clone() else {
-            if published.can_reuse_loaded_projection {
+        match effect {
+            // Nothing landed, so the loaded projection still describes the
+            // tail exactly.
+            PublishViewEffect::Unchanged => {
+                let wal_tail_segments = projection.wal_tail_segments;
                 self.publish_tail_projection = Some(projection);
-            } else {
-                self.invalidate();
+                wal_tail_segments
             }
-            return wal_tail_segments;
-        };
-        let Some(resulting_head_etag) = published.resulting_head_etag.clone() else {
-            self.invalidate();
-            return wal_tail_segments;
-        };
-        for record in &published.published_records {
-            projection.tail_state.apply_committed_wal_record_mut(record);
+            PublishViewEffect::Invalidated => {
+                self.invalidate_projection();
+                projection.wal_tail_segments
+            }
+            // A landed batch is exactly one new WAL segment.
+            PublishViewEffect::Advanced {
+                records,
+                head,
+                head_etag,
+            } => {
+                projection.wal_tail_segments = projection.wal_tail_segments.saturating_add(1);
+                let wal_tail_segments = projection.wal_tail_segments;
+                // The head advanced, but without the etag its
+                // compare-and-swap acknowledged there is nothing to re-anchor
+                // the projection to.
+                let Some(head_etag) = head_etag else {
+                    self.invalidate_projection();
+                    return wal_tail_segments;
+                };
+                for record in &records {
+                    projection.tail_state.apply_committed_wal_record_mut(record);
+                }
+                projection.head_seq = head.seq;
+                projection.head_etag = head_etag;
+                if projection.within_limits(tail_options) {
+                    self.publish_tail_projection = Some(projection);
+                } else {
+                    self.invalidate_projection();
+                }
+                wal_tail_segments
+            }
         }
-        projection.head_seq = resulting_head.seq;
-        projection.head_etag = resulting_head_etag;
-        if projection.within_limits(tail_options) {
-            self.publish_tail_projection = Some(projection);
-        } else {
-            self.invalidate();
-        }
-        wal_tail_segments
     }
 }
 
@@ -825,7 +843,7 @@ mod tests {
             .as_ref()
             .expect("writer a first commit");
         // Force a fresh manifest load on the next publish.
-        engine_a.invalidate();
+        engine_a.invalidate_projection();
 
         store.block_next();
         let blocked_store = StdArc::clone(&store);

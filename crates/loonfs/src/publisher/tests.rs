@@ -1716,6 +1716,75 @@ async fn close_admission_refuses_without_creating_publishers() {
     registry.drain().await.expect("nothing to drain");
 }
 
+/// A delete admitted before the shutdown sweep is the worker's to finish, so
+/// it still lands after admission closes — and it lands terminally. Deleted
+/// outranks closed: the publisher answers later work with the namespace's
+/// tombstone, not with the shutdown that raced it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_admitted_before_close_admission_lands_terminal() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let shared = store.clone() as SharedStore;
+    let writer = test_writer(shared.clone()).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
+    let registry = writer.publisher();
+
+    // A publication parks at its head CAS, so the delete deterministically
+    // queues behind it instead of being taken first.
+    store.block_next();
+    let active = {
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move {
+            registry
+                .submit_commit(namespace_id, create_directory_request("active", "active"))
+                .await
+        })
+    };
+    store.wait_until_blocked().await;
+    let publisher = registry
+        .shared
+        .lock_state()
+        .publishers
+        .get(&namespace_id)
+        .cloned()
+        .expect("publisher exists once a publish is in flight");
+    let delete = spawn_delete(&publisher, DeleteNamespaceOptions::default());
+    wait_for_queued_delete(&publisher).await;
+
+    // Admission closes with the delete already admitted; releasing the gate
+    // lets the batch and then the delete publish.
+    registry.close_admission();
+    store.release();
+
+    let response = active
+        .await
+        .expect("submit task")
+        .expect("admitted commit publishes");
+    assert_eq!(response.committed_seq, ChangeSeq(1));
+    let deleted = settle_delete(delete, "delete admitted before close_admission")
+        .await
+        .expect("an admitted delete lands after admission closes");
+    assert_eq!(deleted.head_seq, ChangeSeq(1));
+
+    assert!(matches!(
+        publisher_state(&publisher).admission,
+        PublisherAdmissionState::Deleted
+    ));
+    let late = try_admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("late", "late"),
+    )
+    .expect_err("submission after the delete lands");
+    assert_eq!(late.code(), ErrorCode::NamespaceDeleted);
+    registry.drain().await.expect("drain settles the delete");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1788,7 +1857,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     let (deleted_while_blocked, delete_queued_while_blocked) = {
         let state = publisher_state(&publisher);
         (
-            state.deleted,
+            matches!(state.admission, PublisherAdmissionState::Deleted),
             matches!(state.queue.back(), Some(WorkItem::Delete(_))),
         )
     };

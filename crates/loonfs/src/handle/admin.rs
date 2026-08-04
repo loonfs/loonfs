@@ -23,9 +23,8 @@ use std::sync::Arc;
 pub struct FsAdmin {
     pub(crate) core: ReadCore,
     pub(crate) actor: WriterIdentity,
-    /// `invalidate_engine` matters only where a publisher exists for the
-    /// namespace, so a standalone admin holds `None` — its
-    /// engines-to-invalidate do not exist — and an admin built over a
+    /// A tail projection to invalidate exists only where a publisher does,
+    /// so a standalone admin holds `None`, and an admin built over a
     /// writer's runtime for background maintenance holds that writer's
     /// registry.
     pub(crate) publisher: Option<PublisherRegistry>,

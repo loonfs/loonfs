@@ -31,7 +31,7 @@ impl FsAdmin {
     fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
         self.core.invalidate_namespace_read_cache(namespace_id);
         if let Some(publisher) = &self.publisher {
-            publisher.invalidate_engine(namespace_id);
+            publisher.invalidate_projection(namespace_id);
         }
     }
 

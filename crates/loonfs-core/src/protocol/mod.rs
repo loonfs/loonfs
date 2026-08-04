@@ -28,7 +28,7 @@ mod publish_view;
 mod uploads;
 
 pub(crate) use self::batch::{
-    publish_namespace_commits_batch_against_publish_view, PublishBatchAgainstViewResult,
+    publish_namespace_commits_batch_against_publish_view, PublishViewEffect,
 };
 pub(crate) use self::changes::list_changes_after;
 pub(crate) use self::publish_view::{load_publish_metadata_view, PublishTailProjection};
