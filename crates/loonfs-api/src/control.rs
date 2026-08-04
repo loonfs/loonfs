@@ -187,8 +187,7 @@ pub enum CheckpointOwner {
 /// record is written `active`, then the basis manifest is re-verified
 /// against the floor, and a failed verification flips the record to
 /// `released`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckpointRecordState {
     /// Freshly generated record identity, one per logical pin. Nothing
     /// derives it, and no caller supplies it, so a new pin can never land on
@@ -220,6 +219,59 @@ pub struct CheckpointRecordState {
     pub owner: CheckpointOwner,
     /// Current lifecycle, advanced only by the one-way release compare-and-swap.
     pub state: CheckpointRecordLifecycle,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictCheckpointRecordState {
+    checkpoint_id: CheckpointId,
+    namespace_id: NamespaceId,
+    manifest_id: ManifestId,
+    manifest_object_id: ManifestObjectId,
+    manifest_head_seq: ChangeSeq,
+    manifest_payload_checksum: String,
+    head_commit_id: CommitId,
+    created_at_ms: u64,
+    #[serde(default)]
+    expires_at_ms: Option<u64>,
+    owner: CheckpointOwner,
+    state: CheckpointRecordLifecycle,
+}
+
+impl<'de> Deserialize<'de> for CheckpointRecordState {
+    /// Reads one checkpoint record and proves the one relationship its shape
+    /// cannot: that a fork-owned pin carries the lease bounding it.
+    ///
+    /// The lease is the only thing that ever releases an attempt whose
+    /// target head was never installed — nothing else can tell that attempt
+    /// from one still running — so a fork record without one pins its basis
+    /// forever, and no pass can decide otherwise. It is refused at load like
+    /// any other corruption.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let record = StrictCheckpointRecordState::deserialize(deserializer)?;
+        if matches!(record.owner, CheckpointOwner::Fork { .. }) && record.expires_at_ms.is_none() {
+            return Err(serde::de::Error::custom(format!(
+                "checkpoint record `{}` is fork-owned but has no lease expiry",
+                record.checkpoint_id
+            )));
+        }
+        Ok(Self {
+            checkpoint_id: record.checkpoint_id,
+            namespace_id: record.namespace_id,
+            manifest_id: record.manifest_id,
+            manifest_object_id: record.manifest_object_id,
+            manifest_head_seq: record.manifest_head_seq,
+            manifest_payload_checksum: record.manifest_payload_checksum,
+            head_commit_id: record.head_commit_id,
+            created_at_ms: record.created_at_ms,
+            expires_at_ms: record.expires_at_ms,
+            owner: record.owner,
+            state: record.state,
+        })
+    }
 }
 
 /// Links one accepted WAL segment to its immutable object and verified sequence range.
@@ -671,7 +723,7 @@ pub struct UploadSessionState {
     ///
     /// The identity exists before any byte is read, so the final object key
     /// is known up front and belongs to exactly this session. Every
-    /// reference the record holds names this object; see the decoder below,
+    /// reference the record holds names this object; see `validate` below,
     /// which refuses a record that disagrees with itself.
     pub content_id: ContentId,
     /// Unix-millisecond creation stamp.
@@ -681,6 +733,61 @@ pub struct UploadSessionState {
     /// The session's lifecycle, and the field every upload operation
     /// compare-and-swaps against.
     pub state: UploadSessionLifecycle,
+}
+
+impl UploadSessionState {
+    /// Proves the relationships this record's shape cannot express but every
+    /// reader of one depends on.
+    ///
+    /// Every reference the record holds is about the same content object,
+    /// whose identity the session allocated before any byte moved. A record
+    /// whose references disagree with its own `content_id` describes two
+    /// objects and cannot be acted on — a completion would verify one key
+    /// and publish another.
+    ///
+    /// The transport and the state must also agree on how the bytes got
+    /// there. Only a service-proxied session stages, because every other
+    /// transport writes past this server; and a direct-put session settles
+    /// on exactly the reference its write was signed against, because that
+    /// reference is what the provider enforced and what completion read
+    /// back. A record that says otherwise describes an upload that did not
+    /// happen.
+    fn validate(&self) -> Result<(), String> {
+        for content_ref in self
+            .transport
+            .promised_content()
+            .into_iter()
+            .chain(self.state.content_ref())
+        {
+            if content_ref.content_id != self.content_id {
+                return Err(format!(
+                    "upload session `{}` owns content `{}` but holds a reference to `{}`",
+                    self.upload_id, self.content_id, content_ref.content_id
+                ));
+            }
+        }
+        match (&self.transport, &self.state) {
+            (
+                UploadSessionTransport::DirectPut { .. }
+                | UploadSessionTransport::DirectMultipart { .. },
+                UploadSessionLifecycle::Open {
+                    staged_content: Some(_),
+                    ..
+                },
+            ) => Err(format!(
+                "upload session `{}` writes past the service but holds staged content",
+                self.upload_id
+            )),
+            (
+                UploadSessionTransport::DirectPut { promised_content },
+                UploadSessionLifecycle::Completed { content_ref, .. },
+            ) if content_ref != promised_content => Err(format!(
+                "upload session `{}` completed on content its direct write never promised",
+                self.upload_id
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -820,43 +927,24 @@ impl From<StrictContentRef> for ContentRef {
 }
 
 impl<'de> Deserialize<'de> for UploadSessionState {
-    /// Reads one session record and proves the one relationship its shape
-    /// cannot: that every reference it holds names the object it owns.
-    ///
-    /// The transport promise and the staged or completed reference are all
-    /// about the same content object, whose identity the session allocated
-    /// before any byte moved. A record whose references disagree with its
-    /// own `content_id` describes two objects and cannot be acted on — a
-    /// completion would verify one key and publish another — so it is
-    /// refused at load like any other corruption, with no shim and no
-    /// salvage.
+    /// Reads one session record and refuses one that `validate` finds
+    /// disagreeing with itself, like any other corruption and with no shim
+    /// or salvage.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let state = StrictUploadSessionState::deserialize(deserializer)?;
-        let transport = UploadSessionTransport::from(state.transport);
-        let lifecycle = UploadSessionLifecycle::from(state.state);
-        for content_ref in transport
-            .promised_content()
-            .into_iter()
-            .chain(lifecycle.content_ref())
-        {
-            if content_ref.content_id != state.content_id {
-                return Err(serde::de::Error::custom(format!(
-                    "upload session `{}` owns content `{}` but holds a reference to `{}`",
-                    state.upload_id, state.content_id, content_ref.content_id
-                )));
-            }
-        }
-        Ok(Self {
+        let session = Self {
             namespace_id: state.namespace_id,
             upload_id: state.upload_id,
             content_id: state.content_id,
             created_at_ms: state.created_at_ms,
-            transport,
-            state: lifecycle,
-        })
+            transport: state.transport.into(),
+            state: state.state.into(),
+        };
+        session.validate().map_err(serde::de::Error::custom)?;
+        Ok(session)
     }
 }
 

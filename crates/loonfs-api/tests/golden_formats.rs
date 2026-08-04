@@ -443,20 +443,24 @@ fn control_document_with_payload_edit(
     .into_bytes()
 }
 
+/// Returns the refusal an edited payload must produce. Every schema
+/// rejection and every hand-checked invariant shares one error variant, so a
+/// caller that cares which rule fired reads it out of the message.
 fn assert_control_payload_edit_is_corrupt<T>(
     fixture: &str,
     kind: ControlObjectKind,
     edit: impl FnOnce(&mut serde_json::Value),
-) where
+) -> String
+where
     T: DeserializeOwned + Debug,
 {
     let edited = control_document_with_payload_edit(fixture, edit);
     let error = decode_control_object::<T>(&edited, kind)
         .expect_err("unknown mutable payload field must be rejected");
-    assert!(
-        matches!(error, EnvelopeCodecError::PayloadDecode(_)),
-        "unexpected error for {kind:?}: {error}"
-    );
+    match error {
+        EnvelopeCodecError::PayloadDecode(message) => message,
+        other => panic!("unexpected error for {kind:?}: {other}"),
+    }
 }
 
 #[test]
@@ -801,6 +805,29 @@ fn active_checkpoint_records_reject_release_stamps() {
     );
 }
 
+/// A fork-owned record is the lease over one fork attempt, and letting the
+/// lease pass is the only way an attempt that never installed its target
+/// head becomes collectable. Without an expiry the pin is immortal, so it is
+/// not a record that decodes — while a user pin without one is ordinary,
+/// held until someone releases it.
+#[test]
+fn fork_checkpoint_records_reject_a_missing_lease_expiry() {
+    let message = assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        "control_checkpoint_record_fork.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        |payload| {
+            payload
+                .as_object_mut()
+                .expect("payload object")
+                .remove("expires_at_ms");
+        },
+    );
+    assert!(
+        message.contains("fork-owned but has no lease expiry"),
+        "unexpected refusal: {message}"
+    );
+}
+
 /// The monotonic upload lifecycle is a hard cutover too. The pre-cutover
 /// encoding wrote `state` as a bare string over `active` and `condemned`;
 /// the current decoder takes a tagged object over three states, each
@@ -933,6 +960,89 @@ fn upload_sessions_reject_a_reference_to_another_content_object() {
         ControlObjectKind::UploadSession,
         |payload| payload["transport"]["promised_content"]["content_id"] = other.clone(),
     );
+}
+
+/// Staging is the service-proxied flow. A direct session's bytes never pass
+/// through this server, so nothing here could have validated them, and a
+/// staged reference under one claims a write that did not happen.
+#[test]
+fn direct_upload_sessions_reject_staged_content() {
+    for fixture in [
+        "control_upload_session_direct_put.v1.json",
+        "control_upload_session_direct_multipart.v1.json",
+    ] {
+        let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            fixture,
+            ControlObjectKind::UploadSession,
+            |payload| {
+                // The session's own content, so the reference is refused for
+                // being staged and not for naming another object.
+                let mut staged =
+                    serde_json::to_value(sample_content_ref()).expect("encode content ref");
+                staged["content_id"] = payload["content_id"].clone();
+                payload["state"]["staged_content"] = staged;
+            },
+        );
+        assert!(
+            message.contains("holds staged content"),
+            "unexpected refusal for {fixture}: {message}"
+        );
+    }
+}
+
+/// A direct-put session settles on exactly the reference its write was
+/// signed against: the provider enforced that digest over those bytes, and
+/// completion read that object back against the same reference. A completed
+/// reference that drifts from the promise names content nobody proved.
+#[test]
+fn direct_put_sessions_reject_a_completion_that_drifts_from_the_promise() {
+    let fixture = "control_upload_session_direct_put.v1.json";
+    // Completing the open fixture on its own promise is a record that
+    // decodes, so the two edits below are refused for the drift alone.
+    decode_control_object::<UploadSessionState>(
+        &control_document_with_payload_edit(fixture, complete_on_the_promise(|_| {})),
+        ControlObjectKind::UploadSession,
+    )
+    .expect("a direct_put session completed on its own promise");
+
+    for message in [
+        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            fixture,
+            ControlObjectKind::UploadSession,
+            complete_on_the_promise(|content_ref| {
+                content_ref["size_bytes"] = serde_json::Value::from(11);
+            }),
+        ),
+        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            fixture,
+            ControlObjectKind::UploadSession,
+            complete_on_the_promise(|content_ref| {
+                content_ref["storage_checksum"]["value"] = serde_json::Value::from("0".repeat(64));
+            }),
+        ),
+    ] {
+        assert!(
+            message.contains("never promised"),
+            "unexpected refusal: {message}"
+        );
+    }
+}
+
+/// Edits an open `direct_put` payload into a completed one carrying the
+/// transport's own promise, then lets the caller drift the reference it
+/// settled on.
+fn complete_on_the_promise(
+    drift: impl FnOnce(&mut serde_json::Value),
+) -> impl FnOnce(&mut serde_json::Value) {
+    move |payload| {
+        let promised = payload["transport"]["promised_content"].clone();
+        payload["state"] = serde_json::json!({
+            "kind": "completed",
+            "completed_at_ms": 2_000,
+            "content_ref": promised,
+        });
+        drift(&mut payload["state"]["content_ref"]);
+    }
 }
 
 /// Each transport carries its own details, and carries all of them. A
