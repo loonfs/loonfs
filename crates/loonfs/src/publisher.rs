@@ -197,7 +197,7 @@ impl RegistryShared {
                 // that namespace either way.
                 publisher
                     .as_ref()
-                    .is_none_or(NamespacePublisher::invalidate_engine)
+                    .is_none_or(NamespacePublisher::invalidate_projection)
             })
             .map(|(victim, _)| victim)
             .collect::<Vec<_>>();
@@ -432,7 +432,7 @@ impl PublisherRegistry {
     ///
     /// A held engine means a publication or delete is in flight; that unit
     /// revalidates against the live head itself, so skipping it is safe.
-    pub(crate) fn invalidate_engine(&self, namespace_id: &NamespaceId) {
+    pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
         let publisher = self
             .shared
             .lock_state()
@@ -442,7 +442,7 @@ impl PublisherRegistry {
         let Some(publisher) = publisher else {
             return;
         };
-        if publisher.invalidate_engine() {
+        if publisher.invalidate_projection() {
             let totals = self.shared.forget_projection(namespace_id);
             self.read_core
                 .instruments()
@@ -534,7 +534,7 @@ struct NamespacePublisher {
     writer: Weak<WriterBits>,
     state: Arc<Mutex<NamespacePublisherState>>,
     /// Locked only by the worker, across one publication or delete, and by
-    /// [`Self::invalidate_engine`], which never waits for it.
+    /// [`Self::invalidate_projection`], which never waits for it.
     engine: Arc<AsyncMutex<EngineSlot>>,
     /// Weak: the registry map owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
@@ -565,17 +565,28 @@ struct EngineSlot {
     session: SharedWriterSessionState,
 }
 
+/// Whether the publisher still admits work, and if not, what it owes the
+/// caller.
+///
+/// One state rather than two flags, so the precedence holds by construction:
+/// a namespace whose delete landed is gone, not shutting down, and closing
+/// admission afterwards cannot demote it.
+enum PublisherAdmissionState {
+    Open,
+    /// Set by the registry's admission close. Later admissions fail with
+    /// `shutting_down`; everything already queued keeps publishing.
+    Closed,
+    /// Terminal: set once a delete succeeds. Admissions fail fast from then
+    /// on without touching the store.
+    Deleted,
+}
+
 struct NamespacePublisherState {
     /// Admitted work in admission order. Commits coalesce into the tail
     /// batch, so a delete queued between them keeps its barrier position.
     queue: VecDeque<WorkItem>,
     in_flight: HashMap<CommitId, InFlightRequest>,
-    /// Terminal: set once a delete succeeds. Admissions fail fast from then
-    /// on without touching the store.
-    deleted: bool,
-    /// Set by the registry's admission close. Later admissions fail with
-    /// `shutting_down`; everything already queued keeps publishing.
-    closed: bool,
+    admission: PublisherAdmissionState,
     /// The worker draining `queue`, while one is running. A live entry is
     /// what makes the loop single-flight: a worker installs itself under
     /// the admission lock and releases the slot under the same lock that
@@ -640,8 +651,7 @@ impl NamespacePublisher {
             state: Arc::new(Mutex::new(NamespacePublisherState {
                 queue: VecDeque::new(),
                 in_flight: HashMap::new(),
-                deleted: false,
-                closed: false,
+                admission: PublisherAdmissionState::Open,
                 worker: None,
                 next_allowed_cas_at: None,
             })),
@@ -666,19 +676,34 @@ impl NamespacePublisher {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Open becomes closed; a delete that already landed is terminal and
+    /// stays terminal.
     fn close_admission(&self) {
-        self.lock_state().closed = true;
+        let mut state = self.lock_state();
+        if matches!(state.admission, PublisherAdmissionState::Open) {
+            state.admission = PublisherAdmissionState::Closed;
+        }
+    }
+
+    /// What an admission owes its caller right now, or `Ok(())` while the
+    /// publisher is open.
+    fn check_admission(&self, state: &NamespacePublisherState) -> Result<(), CoreError> {
+        match state.admission {
+            PublisherAdmissionState::Open => Ok(()),
+            PublisherAdmissionState::Closed => Err(CoreError::ShuttingDown),
+            PublisherAdmissionState::Deleted => Err(self.namespace_deleted()),
+        }
     }
 
     /// Drops the engine's tail projection, reporting whether it took the
     /// engine to do so. A `false` return means a publication or delete holds
     /// the engine, and that unit's own settlement reports what it retains.
-    fn invalidate_engine(&self) -> bool {
+    fn invalidate_projection(&self) -> bool {
         let Ok(mut slot) = self.engine.try_lock() else {
             return false;
         };
         if let Some(engine) = slot.engine.as_mut() {
-            engine.invalidate();
+            engine.invalidate_projection();
         }
         true
     }
@@ -736,14 +761,7 @@ impl NamespacePublisher {
         enqueued_at: Instant,
     ) -> Result<(), CoreError> {
         let mut state = self.lock_state();
-        if state.deleted {
-            return Err(CoreError::NamespaceDeleted {
-                namespace_id: self.namespace_id.clone(),
-            });
-        }
-        if state.closed {
-            return Err(CoreError::ShuttingDown);
-        }
+        self.check_admission(&state)?;
         if let Some(existing) = state.in_flight.get_mut(&commit_id) {
             if existing.semantic_identity != semantic_identity {
                 // Both claims are still in flight, so nothing has landed
@@ -799,14 +817,7 @@ impl NamespacePublisher {
         let (sender, receiver) = oneshot::channel();
         {
             let mut state = self.lock_state();
-            if state.deleted {
-                return Err(CoreError::NamespaceDeleted {
-                    namespace_id: self.namespace_id.clone(),
-                });
-            }
-            if state.closed {
-                return Err(CoreError::ShuttingDown);
-            }
+            self.check_admission(&state)?;
             match state.queue.back_mut() {
                 // A delete queued with the same options is the same request:
                 // both callers share its outcome. Different options ask for
@@ -903,7 +914,7 @@ impl NamespacePublisher {
         let mut state = self.lock_state();
         // Terminal: a successful delete emptied the queue and set this
         // before its worker returned, so nothing may be taken afterwards.
-        if state.deleted || state.queue.is_empty() {
+        if matches!(state.admission, PublisherAdmissionState::Deleted) || state.queue.is_empty() {
             state.worker = None;
             return None;
         }
@@ -1073,12 +1084,12 @@ impl NamespacePublisher {
                 // the delete; admissions from here on fail fast.
                 let queued = {
                     let mut state = self.lock_state();
-                    state.deleted = true;
+                    state.admission = PublisherAdmissionState::Deleted;
                     take_queued_waiters(&mut state)
                 };
                 // The publisher is terminal; drop it from the registry map
                 // so the map stays bounded by live namespaces. Clones still
-                // in flight fail fast on `deleted`, and a later submission
+                // in flight fail fast on `Deleted`, and a later submission
                 // gets a fresh publisher whose publish fails on the durable
                 // tombstone.
                 if let Some(shared) = self.shared.upgrade() {

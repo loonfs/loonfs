@@ -29,45 +29,37 @@ use tracing::Instrument;
 #[derive(Debug, Clone)]
 pub(crate) struct PublishBatchAgainstViewResult {
     pub(crate) results: Vec<Result<ApiCommitResponse>>,
-    pub(crate) published_records: Vec<WalCommitPayload>,
-    pub(crate) resulting_head: Option<HeadState>,
-    pub(crate) resulting_head_etag: Option<String>,
-    pub(crate) can_reuse_loaded_projection: bool,
+    pub(crate) effect: PublishViewEffect,
+}
+
+/// What one batch did to the publish view it ran against — the whole of what
+/// a caller needs to decide the fate of the projection it loaded.
+#[derive(Debug, Clone)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per published batch, moved once: indirection would buy an allocation and save nothing"
+)]
+pub(crate) enum PublishViewEffect {
+    /// Nothing was written: the loaded projection still describes the tail.
+    Unchanged,
+    /// The batch may have left durable state the loaded projection does not
+    /// account for, so that projection must be dropped.
+    Invalidated,
+    /// The head advanced past one new WAL segment. `head_etag` is absent
+    /// when the store's compare-and-swap acknowledgement carried none: the
+    /// head still advanced, but the projection cannot be re-anchored to it.
+    Advanced {
+        records: Vec<WalCommitPayload>,
+        head: HeadState,
+        head_etag: Option<String>,
+    },
 }
 
 impl PublishBatchAgainstViewResult {
-    fn new(results: Vec<Result<ApiCommitResponse>>) -> Self {
+    fn unchanged(results: Vec<Result<ApiCommitResponse>>) -> Self {
         Self {
             results,
-            published_records: Vec::new(),
-            resulting_head: None,
-            resulting_head_etag: None,
-            can_reuse_loaded_projection: true,
-        }
-    }
-
-    fn invalidate_projection(results: Vec<Result<ApiCommitResponse>>) -> Self {
-        Self {
-            results,
-            published_records: Vec::new(),
-            resulting_head: None,
-            resulting_head_etag: None,
-            can_reuse_loaded_projection: false,
-        }
-    }
-
-    fn published(
-        results: Vec<Result<ApiCommitResponse>>,
-        published_records: Vec<WalCommitPayload>,
-        resulting_head: HeadState,
-        resulting_head_etag: Option<String>,
-    ) -> Self {
-        Self {
-            results,
-            published_records,
-            resulting_head: Some(resulting_head),
-            resulting_head_etag,
-            can_reuse_loaded_projection: false,
+            effect: PublishViewEffect::Unchanged,
         }
     }
 }
@@ -83,11 +75,11 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     timer: &dyn MonotonicTimer,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
-        return PublishBatchAgainstViewResult::new(Vec::new());
+        return PublishBatchAgainstViewResult::unchanged(Vec::new());
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     if view.head.namespace_id != *namespace_id {
-        return PublishBatchAgainstViewResult::new(
+        return PublishBatchAgainstViewResult::unchanged(
             (0..candidates.len())
                 .map(|_| {
                     Err(CoreError::Internal(
@@ -226,7 +218,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     drop(prepare_span);
 
     if accepted.is_empty() {
-        return PublishBatchAgainstViewResult::new(dedup.finish(outcomes));
+        return PublishBatchAgainstViewResult::unchanged(dedup.finish(outcomes));
     }
     let records = accepted
         .iter()
@@ -269,7 +261,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         });
         return abort_batch(outcomes, &dedup, &accepted, &error);
     }
-    let resulting_head_etag = match cas_batch_head(
+    let head_etag = match cas_batch_head(
         store,
         &view.head_etag,
         &head_publish,
@@ -282,21 +274,22 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         Err(error) => return abort_batch(outcomes, &dedup, &accepted, &error),
     };
 
-    let published_records = wal.envelope.payload.records.clone();
+    let records = wal.envelope.payload.records.clone();
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
         outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
             namespace_id: namespace_id.clone(),
             commit_id: record.prepared.request.commit_id,
-            committed_seq: published_records[accepted_index].seq,
+            committed_seq: records[accepted_index].seq,
         }));
     }
-    let results = dedup.finish(outcomes);
-    PublishBatchAgainstViewResult::published(
-        results,
-        published_records,
-        head_publish.resulting_head,
-        resulting_head_etag,
-    )
+    PublishBatchAgainstViewResult {
+        results: dedup.finish(outcomes),
+        effect: PublishViewEffect::Advanced {
+            records,
+            head: head_publish.resulting_head,
+            head_etag,
+        },
+    }
 }
 
 /// Aborts a batch whose accepted candidates never became durable.
@@ -310,7 +303,10 @@ fn abort_batch(
     error: &CoreError,
 ) -> PublishBatchAgainstViewResult {
     fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, accepted, error);
-    PublishBatchAgainstViewResult::invalidate_projection(dedup.finish(outcomes))
+    PublishBatchAgainstViewResult {
+        results: dedup.finish(outcomes),
+        effect: PublishViewEffect::Invalidated,
+    }
 }
 
 /// Writes the accepted records as one durable WAL segment.

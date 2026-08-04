@@ -109,7 +109,7 @@ impl FsWriter {
     /// caches, and the rebuildable half of its publisher's publish state.
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
         self.core.invalidate_namespace_read_cache(namespace_id);
-        self.publisher.invalidate_engine(namespace_id);
+        self.publisher.invalidate_projection(namespace_id);
     }
 
     pub(crate) fn finish_namespace_mutation<T>(
@@ -826,7 +826,7 @@ pub(crate) async fn publish_batch_with_engine(
         // Diagnostic mode: the publisher's engine outlives the publish
         // even with caches off, so drop the tail projection it just
         // built. Every publish then reads what a cold engine reads.
-        engine.invalidate();
+        engine.invalidate_projection();
     }
     {
         let _span = tracing::info_span!(
