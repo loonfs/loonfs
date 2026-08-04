@@ -19,8 +19,8 @@ use loonfs_api::{
         AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
         CompleteUploadResponse, DirectMultipartUpload, DirectMultipartUploadOptions,
         DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest,
-        SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadMode,
-        UploadSessionStatus, UploadStatusResponse, ValidatedContentToken,
+        SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadSessionStatus,
+        UploadStatusResponse, ValidatedContentToken,
     },
     ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
@@ -161,11 +161,10 @@ async fn begin_direct_put_upload(
         )
         .map_err(presign_issuer_error)?;
 
-    Ok(Json(BeginUploadResponse {
+    Ok(Json(BeginUploadResponse::DirectPut {
         namespace_id: prepared.namespace_id,
         upload_id: prepared.upload_id,
-        mode: UploadMode::DirectPut,
-        direct_put: Some(DirectPutUpload {
+        direct_put: DirectPutUpload {
             content_ref,
             access: ObjectTransferAccess::PresignedUrl {
                 method: signed.method,
@@ -173,8 +172,7 @@ async fn begin_direct_put_upload(
                 headers: signed.headers,
                 expires_at_ms: signed.expires_at_ms,
             },
-        }),
-        direct_multipart: None,
+        },
     }))
 }
 
@@ -205,14 +203,12 @@ async fn begin_direct_multipart_upload(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
 
-    Ok(Json(BeginUploadResponse {
+    Ok(Json(BeginUploadResponse::DirectMultipart {
         namespace_id: prepared.namespace_id,
         upload_id: prepared.upload_id,
-        mode: UploadMode::DirectMultipart,
-        direct_put: None,
-        direct_multipart: Some(DirectMultipartUpload {
+        direct_multipart: DirectMultipartUpload {
             part_size_bytes: prepared.target.part_size_bytes,
-        }),
+        },
     }))
 }
 

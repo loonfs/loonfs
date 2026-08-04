@@ -12,7 +12,7 @@
 use super::*;
 use crate::transport::test_transport::{self, Outcome};
 use futures::stream::StreamExt;
-use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload, UploadMode};
+use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload};
 use loonfs_api::{
     direct_put_checksum_feature, CapabilityDocument, ContentId, ContentRef,
     FEATURE_UPLOADS_DIRECT_PUT, PROFILE_CORE_V0, PROTOCOL_VERSION,
@@ -223,11 +223,10 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
 }
 
 fn begin_direct_put(content_ref: ContentRef) -> Outcome {
-    json(&BeginUploadResponse {
+    json(&BeginUploadResponse::DirectPut {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
-        mode: UploadMode::DirectPut,
-        direct_put: Some(DirectPutUpload {
+        direct_put: DirectPutUpload {
             content_ref,
             access: ObjectTransferAccess::PresignedUrl {
                 method: "PUT".to_owned(),
@@ -235,30 +234,24 @@ fn begin_direct_put(content_ref: ContentRef) -> Outcome {
                 headers: std::collections::BTreeMap::new(),
                 expires_at_ms: u64::MAX,
             },
-        }),
-        direct_multipart: None,
+        },
     })
 }
 
 fn begin_multipart() -> Outcome {
-    json(&BeginUploadResponse {
+    json(&BeginUploadResponse::DirectMultipart {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
-        mode: UploadMode::DirectMultipart,
-        direct_put: None,
-        direct_multipart: Some(DirectMultipartUpload {
+        direct_multipart: DirectMultipartUpload {
             part_size_bytes: TEST_PART_BYTES,
-        }),
+        },
     })
 }
 
 fn begin_proxied() -> Outcome {
-    json(&BeginUploadResponse {
+    json(&BeginUploadResponse::ServiceProxied {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
-        mode: UploadMode::ServiceProxied,
-        direct_put: None,
-        direct_multipart: None,
     })
 }
 

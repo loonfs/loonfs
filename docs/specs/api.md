@@ -1616,6 +1616,12 @@ the server knows which transport a session was opened with; completing a
 session with the other shape is `invalid_request` too, reported after the
 record is read.
 
+The begin-upload *response* is tagged the same way, in the same `mode`, and
+carries its transport's field and no other's: `service_proxied` carries
+neither `direct_put` nor `direct_multipart`, and each direct mode carries
+only its own. Unlike the request bodies it does not reject unknown fields,
+because a response reader must tolerate what a later server adds.
+
 An upload session allocates its content object when it begins, so repeating
 `PUT /content` with the same bytes for the same upload id writes the same
 object and is idempotent. Repeating it with different bytes is a conflict.

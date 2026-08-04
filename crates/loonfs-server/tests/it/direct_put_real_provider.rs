@@ -6,9 +6,9 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
     v0::{
-        CompleteUploadRequest, DirectMultipartContentClaim, DirectMultipartUploadOptions,
-        DirectPutContentClaim, ObjectTransferAccess, UploadPartChecksumClaim,
-        ValidatedContentToken,
+        BeginUploadResponse, CompleteUploadRequest, DirectMultipartContentClaim,
+        DirectMultipartUpload, DirectMultipartUploadOptions, DirectPutContentClaim,
+        DirectPutUpload, ObjectTransferAccess, UploadPartChecksumClaim, ValidatedContentToken,
     },
     ChangeSeq, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse, DestinationBehavior,
     FilesystemOperation, NamespaceId, StorageChecksum,
@@ -70,6 +70,24 @@ fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> DirectPutCont
     DirectPutContentClaim {
         size_bytes: bytes.len() as u64,
         storage_checksum: StorageChecksum::compute(algorithm, bytes),
+    }
+}
+
+/// The presigned write a `direct_put` begin answered with.
+fn direct_put_of(begin: &BeginUploadResponse) -> &DirectPutUpload {
+    match begin {
+        BeginUploadResponse::DirectPut { direct_put, .. } => direct_put,
+        other => unreachable!("a direct_put begin answered as {:?}", other.mode()),
+    }
+}
+
+/// The part geometry a `direct_multipart` begin answered with.
+fn direct_multipart_of(begin: &BeginUploadResponse) -> DirectMultipartUpload {
+    match begin {
+        BeginUploadResponse::DirectMultipart {
+            direct_multipart, ..
+        } => *direct_multipart,
+        other => unreachable!("a direct_multipart begin answered as {:?}", other.mode()),
     }
 }
 
@@ -163,7 +181,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         )
         .await
         .expect("begin direct put");
-    let direct_put = begin.direct_put.expect("direct-put access");
+    let direct_put = direct_put_of(&begin);
     // The server minted the identity; the client learns it here and names it
     // everywhere afterwards.
     let content_ref = direct_put.content_ref.clone();
@@ -189,7 +207,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .client
         .complete_upload(
             &namespace_id,
-            &begin.upload_id,
+            begin.upload_id(),
             &CompleteUploadRequest::for_content_ref(content_ref.clone()),
         )
         .await
@@ -328,7 +346,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
         )
         .await
         .expect("begin wrong-bytes direct put");
-    let direct_put = begin.direct_put.expect("wrong-bytes direct-put access");
+    let direct_put = direct_put_of(&begin);
     let content_ref = direct_put.content_ref.clone();
 
     expect_client_rejection(
@@ -341,7 +359,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
         client
             .complete_upload(
                 namespace_id,
-                &begin.upload_id,
+                begin.upload_id(),
                 &CompleteUploadRequest::for_content_ref(content_ref),
             )
             .await,
@@ -395,7 +413,7 @@ async fn assert_direct_put_requires_its_signed_headers(
             )
             .await
             .expect("begin meddled direct put");
-        let direct_put = begin.direct_put.expect("meddled direct-put access");
+        let direct_put = direct_put_of(&begin);
         let content_ref = direct_put.content_ref.clone();
 
         expect_client_rejection(
@@ -410,7 +428,7 @@ async fn assert_direct_put_requires_its_signed_headers(
             client
                 .complete_upload(
                     namespace_id,
-                    &begin.upload_id,
+                    begin.upload_id(),
                     &CompleteUploadRequest::for_content_ref(content_ref),
                 )
                 .await,
@@ -434,7 +452,7 @@ async fn assert_direct_put_is_no_replace(
         )
         .await
         .expect("begin duplicate direct put");
-    let direct_put = begin.direct_put.expect("duplicate direct-put access");
+    let direct_put = direct_put_of(&begin);
     let content_ref = direct_put.content_ref.clone();
 
     client
@@ -451,7 +469,7 @@ async fn assert_direct_put_is_no_replace(
     let complete = client
         .complete_upload(
             namespace_id,
-            &begin.upload_id,
+            begin.upload_id(),
             &CompleteUploadRequest::for_content_ref(content_ref),
         )
         .await
@@ -776,7 +794,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
         )
         .await
         .expect("begin direct put");
-    let direct_put = begin.direct_put.expect("direct-put access");
+    let direct_put = direct_put_of(&begin);
     let content_ref = direct_put.content_ref.clone();
     client
         .upload_via_presigned_url(&direct_put.access, bytes)
@@ -800,7 +818,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
         let refused = client
             .complete_upload(
                 namespace_id,
-                &begin.upload_id,
+                begin.upload_id(),
                 &CompleteUploadRequest::for_content_ref(claimed),
             )
             .await;
@@ -811,7 +829,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
     let complete = client
         .complete_upload(
             namespace_id,
-            &begin.upload_id,
+            begin.upload_id(),
             &CompleteUploadRequest::for_content_ref(content_ref.clone()),
         )
         .await
@@ -846,7 +864,7 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
         )
         .await
         .expect("begin direct put");
-    let direct_put = begin.direct_put.expect("direct-put access");
+    let direct_put = direct_put_of(&begin);
     let ObjectTransferAccess::PresignedUrl { url, .. } = &direct_put.access;
     let StoreConfig::GcpGcs {
         bucket, key_prefix, ..
@@ -950,7 +968,7 @@ async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id:
         )
         .await
         .expect("begin direct put");
-    let direct_put = begin.direct_put.expect("direct-put access");
+    let direct_put = direct_put_of(&begin);
     let ObjectTransferAccess::PresignedUrl { url, .. } = &direct_put.access;
 
     // Rewrite the capability's own lifetime to one already spent. The
@@ -1099,8 +1117,8 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .begin_direct_multipart(&namespace_id, DirectMultipartUploadOptions::default())
         .await
         .expect("begin direct multipart");
-    let upload_id = begin.upload_id.clone();
-    let multipart = begin.direct_multipart.expect("multipart geometry");
+    let upload_id = begin.upload_id().clone();
+    let multipart = direct_multipart_of(&begin);
     assert_eq!(
         multipart.part_size_bytes as usize, part_size,
         "the deployment's part geometry is the one this payload was cut to"

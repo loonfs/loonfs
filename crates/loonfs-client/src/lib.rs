@@ -505,6 +505,15 @@ fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<Object
         })
 }
 
+/// A begin-upload response that is not the transport the request asked for.
+///
+/// Which transport carries a payload is settled before the request goes
+/// out, from what the deployment advertises, so a different mode coming
+/// back is a broken server rather than something to fall back from.
+fn negotiated_a_different_upload_mode() -> ClientError {
+    ClientError::Http("the server answered with a different upload mode than negotiated".to_owned())
+}
+
 /// A path qualified by namespace.
 ///
 /// Both parts are validated at construction — [`NamespacePath::parse`] for
@@ -1659,10 +1668,13 @@ impl Client {
                 },
             )
             .await?;
-        let Some(direct_put) = begin.direct_put else {
-            return Err(ClientError::Http(
-                "server accepted direct_put without a write capability".to_owned(),
-            ));
+        let BeginUploadResponse::DirectPut {
+            upload_id,
+            direct_put,
+            ..
+        } = begin
+        else {
+            return Err(negotiated_a_different_upload_mode());
         };
         let written = match body {
             DirectPutBody::Held(bytes) => {
@@ -1675,13 +1687,13 @@ impl Client {
             }
         };
         if let Err(error) = written {
-            let _ = self.abort_upload(namespace_id, &begin.upload_id).await;
+            let _ = self.abort_upload(namespace_id, &upload_id).await;
             return Err(error);
         }
         let response = self
             .complete_upload(
                 namespace_id,
-                &begin.upload_id,
+                &upload_id,
                 &CompleteUploadRequest::for_content_ref(direct_put.content_ref),
             )
             .await?;
@@ -1715,15 +1727,18 @@ impl Client {
                 let begin = self
                     .begin_direct_multipart(namespace_id, DirectMultipartUploadOptions::default())
                     .await?;
-                let Some(multipart) = begin.direct_multipart else {
-                    return Err(ClientError::Http(
-                        "server accepted direct_multipart without part geometry".to_owned(),
-                    ));
+                let BeginUploadResponse::DirectMultipart {
+                    upload_id,
+                    direct_multipart,
+                    ..
+                } = begin
+                else {
+                    return Err(negotiated_a_different_upload_mode());
                 };
                 if let Some(journal) = continuity.journal {
-                    journal.began(&begin.upload_id, multipart.part_size_bytes);
+                    journal.began(&upload_id, direct_multipart.part_size_bytes);
                 }
-                (begin.upload_id, multipart.part_size_bytes)
+                (upload_id, direct_multipart.part_size_bytes)
             }
         };
         let uploaded = self
@@ -1935,9 +1950,9 @@ impl Client {
             .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
         let staged = self
-            .upload_content(namespace_id, &upload.upload_id, bytes)
+            .upload_content(namespace_id, upload.upload_id(), bytes)
             .await?;
-        self.complete_staged(namespace_id, &upload.upload_id, staged)
+        self.complete_staged(namespace_id, upload.upload_id(), staged)
             .await
     }
 
@@ -1955,16 +1970,16 @@ impl Client {
             .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
         let staged = self
-            .upload_streamed_content(namespace_id, &upload.upload_id, source)
+            .upload_streamed_content(namespace_id, upload.upload_id(), source)
             .await;
         let staged = match staged {
             Ok(staged) => staged,
             Err(error) => {
-                let _ = self.abort_upload(namespace_id, &upload.upload_id).await;
+                let _ = self.abort_upload(namespace_id, upload.upload_id()).await;
                 return Err(error);
             }
         };
-        self.complete_staged(namespace_id, &upload.upload_id, staged)
+        self.complete_staged(namespace_id, upload.upload_id(), staged)
             .await
     }
 

@@ -495,7 +495,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
 
     let staged = harness
         .writer
-        .upload_content(&harness.namespace_id, &begin.upload_id, bytes)
+        .upload_content(&harness.namespace_id, begin.upload_id(), bytes)
         .await
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
@@ -515,7 +515,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .writer
         .complete_upload_prepared(
             &harness.namespace_id,
-            &begin.upload_id,
+            begin.upload_id(),
             &CompleteUploadRequest::for_content_ref(staged.content_ref),
         )
         .await

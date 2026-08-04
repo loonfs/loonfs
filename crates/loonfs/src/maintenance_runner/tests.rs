@@ -871,13 +871,13 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
     );
 
     let uploaded = writer
-        .upload_content(&namespace_id, &begun.upload_id, b"body")
+        .upload_content(&namespace_id, begun.upload_id(), b"body")
         .await
         .expect("upload content");
     writer
         .complete_upload(
             &namespace_id,
-            &begun.upload_id,
+            begun.upload_id(),
             &CompleteUploadRequest::for_content_ref(uploaded.content_ref),
         )
         .await

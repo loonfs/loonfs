@@ -66,19 +66,19 @@ fn upload_flow_is_available_from_runtime() {
         .begin_upload_blocking(&namespace_id)
         .expect("begin upload");
     let staged = fs
-        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
+        .upload_content_blocking(&namespace_id, begin.upload_id(), b"uploaded")
         .expect("upload content");
     let staged_again = fs
-        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
+        .upload_content_blocking(&namespace_id, begin.upload_id(), b"uploaded")
         .expect("repeat upload content");
     assert_eq!(staged.content_ref, staged_again.content_ref);
 
     let request = CompleteUploadRequest::for_content_ref(staged.content_ref);
     let completed = fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
+        .complete_upload_blocking(&namespace_id, begin.upload_id(), &request)
         .expect("complete upload");
     let completed_again = fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
+        .complete_upload_blocking(&namespace_id, begin.upload_id(), &request)
         .expect("repeat complete upload");
     assert_eq!(completed.content_ref, completed_again.content_ref);
 }
@@ -461,14 +461,14 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 .expect("begin upload");
             let staged = fs
                 .writer
-                .upload_content(&namespace_id, &begin.upload_id, bytes)
+                .upload_content(&namespace_id, begin.upload_id(), bytes)
                 .await
                 .expect("upload content");
             let completed = fs
                 .writer
                 .complete_upload(
                     &namespace_id,
-                    &begin.upload_id,
+                    begin.upload_id(),
                     &CompleteUploadRequest::for_content_ref(staged.content_ref),
                 )
                 .await
