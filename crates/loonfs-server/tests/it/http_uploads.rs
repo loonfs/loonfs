@@ -131,18 +131,18 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         .expect("begin upload");
     let first_content = harness
         .client
-        .upload_content(&namespace, &begin.upload_id, file_bytes)
+        .upload_content(&namespace, begin.upload_id(), file_bytes)
         .await
         .expect("upload content");
     let repeated_content = harness
         .client
-        .upload_content(&namespace, &begin.upload_id, file_bytes)
+        .upload_content(&namespace, begin.upload_id(), file_bytes)
         .await
         .expect("repeat upload content");
     assert_eq!(first_content, repeated_content);
     match harness
         .client
-        .upload_content(&namespace, &begin.upload_id, b"different bytes")
+        .upload_content(&namespace, begin.upload_id(), b"different bytes")
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
@@ -156,7 +156,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         .expect("begin mismatch upload");
     let staged = harness
         .client
-        .upload_content(&namespace, &mismatch_upload.upload_id, file_bytes)
+        .upload_content(&namespace, mismatch_upload.upload_id(), file_bytes)
         .await
         .expect("stage mismatch upload content");
     assert_ne!(
@@ -167,7 +167,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         .client
         .complete_upload(
             &namespace,
-            &mismatch_upload.upload_id,
+            mismatch_upload.upload_id(),
             &CompleteUploadRequest::for_content_ref(ContentRef::blob_v1(
                 ContentId::generate(),
                 b"other bytes",
@@ -289,14 +289,14 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
-    let status = read_upload_status(&harness.server_url, &open.upload_id);
+    let status = read_upload_status(&harness.server_url, open.upload_id());
     assert!(matches!(status.status, UploadSessionStatus::Open { .. }));
 
     // Aborting it is terminal, repeatable, and observable.
-    let aborted = abort_upload(&harness.server_url, &open.upload_id).expect("abort");
-    let repeated = abort_upload(&harness.server_url, &open.upload_id).expect("repeated abort");
+    let aborted = abort_upload(&harness.server_url, open.upload_id()).expect("abort");
+    let repeated = abort_upload(&harness.server_url, open.upload_id()).expect("repeated abort");
     assert_eq!(repeated, aborted);
-    let status = read_upload_status(&harness.server_url, &open.upload_id);
+    let status = read_upload_status(&harness.server_url, open.upload_id());
     let UploadSessionStatus::Aborted { aborted_at_ms } = status.status else {
         unreachable!("an aborted session reports itself aborted");
     };
@@ -308,7 +308,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .client
         .complete_upload(
             &namespace,
-            &open.upload_id,
+            open.upload_id(),
             &CompleteUploadRequest::for_content_ref(ContentRef::blob_v1(
                 ContentId::generate(),
                 b"never staged",
@@ -458,19 +458,19 @@ async fn complete_upload_session(
         .expect("begin upload");
     let staged = harness
         .client
-        .upload_content(namespace, &begin.upload_id, bytes)
+        .upload_content(namespace, begin.upload_id(), bytes)
         .await
         .expect("upload content");
     let completed = harness
         .client
         .complete_upload(
             namespace,
-            &begin.upload_id,
+            begin.upload_id(),
             &CompleteUploadRequest::for_content_ref(staged.content_ref),
         )
         .await
         .expect("complete upload");
-    (begin.upload_id, completed.content_ref)
+    (begin.upload_id().clone(), completed.content_ref)
 }
 
 fn read_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadStatusResponse {

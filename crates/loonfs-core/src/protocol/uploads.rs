@@ -83,12 +83,9 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
         context,
     )
     .await?;
-    Ok(BeginUploadResponse {
+    Ok(BeginUploadResponse::ServiceProxied {
         namespace_id: namespace_id.clone(),
         upload_id,
-        mode: UploadMode::ServiceProxied,
-        direct_put: None,
-        direct_multipart: None,
     })
 }
 
@@ -1500,7 +1497,7 @@ mod tests {
         )
         .await
         .expect("begin upload");
-        let staged = upload_content(store, &namespace_id, &begin.upload_id, BYTES)
+        let staged = upload_content(store, &namespace_id, begin.upload_id(), BYTES)
             .await
             .expect("stage upload");
         let content_store_id = load_namespace_content_store_id(store, &namespace_id)
@@ -1510,7 +1507,7 @@ mod tests {
         (
             namespace_id,
             content_store_id,
-            begin.upload_id,
+            begin.upload_id().clone(),
             staged.content_ref,
             content_key,
         )
@@ -1687,12 +1684,12 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            &aborted.upload_id,
+            aborted.upload_id(),
             &context(3_000),
         )
         .await
         .expect("abort");
-        let error = upload_content(&store, &namespace_id, &aborted.upload_id, BYTES)
+        let error = upload_content(&store, &namespace_id, aborted.upload_id(), BYTES)
             .await
             .expect_err("an aborted session takes no more bytes");
         assert!(matches!(error, CoreError::UploadNotFound { .. }));
@@ -1751,7 +1748,7 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            &begin.upload_id,
+            begin.upload_id(),
             &context(3_000),
         )
         .await
@@ -1760,7 +1757,7 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            &begin.upload_id,
+            begin.upload_id(),
             3_500,
         )
         .await

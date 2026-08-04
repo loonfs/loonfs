@@ -246,7 +246,7 @@ async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     let begin = begin_upload(&guarded_store, &namespace_id, &context)
         .await
         .expect("begin upload");
-    assert_eq!(begin.namespace_id, namespace_id);
+    assert_eq!(begin.namespace_id(), &namespace_id);
     assert_eq!(guarded_store.attempts(), 0);
 }
 
@@ -263,7 +263,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let begin = begin_upload(&store, &namespace_id, &context)
         .await
         .expect("begin upload");
-    let uploaded = upload_content(&store, &namespace_id, &begin.upload_id, b"hello", &context)
+    let uploaded = upload_content(&store, &namespace_id, begin.upload_id(), b"hello", &context)
         .await
         .expect("upload content");
 
@@ -271,7 +271,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let completed = complete_upload(
         &store,
         &namespace_id,
-        &begin.upload_id,
+        begin.upload_id(),
         &CompleteUploadRequest::for_content_ref(uploaded.content_ref.clone()),
         &context,
     )
@@ -284,7 +284,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let completed_again = complete_upload(
         &store,
         &namespace_id,
-        &begin.upload_id,
+        begin.upload_id(),
         &CompleteUploadRequest::for_content_ref(uploaded.content_ref),
         &context,
     )
@@ -299,7 +299,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let mismatch_uploaded = upload_content(
         &store,
         &namespace_id,
-        &mismatch_begin.upload_id,
+        mismatch_begin.upload_id(),
         b"staged",
         &context,
     )
@@ -312,7 +312,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let mismatch = complete_upload(
         &store,
         &namespace_id,
-        &mismatch_begin.upload_id,
+        mismatch_begin.upload_id(),
         &CompleteUploadRequest::for_content_ref(wrong_ref),
         &context,
     )
@@ -403,7 +403,7 @@ mod streamed_content {
         let begin = begin_upload(&store, &namespace_id, &context)
             .await
             .expect("begin upload");
-        let staged = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
+        let staged = upload_streamed(&store, &namespace_id, begin.upload_id(), &bytes, &context)
             .await
             .expect("stream a multi-part payload into the session");
 
@@ -423,7 +423,7 @@ mod streamed_content {
         let completed = complete_upload(
             &store,
             &namespace_id,
-            &begin.upload_id,
+            begin.upload_id(),
             &CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
             &context,
         )
@@ -450,10 +450,10 @@ mod streamed_content {
         let begin = begin_upload(&store, &namespace_id, &context)
             .await
             .expect("begin upload");
-        let first = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
+        let first = upload_streamed(&store, &namespace_id, begin.upload_id(), &bytes, &context)
             .await
             .expect("first streamed upload");
-        let repeated = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
+        let repeated = upload_streamed(&store, &namespace_id, begin.upload_id(), &bytes, &context)
             .await
             .expect("the same bytes again is the same upload");
         assert_eq!(first, repeated);
@@ -463,7 +463,7 @@ mod streamed_content {
         let error = upload_streamed(
             &store,
             &namespace_id,
-            &begin.upload_id,
+            begin.upload_id(),
             &different,
             &context,
         )
@@ -974,7 +974,7 @@ mod direct_multipart {
         upload_content(
             &store,
             &session.namespace_id,
-            &begin.upload_id,
+            begin.upload_id(),
             PART,
             &context,
         )
@@ -983,7 +983,7 @@ mod direct_multipart {
         let error = complete_upload(
             &store,
             &session.namespace_id,
-            &begin.upload_id,
+            begin.upload_id(),
             &CompleteUploadRequest::for_multipart(
                 session.claim.clone(),
                 upload_every_part(&store, &session),

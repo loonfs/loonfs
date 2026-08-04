@@ -249,16 +249,16 @@ pub(crate) mod http_split_support {
             .await
             .expect("begin upload");
         let staged = client
-            .upload_content(namespace_id, &begin.upload_id, file_bytes)
+            .upload_content(namespace_id, begin.upload_id(), file_bytes)
             .await
             .expect("upload content");
         let complete_request = CompleteUploadRequest::for_content_ref(staged.content_ref);
         let complete = client
-            .complete_upload(namespace_id, &begin.upload_id, &complete_request)
+            .complete_upload(namespace_id, begin.upload_id(), &complete_request)
             .await
             .expect("complete upload");
         let repeated = client
-            .complete_upload(namespace_id, &begin.upload_id, &complete_request)
+            .complete_upload(namespace_id, begin.upload_id(), &complete_request)
             .await
             .expect("repeat complete upload");
         assert_eq!(repeated.namespace_id, complete.namespace_id);

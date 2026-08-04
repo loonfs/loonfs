@@ -2977,49 +2977,97 @@
         "description": "Request for starting an upload session, tagged by the transport it asks\nfor.\n\nEach transport carries only what it needs, so the combinations a flat\nrequest could spell — a proxied begin carrying multipart geometry, a\ndirect put with no claim to sign — are refused when the body is decoded\nrather than by a handler reading them back. `mode` is required: a\nrequest that does not say how it intends to move its bytes is not a\nrequest this API can answer."
       },
       "BeginUploadResponse": {
-        "type": "object",
-        "description": "Response for starting an upload session.",
-        "required": [
-          "namespace_id",
-          "upload_id",
-          "mode"
-        ],
-        "properties": {
-          "direct_multipart": {
-            "oneOf": [
-              {
-                "type": "null"
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "BeginUploadResponseServiceProxied",
+            "description": "The service will receive the bytes and write the content object.",
+            "required": [
+              "namespace_id",
+              "upload_id",
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "service_proxied"
+                ]
               },
-              {
-                "$ref": "#/components/schemas/DirectMultipartUpload",
-                "description": "Part geometry for `DirectMultipart`, or `None` for every other mode."
+              "namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace authorized to consume the eventual staged content."
+              },
+              "upload_id": {
+                "$ref": "#/components/schemas/UploadId",
+                "description": "Durable session identity used by subsequent append and completion\ncalls."
               }
-            ]
+            }
           },
-          "direct_put": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
+          {
+            "type": "object",
+            "title": "BeginUploadResponseDirectPut",
+            "description": "One presigned request writes the whole object.",
+            "required": [
+              "namespace_id",
+              "upload_id",
+              "direct_put",
+              "mode"
+            ],
+            "properties": {
+              "direct_put": {
                 "$ref": "#/components/schemas/DirectPutUpload",
-                "description": "Presigned write details for `DirectPut`, or `None` for `ServiceProxied`."
+                "description": "The object this session writes, and the capability to write it."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "direct_put"
+                ]
+              },
+              "namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace authorized to consume the eventual staged content."
+              },
+              "upload_id": {
+                "$ref": "#/components/schemas/UploadId",
+                "description": "Durable session identity used by subsequent completion calls."
               }
-            ]
+            }
           },
-          "mode": {
-            "$ref": "#/components/schemas/UploadMode",
-            "description": "Transport selected after applying server capability and request validation."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace authorized to consume the eventual staged content."
-          },
-          "upload_id": {
-            "$ref": "#/components/schemas/UploadId",
-            "description": "Durable session identity used by subsequent append and completion calls."
+          {
+            "type": "object",
+            "title": "BeginUploadResponseDirectMultipart",
+            "description": "Presigned part uploads assemble the object.",
+            "required": [
+              "namespace_id",
+              "upload_id",
+              "direct_multipart",
+              "mode"
+            ],
+            "properties": {
+              "direct_multipart": {
+                "$ref": "#/components/schemas/DirectMultipartUpload",
+                "description": "The geometry the client cuts its payload to."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "direct_multipart"
+                ]
+              },
+              "namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace authorized to consume the eventual staged content."
+              },
+              "upload_id": {
+                "$ref": "#/components/schemas/UploadId",
+                "description": "Durable session identity used by subsequent part-signing and\ncompletion calls."
+              }
+            }
           }
-        }
+        ],
+        "description": "Response for starting an upload session, tagged by the transport the\nserver settled on.\n\nEach transport carries what its client needs next and nothing else, so\nthe combinations a flat response could spell — a proxied session holding\npresigned access, a direct put with no capability to write through — are\nnot values this type can hold. Unlike the request, unknown fields are\naccepted: a response reader tolerates what a later server adds."
       },
       "CapabilityDocument": {
         "type": "object",

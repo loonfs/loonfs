@@ -1350,7 +1350,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         .expect("begin a proxied upload session");
     assert_api_error(
         client
-            .upload_content(&namespace, &session.upload_id, &[0u8; 4096])
+            .upload_content(&namespace, session.upload_id(), &[0u8; 4096])
             .await,
         413,
         "content_too_large",

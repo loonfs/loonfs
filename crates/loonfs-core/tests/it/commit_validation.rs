@@ -239,12 +239,12 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .await
         .expect("begin upload");
     let staged = engine
-        .upload_content(&upload.upload_id, b"admitted")
+        .upload_content(upload.upload_id(), b"admitted")
         .await
         .expect("stage content");
     let completed = engine
         .complete_upload_prepared(
-            &upload.upload_id,
+            upload.upload_id(),
             &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
         )
         .await
@@ -950,12 +950,12 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .await
         .expect("begin upload");
     let staged = engine
-        .upload_content(&upload.upload_id, b"re-minted")
+        .upload_content(upload.upload_id(), b"re-minted")
         .await
         .expect("stage content");
     let completed = engine
         .complete_upload_prepared(
-            &upload.upload_id,
+            upload.upload_id(),
             &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
         )
         .await
@@ -985,7 +985,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
 
     // Reading the session mints another one for the same durable bytes.
     let (status, receipt) = engine
-        .read_upload_status(&upload.upload_id)
+        .read_upload_status(upload.upload_id())
         .await
         .expect("read upload status");
     match status.status {

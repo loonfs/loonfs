@@ -321,14 +321,18 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     .await
     .expect("begin upload");
     let staged =
-        crate::protocol::upload_content(store, namespace_id, &begin.upload_id, b"racing upload\n")
+        crate::protocol::upload_content(store, namespace_id, begin.upload_id(), b"racing upload\n")
             .await
             .expect("stage upload");
     let content_store_id =
         crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
             .await
             .expect("content store id");
-    (begin.upload_id, staged.content_ref, content_store_id)
+    (
+        begin.upload_id().clone(),
+        staged.content_ref,
+        content_store_id,
+    )
 }
 
 async fn read_upload_session<S: ObjectStore + ?Sized>(
@@ -907,7 +911,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("begin upload");
-    let staged = crate::protocol::upload_content(store, namespace_id, &begin.upload_id, bytes)
+    let staged = crate::protocol::upload_content(store, namespace_id, begin.upload_id(), bytes)
         .await
         .expect("stage upload");
     let content_store_id =
@@ -918,14 +922,14 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         &content_store_id,
-        &begin.upload_id,
+        begin.upload_id(),
         &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
         context,
     )
     .await
     .expect("complete upload");
     (
-        begin.upload_id,
+        begin.upload_id().clone(),
         staged.content_ref,
         content_store_id,
         completed.prepared,

@@ -266,22 +266,83 @@ pub struct ValidatedContentToken {
     pub token: String,
 }
 
-/// Response for starting an upload session.
+/// Response for starting an upload session, tagged by the transport the
+/// server settled on.
+///
+/// Each transport carries what its client needs next and nothing else, so
+/// the combinations a flat response could spell — a proxied session holding
+/// presigned access, a direct put with no capability to write through — are
+/// not values this type can hold. Unlike the request, unknown fields are
+/// accepted: a response reader tolerates what a later server adds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct BeginUploadResponse {
-    /// Namespace authorized to consume the eventual staged content.
-    pub namespace_id: NamespaceId,
-    /// Durable session identity used by subsequent append and completion calls.
-    pub upload_id: UploadId,
-    /// Transport selected after applying server capability and request validation.
-    pub mode: UploadMode,
-    /// Presigned write details for `DirectPut`, or `None` for `ServiceProxied`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_put: Option<DirectPutUpload>,
-    /// Part geometry for `DirectMultipart`, or `None` for every other mode.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_multipart: Option<DirectMultipartUpload>,
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum BeginUploadResponse {
+    /// The service will receive the bytes and write the content object.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "BeginUploadResponseServiceProxied")
+    )]
+    ServiceProxied {
+        /// Namespace authorized to consume the eventual staged content.
+        namespace_id: NamespaceId,
+        /// Durable session identity used by subsequent append and completion
+        /// calls.
+        upload_id: UploadId,
+    },
+    /// One presigned request writes the whole object.
+    #[cfg_attr(feature = "openapi", schema(title = "BeginUploadResponseDirectPut"))]
+    DirectPut {
+        /// Namespace authorized to consume the eventual staged content.
+        namespace_id: NamespaceId,
+        /// Durable session identity used by subsequent completion calls.
+        upload_id: UploadId,
+        /// The object this session writes, and the capability to write it.
+        direct_put: DirectPutUpload,
+    },
+    /// Presigned part uploads assemble the object.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "BeginUploadResponseDirectMultipart")
+    )]
+    DirectMultipart {
+        /// Namespace authorized to consume the eventual staged content.
+        namespace_id: NamespaceId,
+        /// Durable session identity used by subsequent part-signing and
+        /// completion calls.
+        upload_id: UploadId,
+        /// The geometry the client cuts its payload to.
+        direct_multipart: DirectMultipartUpload,
+    },
+}
+
+impl BeginUploadResponse {
+    /// Namespace that owns the session.
+    pub fn namespace_id(&self) -> &NamespaceId {
+        match self {
+            Self::ServiceProxied { namespace_id, .. }
+            | Self::DirectPut { namespace_id, .. }
+            | Self::DirectMultipart { namespace_id, .. } => namespace_id,
+        }
+    }
+
+    /// Session the later append, part, completion, and abort calls name.
+    pub fn upload_id(&self) -> &UploadId {
+        match self {
+            Self::ServiceProxied { upload_id, .. }
+            | Self::DirectPut { upload_id, .. }
+            | Self::DirectMultipart { upload_id, .. } => upload_id,
+        }
+    }
+
+    /// The transport this session was opened with.
+    pub fn mode(&self) -> UploadMode {
+        match self {
+            Self::ServiceProxied { .. } => UploadMode::ServiceProxied,
+            Self::DirectPut { .. } => UploadMode::DirectPut,
+            Self::DirectMultipart { .. } => UploadMode::DirectMultipart,
+        }
+    }
 }
 
 /// Response after uploading bytes into a session.
@@ -433,8 +494,9 @@ pub struct AbortUploadResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, DirectPutContentClaim,
-        DirectPutUpload, ObjectTransferAccess, UploadMode, UploadSessionStatus,
+        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, DirectMultipartUpload,
+        DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess, UploadMode,
+        UploadSessionStatus,
     };
     use crate::{ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, StorageChecksum, UploadId};
     use std::collections::BTreeMap;
@@ -496,12 +558,11 @@ mod tests {
 
     #[test]
     fn direct_put_response_exposes_only_presigned_access() {
-        let response = BeginUploadResponse {
+        let response = BeginUploadResponse::DirectPut {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             upload_id: UploadId::parse("upl_00000000000000000000000000000001")
                 .expect("valid upload id"),
-            mode: UploadMode::DirectPut,
-            direct_put: Some(DirectPutUpload {
+            direct_put: DirectPutUpload {
                 content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
                 access: ObjectTransferAccess::PresignedUrl {
                     method: "PUT".to_owned(),
@@ -515,13 +576,111 @@ mod tests {
                     ]),
                     expires_at_ms: 1,
                 },
-            }),
-            direct_multipart: None,
+            },
         };
 
         let json = serde_json::to_string(&response).expect("serialize response");
         assert!(json.contains(r#""kind":"presigned_url""#));
         assert!(!json.contains("object_key"));
+    }
+
+    /// The bytes each transport answers with, pinned. A response names its
+    /// transport in `mode` and carries that transport's field and no other's,
+    /// which is the same wire the flat shape spelled by convention.
+    #[test]
+    fn a_begin_response_carries_only_its_transports_field() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let upload_id =
+            UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id");
+        let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+        assert_eq!(
+            serde_json::to_value(BeginUploadResponse::ServiceProxied {
+                namespace_id: namespace_id.clone(),
+                upload_id: upload_id.clone(),
+            })
+            .expect("serialize proxied response"),
+            serde_json::json!({
+                "mode": "service_proxied",
+                "namespace_id": "demo",
+                "upload_id": "upl_00000000000000000000000000000001"
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(BeginUploadResponse::DirectPut {
+                namespace_id: namespace_id.clone(),
+                upload_id: upload_id.clone(),
+                direct_put: DirectPutUpload {
+                    content_ref: ContentRef::blob_v1(
+                        ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                            .expect("content id"),
+                        b"hello",
+                    ),
+                    access: ObjectTransferAccess::PresignedUrl {
+                        method: "PUT".to_owned(),
+                        url: "https://bucket.example/object".to_owned(),
+                        headers: BTreeMap::new(),
+                        expires_at_ms: 1,
+                    },
+                },
+            })
+            .expect("serialize direct-put response"),
+            serde_json::json!({
+                "mode": "direct_put",
+                "namespace_id": "demo",
+                "upload_id": "upl_00000000000000000000000000000001",
+                "direct_put": {
+                    "content_ref": {
+                        "kind": "blob_v1",
+                        "content_id": "con_0123456789abcdef0123456789abcdef",
+                        "size_bytes": 5,
+                        "storage_checksum": { "algorithm": "sha256", "value": sha256 },
+                        "whole_file_sha256": sha256
+                    },
+                    "access": {
+                        "kind": "presigned_url",
+                        "method": "PUT",
+                        "url": "https://bucket.example/object",
+                        "expires_at_ms": 1
+                    }
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(BeginUploadResponse::DirectMultipart {
+                namespace_id,
+                upload_id,
+                direct_multipart: DirectMultipartUpload {
+                    part_size_bytes: 8 * 1024 * 1024,
+                },
+            })
+            .expect("serialize multipart response"),
+            serde_json::json!({
+                "mode": "direct_multipart",
+                "namespace_id": "demo",
+                "upload_id": "upl_00000000000000000000000000000001",
+                "direct_multipart": { "part_size_bytes": 8 * 1024 * 1024 }
+            })
+        );
+    }
+
+    /// The request refuses fields it does not know; the response must not.
+    /// A reader that rejected them could not talk to a later server.
+    #[test]
+    fn a_begin_response_carrying_a_later_servers_field_still_decodes() {
+        assert_eq!(
+            serde_json::from_str::<BeginUploadResponse>(
+                r#"{"mode":"service_proxied","namespace_id":"demo","upload_id":"upl_00000000000000000000000000000001","invented_later":true}"#
+            )
+            .expect("decode a proxied response carrying an unknown field"),
+            BeginUploadResponse::ServiceProxied {
+                namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                upload_id: UploadId::parse("upl_00000000000000000000000000000001")
+                    .expect("valid upload id"),
+            }
+        );
     }
 
     /// A direct-put client declares what it is about to write; it cannot
