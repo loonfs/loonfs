@@ -4,7 +4,7 @@ use super::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, PresignedGetRequest,
     PresignedPartRequest, PresignedPutRequest, PresignedUrl,
 };
-use crate::keyspace::{parse_endpoint_url, scope_object_key};
+use crate::keyspace::{normalize_key_prefix, parse_endpoint_url, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
     canonical_query_string, hex_lower, hmac_sha256, normalize_header_value, percent_encode_path,
@@ -88,9 +88,16 @@ pub struct S3CompatiblePresigner {
 impl S3CompatiblePresigner {
     /// Creates a presigner after validating required bucket, region, and credential values.
     ///
-    /// Blank required values fail immediately; endpoint, key-prefix, content,
-    /// expiry, and signing-time failures surface when [`DirectPutIssuer::presign_put`] runs.
-    pub fn new(config: S3PresignerConfig) -> Result<Self> {
+    /// The key prefix is normalized here, through the same helper the
+    /// provider client uses, so the two resolve an object key to the same
+    /// string. They must: a signed write that lands outside the keyspace the
+    /// store reads, lists, and collects creates an object that is committed,
+    /// invisible, and unreclaimable.
+    ///
+    /// Blank required values and an unusable key prefix fail immediately;
+    /// endpoint, content, expiry, and signing-time failures surface when
+    /// [`DirectPutIssuer::presign_put`] runs.
+    pub fn new(mut config: S3PresignerConfig) -> Result<Self> {
         if config.bucket.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
                 "bucket must not be empty".to_owned(),
@@ -111,6 +118,7 @@ impl S3CompatiblePresigner {
                 "secret access key must not be empty".to_owned(),
             ));
         }
+        config.key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
         Ok(Self { config })
     }
 
@@ -545,6 +553,7 @@ fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES};
+    use crate::keyspace::{normalize_key_prefix, scope_object_key};
     use crate::presign::{
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
@@ -701,6 +710,67 @@ mod tests {
 
         let object_of = |url: &str| url.split('?').next().expect("url path").to_owned();
         assert_eq!(object_of(&read.url), object_of(&written.url));
+    }
+
+    /// The signer and the provider client resolve an object key to the same
+    /// string, whatever spelling of a prefix the deployment configured.
+    ///
+    /// A whitespace-only prefix is the case that used to split them: the
+    /// store normalizes it away and works in the unprefixed keyspace, while
+    /// the signer kept it raw and addressed `%20%20%20/...`. An object
+    /// written through such a capability is committed and then invisible to
+    /// every read, listing, and collection the store performs.
+    #[test]
+    fn the_signer_and_the_store_resolve_a_key_to_the_same_string() {
+        for raw_prefix in [None, Some("   "), Some(""), Some("tenant-a")] {
+            let signed = presigner(raw_prefix, None)
+                .presign_get(
+                    PresignedGetRequest {
+                        object_key: CONTENT_KEY,
+                        expires_in: Duration::from_secs(900),
+                    },
+                    UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+                )
+                .expect("presign get");
+
+            // Exactly what `ProviderObjectStore` does with the same value.
+            let store_key = scope_object_key(
+                normalize_key_prefix(raw_prefix)
+                    .expect("store normalizes the prefix")
+                    .as_deref(),
+                CONTENT_KEY,
+            )
+            .expect("store scopes the key");
+
+            let signed_path = signed.url.split('?').next().expect("url path");
+            assert_eq!(
+                signed_path,
+                format!("https://bucket.s3.us-east-1.amazonaws.com/{store_key}"),
+                "signer and store disagree about the key under prefix {raw_prefix:?}"
+            );
+        }
+    }
+
+    /// A prefix the store would refuse is refused here too, at construction,
+    /// rather than producing capabilities the store cannot address.
+    #[test]
+    fn an_unusable_key_prefix_fails_construction() {
+        for raw_prefix in ["tenant-a//bad", "../escape"] {
+            assert!(matches!(
+                S3CompatiblePresigner::new(S3PresignerConfig {
+                    bucket: "bucket".to_owned(),
+                    region: "us-east-1".to_owned(),
+                    endpoint_url: None,
+                    access_key_id: "access".into(),
+                    secret_access_key: "secret".into(),
+                    session_token: None,
+                    key_prefix: Some(raw_prefix.to_owned()),
+                    force_path_style: false,
+                    direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
+                }),
+                Err(ObjectStoreError::InvalidKey { .. })
+            ));
+        }
     }
 
     #[test]

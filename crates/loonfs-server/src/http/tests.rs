@@ -2803,10 +2803,9 @@ mod direct_download {
     /// The GCS shape, end to end, with no GCS-specific code anywhere above
     /// the object-store adapter.
     ///
-    /// A bundle that signs reads and CRC-32C whole-object writes and has no
-    /// multipart API is served by the same handler, carried by the same
-    /// client ladder, and completed by the same rule as the S3-compatible
-    /// one. The client learns `crc32c` from the capability document, folds
+    /// A bundle that signs reads and CRC-32C whole-object writes and no
+    /// multipart is served by the same handler, carried by the same client
+    /// ladder, and completed by the same rule as the S3-compatible one. The client learns `crc32c` from the capability document, folds
     /// exactly that digest over the payload in its one measuring pass, and
     /// the ref the commit records says so — with no `whole_file_sha256`,
     /// because nobody computed a SHA-256 over these bytes and the format does
@@ -2837,7 +2836,7 @@ mod direct_download {
         assert!(!advertised.supports(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256));
         assert!(
             !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
-            "GCS has no S3-style multipart API to advertise"
+            "this adapter signs no multipart for GCS, so the key must be absent"
         );
         assert_eq!(
             advertised.direct_put_checksum_algorithm(),

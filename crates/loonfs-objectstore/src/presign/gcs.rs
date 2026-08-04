@@ -10,7 +10,7 @@
 use super::{
     DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest, PresignedUrl,
 };
-use crate::keyspace::scope_object_key;
+use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
     canonical_query_string, hex_lower, normalize_header_value, percent_encode_path,
@@ -67,9 +67,13 @@ const MAX_PRESIGN_EXPIRY: u64 = 7 * 24 * 60 * 60;
 /// object ceiling is therefore the request ceiling.
 ///
 /// This is three orders of magnitude above the S3 family's 5 GiB single-PUT
-/// ceiling, and it is why GCS needs no multipart path to carry a large
-/// object: there is no size at which a whole-object write stops being
-/// expressible.
+/// ceiling, which is what lets this adapter carry large objects without
+/// signing multipart at all: there is no size at which the whole-object
+/// write stops being expressible. Google does document an XML API multipart
+/// upload, and documents it as S3-compatible; this adapter does not
+/// implement it, because it belongs to the same interoperability surface
+/// whose precondition handling conformance found unsound, and because the
+/// large-object path GCS is headed for is the native resumable upload.
 pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
 /// Supplies the service-account key and key scoping for native GCS signed URLs.
@@ -124,11 +128,18 @@ impl fmt::Debug for GcsV4Presigner {
 impl GcsV4Presigner {
     /// Creates a presigner, reading and parsing the service-account key once.
     ///
-    /// Construction fails for a blank bucket or key path, an unreadable or
-    /// malformed key file, or a private key that is not an RSA key in PKCS#8
-    /// form. Failing here is deliberate: a GCS deployment whose key cannot
-    /// sign also cannot authenticate its provider client, so the fault
-    /// belongs at startup rather than at the first transfer.
+    /// The key prefix is normalized here, through the same helper the
+    /// provider client uses. That is not tidiness: the two have to resolve
+    /// an object key to the same string or a signed write lands somewhere
+    /// the store's own reads, listings, and collection never look — an
+    /// object committed, invisible, and unreclaimable.
+    ///
+    /// Construction fails for a blank bucket or key path, an unusable key
+    /// prefix, an unreadable or malformed key file, or a private key that is
+    /// not an RSA key in PKCS#8 form. Failing here is deliberate: a GCS
+    /// deployment whose key cannot sign also cannot authenticate its
+    /// provider client, so the fault belongs at startup rather than at the
+    /// first transfer.
     pub fn new(config: GcsPresignerConfig) -> Result<Self> {
         if config.bucket.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
@@ -167,7 +178,7 @@ impl GcsV4Presigner {
 
         Ok(Self {
             bucket: config.bucket,
-            key_prefix: config.key_prefix,
+            key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             client_email: key.client_email,
             signing_key,
         })
@@ -448,6 +459,7 @@ fn invalid_direct_put_content(message: &str) -> ObjectStoreError {
 #[cfg(test)]
 mod tests {
     use super::{stored_crc32c, GcsPresignerConfig, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
+    use crate::keyspace::{normalize_key_prefix, scope_object_key};
     use crate::presign::{
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
@@ -632,6 +644,66 @@ mod tests {
             PUT_UNPREFIXED_SIGNATURE, PUT_PREFIXED_SIGNATURE,
             "the same object key under two prefixes must not sign alike"
         );
+    }
+
+    /// The signer and the provider client resolve an object key to the same
+    /// string, whatever spelling of a prefix the deployment configured.
+    ///
+    /// A whitespace-only prefix is the case that used to split them: the
+    /// store normalizes it away and works in the unprefixed keyspace, while
+    /// the signer kept it raw and addressed `%20%20%20/...`. An object
+    /// written through such a capability is committed and then invisible to
+    /// every read, listing, and collection the store performs — durable
+    /// nowhere anything looks.
+    #[test]
+    fn the_signer_and_the_store_resolve_a_key_to_the_same_string() {
+        for raw_prefix in [None, Some("   "), Some(""), Some("tenant-a")] {
+            let signed = presigner(raw_prefix)
+                .presign_get(
+                    PresignedGetRequest {
+                        object_key: CONTENT_KEY,
+                        expires_in: EXPIRES_IN,
+                    },
+                    signing_time(),
+                )
+                .expect("presign get");
+
+            // Exactly what `ProviderObjectStore` does with the same value.
+            let store_key = scope_object_key(
+                normalize_key_prefix(raw_prefix)
+                    .expect("store normalizes the prefix")
+                    .as_deref(),
+                CONTENT_KEY,
+            )
+            .expect("store scopes the key");
+
+            let signed_path = signed.url.split('?').next().expect("url path");
+            assert_eq!(
+                signed_path,
+                format!("https://storage.googleapis.com/bucket/{store_key}"),
+                "signer and store disagree about the key under prefix {raw_prefix:?}"
+            );
+        }
+    }
+
+    /// A prefix the store would refuse is refused here too, at construction,
+    /// rather than producing capabilities the store cannot address.
+    #[test]
+    fn an_unusable_key_prefix_fails_construction() {
+        for raw_prefix in ["tenant-a//bad", "../escape"] {
+            assert!(matches!(
+                GcsV4Presigner::new(GcsPresignerConfig {
+                    bucket: "bucket".to_owned(),
+                    service_account_key_path: gcs_fixture_service_account_key_file(
+                        "gcs-presign-prefix"
+                    )
+                    .display()
+                    .to_string(),
+                    key_prefix: Some(raw_prefix.to_owned()),
+                }),
+                Err(ObjectStoreError::InvalidKey { .. })
+            ));
+        }
     }
 
     /// Path segments are percent-encoded, and the separators between them are
