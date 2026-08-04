@@ -42,12 +42,22 @@ configuration the question a second time:
    `if-none-match: *`. GCS and Azure Blob can presign and enforce create-only
    but validate only CRC32C/MD5, neither of which the claim could name until
    now; the local filesystem has no signing surface at all.
-2. **The endpoint is one the live conformance suite has actually run against.**
-   An AWS S3 endpoint with no override, an override in the `amazonaws.com` or
-   `amazonaws.com.cn` domain family, and an R2 endpoint in the
-   `r2.cloudflarestorage.com` family qualify. Any other endpoint URL is some
-   other implementation of the S3 API, is not covered by those runs, and does
-   not qualify.
+2. **The endpoint is one the live conformance suite has actually run against,
+   reached over TLS.** An AWS S3 endpoint with no override, an override in
+   the `amazonaws.com` or `amazonaws.com.cn` domain family, and an R2
+   endpoint in the `r2.cloudflarestorage.com` family qualify. Any other
+   endpoint URL is some other implementation of the S3 API, is not covered by
+   those runs, and does not qualify.
+
+   The scheme is part of the test because a presigned URL is a bearer
+   capability to read or write one object: issued over `http`, it and its
+   signed headers would cross the network in cleartext for anyone on the path
+   to replay. So one of these domains on `http` earns no direct transfers,
+   and config validation rejects it outright, by name, saying https is
+   required — reaching a provider's own endpoint without TLS is a
+   misconfiguration rather than a choice. A private gateway on `http` is
+   left alone: it is a legitimate setup that simply earns no direct
+   transfers, for reason 2 above.
 
 Where both hold, the server advertises `core.uploads.direct_put` in its
 capability document and accepts the mode. Everywhere else the feature key is

@@ -7,6 +7,9 @@
 //! and kebab-case, documented by the examples in `configs/`.
 
 use crate::abs::AzureAbsStoreConfig;
+use crate::configured::{
+    endpoint_host_is_proven, AWS_S3_PROVEN_DOMAINS, CLOUDFLARE_R2_PROVEN_DOMAINS,
+};
 use crate::gcs::GcpGcsStoreConfig;
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use crate::secret::SecretString;
@@ -325,6 +328,11 @@ impl StoreConfig {
                 )?;
                 if let Some(url) = endpoint_url {
                     validate_absolute_http_url("store.endpoint_url", url)?;
+                    require_tls_on_proven_domains(
+                        "store.endpoint_url",
+                        url,
+                        AWS_S3_PROVEN_DOMAINS,
+                    )?;
                 }
             }
             StoreConfig::CloudflareR2 {
@@ -348,6 +356,11 @@ impl StoreConfig {
                     secret_access_key.expose(),
                 )?;
                 validate_absolute_http_url("store.endpoint_url", endpoint_url)?;
+                require_tls_on_proven_domains(
+                    "store.endpoint_url",
+                    endpoint_url,
+                    CLOUDFLARE_R2_PROVEN_DOMAINS,
+                )?;
             }
             StoreConfig::GcpGcs {
                 bucket,
@@ -445,6 +458,35 @@ fn fill_secret(
 
 fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
+}
+
+/// Refuses a provider's own domain addressed over plain `http`.
+///
+/// Reaching one of these endpoints without TLS is a misconfiguration, not a
+/// choice: they all serve TLS, and the deployment would otherwise mint
+/// presigned URLs — bearer capabilities to read or write one object — into
+/// cleartext. Any other host is left alone: a private gateway on `http` is a
+/// legitimate setup, and it simply earns no direct transfers.
+fn require_tls_on_proven_domains(
+    field: &'static str,
+    value: &str,
+    domain_families: &[&str],
+) -> Result<(), StoreConfigError> {
+    let Ok(uri) = value.trim().parse::<Uri>() else {
+        // Shape was already reported by the caller's URL validation.
+        return Ok(());
+    };
+    if uri.scheme_str() == Some("https") || !endpoint_host_is_proven(&uri, domain_families) {
+        return Ok(());
+    }
+    Err(StoreConfigError::InvalidField {
+        field,
+        reason: format!(
+            "`{}` is a provider endpoint and must be reached over https: a presigned URL is a \
+             bearer capability, and http would put it on the wire in cleartext",
+            uri.host().unwrap_or_default()
+        ),
+    })
 }
 
 fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), StoreConfigError> {
@@ -553,6 +595,61 @@ access_key = "key"
             assert_eq!(config.kind(), kind);
             config.validate().expect("valid config");
         }
+    }
+
+    /// A provider's own endpoint on plain `http` is a misconfiguration, and
+    /// the message says what to do about it. Any other host is left alone —
+    /// a private gateway on `http` is a legitimate setup that simply earns
+    /// no direct transfers.
+    #[test]
+    fn a_provider_endpoint_without_tls_is_rejected_by_name() {
+        for (contents, host) in [
+            (
+                r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+endpoint_url = "http://bucket.s3.amazonaws.com"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+                "bucket.s3.amazonaws.com",
+            ),
+            (
+                r#"
+kind = "cloudflare-r2"
+bucket = "bucket"
+account_id = "account"
+endpoint_url = "http://account.r2.cloudflarestorage.com"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+                "account.r2.cloudflarestorage.com",
+            ),
+        ] {
+            match parse(contents).validate() {
+                Err(StoreConfigError::InvalidField { field, reason }) => {
+                    assert_eq!(field, "store.endpoint_url");
+                    assert!(reason.contains(host), "{reason}");
+                    assert!(reason.contains("https"), "{reason}");
+                }
+                other => panic!("expected an https requirement, got {other:?}"),
+            }
+        }
+
+        // A gateway that is nobody's provider domain keeps working on http.
+        parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+endpoint_url = "http://127.0.0.1:9000"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        )
+        .validate()
+        .expect("a private http gateway is a valid configuration");
     }
 
     #[test]

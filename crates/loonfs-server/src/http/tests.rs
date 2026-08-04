@@ -1336,14 +1336,38 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     })
     .expect("valid client config");
     let target = NamespacePath::parse("demo", "/big.bin").expect("target");
+    let namespace = namespace_id("demo");
+
+    // The cap is the server's, and it holds against any client: this drives
+    // the proxied content route directly, the way a client that never read
+    // the capability document would.
+    let session = client
+        .begin_upload(
+            &namespace,
+            &loonfs_api::v0::BeginUploadRequest::ServiceProxied {},
+        )
+        .await
+        .expect("begin a proxied upload session");
     assert_api_error(
         client
-            .put_file_bytes(&target, &[0u8; 4096], &replace_file_options())
+            .upload_content(&namespace, &session.upload_id, &[0u8; 4096])
             .await,
         413,
         "content_too_large",
         None,
     );
+
+    // A client that did read the document never sends it at all: with no
+    // direct transport on offer here, the payload has nowhere to go and the
+    // refusal comes before the bytes move.
+    match client
+        .put_file_bytes(&target, &[0u8; 4096], &replace_file_options())
+        .await
+    {
+        Err(ClientError::UploadTooLarge { size_bytes, .. }) => assert_eq!(size_bytes, 4096),
+        other => panic!("expected a client-side refusal, got {other:?}"),
+    }
+
     // A body inside the limit still goes through on the same route.
     client
         .put_file_bytes(&target, &[0u8; 512], &replace_file_options())

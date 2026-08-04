@@ -1666,19 +1666,36 @@ down the transports its deployment advertises:
    its own and nothing has to know the payload's length in advance.
 2. `direct_put`, where advertised and `size_bytes` is at most
    `upload.direct_put_max_content_bytes`. This is the rung a provider that
-   can sign a write but has no multipart API to open offers, and it costs a
-   pass over the payload before the upload starts, because the digest is
-   signed into the write.
+   can sign a write but has no multipart API to open offers. It is the one
+   transport that reads the payload twice, because the digest is signed into
+   the write and so must be complete before the first body byte: one pass
+   folds the digest and counts the bytes, the second sends them. Neither pass
+   has to hold the payload — a file is simply re-opened, and any other source
+   is spooled to disk as the first pass reads it.
 3. `PUT /content` as a streaming request body, where `size_bytes` is at most
    `upload.max_content_bytes`. The server hashes the payload as it forwards
    it on. A body whose length is unknown is sent with chunked transfer
    encoding, and the server's incremental accounting is what bounds it.
 
-A payload that none of these can carry should be refused by the client,
+Every rung is judged against the advertised limits, never against an assumed
+one: a payload under one part is not thereby known to fit
+`upload.max_content_bytes`, since a deployment may set that cap anywhere. A
+payload that none of the three can carry should be refused by the client,
 naming the limits it passed, rather than sent into the proxy to be refused
-there. A source whose length is unknown cannot be checked against any of
-them, and cannot state a digest up front either, so it takes
-`direct_multipart` where that is advertised and `PUT /content` otherwise.
+there.
+
+**A declared length is a hint, and only a measured one may refuse.** A source
+may state its length up front, and that is what picks the rung — but it is
+not a promise, and a client that refused an upload on a wrong hint would turn
+a bad guess into a failed transfer. So a refusal, and the `size_bytes` a
+`direct_put` claim carries, come only from bytes the client has actually
+counted. Where the hint says nothing can carry the payload and a whole-object
+write is on offer, that transport is still the right one to try: its first
+pass measures the payload without sending anything, and whatever follows —
+the upload, a different rung, or a refusal — is decided on what it found. A
+source whose length is unknown cannot be checked against any limit up front,
+so it takes `direct_multipart` where that is advertised and `PUT /content`
+otherwise, and both discover the length as they send.
 
 **Receipt expiry and re-minting.** The `validated_content_token` is the
 upload's receipt: it is minted only from a session the store already says is

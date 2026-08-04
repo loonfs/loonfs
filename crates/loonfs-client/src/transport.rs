@@ -305,9 +305,15 @@ impl Client {
         #[cfg(test)]
         if let Some(outcome) = test_transport::next(request) {
             // Drain the body so a scripted test still observes the source
-            // being read exactly once, as a real send would.
+            // being read exactly once, as a real send would, and record the
+            // pieces it arrived in so a test can hold the client to sending
+            // a payload it never assembled.
             let mut body = body;
-            while futures::StreamExt::next(&mut body).await.is_some() {}
+            let mut chunks = Vec::new();
+            while let Some(chunk) = futures::StreamExt::next(&mut body).await {
+                chunks.push(chunk.map(|bytes| bytes.len()).unwrap_or(0));
+            }
+            test_transport::record_streamed_body(chunks);
             return outcome;
         }
         let mut builder = self.build(request).body(reqwest::Body::wrap_stream(body));
@@ -506,9 +512,15 @@ pub(crate) mod test_transport {
     /// One request a scripted attempt carried.
     #[derive(Debug, Clone)]
     pub(crate) struct SentRequest {
-        #[allow(dead_code, reason = "part of what a scripted attempt carried")]
         pub url: String,
         pub headers: Vec<(String, String)>,
+        /// Sizes of the body pieces a streamed send read, in order. Empty
+        /// for a bodyless or buffered request.
+        ///
+        /// This is how a test holds the client to *how* it sent a payload
+        /// rather than only that it sent one: a body that arrived in many
+        /// bounded pieces was never assembled whole anywhere.
+        pub body_chunks: Vec<usize>,
     }
 
     impl SentRequest {
@@ -518,6 +530,29 @@ pub(crate) mod test_transport {
                 .find(|(header, _)| header.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value.as_str())
         }
+
+        /// Total bytes the streamed body carried.
+        pub(crate) fn body_bytes(&self) -> usize {
+            self.body_chunks.iter().sum()
+        }
+
+        /// The largest single piece the body arrived in — the upper bound on
+        /// what any one allocation held.
+        pub(crate) fn largest_body_chunk(&self) -> usize {
+            self.body_chunks.iter().copied().max().unwrap_or(0)
+        }
+    }
+
+    /// Records the body a streamed send read, against the request that
+    /// carried it.
+    pub(super) fn record_streamed_body(chunks: Vec<usize>) {
+        STATE.with(|state| {
+            if let Some(state) = state.borrow_mut().as_mut() {
+                if let Some(sent) = state.sent.last_mut() {
+                    sent.body_chunks = chunks;
+                }
+            }
+        });
     }
 
     // A thread-local is sound here because client tests run on the default
@@ -593,6 +628,7 @@ pub(crate) mod test_transport {
             state.sent.push(SentRequest {
                 url: request.url.clone(),
                 headers: request.headers.clone(),
+                body_chunks: Vec::new(),
             });
             let outcome = state
                 .outcomes

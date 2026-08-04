@@ -23,8 +23,8 @@ use std::sync::Arc;
 /// endpoints have been run against that suite, so only they earn the trust.
 /// An endpoint override outside the provider's own domain family is some
 /// other implementation of the S3 API and is not covered by those runs.
-const AWS_S3_PROVEN_DOMAINS: &[&str] = &["amazonaws.com", "amazonaws.com.cn"];
-const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage.com"];
+pub(crate) const AWS_S3_PROVEN_DOMAINS: &[&str] = &["amazonaws.com", "amazonaws.com.cn"];
+pub(crate) const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage.com"];
 
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,9 +196,18 @@ fn s3_compatible_transfers(presigner: S3CompatiblePresigner) -> DirectTransferIs
 }
 
 /// Whether an endpoint sits in one of the domain families whose signed
-/// preconditions the live conformance suite has exercised.
+/// preconditions the live conformance suite has exercised, *and* is reached
+/// over TLS.
 ///
-/// An absent endpoint is the provider's own default, which qualifies.
+/// An absent endpoint is the provider's own default, which qualifies on both
+/// counts. TLS is not incidental here: a presigned URL is a bearer
+/// capability to write or read one object, so issuing one over `http` would
+/// put it, and the signed headers with it, on the wire in cleartext for
+/// anyone on the path to replay. An `http` override of a provider's own
+/// domain is a misconfiguration rather than a different provider, and
+/// [`StoreConfig::validate`](crate::StoreConfig::validate) rejects it by
+/// name; this is the second gate, for a configuration built in Rust that
+/// never passed through that validation.
 fn endpoint_is_proven(endpoint_url: Option<&str>, domain_families: &[&str]) -> bool {
     let Some(endpoint_url) = endpoint_url else {
         return true;
@@ -206,6 +215,13 @@ fn endpoint_is_proven(endpoint_url: Option<&str>, domain_families: &[&str]) -> b
     let Ok(uri) = endpoint_url.parse::<Uri>() else {
         return false;
     };
+    uri.scheme_str() == Some("https") && endpoint_host_is_proven(&uri, domain_families)
+}
+
+/// Whether a parsed endpoint's host is one of the proven families, ignoring
+/// the scheme. Config validation asks this separately so it can tell an
+/// unproven provider apart from a proven one addressed insecurely.
+pub(crate) fn endpoint_host_is_proven(uri: &Uri, domain_families: &[&str]) -> bool {
     let Some(host) = uri.host() else {
         return false;
     };
@@ -321,6 +337,26 @@ mod tests {
         })
         .expect("construct azure store");
         assert!(azure.direct_transfers().is_none());
+    }
+
+    /// A presigned URL is a bearer capability, so a proven domain reached
+    /// over plain `http` earns no bundle: the capability and its signed
+    /// headers would go out in cleartext.
+    #[test]
+    fn a_proven_domain_without_tls_offers_no_direct_transfers() {
+        assert!(aws_s3_store(Some("http://bucket.s3.amazonaws.com"))
+            .direct_transfers()
+            .is_none());
+        assert!(aws_s3_store(Some("https://bucket.s3.amazonaws.com"))
+            .direct_transfers()
+            .is_some());
+
+        assert!(r2_store("http://account.r2.cloudflarestorage.com")
+            .direct_transfers()
+            .is_none());
+        assert!(r2_store("https://account.r2.cloudflarestorage.com")
+            .direct_transfers()
+            .is_some());
     }
 
     /// The S3-compatible providers sign every direction, and each names its
