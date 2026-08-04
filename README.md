@@ -54,7 +54,7 @@ loonfs use {namespace_id}
 
 ## Server deployment
 
-Use the server when multiple clients need to write to the same LoonFS deployment. Embedded clients talk directly to object storage and compete for the single-writer role; the server instead provides one shared writer for remote clients.
+Use a server when multiple clients need to write to the same LoonFS deployment. (Embedded clients talk directly to object storage and compete for the single-writer role; the server instead can provide one shared writer for remote clients.)
 
 ### Local development
 
