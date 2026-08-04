@@ -687,7 +687,7 @@
           "admin"
         ],
         "summary": "Run maintenance step",
-        "description": "Runs one bounded maintenance step, which does four things in order: flushes the WAL tail once it reaches the threshold, merges one bounded metadata reorganization unit, and — each strictly opt-in — advances the retention floor (`retention: true`) and runs one bounded garbage-collection pass (`gc`). Nothing surrenders replay history or sweeps objects unless the body asked for it. `only` restricts the step to a single sub-step: `wal_flush`, `reorganize`, `retention`, or `gc`; naming `retention` or `gc` that way is itself the opt-in. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
+        "description": "Runs one bounded maintenance step. The body selects the actions by naming them: `metadata` folds the WAL tail once it reaches the threshold and merges one bounded reorganization unit, `advance_retention: true` advances the retention floor, and `gc` runs one bounded garbage-collection pass. Selected actions run in that order, each reports separately, and an absent report means the body did not select that action. A body that selects nothing is rejected. Nothing surrenders replay history or sweeps objects unless the body asked for it. A deleted namespace accepts a step that selects `gc` alone, which is how its reclaimable state is collected; any other selection is refused. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
         "operationId": "maintenance_step",
         "parameters": [
           {
@@ -701,7 +701,7 @@
           }
         ],
         "requestBody": {
-          "description": "Optional threshold and GC overrides",
+          "description": "The actions this step selects",
           "content": {
             "application/json": {
               "schema": {
@@ -2710,6 +2710,19 @@
       "AbsolutePath": {
         "type": "string",
         "description": "Validated complete absolute namespace path, serialized as a plain string."
+      },
+      "AdvanceRetentionResponse": {
+        "type": "object",
+        "description": "Result of advancing the retention floor.",
+        "required": [
+          "retention_floor_seq"
+        ],
+        "properties": {
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "New minimum sequence for incremental replay."
+          }
+        }
       },
       "ApiError": {
         "type": "object",
@@ -5053,20 +5066,14 @@
           }
         }
       },
-      "MaintenanceStepKind": {
-        "type": "string",
-        "description": "One sub-step of a maintenance step, for callers that want to run exactly\none of them.",
-        "enum": [
-          "wal_flush",
-          "reorganize",
-          "retention",
-          "gc"
-        ]
-      },
       "MaintenanceStepRequest": {
         "type": "object",
-        "description": "Options for one explicit maintenance step. Absent fields use the\nserver's defaults; retention advance runs only when `retention` is true\nand garbage collection only when `gc` is present.",
+        "description": "One explicit maintenance step: the actions it selects, and nothing more.\n\nSelection is presence. Each field names one independent action, and a\nstep runs exactly the ones the body carries — a request that selects\nnothing is rejected rather than quietly doing nothing.",
         "properties": {
+          "advance_retention": {
+            "type": "boolean",
+            "description": "Advance the retention floor to the flushed manifest head. Nothing\nsurrenders replay history unless this is true."
+          },
           "gc": {
             "oneOf": [
               {
@@ -5074,48 +5081,29 @@
               },
               {
                 "$ref": "#/components/schemas/GcRequest",
-                "description": "Run the mark-and-sweep garbage collector after the step's\nflush work. Nothing sweeps unless this is present."
+                "description": "Run one bounded mark-and-sweep garbage-collection pass. Nothing\nsweeps unless this is present."
               }
             ]
           },
-          "max_wal_tail_segments": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Flush the visible WAL tail into metadata tables when it reaches this\nmany segments. Values above the write-rejection threshold are\nrejected as `invalid_request`.",
-            "minimum": 0
-          },
-          "only": {
+          "metadata": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/MaintenanceStepKind",
-                "description": "Restrict the step to one sub-step. Absent runs the whole step: WAL\nflush, then reorganization, then retention if `retention` opted in,\nthen garbage collection if `gc` opted in."
+                "$ref": "#/components/schemas/MetadataMaintenanceRequest",
+                "description": "Fold the visible WAL tail into metadata tables and merge one bounded\nreorganization unit. The two travel together: folding a tail is what\ncreates the delta runs a reorganization merges."
               }
             ]
-          },
-          "retention": {
-            "type": [
-              "boolean",
-              "null"
-            ],
-            "description": "Advance the retention floor to the flushed manifest head. Nothing\nsurrenders replay history unless this is true or `only` selects\n`retention`."
           }
         }
       },
       "MaintenanceStepResponse": {
         "type": "object",
-        "description": "Result of one explicit maintenance step.",
+        "description": "Result of one explicit maintenance step.\n\nOne report per action the request selected, and none for an action it\ndid not: an absent field means \"not selected\", never \"ran and found\nnothing to do\". The latter is what the outcomes inside a report say.",
         "required": [
           "namespace_id",
-          "status_before",
-          "wal_flush",
-          "reorganize",
-          "retention_floor_seq"
+          "status_before"
         ],
         "properties": {
           "gc": {
@@ -5125,7 +5113,18 @@
               },
               {
                 "$ref": "#/components/schemas/GcResponse",
-                "description": "Garbage-collection report when the step opted into sweeping."
+                "description": "What the collection pass reclaimed."
+              }
+            ]
+          },
+          "metadata": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MetadataMaintenanceResponse",
+                "description": "What the metadata-upkeep action did."
               }
             ]
           },
@@ -5133,21 +5132,20 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the step ran against."
           },
-          "reorganize": {
-            "$ref": "#/components/schemas/ReorganizeStepOutcome",
-            "description": "What the metadata-reorganization sub-step did."
-          },
-          "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The retention floor after the step. Compare with\n`status_before.retention_floor_seq` to see whether it moved."
+          "retention": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdvanceRetentionResponse",
+                "description": "Where the retention floor ended up."
+              }
+            ]
           },
           "status_before": {
             "$ref": "#/components/schemas/NamespaceStatusResponse",
             "description": "Namespace status observed before the step acted."
-          },
-          "wal_flush": {
-            "$ref": "#/components/schemas/WalFlushStepOutcome",
-            "description": "What the WAL-flush sub-step did."
           }
         }
       },
@@ -5156,6 +5154,39 @@
         "format": "int64",
         "description": "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit.",
         "minimum": 0
+      },
+      "MetadataMaintenanceRequest": {
+        "type": "object",
+        "description": "Overrides for the metadata-upkeep action.",
+        "properties": {
+          "max_wal_tail_segments": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Flush the visible WAL tail once it reaches this many segments.\nAbsent uses the server's default threshold; zero, and any value above\nthe write-rejection threshold, are rejected as `invalid_request`.",
+            "minimum": 0
+          }
+        }
+      },
+      "MetadataMaintenanceResponse": {
+        "type": "object",
+        "description": "What one metadata-upkeep action did, part by part.",
+        "required": [
+          "wal_flush",
+          "reorganize"
+        ],
+        "properties": {
+          "reorganize": {
+            "$ref": "#/components/schemas/ReorganizeStepOutcome",
+            "description": "What the reorganization unit did."
+          },
+          "wal_flush": {
+            "$ref": "#/components/schemas/WalFlushStepOutcome",
+            "description": "What the WAL fold did."
+          }
+        }
       },
       "NameKey": {
         "type": "string",
@@ -5815,7 +5846,7 @@
         "oneOf": [
           {
             "type": "object",
-            "description": "The step did not run this sub-step: the tail was below the threshold,\nor `only` selected something else.",
+            "description": "The tail was below the threshold, so there was nothing to fold.",
             "required": [
               "kind"
             ],

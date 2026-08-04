@@ -8,8 +8,9 @@
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
-    PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
+    MetadataMaintenanceOptions, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions,
+    SharedObjectStore,
 };
 use loonfs_api::AbsolutePath;
 
@@ -193,9 +194,11 @@ async fn warm_phase_request_accounting() {
             admin
                 .maintenance_step_namespace(
                     &namespace_id,
-                    MaintenanceStepOptions {
-                        max_wal_tail_segments: 1,
-                        ..MaintenanceStepOptions::default()
+                    MaintenancePlan {
+                        metadata: Some(MetadataMaintenanceOptions {
+                            max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                        }),
+                        ..MaintenancePlan::default()
                     },
                 )
                 .await

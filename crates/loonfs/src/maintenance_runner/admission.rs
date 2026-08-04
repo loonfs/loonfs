@@ -401,7 +401,7 @@ impl Admission {
 
     /// Rejects further scheduling and drops everything still waiting.
     /// Running steps stay visible to the drain.
-    pub(crate) fn shut_down(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.closed = true;
         for state in self.keys.values_mut() {
             state.clear_schedule();
@@ -706,7 +706,7 @@ mod tests {
         admission.nudge(key.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
         admission.nudge(key.clone());
-        admission.shut_down();
+        admission.close();
         assert_eq!(
             admission.finish(&key, idle(), NOW),
             None,
@@ -731,7 +731,7 @@ mod tests {
             "a released slot is claimable again"
         );
         admission.abandon(&key);
-        admission.shut_down();
+        admission.close();
         admission.nudge(key.clone());
         assert_eq!(
             admission.try_dispatch(NOW),
@@ -800,7 +800,7 @@ mod tests {
         admission.nudge(active.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(active.clone()));
         admission.nudge(queued.clone());
-        admission.shut_down();
+        admission.close();
         assert_eq!(admission.finish(&active, idle(), NOW), None);
         assert!(
             !admission.is_pending(&queued),
@@ -1384,11 +1384,11 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_clears_pending_obligations() {
+    fn closing_admission_clears_pending_obligations() {
         let mut admission = book(1);
         let key = gc("leased");
         admission.nudge_not_before(key.clone(), NOW + 60_000, NOW);
-        admission.shut_down();
+        admission.close();
         assert_eq!(admission.not_before_ms(&key), None);
         assert_eq!(admission.earliest_deadline_ms(NOW), None);
         admission.promote_due(NOW + 60_000);

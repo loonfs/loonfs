@@ -799,53 +799,42 @@ impl RetainedCandidates {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AdvanceRetentionResponse {
-    /// Namespace whose retention floor changed.
-    pub namespace_id: NamespaceId,
     /// New minimum sequence for incremental replay.
     pub retention_floor_seq: ChangeSeq,
 }
 
-/// One sub-step of a maintenance step, for callers that want to run exactly
-/// one of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceStepKind {
-    /// Fold the visible WAL tail into metadata tables and advance the root.
-    WalFlush,
-    /// Merge one bounded group of metadata delta runs into its base.
-    Reorganize,
-    /// Advance the retention floor behind a verified checkpoint.
-    Retention,
-    /// Run the mark-and-sweep garbage collector.
-    Gc,
-}
-
-/// Options for one explicit maintenance step. Absent fields use the
-/// server's defaults; retention advance runs only when `retention` is true
-/// and garbage collection only when `gc` is present.
+/// One explicit maintenance step: the actions it selects, and nothing more.
+///
+/// Selection is presence. Each field names one independent action, and a
+/// step runs exactly the ones the body carries — a request that selects
+/// nothing is rejected rather than quietly doing nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MaintenanceStepRequest {
-    /// Flush the visible WAL tail into metadata tables when it reaches this
-    /// many segments. Values above the write-rejection threshold are
-    /// rejected as `invalid_request`.
+    /// Fold the visible WAL tail into metadata tables and merge one bounded
+    /// reorganization unit. The two travel together: folding a tail is what
+    /// creates the delta runs a reorganization merges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_wal_tail_segments: Option<u64>,
+    pub metadata: Option<MetadataMaintenanceRequest>,
     /// Advance the retention floor to the flushed manifest head. Nothing
-    /// surrenders replay history unless this is true or `only` selects
-    /// `retention`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retention: Option<bool>,
-    /// Run the mark-and-sweep garbage collector after the step's
-    /// flush work. Nothing sweeps unless this is present.
+    /// surrenders replay history unless this is true.
+    #[serde(default)]
+    pub advance_retention: bool,
+    /// Run one bounded mark-and-sweep garbage-collection pass. Nothing
+    /// sweeps unless this is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcRequest>,
-    /// Restrict the step to one sub-step. Absent runs the whole step: WAL
-    /// flush, then reorganization, then retention if `retention` opted in,
-    /// then garbage collection if `gc` opted in.
+}
+
+/// Overrides for the metadata-upkeep action.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MetadataMaintenanceRequest {
+    /// Flush the visible WAL tail once it reaches this many segments.
+    /// Absent uses the server's default threshold; zero, and any value above
+    /// the write-rejection threshold, are rejected as `invalid_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub only: Option<MaintenanceStepKind>,
+    pub max_wal_tail_segments: Option<u64>,
 }
 
 /// What the WAL-flush part of a maintenance step did.
@@ -853,8 +842,7 @@ pub struct MaintenanceStepRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WalFlushStepOutcome {
-    /// The step did not run this sub-step: the tail was below the threshold,
-    /// or `only` selected something else.
+    /// The tail was below the threshold, so there was nothing to fold.
     NotNeeded,
     /// The step flushed the WAL tail and advanced the metadata root.
     Flushed {
@@ -884,8 +872,7 @@ pub enum WalFlushStepOutcome {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReorganizeStepOutcome {
-    /// No family group had enough delta runs to merge, or `only` selected
-    /// something else.
+    /// No family group had enough delta runs to merge.
     NotNeeded,
     /// One family group was merged and a manifest published.
     UnitPublished,
@@ -897,6 +884,10 @@ pub enum ReorganizeStepOutcome {
 }
 
 /// Result of one explicit maintenance step.
+///
+/// One report per action the request selected, and none for an action it
+/// did not: an absent field means "not selected", never "ran and found
+/// nothing to do". The latter is what the outcomes inside a report say.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MaintenanceStepResponse {
@@ -904,16 +895,25 @@ pub struct MaintenanceStepResponse {
     pub namespace_id: NamespaceId,
     /// Namespace status observed before the step acted.
     pub status_before: NamespaceStatusResponse,
-    /// What the WAL-flush sub-step did.
-    pub wal_flush: WalFlushStepOutcome,
-    /// What the metadata-reorganization sub-step did.
-    pub reorganize: ReorganizeStepOutcome,
-    /// The retention floor after the step. Compare with
-    /// `status_before.retention_floor_seq` to see whether it moved.
-    pub retention_floor_seq: ChangeSeq,
-    /// Garbage-collection report when the step opted into sweeping.
+    /// What the metadata-upkeep action did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<MetadataMaintenanceResponse>,
+    /// Where the retention floor ended up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<AdvanceRetentionResponse>,
+    /// What the collection pass reclaimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcResponse>,
+}
+
+/// What one metadata-upkeep action did, part by part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MetadataMaintenanceResponse {
+    /// What the WAL fold did.
+    pub wal_flush: WalFlushStepOutcome,
+    /// What the reorganization unit did.
+    pub reorganize: ReorganizeStepOutcome,
 }
 
 /// Options for one store contract probe. Empty today; a body is still sent

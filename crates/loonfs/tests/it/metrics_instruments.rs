@@ -9,7 +9,7 @@ use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use loonfs::{
     CreateNamespaceOptions, FsBackgroundWork, MaintenanceJobId, MaintenanceStepConclusion,
-    MaintenanceStepOptions, PutFileOptions,
+    MetadataMaintenanceOptions, PutFileOptions,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
@@ -47,7 +47,10 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
     let namespace_id = namespace_id("demo");
     // Enough writes to push the WAL tail past its threshold, which is what
     // nudges the metadata job and gives the runner a step to settle.
-    let writes = MaintenanceStepOptions::default().max_wal_tail_segments + 1;
+    let writes = MetadataMaintenanceOptions::default()
+        .max_wal_tail_segments
+        .get()
+        + 1;
     // One runtime for the whole test: the writer's background work is
     // spawned on the runtime that opened it, so a second `block_on` would
     // be waiting on tasks that went away with the first.

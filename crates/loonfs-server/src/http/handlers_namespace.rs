@@ -417,9 +417,9 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
         path = "/v0/admin/namespaces/{namespace}/maintenance/step",
         tag = "admin",
         summary = "Run maintenance step",
-        description = "Runs one bounded maintenance step, which does four things in order: flushes the WAL tail once it reaches the threshold, merges one bounded metadata reorganization unit, and — each strictly opt-in — advances the retention floor (`retention: true`) and runs one bounded garbage-collection pass (`gc`). Nothing surrenders replay history or sweeps objects unless the body asked for it. `only` restricts the step to a single sub-step: `wal_flush`, `reorganize`, `retention`, or `gc`; naming `retention` or `gc` that way is itself the opt-in. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
+        description = "Runs one bounded maintenance step. The body selects the actions by naming them: `metadata` folds the WAL tail once it reaches the threshold and merges one bounded reorganization unit, `advance_retention: true` advances the retention floor, and `gc` runs one bounded garbage-collection pass. Selected actions run in that order, each reports separately, and an absent report means the body did not select that action. A body that selects nothing is rejected. Nothing surrenders replay history or sweeps objects unless the body asked for it. A deleted namespace accepts a step that selects `gc` alone, which is how its reclaimable state is collected; any other selection is refused. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
         params(("namespace" = String, Path, description = "Namespace id")),
-        request_body(content = MaintenanceStepRequest, description = "Optional threshold and GC overrides"),
+        request_body(content = MaintenanceStepRequest, description = "The actions this step selects"),
         responses(
             (status = 200, description = "Maintenance step completed", body = MaintenanceStepResponse),
             (status = 400, description = "Invalid namespace id or options", body = ApiError),
@@ -435,10 +435,11 @@ pub(super) async fn maintenance_step(
     OptionalAppJson(request): OptionalAppJson<MaintenanceStepRequest>,
 ) -> Result<Json<MaintenanceStepResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
-    let options = loonfs::MaintenanceStepOptions::from_request(request.unwrap_or_default());
+    let plan = loonfs::MaintenancePlan::from_request(request.unwrap_or_default())
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let result = state
         .admin
-        .maintenance_step_namespace(&namespace_id, options)
+        .maintenance_step_namespace(&namespace_id, plan)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(result))

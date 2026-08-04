@@ -1262,8 +1262,10 @@ impl Client {
     }
 
     /// Runs one bounded maintenance step against a namespace (admin plane).
-    /// Absent request fields use the server's defaults; garbage collection
-    /// runs only when the request opts in.
+    ///
+    /// The request selects the actions by naming them, and a request that
+    /// names none is rejected. Absent overrides inside a selected action use
+    /// the server's defaults.
     pub async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,

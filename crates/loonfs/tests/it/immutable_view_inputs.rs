@@ -3,8 +3,8 @@
 //! tests pin that a warm handle stops re-fetching it entirely.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
-    PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
+    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -48,9 +48,11 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
     admin
         .maintenance_step_namespace(
             namespace_id,
-            MaintenanceStepOptions {
-                max_wal_tail_segments: 1,
-                ..MaintenanceStepOptions::default()
+            MaintenancePlan {
+                metadata: Some(MetadataMaintenanceOptions {
+                    max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                }),
+                ..MaintenancePlan::default()
             },
         )
         .await

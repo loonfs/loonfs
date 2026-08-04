@@ -24,6 +24,30 @@ fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
     }
 }
 
+/// One phrase for what the WAL fold did, with the tail it decided against
+/// when it decided against folding.
+fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u64) -> String {
+    match outcome {
+        WalFlushStepOutcome::NotNeeded => {
+            format!("wal flush not needed (tail {tail_segments} segments)")
+        }
+        WalFlushStepOutcome::Flushed { manifest_head_seq } => {
+            format!("wal flushed @ seq {}", manifest_head_seq.0)
+        }
+        WalFlushStepOutcome::Superseded {
+            attempted_seq,
+            current_manifest_id,
+        } => format!(
+            "wal flush @ seq {} superseded (current manifest {current_manifest_id})",
+            attempted_seq.0
+        ),
+        WalFlushStepOutcome::RaceLost { observed_head_seq } => format!(
+            "wal flush race lost (head moved past seq {})",
+            observed_head_seq.0
+        ),
+    }
+}
+
 /// One phrase for where the index is, in the terms that phase actually has.
 fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
     match state {
@@ -418,53 +442,50 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 response.checkpoint_id, response.namespace_id
             )
         }
+        // One clause per action the step selected, and none for an action it
+        // did not: the line says what ran, never what was skipped.
         CommandData::MaintenanceStepped(response) => {
-            let wal_flush = match &response.wal_flush {
-                WalFlushStepOutcome::NotNeeded => format!(
-                    "wal flush not needed (tail {} segments)",
-                    response.status_before.wal_tail_segments
-                ),
-                WalFlushStepOutcome::Flushed { manifest_head_seq } => {
-                    format!("wal flushed @ seq {}", manifest_head_seq.0)
-                }
-                WalFlushStepOutcome::Superseded {
-                    attempted_seq,
-                    current_manifest_id,
-                } => format!(
-                    "wal flush @ seq {} superseded (current manifest {})",
-                    attempted_seq.0, current_manifest_id
-                ),
-                WalFlushStepOutcome::RaceLost { observed_head_seq } => format!(
-                    "wal flush race lost (head moved past seq {})",
-                    observed_head_seq.0
-                ),
-            };
-            let reorganize = match response.reorganize {
-                ReorganizeStepOutcome::NotNeeded => "reorganize not needed",
-                ReorganizeStepOutcome::UnitPublished => "reorganized one family group",
-                ReorganizeStepOutcome::BudgetExhausted => "reorganize over the per-step budget",
-                ReorganizeStepOutcome::Superseded => "reorganize superseded",
-            };
-            let retention =
-                if response.retention_floor_seq > response.status_before.retention_floor_seq {
-                    format!(
-                        "retention floor advanced to seq {}",
-                        response.retention_floor_seq.0
-                    )
-                } else {
-                    format!(
-                        "retention floor unchanged at seq {}",
-                        response.retention_floor_seq.0
-                    )
-                };
-            let mut line = format!(
-                "maintenance step for {}: {wal_flush}; {reorganize}; {retention}",
-                response.namespace_id
-            );
-            if let Some(gc) = &response.gc {
-                line.push_str(&format!("; {}", gc_summary(gc)));
+            let mut clauses = Vec::new();
+            if let Some(metadata) = &response.metadata {
+                clauses.push(wal_flush_summary(
+                    &metadata.wal_flush,
+                    response.status_before.wal_tail_segments,
+                ));
+                clauses.push(
+                    match metadata.reorganize {
+                        ReorganizeStepOutcome::NotNeeded => "reorganize not needed",
+                        ReorganizeStepOutcome::UnitPublished => "reorganized one family group",
+                        ReorganizeStepOutcome::BudgetExhausted => {
+                            "reorganize over the per-step budget"
+                        }
+                        ReorganizeStepOutcome::Superseded => "reorganize superseded",
+                    }
+                    .to_owned(),
+                );
             }
-            line
+            if let Some(retention) = &response.retention {
+                clauses.push(
+                    if retention.retention_floor_seq > response.status_before.retention_floor_seq {
+                        format!(
+                            "retention floor advanced to seq {}",
+                            retention.retention_floor_seq.0
+                        )
+                    } else {
+                        format!(
+                            "retention floor unchanged at seq {}",
+                            retention.retention_floor_seq.0
+                        )
+                    },
+                );
+            }
+            if let Some(gc) = &response.gc {
+                clauses.push(gc_summary(gc));
+            }
+            format!(
+                "maintenance step for {}: {}",
+                response.namespace_id,
+                clauses.join("; ")
+            )
         }
         CommandData::GarbageCollected(response) => {
             format!("gc for {}: {}", response.namespace_id, gc_summary(response))

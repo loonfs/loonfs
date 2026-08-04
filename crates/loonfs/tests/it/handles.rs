@@ -8,9 +8,9 @@
 
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsAdmin,
-    FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, MaintenanceStepKind,
-    MaintenanceStepOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
-    RuntimeError, SharedObjectStore, StoreConfig,
+    FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, MaintenancePlan, ManifestId,
+    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError,
+    SharedObjectStore, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
@@ -33,7 +33,9 @@ fn store_config(root: &Path) -> StoreConfig {
 }
 
 fn wal_tail_segment_threshold() -> u64 {
-    MaintenanceStepOptions::default().max_wal_tail_segments
+    MetadataMaintenanceOptions::default()
+        .max_wal_tail_segments
+        .get()
 }
 
 fn wal_tail_segment_count_past_threshold() -> u64 {
@@ -698,9 +700,11 @@ fn manual_only_writer_never_schedules_maintenance() {
 
         // Explicit admin maintenance bounds the tail the writer left.
         let step = admin
-            .maintenance_step_namespace(&namespace_id, MaintenanceStepOptions::default())
+            .maintenance_step_namespace(&namespace_id, MaintenancePlan::metadata())
             .await
-            .expect("explicit maintenance step");
+            .expect("explicit maintenance step")
+            .metadata
+            .expect("metadata selected");
         assert_ne!(
             step.wal_flush,
             loonfs::WalFlushStepOutcome::NotNeeded,
@@ -974,14 +978,15 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
         let retention = admin
             .maintenance_step_namespace(
                 &namespace_id,
-                MaintenanceStepOptions {
-                    only: Some(MaintenanceStepKind::Retention),
-                    ..MaintenanceStepOptions::default()
+                MaintenancePlan {
+                    advance_retention: true,
+                    ..MaintenancePlan::default()
                 },
             )
             .await
             .expect("advance retention");
         assert_eq!(retention.namespace_id, namespace_id);
+        assert!(retention.retention.is_some());
     });
 }
 

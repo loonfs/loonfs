@@ -12,9 +12,9 @@ use loonfs::{
     CompleteUploadResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
     CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
     DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
-    ListChangesOptions, MaintenanceStepOptions, MaintenanceStepResponse, MoveOptions, NamespaceId,
-    NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError, SharedObjectStore,
-    UploadContentResponse, UploadId, WalFlushStepOutcome,
+    ListChangesOptions, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceResponse,
+    MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError,
+    SharedObjectStore, UploadContentResponse, UploadId,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -26,6 +26,24 @@ use std::sync::Arc;
 
 pub(crate) fn store(root: &Path) -> SharedObjectStore {
     Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
+}
+
+/// The upkeep report a step that selected metadata is obliged to carry.
+pub(crate) fn upkeep(step: &MaintenanceStepResponse) -> &MetadataMaintenanceResponse {
+    step.metadata
+        .as_ref()
+        .expect("a plan selecting metadata upkeep reports it")
+}
+
+/// A plan selecting metadata upkeep alone, at an explicit flush threshold.
+pub(crate) fn metadata_plan(max_wal_tail_segments: u64) -> MaintenancePlan {
+    MaintenancePlan {
+        metadata: Some(loonfs::MetadataMaintenanceOptions {
+            max_wal_tail_segments: std::num::NonZeroU64::new(max_wal_tail_segments)
+                .expect("a flush threshold is non-zero"),
+        }),
+        ..MaintenancePlan::default()
+    }
 }
 
 /// One handle set per test fixture: a writer, its derived reader, and an
@@ -223,10 +241,12 @@ pub(crate) trait RuntimeTestExt {
     fn maintenance_step_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: MaintenanceStepOptions,
+        plan: MaintenancePlan,
     ) -> loonfs::Result<MaintenanceStepResponse>;
-    fn flush_wal_blocking(&self, namespace_id: &NamespaceId)
-        -> loonfs::Result<WalFlushStepOutcome>;
+    fn flush_wal_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<MetadataMaintenanceResponse>;
     fn stat_path_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -343,15 +363,15 @@ impl RuntimeTestExt for TestRuntime {
     fn maintenance_step_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: MaintenanceStepOptions,
+        plan: MaintenancePlan,
     ) -> loonfs::Result<MaintenanceStepResponse> {
-        block_on(self.admin.maintenance_step_namespace(namespace_id, options))
+        block_on(self.admin.maintenance_step_namespace(namespace_id, plan))
     }
 
     fn flush_wal_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<WalFlushStepOutcome> {
+    ) -> loonfs::Result<MetadataMaintenanceResponse> {
         block_on(self.admin.flush_wal(namespace_id))
     }
 

@@ -41,7 +41,6 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         .map_err(CoreError::load_head)?
     else {
         return Ok(AdvanceRetentionResponse {
-            namespace_id: namespace_id.clone(),
             retention_floor_seq: resolve_retention_floor_seq(store, &head)
                 .await
                 .map_err(CoreError::load_head)?,
@@ -65,7 +64,6 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         // Already advanced; skip the existence probes on the idempotent
         // re-invocation path.
         return Ok(AdvanceRetentionResponse {
-            namespace_id: namespace_id.clone(),
             retention_floor_seq: current_floor,
         });
     }
@@ -115,7 +113,6 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             .is_some_and(|loaded| loaded.envelope.state.floor_seq >= target_floor)
         {
             return Ok(AdvanceRetentionResponse {
-                namespace_id: namespace_id.clone(),
                 retention_floor_seq: loaded
                     .map_or(ChangeSeq(0), |loaded| loaded.envelope.state.floor_seq),
             });
@@ -151,7 +148,6 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         match published {
             Ok(_) => {
                 return Ok(AdvanceRetentionResponse {
-                    namespace_id: namespace_id.clone(),
                     retention_floor_seq: target_floor,
                 })
             }

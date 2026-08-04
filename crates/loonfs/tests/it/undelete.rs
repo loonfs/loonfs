@@ -7,8 +7,7 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, ErrorCode, InodeId, ListChangesOptions, MaintenanceStepOptions,
-    PutFileOptions, RuntimeError,
+    DestinationBehavior, ErrorCode, InodeId, ListChangesOptions, PutFileOptions, RuntimeError,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
@@ -364,16 +363,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         // this short history; force the flush so reopen reads Set and
         // Revoke rows out of durable tables, not WAL replay.
         let step = fs
-            .maintenance_step_namespace_blocking(
-                &namespace_id,
-                MaintenanceStepOptions {
-                    max_wal_tail_segments: 1,
-                    retention: false,
-                    gc: None,
-                    only: None,
-                },
-            )
+            .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
             .expect("checkpoint the revoke into durable tables");
+        let step = upkeep(&step);
         assert!(
             matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
             "step must materialize the tail, got {:?}",
@@ -403,16 +395,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .committed_seq;
         assert!(second_deletion > deletion);
         let step = fs
-            .maintenance_step_namespace_blocking(
-                &namespace_id,
-                MaintenanceStepOptions {
-                    max_wal_tail_segments: 1,
-                    retention: false,
-                    gc: None,
-                    only: None,
-                },
-            )
+            .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
             .expect("checkpoint the deletion");
+        let step = upkeep(&step);
         assert!(
             matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
             "step must materialize the tail, got {:?}",
@@ -428,16 +413,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         ))
         .expect("undelete a checkpointed deletion after reopen");
         let step = fs
-            .maintenance_step_namespace_blocking(
-                &namespace_id,
-                MaintenanceStepOptions {
-                    max_wal_tail_segments: 1,
-                    retention: false,
-                    gc: None,
-                    only: None,
-                },
-            )
+            .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
             .expect("checkpoint the second revoke");
+        let step = upkeep(&step);
         assert!(
             matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
             "step must materialize the tail, got {:?}",

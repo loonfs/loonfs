@@ -2,9 +2,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::v0::{
-    CreateCheckpointRequest, MaintenanceStepKind, MaintenanceStepRequest, ValidatedContentToken,
-};
+use loonfs_api::v0::{CreateCheckpointRequest, MaintenanceStepRequest, ValidatedContentToken};
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, CommitRequest, DestinationBehavior, FilesystemOperation,
     RevisionNo,
@@ -663,12 +661,14 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         .maintenance_step(
             &namespace,
             &MaintenanceStepRequest {
-                only: Some(MaintenanceStepKind::Retention),
+                advance_retention: true,
                 ..MaintenanceStepRequest::default()
             },
         )
         .await
-        .expect("advance retention floor");
+        .expect("advance retention floor")
+        .retention
+        .expect("a step selecting the retention advance reports it");
     assert!(
         advanced.retention_floor_seq >= first.committed_seq,
         "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",

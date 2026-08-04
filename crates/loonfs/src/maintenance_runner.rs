@@ -547,8 +547,8 @@ impl MaintenanceRunner {
     /// Synchronous on purpose: a shutdown has to close admission before its
     /// first await, or a step finishing during the publication drain hands
     /// its slot to work the shutdown already decided to drop.
-    pub(crate) fn shut_down(&self) {
-        self.inner.lock_state().admission.shut_down();
+    pub(crate) fn close_admission(&self) {
+        self.inner.lock_state().admission.close();
         self.inner.wake.notify_one();
     }
 

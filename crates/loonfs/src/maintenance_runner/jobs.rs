@@ -17,8 +17,8 @@ use super::{
 use crate::fs::{ReadCore, WriterBits};
 use crate::publisher::PublisherRegistry;
 use crate::{
-    ErrorCode, FsAdmin, GcConfig, GcResponse, MaintenanceStepKind, MaintenanceStepOptions,
-    MaintenanceStepResponse, NamespaceId, ReorganizeStepOutcome, Result, RuntimeError,
+    ErrorCode, FsAdmin, GcConfig, GcResponse, MaintenancePlan, MetadataMaintenanceOptions,
+    MetadataMaintenanceResponse, NamespaceId, ReorganizeStepOutcome, Result, RuntimeError,
     WalFlushStepOutcome,
 };
 use loonfs_core::limits::{
@@ -120,15 +120,17 @@ impl MaintenanceJob for MetadataJob {
                 MaintenanceStepConclusion::NotEnabled,
             ));
         };
-        // The default step: no retention, no garbage collection. Both are
-        // other decisions, and one of them is another job.
-        let options = MaintenanceStepOptions::default();
+        // Upkeep alone: no retention, no garbage collection. Both are other
+        // decisions, and one of them is another job.
         match admin
-            .maintenance_step_namespace(namespace_id, options)
+            .maintenance_step_namespace(namespace_id, MaintenancePlan::metadata())
             .await
         {
             Ok(step) => {
-                let conclusion = metadata_conclusion(&step);
+                let metadata = step
+                    .metadata
+                    .expect("a plan selecting metadata upkeep reports it");
+                let conclusion = metadata_conclusion(&metadata);
                 // Quiet sub-outcomes emit nothing at default levels, so this
                 // is the only record of what a step actually did. The runner
                 // logs what the conclusion means for scheduling; this logs
@@ -136,8 +138,8 @@ impl MaintenanceJob for MetadataJob {
                 tracing::debug!(
                     namespace_id = %step.namespace_id,
                     wal_tail_segments_before = step.status_before.wal_tail_segments,
-                    wal_flush = ?step.wal_flush,
-                    reorganize = ?step.reorganize,
+                    wal_flush = ?metadata.wal_flush,
+                    reorganize = ?metadata.reorganize,
                     conclusion = conclusion.as_str(),
                     "metadata maintenance step concluded"
                 );
@@ -160,8 +162,8 @@ impl MaintenanceJob for MetadataJob {
         // the run that found it rather than left for a sweep.
         match admin.namespace_status(namespace_id).await {
             Ok(status) => {
-                let threshold = MaintenanceStepOptions::default().max_wal_tail_segments;
-                Ok(if status.wal_tail_segments >= threshold {
+                let threshold = MetadataMaintenanceOptions::default().max_wal_tail_segments;
+                Ok(if status.wal_tail_segments >= threshold.get() {
                     MaintenanceProbe::Due
                 } else {
                     MaintenanceProbe::Idle
@@ -202,20 +204,16 @@ impl MaintenanceJob for GcJob {
                 MaintenanceStepConclusion::NotEnabled,
             ));
         };
-        let options = MaintenanceStepOptions {
-            only: Some(MaintenanceStepKind::Gc),
+        let plan = MaintenancePlan {
             gc: Some(GcConfig {
                 cursor: continuation.map(str::to_owned),
                 // The step resolves the absent candidate budget to the
                 // per-step default, which is what bounds this pass.
                 ..GcConfig::default()
             }),
-            ..MaintenanceStepOptions::default()
+            ..MaintenancePlan::default()
         };
-        let step = match admin
-            .maintenance_step_namespace(namespace_id, options)
-            .await
-        {
+        let step = match admin.maintenance_step_namespace(namespace_id, plan).await {
             Ok(step) => step,
             Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
                 // A deleted namespace still owns reclaimable state, so only
@@ -225,9 +223,10 @@ impl MaintenanceJob for GcJob {
                 ));
             }
             Err(error) if continuation.is_some() && error.code() == ErrorCode::InvalidRequest => {
-                // With every other option fixed, the one thing this step
-                // can be asked to reject is the cursor it was resumed with.
-                // Concluding without one hands the runner an empty
+                // This plan selects collection and nothing else, and fixes
+                // every field of it but the cursor, so the cursor it was
+                // resumed with is the one thing the step can be asked to
+                // reject. Concluding without one hands the runner an empty
                 // continuation and takes the key again, which restarts
                 // enumeration — always sound, because every pass rebuilds
                 // its own safety proof from durable state.
@@ -242,13 +241,12 @@ impl MaintenanceJob for GcJob {
             }
             Err(error) => return Err(error),
         };
-        let Some(gc) = step.gc else {
-            // A gc-only step always reports its pass; nothing to conclude
-            // from otherwise.
-            return Ok(MaintenanceStepResult::concluded(
-                MaintenanceStepConclusion::Idle,
-            ));
-        };
+        // Selection is presence, so a plan that named collection is answered
+        // with a collection report: there is no step that ran and said
+        // nothing.
+        let gc = step
+            .gc
+            .expect("a plan selecting collection reports its pass");
         // The counts a pass produced survive here or nowhere: the runner
         // reads a pass as one conclusion, and everything it reclaimed is
         // dropped with the response a line below.
@@ -274,13 +272,13 @@ fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
     )
 }
 
-/// The step's two sub-outcomes, read as one conclusion.
+/// One upkeep pass's two outcomes, read as one conclusion.
 ///
 /// Precedence runs progress, then races, then blocks: a step that flushed
 /// and then failed to fit a fold unit did move durable state and should run
 /// again; a step that only lost a race should take that race again; a step
 /// that only failed to fit has nothing to gain from an immediate retry.
-fn metadata_conclusion(step: &MaintenanceStepResponse) -> MaintenanceStepConclusion {
+fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceStepConclusion {
     let flush = match step.wal_flush {
         WalFlushStepOutcome::Flushed { .. } => Some(MaintenanceStepConclusion::Progressed),
         WalFlushStepOutcome::Superseded { .. } | WalFlushStepOutcome::RaceLost { .. } => {
@@ -375,28 +373,17 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ManifestId, NamespaceStatusResponse};
+    use crate::ManifestId;
     use loonfs_api::ChangeSeq;
     use loonfs_test_support::ids::namespace_id;
 
     fn step_response(
         wal_flush: WalFlushStepOutcome,
         reorganize: ReorganizeStepOutcome,
-    ) -> MaintenanceStepResponse {
-        let namespace = namespace_id("demo");
-        MaintenanceStepResponse {
-            namespace_id: namespace.clone(),
-            status_before: NamespaceStatusResponse {
-                namespace_id: namespace,
-                head_seq: ChangeSeq(1),
-                current_manifest_id: None,
-                wal_tail_segments: 0,
-                retention_floor_seq: ChangeSeq(0),
-            },
+    ) -> MetadataMaintenanceResponse {
+        MetadataMaintenanceResponse {
             wal_flush,
             reorganize,
-            retention_floor_seq: ChangeSeq(0),
-            gc: None,
         }
     }
 

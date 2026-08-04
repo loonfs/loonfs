@@ -10,9 +10,9 @@ use loonfs::{
     ByteStream, ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
     FileContentStream, FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceHandle,
-    MaintenanceJob, MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepOptions,
-    MoveOptions, PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, RuntimeError,
-    SharedObjectStore, UndeleteOptions,
+    MaintenanceJob, MaintenanceJobId, MaintenancePlan, MaintenanceStepConclusion, MoveOptions,
+    PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore,
+    UndeleteOptions,
 };
 use loonfs_api::{
     v0::{
@@ -796,9 +796,10 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
     ) -> Result<MaintenanceStepResponse, BackendError> {
-        let options = MaintenanceStepOptions::from_request(request);
+        let plan = MaintenancePlan::from_request(request)
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?;
         self.admin
-            .maintenance_step_namespace(namespace_id, options)
+            .maintenance_step_namespace(namespace_id, plan)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }

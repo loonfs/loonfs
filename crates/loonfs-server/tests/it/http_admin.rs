@@ -39,8 +39,22 @@ fn post_gc(server_url: &str, namespace: &str) -> Result<loonfs_api::GcResponse, 
     post_gc_with(server_url, namespace, serde_json::json!({}))
 }
 
+/// The upkeep report a step that selected metadata is obliged to carry.
+fn upkeep(step: &loonfs_api::MaintenanceStepResponse) -> &loonfs_api::MetadataMaintenanceResponse {
+    step.metadata
+        .as_ref()
+        .expect("a step selecting metadata upkeep reports it")
+}
+
+/// The floor a step that selected the retention advance is obliged to report.
+fn retention_floor(step: loonfs_api::MaintenanceStepResponse) -> ChangeSeq {
+    step.retention
+        .expect("a step selecting the retention advance reports it")
+        .retention_floor_seq
+}
+
 /// One garbage-collection pass, as the collapsed surface runs it: a
-/// maintenance step restricted to `gc`.
+/// maintenance step selecting `gc` and nothing else.
 fn post_gc_with(
     server_url: &str,
     namespace: &str,
@@ -49,18 +63,35 @@ fn post_gc_with(
     let step: Result<loonfs_api::MaintenanceStepResponse, ApiError> = post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
-        serde_json::json!({ "only": "gc", "gc": gc }),
+        serde_json::json!({ "gc": gc }),
     );
-    step.map(|step| step.gc.expect("gc report present when the step opted in"))
+    step.map(|step| {
+        step.gc
+            .expect("a step selecting collection reports its pass")
+    })
 }
 
+/// One metadata-upkeep step at the server's default threshold.
 fn post_maintenance_step(
     server_url: &str,
     namespace: &str,
 ) -> Result<loonfs_api::MaintenanceStepResponse, ApiError> {
-    post_admin_json(
+    post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
+        serde_json::json!({ "metadata": {} }),
+    )
+}
+
+/// A step body that selects nothing, which the route refuses.
+fn post_empty_maintenance_step(
+    server_url: &str,
+    namespace: &str,
+) -> Result<loonfs_api::MaintenanceStepResponse, ApiError> {
+    post_admin_json_body(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
+        "test-token",
+        serde_json::json!({}),
     )
 }
 
@@ -72,7 +103,7 @@ fn post_retention_advance(
     post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
-        serde_json::json!({ "only": "retention" }),
+        serde_json::json!({ "advance_retention": true }),
     )
 }
 
@@ -201,22 +232,17 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(unsafe_gc.code, "invalid_request");
     assert!(unsafe_gc.message.contains("derived safety minimum"));
 
-    let advanced =
-        post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
-    assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
+    let advanced = retention_floor(
+        post_retention_advance(&server_url, namespace.as_str()).expect("advance retention"),
+    );
+    assert_eq!(advanced, ChangeSeq(1));
 
     // Idempotent in the floor it lands on. `status_before` legitimately
     // differs: the first call observed the floor it then advanced past.
-    let repeated_advance =
+    let repeated =
         post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
-    assert_eq!(
-        repeated_advance.retention_floor_seq,
-        advanced.retention_floor_seq
-    );
-    assert_eq!(
-        repeated_advance.status_before.retention_floor_seq,
-        advanced.retention_floor_seq
-    );
+    assert_eq!(repeated.status_before.retention_floor_seq, advanced);
+    assert_eq!(retention_floor(repeated), advanced);
 
     let bytes = client.get_file_bytes(&target).await.expect("read file");
     assert_eq!(bytes, b"hello admin\n");
@@ -316,41 +342,53 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
         .await
         .expect("write file");
 
+    // A body that names no action is not a step.
+    let empty = post_empty_maintenance_step(&server_url, namespace.as_str())
+        .expect_err("a body selecting nothing is refused");
+    assert_eq!(empty.code, "invalid_request");
+    assert!(empty.message.contains("at least one action"));
+
     // One WAL segment sits far below the default threshold.
     let idle = post_maintenance_step(&server_url, namespace.as_str()).expect("idle step");
     assert_eq!(idle.namespace_id, namespace);
     assert_eq!(idle.status_before.wal_tail_segments, 1);
-    assert_eq!(idle.wal_flush, loonfs_api::WalFlushStepOutcome::NotNeeded);
+    assert_eq!(
+        upkeep(&idle).wal_flush,
+        loonfs_api::WalFlushStepOutcome::NotNeeded
+    );
+    // Unnamed actions report nothing at all.
     assert!(idle.gc.is_none());
+    assert!(idle.retention.is_none());
 
-    // Forcing the threshold to one segment flushes the WAL tail
-    // and runs the opted-in GC pass.
+    // Forcing the threshold to one segment flushes the WAL tail, and the
+    // named retention and collection actions run behind it.
     let forced: loonfs_api::MaintenanceStepResponse = client
         .maintenance_step(
             &namespace,
             &loonfs_api::MaintenanceStepRequest {
-                max_wal_tail_segments: Some(1),
-                retention: None,
+                metadata: Some(loonfs_api::MetadataMaintenanceRequest {
+                    max_wal_tail_segments: Some(1),
+                }),
+                advance_retention: true,
                 gc: Some(loonfs_api::GcRequest::default()),
-                only: None,
             },
         )
         .await
         .expect("forced step");
     assert_eq!(
-        forced.wal_flush,
+        upkeep(&forced).wal_flush,
         loonfs_api::WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1),
         }
     );
-    // Retention runs inside the step now, so the floor is reported whether or
-    // not it moved, and it never goes backwards.
-    assert!(forced.retention_floor_seq >= forced.status_before.retention_floor_seq);
+    // The floor is reported because the step named the advance, and it never
+    // goes backwards.
+    assert!(retention_floor(forced.clone()) >= forced.status_before.retention_floor_seq);
     assert_eq!(
-        forced.reorganize,
+        upkeep(&forced).reorganize,
         loonfs_api::ReorganizeStepOutcome::NotNeeded
     );
-    let gc = forced.gc.expect("gc report present when opted in");
+    let gc = forced.gc.clone().expect("gc report present when opted in");
     assert_eq!(gc.deleted_wal_segments, 0);
     assert!(!gc.degraded_retention);
 
@@ -378,9 +416,10 @@ async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
         .await
         .expect("create namespace");
 
-    let advanced =
-        post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
-    assert_eq!(advanced.retention_floor_seq, ChangeSeq(0));
+    let advanced = retention_floor(
+        post_retention_advance(&server_url, namespace.as_str()).expect("advance retention"),
+    );
+    assert_eq!(advanced, ChangeSeq(0));
 
     harness.server.abort();
 }

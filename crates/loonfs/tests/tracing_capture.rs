@@ -15,7 +15,7 @@
 //! installed, and the assertion is deterministic.
 
 use loonfs::{
-    CreateNamespaceOptions, FsBackgroundWork, FsWriter, MaintenanceStepOptions, NamespaceId,
+    CreateNamespaceOptions, FsBackgroundWork, FsWriter, MetadataMaintenanceOptions, NamespaceId,
     PutFileOptions, StoreConfig,
 };
 use loonfs_test_support::block_on::block_on;
@@ -33,8 +33,13 @@ fn store_config(root: &Path) -> StoreConfig {
 }
 
 fn writes_past_wal_tail_threshold() -> u32 {
-    u32::try_from(MaintenanceStepOptions::default().max_wal_tail_segments + 1)
-        .expect("WAL tail threshold plus one should fit in u32")
+    u32::try_from(
+        MetadataMaintenanceOptions::default()
+            .max_wal_tail_segments
+            .get()
+            + 1,
+    )
+    .expect("WAL tail threshold plus one should fit in u32")
 }
 
 async fn writer(root: &Path) -> FsWriter {
