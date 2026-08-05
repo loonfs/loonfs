@@ -5,11 +5,13 @@ use super::metrics::ServerMetrics;
 use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
 use crate::config::{ServerConfig, ServerConfigError};
+use crate::local_cache::FoyerStoredMetadataBlockCache;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
     FsAdmin, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob, MaintenanceProbe,
-    SharedObjectStore, TraceMode, TraceStoreKind,
+    SharedObjectStore, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, TraceMode,
+    TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
 use loonfs_grep::{GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
@@ -70,6 +72,12 @@ pub(super) struct AppState {
     /// deployment has to remember to switch on is a metrics surface nobody
     /// has during the incident.
     pub(super) metrics: Arc<ServerMetrics>,
+    /// The node-local block cache this deployment keeps, when `[local_cache]`
+    /// asked for one. The handles reach it through the decoded block cache
+    /// they were built with; it is held here as its concrete type for the
+    /// two things the seam does not offer — reading foyer's own numbers at
+    /// scrape time, and closing the cache at shutdown.
+    pub(super) local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 }
 
 /// Everything a request path tells the writer's maintenance runner about
@@ -106,19 +114,26 @@ impl GrepMaintenance {
     }
 }
 
-/// Builds the HTTP application: the router that serves requests, and the
-/// writer whose background work its host must settle.
+/// Builds the HTTP application: the router that serves requests, the writer
+/// whose background work its host must settle, and the local block cache
+/// that host must close.
 ///
 /// Everything this app spawns belongs to that writer — publications, and
 /// the maintenance runner that admits the runtime's steps alongside the
 /// grep index's. [`serve`] settles it itself. A host embedding the
 /// [`Router`] on its own HTTP server must call [`FsWriter::shutdown`] after
 /// its listener drains, or publisher tasks and writer maintenance outlive
-/// the listener unobserved. The writer also answers what a deployment's
-/// shape is, so a host that needs to know whether the grep index job is
-/// registered here asks
+/// the listener unobserved, and must then call
+/// [`StoredMetadataBlockCache::close`] on the returned cache, or the blocks
+/// its memory tier still holds never reach disk. The writer also answers
+/// what a deployment's shape is, so a host that needs to know whether the
+/// grep index job is registered here asks
 /// [`FsWriter::maintenance_job`](loonfs::FsWriter::maintenance_job).
-pub async fn app(config: ServerConfig) -> Result<(Router, FsWriter), ServerConfigError> {
+///
+/// The cache is `None` unless the config carried a `[local_cache]` table.
+pub async fn app(
+    config: ServerConfig,
+) -> Result<(Router, FsWriter, Option<Arc<FoyerStoredMetadataBlockCache>>), ServerConfigError> {
     // The one unavoidable validation point: configs that skipped
     // `load_server_config` (direct Rust construction) fail here exactly as
     // file-loaded ones fail at load.
@@ -132,7 +147,7 @@ pub async fn app(config: ServerConfig) -> Result<(Router, FsWriter), ServerConfi
     let store = store.into_shared();
     let (router, state) =
         app_with_store_and_direct_transfers(config, store, direct_transfers).await?;
-    Ok((router, state.writer))
+    Ok((router, state.writer, state.local_cache))
 }
 
 #[cfg(test)]
@@ -166,6 +181,15 @@ pub(super) async fn app_with_store_and_direct_transfers(
     // grep mode maintains the index.
     let maintains_grep_index =
         config.maintenance.registers_automatic_jobs() && config.grep.mode.maintains_index();
+    // Opened before the handles, because the handles are what it is
+    // installed on: a directory that cannot be owned fails startup here
+    // rather than after a runtime is already running on it.
+    let local_cache = match &config.local_cache {
+        Some(local_cache) => Some(Arc::new(
+            FoyerStoredMetadataBlockCache::open(local_cache, metrics.recorder().as_ref()).await?,
+        )),
+        None => None,
+    };
     // Grep reads and checkpoints through the same handles the HTTP planes
     // use, so it is composed after them. Nothing has to be wired back into
     // the writer for its publications to reach the index: the job says on
@@ -176,6 +200,7 @@ pub(super) async fn app_with_store_and_direct_transfers(
         store,
         &metrics,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
+        local_cache.clone(),
     )
     .await?;
     let probe_store = writer.object_store();
@@ -251,6 +276,7 @@ pub(super) async fn app_with_store_and_direct_transfers(
         grep_service,
         grep_maintenance,
         metrics,
+        local_cache,
     };
     Ok((router(state.clone()), state))
 }
@@ -261,7 +287,14 @@ pub(super) async fn build_handles_with_metrics_jsonl_path(
     store: SharedObjectStore,
     metrics_jsonl_path: Option<OsString>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
-    build_handles(config, store, &ServerMetrics::new(), metrics_jsonl_path).await
+    build_handles(
+        config,
+        store,
+        &ServerMetrics::new(),
+        metrics_jsonl_path,
+        None,
+    )
+    .await
 }
 
 /// Opens the process's handles on one store, with the metrics wiring every
@@ -271,11 +304,16 @@ pub(super) async fn build_handles_with_metrics_jsonl_path(
 /// one set of numbers rather than two. The optional JSONL path adds a second
 /// sink for the raw object-store samples; the handle fans one store wrapper
 /// out to both rather than stacking two.
+///
+/// The local block cache is installed on the writer, which is what puts it
+/// under the decoded block cache the reader and the admin share. One
+/// installation covers all three handles.
 async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
     metrics: &ServerMetrics,
     metrics_jsonl_path: Option<OsString>,
+    local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
@@ -298,6 +336,9 @@ async fn build_handles(
         .metrics_recorder(metrics.recorder());
     if let Some(samples) = &samples {
         writer_builder = writer_builder.object_store_metrics_recorder(Arc::clone(samples));
+    }
+    if let Some(local_cache) = local_cache {
+        writer_builder = writer_builder.stored_metadata_block_cache(local_cache);
     }
     let writer = writer_builder.build().await.map_err(runtime_error)?;
     let reader = writer.reader();
@@ -356,6 +397,8 @@ pub enum ServeError {
     Serve(#[source] std::io::Error),
     #[error("background work did not settle during shutdown: {0}")]
     Shutdown(#[source] loonfs::RuntimeError),
+    #[error("the local block cache did not close during shutdown: {0}")]
+    LocalCacheClose(#[source] StoredMetadataBlockCacheCloseError),
 }
 
 /// Serves until ctrl-c or SIGTERM, then shuts down gracefully: the listener
@@ -402,7 +445,25 @@ pub(super) async fn serve_on<L>(
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
-    let (router, writer) = app(config).await?;
+    let (router, writer, local_cache) = app(config).await?;
+    serve_and_settle(listener, router, writer, local_cache, shutdown).await
+}
+
+/// Serves until the shutdown trigger fires, then settles what this process
+/// owns, in the order it has to be settled in.
+///
+/// Kept apart from [`serve_on`] so the settling order is a thing a test can
+/// drive with handles it holds.
+pub(super) async fn serve_and_settle<L>(
+    listener: L,
+    router: Router,
+    writer: FsWriter,
+    local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError>
+where
+    L: axum::serve::Listener<Addr = SocketAddr>,
+{
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await
@@ -412,7 +473,22 @@ where
     // work this server accepted. What order the shutdown itself runs in is
     // the writer's business, not this function's. Panicked tasks surface
     // here rather than disappearing with the process.
-    writer.shutdown().await.map_err(ServeError::Shutdown)
+    let settled = writer.shutdown().await.map_err(ServeError::Shutdown);
+    // The cache closes after the writer, and it closes whether or not the
+    // writer settled: a read may outlive the writer by design, and a lookup
+    // after the close is a miss by contract, so nothing is left waiting on
+    // bytes this takes away. Closing is what flushes the memory tier to
+    // disk, so a shutdown that skipped it would throw away the blocks this
+    // process spent the most on. A writer that failed to settle is the
+    // worse news of the two and is what a host is told about.
+    let closed = match local_cache {
+        Some(local_cache) => local_cache
+            .close()
+            .await
+            .map_err(ServeError::LocalCacheClose),
+        None => Ok(()),
+    };
+    settled.and(closed)
 }
 
 /// Resolves on ctrl-c or, on unix, SIGTERM — the stop signal container

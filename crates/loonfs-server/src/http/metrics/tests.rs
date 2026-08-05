@@ -140,7 +140,7 @@ fn scrape_time_gauges_carry_every_runtime_cache_counter() {
         metadata_table_cache_hits: 12,
         ..RuntimeCacheStats::default()
     };
-    render_scrape_gauges(&mut rendered, &cache, 4, 2);
+    render_scrape_gauges(&mut rendered, &cache, None, 4, 2);
 
     assert!(rendered.contains("loonfs_cache_metadata_table_cache_hits 12\n"));
     assert!(rendered.contains("loonfs_server_upload_permits_available 4\n"));

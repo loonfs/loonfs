@@ -38,7 +38,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     let addr = listener.local_addr().expect("listener addr");
     // The writer is dropped: tests abort the server task instead of shutting
     // it down gracefully.
-    let (router, _writer) = app(config).await.expect("build app");
+    let (router, _writer, _local_cache) = app(config).await.expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -161,6 +161,7 @@ pub(crate) fn test_config(
         content_token_secret: content_token_secret.into(),
         writer_id: writer_id.to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        local_cache: None,
         grep: GrepConfig::default(),
         maintenance: MaintenanceMode::Automatic,
         min_publish_interval_ms: 0,

@@ -14,7 +14,7 @@ use futures::stream::{BoxStream, StreamExt};
 use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, MaintenanceJob,
     MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepResult,
-    PutFileOptions, TraceMode, TraceStoreKind,
+    PutFileOptions, StoredMetadataBlockCache, TraceMode, TraceStoreKind,
 };
 use loonfs_api::ErrorCode;
 use loonfs_api::{
@@ -294,6 +294,103 @@ async fn app_validates_directly_built_configs() {
         }
         Err(other) => panic!("expected invalid field error, got {other:?}"),
         Ok(_) => panic!("app must reject a zero upload bound"),
+    }
+}
+
+/// The `[local_cache]` table is the whole switch: without it nothing is
+/// built, and a scrape says nothing about a tier this deployment does not
+/// have.
+#[tokio::test]
+async fn a_server_without_the_table_builds_no_local_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let config = test_config(temp_dir.path(), "no-local-cache-writer");
+
+    let (_router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    assert!(state.local_cache.is_none());
+    let rendered = state
+        .metrics
+        .render(&state.writer.runtime_cache_stats(), None, 0, 0);
+    assert!(!rendered.contains("loonfs_local_cache_"));
+}
+
+/// A configured cache is built at startup and reports itself on every
+/// scrape.
+#[tokio::test]
+async fn a_configured_local_cache_is_built_and_scraped() {
+    let temp_dir = tempdir().expect("tempdir");
+    let cache_dir = tempdir().expect("cache tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let mut config = test_config(temp_dir.path(), "local-cache-writer");
+    config.local_cache = Some(test_local_cache_config(cache_dir.path()));
+
+    let (_router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    let local_cache = state.local_cache.clone().expect("a local cache");
+    let rendered = state.metrics.render(
+        &state.writer.runtime_cache_stats(),
+        Some(local_cache.foyer_stats()),
+        0,
+        0,
+    );
+    assert!(rendered.contains("loonfs_local_cache_memory_capacity_bytes 4194304\n"));
+    assert!(rendered.contains("loonfs_local_cache_disk_capacity_bytes 134217728\n"));
+    assert!(rendered.contains("loonfs_local_cache_queue_buffer_overflows 0\n"));
+    assert!(rendered.contains("loonfs_local_cache_queue_channel_overflows 0\n"));
+
+    local_cache.close().await.expect("close local cache");
+}
+
+/// The graceful path closes the cache, and closes it after the writer has
+/// settled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graceful_shutdown_closes_the_local_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let cache_dir = tempdir().expect("cache tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let mut config = test_config(temp_dir.path(), "shutdown-local-cache-writer");
+    config.local_cache = Some(test_local_cache_config(cache_dir.path()));
+
+    let (router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    let local_cache = state.local_cache.clone().expect("a local cache");
+    assert!(!local_cache.is_closed());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve::serve_and_settle(
+        listener,
+        router,
+        state.writer.clone(),
+        state.local_cache.clone(),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    shutdown_tx.send(()).expect("trigger shutdown");
+    server
+        .await
+        .expect("join server task")
+        .expect("graceful shutdown settles background work");
+
+    assert!(
+        local_cache.is_closed(),
+        "the graceful path closes the cache before it returns"
+    );
+}
+
+fn test_local_cache_config(root: &Path) -> crate::config::LocalCacheConfig {
+    crate::config::LocalCacheConfig {
+        path: root.display().to_string(),
+        memory_bytes: 4 * 1024 * 1024,
+        disk_bytes: 128 * 1024 * 1024,
     }
 }
 
@@ -1751,7 +1848,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     // needs to know it is happening, not only that some clients saw 503.
     assert!(state
         .metrics
-        .render(&state.writer.runtime_cache_stats(), 0, 0)
+        .render(&state.writer.runtime_cache_stats(), None, 0, 0)
         .contains("loonfs_server_busy_rejections_total{kind=\"upload\"} 1\n"));
 
     drop(held);
@@ -1866,7 +1963,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     );
     assert!(state
         .metrics
-        .render(&state.writer.runtime_cache_stats(), 0, 0)
+        .render(&state.writer.runtime_cache_stats(), None, 0, 0)
         .contains("loonfs_server_busy_rejections_total{kind=\"download\"} 1\n"));
 
     drop(held);
@@ -2189,6 +2286,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         content_token_secret: "test-content-token-secret".into(),
         writer_id: writer_id.to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        local_cache: None,
         grep: crate::config::GrepConfig::default(),
         maintenance: crate::config::MaintenanceMode::Automatic,
         min_publish_interval_ms: 0,

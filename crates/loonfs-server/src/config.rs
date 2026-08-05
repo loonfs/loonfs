@@ -41,6 +41,12 @@ pub struct ServerConfig {
     pub writer_id: String,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
+    /// The node-local cache of encoded metadata blocks, if this deployment
+    /// keeps one. Absent means no local cache: every metadata block read
+    /// that misses the decoded cache goes to object storage, which is the
+    /// behavior of a server that never had this table.
+    #[serde(default)]
+    pub local_cache: Option<LocalCacheConfig>,
     /// What this server does about grep, plus the bounded-step budgets its
     /// index maintenance runs under. A config with no `[grep]` table
     /// composes no grep at all; a table that names no `mode` both serves
@@ -161,6 +167,32 @@ fn grep_absent() -> GrepConfig {
         mode: GrepMode::Disabled,
         ..GrepConfig::default()
     }
+}
+
+/// The server's `[local_cache]` table: where the node-local cache of encoded
+/// metadata blocks lives, and how much memory and disk it may use.
+///
+/// The directory is this process's alone while it runs, and it holds nothing
+/// durable. Object storage remains the authority for every block the cache
+/// answers, so the directory can be deleted whenever the process is not
+/// running and the only cost is a cold cache.
+///
+/// Everything else about the tier — its on-disk layout, how many flushers
+/// write it, how large its write buffers are — is fixed in the
+/// implementation. Those are engine-tuning numbers, not deployment
+/// decisions, and they stay out of configuration until measurement says
+/// otherwise.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalCacheConfig {
+    /// Directory the cache owns. Created if missing; locked while this
+    /// process runs, so two servers cannot share one.
+    pub path: String,
+    /// Bytes of memory the cache's in-memory tier may hold.
+    pub memory_bytes: u64,
+    /// Bytes of disk the cache's disk tier may hold. The tier claims this
+    /// much space up front, in files under `path`.
+    pub disk_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -442,6 +474,25 @@ impl ServerConfig {
                          set `maintenance = \"manual\"` to disable scheduling"
                     .to_owned(),
             });
+        }
+        if let Some(local_cache) = &self.local_cache {
+            require_non_empty("local_cache.path", &local_cache.path)?;
+            if local_cache.memory_bytes == 0 {
+                return Err(ServerConfigError::InvalidField {
+                    field: "local_cache.memory_bytes",
+                    reason: "must be greater than zero; \
+                             omit the `[local_cache]` table to run without a local cache"
+                        .to_owned(),
+                });
+            }
+            if local_cache.disk_bytes == 0 {
+                return Err(ServerConfigError::InvalidField {
+                    field: "local_cache.disk_bytes",
+                    reason: "must be greater than zero; \
+                             omit the `[local_cache]` table to run without a local cache"
+                        .to_owned(),
+                });
+            }
         }
         if let Err(error) = self.grep.worker_config().validate() {
             return Err(ServerConfigError::InvalidField {
@@ -1442,6 +1493,128 @@ root = "/tmp/loonfs-server"
             .expect("load config")
             .runtime_cache_config();
         assert_eq!(config, loonfs::RuntimeCacheConfig::disabled());
+    }
+
+    #[test]
+    fn an_omitted_local_cache_table_asks_for_no_local_cache() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let config = load_server_config(&path).expect("valid config");
+        assert!(
+            config.local_cache.is_none(),
+            "a server without the table reads every metadata block from object storage"
+        );
+    }
+
+    #[test]
+    fn load_reads_the_local_cache_table() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[local_cache]
+path = "/var/lib/loonfs/cache"
+memory_bytes = 67108864
+disk_bytes = 107374182400
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let local_cache = load_server_config(&path)
+            .expect("valid config")
+            .local_cache
+            .expect("a local cache table");
+        assert_eq!(local_cache.path, "/var/lib/loonfs/cache");
+        assert_eq!(local_cache.memory_bytes, 67_108_864);
+        assert_eq!(local_cache.disk_bytes, 107_374_182_400);
+    }
+
+    #[test]
+    fn a_local_cache_table_needs_a_path_and_two_sizes() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[local_cache]
+path = "   "
+memory_bytes = 67108864
+disk_bytes = 107374182400
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let error = load_server_config(&path).expect_err("a blank path must be rejected");
+        assert_missing_field(error, "local_cache.path");
+
+        for (field, memory_bytes, disk_bytes) in [
+            ("local_cache.memory_bytes", 0, 107_374_182_400_u64),
+            ("local_cache.disk_bytes", 67_108_864, 0),
+        ] {
+            let path = write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[local_cache]
+path = "/var/lib/loonfs/cache"
+memory_bytes = {memory_bytes}
+disk_bytes = {disk_bytes}
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+            let error = load_server_config(&path).expect_err("a zero size must be rejected");
+            assert_invalid_field(error, field);
+        }
+    }
+
+    #[test]
+    fn the_local_cache_table_takes_no_engine_settings() {
+        // The disk engine's geometry is fixed in the implementation. A
+        // deployment reaching for it fails through strict decoding like any
+        // other unknown key.
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[local_cache]
+path = "/var/lib/loonfs/cache"
+memory_bytes = 67108864
+disk_bytes = 107374182400
+block_bytes = 65536
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let error = load_server_config(&path).expect_err("an engine key must not load");
+        assert!(error.to_string().contains("block_bytes"), "{error}");
     }
 
     #[test]

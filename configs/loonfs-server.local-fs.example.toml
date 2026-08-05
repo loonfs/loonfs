@@ -64,6 +64,25 @@ writer_id = "loonfs-server-local"
 # Decoded-byte budget for the metadata table cache; unlimited by default.
 #metadata_table_cache_max_decoded_bytes = 268435456
 
+# Optional node-local cache of encoded metadata blocks, on this machine's own
+# disk. Omit the table and there is none: every metadata block the decoded
+# cache misses is read from object storage.
+#
+# The directory is this server's alone while it runs — a second server
+# pointed at it fails to start — and it holds nothing durable. Object storage
+# stays the authority for every block, so the directory can be deleted
+# whenever this server is stopped, and it is rebuilt on the next start.
+#
+# `disk_bytes` is claimed up front in 16 MiB files under `path`, each held
+# open, so the value below asks for 6400 files and an open-file limit above
+# that. Nothing else about the tier is configurable: how it is laid out on
+# disk, how many flushers write it, and how large its write buffers are are
+# engine-tuning numbers rather than deployment decisions.
+#[local_cache]
+#path = "/var/lib/loonfs/cache"
+#memory_bytes = 67108864
+#disk_bytes = 107374182400
+
 # Omit the `[grep]` table and this server composes no grep at all: uniform
 # `not_supported` responses, and no `query.grep` feature or limits advertised.
 # A `[grep]` table with no `mode` both serves searches and maintains the index.

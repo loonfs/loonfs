@@ -7,6 +7,7 @@
 //! request-level instruments only an HTTP server can report, and renders the
 //! whole snapshot on demand.
 
+use crate::local_cache::FoyerCacheStats;
 use axum::http::{Method, StatusCode};
 use loonfs::metrics::{
     CounterHandle, DefaultMetricsRecorder, HistogramHandle, MetricEntry, MetricValue,
@@ -115,11 +116,18 @@ impl ServerMetrics {
     pub(super) fn render(
         &self,
         cache: &RuntimeCacheStats,
+        local_cache: Option<FoyerCacheStats>,
         upload_permits: usize,
         download_permits: usize,
     ) -> String {
         let mut rendered = render_snapshot(&self.recorder.snapshot());
-        render_scrape_gauges(&mut rendered, cache, upload_permits, download_permits);
+        render_scrape_gauges(
+            &mut rendered,
+            cache,
+            local_cache,
+            upload_permits,
+            download_permits,
+        );
         rendered
     }
 
@@ -302,11 +310,13 @@ fn write_entry(rendered: &mut String, name: &str, entry: &MetricEntry) {
 }
 
 /// Appends the values that are read when a scrape asks rather than
-/// accumulated as work happens: the runtime's cache counters and the
-/// transfer slots this server has free.
+/// accumulated as work happens: the runtime's cache counters, what foyer
+/// says about the local block cache, and the transfer slots this server has
+/// free.
 fn render_scrape_gauges(
     rendered: &mut String,
     cache: &RuntimeCacheStats,
+    local_cache: Option<FoyerCacheStats>,
     upload_permits: usize,
     download_permits: usize,
 ) {
@@ -315,6 +325,16 @@ fn render_scrape_gauges(
         let _ = writeln!(rendered, "# HELP {name} Runtime cache counter `{field}`");
         let _ = writeln!(rendered, "# TYPE {name} gauge");
         let _ = writeln!(rendered, "{name} {value}");
+    }
+    // Absent when this deployment keeps no local cache, so a scrape reports
+    // nothing about a tier that does not exist rather than reporting zeros
+    // that read like an idle one.
+    if let Some(local_cache) = local_cache {
+        for (name, description, value) in local_cache_gauges(&local_cache) {
+            let _ = writeln!(rendered, "# HELP {name} {description}");
+            let _ = writeln!(rendered, "# TYPE {name} gauge");
+            let _ = writeln!(rendered, "{name} {value}");
+        }
     }
     for (name, description, value) in [
         (
@@ -332,6 +352,58 @@ fn render_scrape_gauges(
         let _ = writeln!(rendered, "# TYPE {name} gauge");
         let _ = writeln!(rendered, "{name} {value}");
     }
+}
+
+/// What foyer says about the local block cache, as gauges.
+///
+/// These are foyer's own numbers, read at scrape time; the cache's hits,
+/// misses, and inserts are reported through the runtime's recorder like
+/// every other instrument and are already in the snapshot above.
+///
+/// Destructured without a rest pattern for the same reason the runtime
+/// counters are: a field added to [`FoyerCacheStats`] and not exported here
+/// fails to compile.
+fn local_cache_gauges(stats: &FoyerCacheStats) -> [(&'static str, &'static str, u64); 6] {
+    let FoyerCacheStats {
+        memory_bytes,
+        memory_capacity_bytes,
+        disk_bytes,
+        disk_capacity_bytes,
+        queue_buffer_overflows,
+        queue_channel_overflows,
+    } = *stats;
+    [
+        (
+            "loonfs_local_cache_memory_bytes",
+            "Bytes the local block cache's memory tier is holding",
+            memory_bytes as u64,
+        ),
+        (
+            "loonfs_local_cache_memory_capacity_bytes",
+            "Bytes the local block cache's memory tier may hold",
+            memory_capacity_bytes as u64,
+        ),
+        (
+            "loonfs_local_cache_disk_bytes",
+            "Bytes of the local block cache's disk device claimed as blocks",
+            disk_bytes as u64,
+        ),
+        (
+            "loonfs_local_cache_disk_capacity_bytes",
+            "Bytes of disk the local block cache was opened with",
+            disk_capacity_bytes as u64,
+        ),
+        (
+            "loonfs_local_cache_queue_buffer_overflows",
+            "Inserts the local block cache dropped with a full flush buffer",
+            queue_buffer_overflows,
+        ),
+        (
+            "loonfs_local_cache_queue_channel_overflows",
+            "Inserts the local block cache dropped with a full submit queue",
+            queue_channel_overflows,
+        ),
+    ]
 }
 
 /// The runtime cache counters, named as their fields are.

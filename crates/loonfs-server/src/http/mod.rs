@@ -377,6 +377,10 @@ async fn serve_metrics(
     // level is only true when it is asked for.
     let rendered = state.metrics.render(
         &state.writer.runtime_cache_stats(),
+        state
+            .local_cache
+            .as_ref()
+            .map(|local_cache| local_cache.foyer_stats()),
         state.upload_permits.available_permits(),
         state.download_permits.available_permits(),
     );
