@@ -22,8 +22,10 @@
 //!   [`row`] handles manifest-row encoding.
 //! - [`reorganize`] compacts bounded family groups into new base runs.
 //! - [`retention`] advances the retention floor behind verified progress.
-//! - [`runs`] models the LSM run layout shared by all of the above, and
-//!   [`cache`] holds decoded SST blocks keyed by content digest.
+//! - [`runs`] models the LSM run layout shared by all of the above,
+//!   [`cache`] holds decoded SST blocks keyed by content digest, and
+//!   [`stored_block_cache`] defines the seam a node-local cache of the same
+//!   blocks in their encoded form plugs into.
 
 mod block_fetch;
 mod block_load;
@@ -44,6 +46,7 @@ mod retention;
 mod row;
 mod runs;
 mod scan;
+mod stored_block_cache;
 #[cfg(test)]
 pub(crate) mod tests;
 mod validate;
@@ -58,6 +61,10 @@ pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
+pub use self::stored_block_cache::{
+    StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
+    StoredMetadataBlockKind,
+};
 
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;

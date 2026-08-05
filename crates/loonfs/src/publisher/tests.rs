@@ -200,6 +200,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
             trace_store_kind: TraceStoreKind::LocalFs,
         },
         None,
+        None,
         RuntimeInstruments::new(None),
     )
 }

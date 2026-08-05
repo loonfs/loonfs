@@ -25,6 +25,9 @@ tracing.workspace = true
 
 [features]
 default = []
+# Test doubles for this crate's public seams, for the test targets of crates
+# that implement or install them. No production build enables it.
+test-support = []
 
 [dev-dependencies]
 loonfs-model = { path = "../loonfs-model" }

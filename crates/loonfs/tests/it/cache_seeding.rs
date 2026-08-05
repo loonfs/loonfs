@@ -8,6 +8,7 @@ use loonfs::{
     ChangeSeq, CreateDirectoryOptions, CreateNamespaceOptions, ErrorCode, InodeId, InodeKind,
     NamespaceId, PutFileOptions, RuntimeCacheConfig, SharedObjectStore,
 };
+use loonfs_core::test_support::RecordingStoredMetadataBlockCache;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
@@ -656,4 +657,65 @@ fn separate_runtime_instances_share_object_store_state() {
         .get_file_bytes_blocking(&namespace_id, "/docs/shared.txt")
         .expect("read shared file");
     assert_eq!(file.bytes, b"shared");
+}
+
+/// The stored-block cache is a seam and nothing more until a later change
+/// wires the fetch path into it: a runtime built with one installed reads
+/// and writes exactly as it did without one, and never calls it. The
+/// decoded-cache assertion keeps this honest — it fails if the cycle stops
+/// exercising the metadata table path this tier sits under.
+#[test]
+fn an_installed_stored_block_cache_is_never_called() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let fs = open_runtime_with(
+        store(temp_dir.path()),
+        "stored-block-seam-test",
+        |builder| builder.stored_metadata_block_cache(stored_blocks.clone()),
+    );
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+    fs.create_checkpoint_blocking(&namespace_id)
+        .expect("checkpoint");
+    // A write after the checkpoint moves the head, so the reads below
+    // resolve against the published manifest and touch its segments.
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/second.txt",
+        b"second",
+        PutFileOptions::default(),
+    )
+    .expect("put second file");
+
+    let file = fs
+        .get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+        .expect("read file");
+    assert_eq!(file.bytes, b"file");
+    let entries = fs
+        .list_path_blocking(&namespace_id, "/docs")
+        .expect("list docs");
+    assert_eq!(entries.len(), 2);
+
+    assert!(
+        fs.runtime_cache_stats().metadata_table_cache_inserts > 0,
+        "the cycle must reach the decoded block cache for this to prove anything"
+    );
+    assert_eq!(
+        stored_blocks.calls(),
+        Vec::new(),
+        "nothing consults the stored-block cache yet"
+    );
+    assert!(
+        !stored_blocks.is_closed(),
+        "the host owns the cache and closes it"
+    );
 }
