@@ -106,6 +106,13 @@ pub mod metadata;
 /// Path parsing and current-state resolution. Consumed by `loonfs`'s write
 /// path (`parse_mutation_path`).
 pub mod path;
+/// Test doubles for this crate's public seams, behind the `test-support`
+/// feature. Consumed by the test targets of crates that implement or install
+/// those seams; no production build enables the feature. Doubles live here
+/// rather than in `loonfs-test-support` because that crate is a development
+/// dependency of this one and so cannot depend on these types.
+#[cfg(feature = "test-support")]
+pub mod test_support;
 /// The wall-clock boundary durable timestamps are stamped at. Consumed by
 /// `loonfs`, whose mutation contexts and maintenance clock stamp from the
 /// same boundary this crate's own commits do.
@@ -119,8 +126,9 @@ pub mod cache {
 
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
-        MetadataTableCacheStats, WalTailProjectionCache, WalTailProjectionCacheConfig,
-        WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+        MetadataTableCacheStats, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError,
+        StoredMetadataBlockKey, StoredMetadataBlockKind, WalTailProjectionCache,
+        WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
         DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };

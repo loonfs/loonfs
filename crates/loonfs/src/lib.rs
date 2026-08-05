@@ -68,7 +68,10 @@ pub use loonfs_api::{
     FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
-pub use loonfs_core::cache::{MetadataTableCacheConfig, Recency};
+pub use loonfs_core::cache::{
+    MetadataTableCacheConfig, Recency, StoredMetadataBlockCache,
+    StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
+};
 pub use loonfs_core::limits::{
     DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
 };

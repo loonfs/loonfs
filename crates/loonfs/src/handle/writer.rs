@@ -10,7 +10,7 @@ use crate::{
     MaintenanceJobId, NamespaceId, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
     SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
-use loonfs_core::cache::MetadataTableCache;
+use loonfs_core::cache::{MetadataTableCache, StoredMetadataBlockCache};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -314,6 +314,27 @@ impl FsWriterBuilder {
         self
     }
 
+    /// Installs a node-local cache of encoded metadata blocks beneath this
+    /// writer's decoded block cache.
+    ///
+    /// The handle rides on the decoded cache, so every handle built from
+    /// this writer's cache reaches the same local cache — the reader this
+    /// writer derives, and an admin handle sharing the cache through
+    /// [`FsAdminBuilder::shared_metadata_table_cache`]. Nothing else
+    /// reaches it: paths that carry no decoded cache carry neither tier.
+    ///
+    /// Unset by default. The host owns the cache and closes it, and object
+    /// storage stays the authority for every read either way.
+    ///
+    /// [`FsAdminBuilder::shared_metadata_table_cache`]: crate::FsAdminBuilder::shared_metadata_table_cache
+    pub fn stored_metadata_block_cache(
+        mut self,
+        stored_metadata_block_cache: Arc<dyn StoredMetadataBlockCache>,
+    ) -> Self {
+        self.core.stored_metadata_block_cache = Some(stored_metadata_block_cache);
+        self
+    }
+
     /// Sets the tracing mode label.
     pub fn trace_mode(mut self, trace_mode: TraceMode) -> Self {
         self.core.trace_mode = trace_mode;
@@ -435,11 +456,50 @@ mod tests {
         CreateNamespaceOptions, ErrorCode, FsBackgroundWork, FsWriter, MaintenanceJobId,
         NamespaceId, PutFileOptions,
     };
+    use loonfs_core::test_support::RecordingStoredMetadataBlockCache;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
     use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn a_writer_carries_no_stored_block_cache_by_default() {
+        let temp_dir = tempdir().expect("tempdir");
+        let writer = FsWriter::builder_with_store(Arc::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        ))
+        .writer_id("no-stored-block-cache-writer")
+        .build()
+        .await
+        .expect("build writer");
+
+        assert!(writer.metadata_table_cache().stored_block_cache().is_none());
+    }
+
+    /// The handle rides on the decoded block cache, which is what puts the
+    /// two tiers in the same places: every handle built from this cache
+    /// reaches the local cache, and every path that carries no decoded cache
+    /// reaches neither tier.
+    #[tokio::test]
+    async fn the_builder_installs_the_stored_block_cache_on_the_decoded_cache() {
+        let temp_dir = tempdir().expect("tempdir");
+        let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+        let writer = FsWriter::builder_with_store(Arc::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        ))
+        .writer_id("stored-block-cache-writer")
+        .stored_metadata_block_cache(stored_blocks.clone())
+        .build()
+        .await
+        .expect("build writer");
+
+        assert!(writer.metadata_table_cache().stored_block_cache().is_some());
+        assert!(Arc::ptr_eq(
+            &writer.metadata_table_cache(),
+            &writer.reader().core.metadata_table_cache()
+        ));
+    }
 
     /// A writer whose store parks the first head compare-and-swap, so a
     /// publication can be held open across a shutdown's first poll.

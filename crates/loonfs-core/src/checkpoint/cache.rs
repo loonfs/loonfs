@@ -1,7 +1,12 @@
 //! Shared caches for decoded manifest state: SST blocks keyed by content
 //! digest, validated manifests, and bounded WAL-tail projections.
+//!
+//! The decoded block cache also carries the handle to the optional
+//! node-local cache of the same blocks in their encoded form; see
+//! [`stored_block_cache`](super::stored_block_cache).
 
 use super::runs::MetadataRunManifest;
+use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::metadata::MetadataState;
 use crate::recency::Recency;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
@@ -121,6 +126,12 @@ pub struct MetadataTableCache {
     /// One cell per in-flight block fetch, keyed by the block's cache key,
     /// so concurrent readers share a single ranged GET per block.
     in_flight: Mutex<HashMap<MetadataTableCacheKey, Arc<OnceCell<DecodedMetadataTableBlock>>>>,
+    /// The node-local cache of encoded stored blocks this cache misses
+    /// into, when the runtime was built with one. It lives here so the two
+    /// tiers are available together: a path that carries no table cache —
+    /// maintenance, reorganization, collection, and retention all pass
+    /// none — reaches neither tier, and needs no separate wiring to say so.
+    stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
 }
 
 #[derive(Debug, Default)]
@@ -150,12 +161,28 @@ struct MetadataTableCacheStatsInner {
 
 impl MetadataTableCache {
     pub fn new(config: MetadataTableCacheConfig) -> Self {
+        Self::with_stored_block_cache(config, None)
+    }
+
+    /// Sizes a cache that also carries a node-local cache of encoded stored
+    /// blocks beneath it. Passing `None` is exactly [`Self::new`].
+    pub fn with_stored_block_cache(
+        config: MetadataTableCacheConfig,
+        stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
+    ) -> Self {
         Self {
             config,
             inner: Mutex::new(MetadataTableCacheInner::default()),
             stats: MetadataTableCacheStatsInner::default(),
             in_flight: Mutex::new(HashMap::new()),
+            stored_block_cache,
         }
+    }
+
+    /// The node-local stored-block cache this cache misses into, if the
+    /// runtime was built with one.
+    pub fn stored_block_cache(&self) -> Option<&Arc<dyn StoredMetadataBlockCache>> {
+        self.stored_block_cache.as_ref()
     }
 
     /// Resolves one block access through a single-flight cell.

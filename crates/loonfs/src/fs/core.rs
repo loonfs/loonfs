@@ -22,7 +22,8 @@ use loonfs_api::{
     PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
-    MetadataTableCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
+    MetadataTableCache, StoredMetadataBlockCache, WalTailProjectionCache,
+    WalTailProjectionCacheConfig,
 };
 use loonfs_core::time::current_time_ms;
 use loonfs_core::{MutationContext, NamespaceEngine};
@@ -113,15 +114,23 @@ impl ReadCore {
     /// identities (payload checksums and manifest object keys); the
     /// sharing caller owns the sizing decision, and
     /// `config.runtime_cache.metadata_table_cache` goes unused.
+    ///
+    /// `stored_metadata_block_cache` is the node-local cache of encoded
+    /// blocks the fresh decoded cache carries beneath it. It applies only
+    /// when this core sizes its own cache: a shared cache already carries
+    /// whatever handle it was built with, which is what makes the sharing
+    /// caller's sizing decision cover both tiers together.
     pub(crate) fn open(
         store: SharedObjectStore,
         config: ReadConfig,
         shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
+        stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
         instruments: Arc<RuntimeInstruments>,
     ) -> Self {
         let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
-            Arc::new(MetadataTableCache::new(
+            Arc::new(MetadataTableCache::with_stored_block_cache(
                 config.runtime_cache.metadata_table_cache.clone(),
+                stored_metadata_block_cache,
             ))
         });
         let wal_tail_projection_cache =

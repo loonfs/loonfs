@@ -10,7 +10,7 @@ use crate::{
     Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
     TraceStoreKind,
 };
-use loonfs_core::cache::MetadataTableCache;
+use loonfs_core::cache::{MetadataTableCache, StoredMetadataBlockCache};
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::sync::Arc;
 
@@ -32,6 +32,9 @@ pub(super) struct HandleBuilderCore {
     /// An existing decoded-block cache to share instead of sizing a fresh
     /// one from `runtime_cache`; see [`ReadCore::open`].
     pub(super) shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
+    /// A node-local cache of encoded metadata blocks for the fresh decoded
+    /// cache to carry beneath it; see [`ReadCore::open`].
+    pub(super) stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     pub(super) trace_mode: TraceMode,
     pub(super) trace_store_kind: Option<TraceStoreKind>,
     pub(super) object_store_metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
@@ -53,6 +56,7 @@ impl HandleBuilderCore {
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
             shared_metadata_table_cache: None,
+            stored_metadata_block_cache: None,
             trace_mode: TraceMode::Embedded,
             trace_store_kind: None,
             object_store_metrics_recorder: None,
@@ -99,6 +103,7 @@ impl HandleBuilderCore {
                 trace_store_kind,
             },
             self.shared_metadata_table_cache,
+            self.stored_metadata_block_cache,
             instruments,
         ))
     }
