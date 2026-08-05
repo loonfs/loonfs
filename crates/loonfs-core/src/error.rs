@@ -93,7 +93,8 @@ pub enum CoreError {
     #[error("asked for {requested} items, over the {max} one batch answers")]
     BatchTooLarge { requested: usize, max: usize },
     /// A streamed read was asked to start past the end of the content it
-    /// reads. Nothing was read.
+    /// reads, either outright or by being handed more already-held bytes
+    /// than the content has. Nothing was read.
     #[error("cannot start a read at offset {start_offset} of {size_bytes}-byte content")]
     ResumeOffsetOutOfRange { start_offset: u64, size_bytes: u64 },
     /// A streamed read that starts past zero was driven before the bytes it

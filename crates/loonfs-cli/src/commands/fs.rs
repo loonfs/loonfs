@@ -419,9 +419,9 @@ pub(super) async fn stream_download_to_file(
     let resumed_from = download.resumed_from();
     let mut partial = PartialDownload::open(destination, meta, resumed_from)
         .map_err(|error| local_open_error(destination, error, force, derived_name))?;
-    partial
-        .fold_into(download)
-        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+    partial.fold_into(download, |error| {
+        local_destination_error(destination, error, force, derived_name)
+    })?;
     progress.already_done(resumed_from);
     if resumed_from > 0 {
         // Folding a head start back into the verification takes time and

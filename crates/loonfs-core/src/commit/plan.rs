@@ -5,6 +5,7 @@
 use crate::metadata::MetadataState;
 #[cfg(test)]
 use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::{
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
 };
@@ -99,8 +100,7 @@ pub(crate) enum ValidatedOp {
         name_key: NameKey,
         /// The exact deletion generation validation resolved and pinned:
         /// the active tombstone's own event coordinates.
-        target_seq: ChangeSeq,
-        target_delta_index: u32,
+        target: TombstoneGeneration,
         revoke_tombstone_delta_index: u32,
         bind_delta_index: u32,
     },

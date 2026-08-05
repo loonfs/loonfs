@@ -2,7 +2,7 @@
 //! results.
 
 use super::{PreparedCommit, ResolvedBinding, ValidatedOp};
-use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
+use loonfs_api::wire::manifest::DeletedDirentry;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{ContentRef, InodeId, InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
@@ -304,8 +304,7 @@ pub(super) fn materialize_validated_op(
             parent_inode_id,
             display_name,
             name_key,
-            target_seq,
-            target_delta_index,
+            target,
             revoke_tombstone_delta_index,
             bind_delta_index,
         } => {
@@ -318,10 +317,7 @@ pub(super) fn materialize_validated_op(
                 WalDelta::RevokeSubtreeTombstone {
                     delta_index: *revoke_tombstone_delta_index,
                     root_inode_id: *inode_id,
-                    target: TombstoneGeneration {
-                        seq: *target_seq,
-                        delta_index: *target_delta_index,
-                    },
+                    target: *target,
                 },
             );
             push_delta(

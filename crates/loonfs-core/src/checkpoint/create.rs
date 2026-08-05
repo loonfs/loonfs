@@ -57,7 +57,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     let mut saw_root_cas_race = false;
     for _publication_attempt in 0..CONTENTION_RETRY_LIMIT {
         let basis = match try_flush_wal(store, namespace_id, context, &timer).await? {
-            TryFlushWal::Flushed(basis) => basis,
+            TryFlushWal::Settled(basis) => basis,
             TryFlushWal::RaceLost => {
                 saw_root_cas_race = true;
                 continue;

@@ -160,17 +160,28 @@ impl PartialDownload {
     /// Hands the download the bytes already on disk, so its verification
     /// still covers the whole file and not merely the part this run
     /// fetched.
-    pub(super) fn fold_into(&self, download: &mut FileDownload) -> std::io::Result<()> {
+    ///
+    /// `local_error` shapes a failure to read those bytes back. A download
+    /// that refuses them — a partial longer than the content it claims to
+    /// resume — reports its own reason instead, because that is the answer
+    /// worth printing.
+    pub(super) fn fold_into(
+        &self,
+        download: &mut FileDownload,
+        local_error: impl Fn(std::io::Error) -> CliError,
+    ) -> Result<(), CliError> {
         if self.resumed_from == 0 {
             return Ok(());
         }
-        let mut reader = std::fs::File::open(&self.path)?;
+        let mut reader = std::fs::File::open(&self.path).map_err(&local_error)?;
         let mut buffer = vec![0u8; FOLD_CHUNK_BYTES];
         let mut remaining = self.resumed_from;
         while remaining > 0 {
             let wanted = buffer.len().min(remaining as usize);
-            reader.read_exact(&mut buffer[..wanted])?;
-            download.fold_resumed_prefix(&buffer[..wanted]);
+            reader
+                .read_exact(&mut buffer[..wanted])
+                .map_err(&local_error)?;
+            download.fold_resumed_prefix(&buffer[..wanted])?;
             remaining -= wanted as u64;
         }
         Ok(())

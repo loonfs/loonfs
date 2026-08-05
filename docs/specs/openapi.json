@@ -5685,15 +5685,6 @@
         "type": "string",
         "description": "Durable id for one upload session."
       },
-      "UploadMode": {
-        "type": "string",
-        "description": "Upload transport mode.",
-        "enum": [
-          "service_proxied",
-          "direct_put",
-          "direct_multipart"
-        ]
-      },
       "UploadPartChecksumClaim": {
         "type": "object",
         "description": "One part's checksum, supplied by the client so the server can sign it\ninto that part's upload URL.",

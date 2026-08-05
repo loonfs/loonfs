@@ -887,9 +887,10 @@ create-vs-collect grace, `expires_at_ms` for the release, and
 carries the caller's `ttl_ms`, or nothing at all, in which case it is held
 until released. A fork-owned record always carries one: it is the lease for a
 single fork attempt (section 3.9.2), and letting it pass is how an abandoned
-attempt becomes collectable. An active record whose expiry has passed still
-pins and still serves — until the pass that releases it, it is a root, and
-answering from it is answering from state that is provably still there.
+attempt becomes collectable; a fork-owned record read without one is rejected
+at decode, like any other corruption. An active record whose expiry has passed
+still pins and still serves — until the pass that releases it, it is a root,
+and answering from it is answering from state that is provably still there.
 
 Explicit release is user-owned only, and it is idempotent: releasing an
 already-released or already-deleted record leaves the same end state. Owner

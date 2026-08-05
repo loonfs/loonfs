@@ -324,9 +324,37 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// over the ones it does. Feeding the wrong bytes fails verification at
     /// the end, which is exactly right: the reference is the authority on
     /// what the object holds, not the partial copy on the caller's disk.
-    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
+    ///
+    /// Feeding the wrong *number* of bytes, or feeding them at the wrong
+    /// time, is refused here instead. A digest is order-dependent and closes
+    /// once, so those could only ever surface as a corruption verdict at the
+    /// end — a report about the object, for a mistake that was never the
+    /// object's.
+    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), CoreError> {
+        if self.completion.is_some() {
+            return Err(CoreError::Internal(format!(
+                "content stream for `{}` was handed a resumed prefix after its read had \
+                 already reached the end",
+                self.object_key
+            )));
+        }
+        if self.next_offset != self.resumed_from {
+            return Err(CoreError::Internal(format!(
+                "content stream for `{}` was handed a resumed prefix after it had already \
+                 fetched content",
+                self.object_key
+            )));
+        }
+        let folded = self.prefix_folded.saturating_add(bytes.len() as u64);
+        if folded > self.content_ref.size_bytes {
+            return Err(CoreError::ResumeOffsetOutOfRange {
+                start_offset: folded,
+                size_bytes: self.content_ref.size_bytes,
+            });
+        }
         self.digest.update(bytes);
-        self.prefix_folded = self.prefix_folded.saturating_add(bytes.len() as u64);
+        self.prefix_folded = folded;
+        Ok(())
     }
 
     /// The authoritative metadata entry the path resolved to.
@@ -1155,7 +1183,9 @@ mod tests {
         let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
             .await
             .expect("open stream");
-        stream.fold_resumed_prefix(&bytes[..held]);
+        stream
+            .fold_resumed_prefix(&bytes[..held])
+            .expect("fold the held prefix");
         let mut fetched = Vec::new();
         while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
             fetched.extend_from_slice(&chunk);
@@ -1208,7 +1238,9 @@ mod tests {
         let mut wrong = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
             .await
             .expect("open stream");
-        wrong.fold_resumed_prefix(&vec![0u8; held]);
+        wrong
+            .fold_resumed_prefix(&vec![0u8; held])
+            .expect("a prefix of the right length is accepted");
         let verdict = loop {
             match wrong.next_chunk().await {
                 Ok(Some(_)) => continue,
@@ -1227,6 +1259,109 @@ mod tests {
                 )
             ),
             "a prefix that is not the object's fails the whole read: {verdict}"
+        );
+    }
+
+    /// A prefix handed over in pieces is the ordinary case, and the fold
+    /// accepts every one of them: the digest only cares that the bytes
+    /// arrive in order.
+    #[tokio::test]
+    async fn a_resumed_prefix_may_be_folded_in_pieces() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        let held = TEST_CHUNK_BYTES as usize;
+
+        let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+            .await
+            .expect("open stream");
+        for piece in bytes[..held].chunks(64) {
+            stream.fold_resumed_prefix(piece).expect("fold a piece");
+        }
+        let mut fetched = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+            fetched.extend_from_slice(&chunk);
+        }
+        assert_eq!(fetched, bytes[held..]);
+    }
+
+    /// A partial longer than the content it claims to resume is the caller's
+    /// own file being wrong, and it is refused where that is still visible
+    /// — not folded in to reappear as a corruption verdict about the object.
+    #[tokio::test]
+    async fn a_prefix_longer_than_the_content_is_refused() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        let held = TEST_CHUNK_BYTES as usize;
+
+        store.reset();
+        let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+            .await
+            .expect("open stream");
+        let overlong = payload(bytes.len() + 1);
+        let err = stream
+            .fold_resumed_prefix(&overlong)
+            .expect_err("a prefix past the end of the content");
+        assert!(
+            matches!(
+                err,
+                CoreError::ResumeOffsetOutOfRange {
+                    start_offset,
+                    size_bytes,
+                } if start_offset == overlong.len() as u64 && size_bytes == bytes.len() as u64
+            ),
+            "unexpected error: {err}"
+        );
+        assert_eq!(store.count(OperationClass::Read), 0, "nothing was fetched");
+    }
+
+    /// The digest folds in one direction, so a prefix offered after the
+    /// stream has already fetched content could only ever land in the wrong
+    /// place. Saying so beats folding it and blaming the object.
+    #[tokio::test]
+    async fn a_prefix_offered_after_a_fetch_is_refused() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        stream.next_chunk().await.expect("chunk").expect("a chunk");
+        let err = stream
+            .fold_resumed_prefix(&bytes[..8])
+            .expect_err("a prefix after a fetch");
+        assert!(
+            matches!(err, CoreError::Internal(_)),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The verdict is closed once. A prefix offered after it exists cannot
+    /// change it, so the fold refuses rather than pretending to.
+    #[tokio::test]
+    async fn a_prefix_offered_after_the_end_is_refused() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        // Empty content reaches its verdict without fetching, which leaves
+        // only the finished-stream guard between this fold and the digest.
+        let content_ref = content_ref(b"");
+        put_content_object(&store, &content_store_id, &content_ref, b"").await;
+
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        assert!(stream.next_chunk().await.expect("verified end").is_none());
+        let err = stream
+            .fold_resumed_prefix(b"")
+            .expect_err("a prefix after the end");
+        assert!(
+            matches!(err, CoreError::Internal(_)),
+            "unexpected error: {err}"
         );
     }
 
@@ -1327,7 +1462,9 @@ mod tests {
         let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
             .await
             .expect("open stream");
-        stream.fold_resumed_prefix(&bytes[..held]);
+        stream
+            .fold_resumed_prefix(&bytes[..held])
+            .expect("fold the held prefix");
         let mut fetched = Vec::new();
         while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
             fetched.extend_from_slice(&chunk);
@@ -1344,7 +1481,9 @@ mod tests {
         let mut wrong = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
             .await
             .expect("open stream");
-        wrong.fold_resumed_prefix(&vec![0u8; held]);
+        wrong
+            .fold_resumed_prefix(&vec![0u8; held])
+            .expect("a prefix of the right length is accepted");
         let verdict = loop {
             match wrong.next_chunk().await {
                 Ok(Some(_)) => continue,
