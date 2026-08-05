@@ -44,7 +44,7 @@ mod tests;
 
 use crate::metrics::RuntimeInstruments;
 use crate::{NamespaceId, Result, RuntimeError};
-use admission::{Admission, MaintenanceKey, StepOutcome};
+use admission::{Admission, MaintenanceDispatch, MaintenanceKey, StepOutcome};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -380,7 +380,7 @@ impl MaintenanceHandle {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
-        nudge_at(&inner, job, namespace_id, None);
+        nudge_key(&inner, job, namespace_id, None);
     }
 
     /// Asks for `job` to run against `namespace_id` once `not_before_ms`
@@ -399,7 +399,7 @@ impl MaintenanceHandle {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
-        nudge_at(&inner, job, namespace_id, Some(not_before_ms));
+        nudge_key(&inner, job, namespace_id, Some(not_before_ms));
     }
 }
 
@@ -615,7 +615,7 @@ impl MaintenanceRunner {
             .map(|(id, _)| *id)
             .collect();
         for job in subscribers {
-            nudge_at(&self.inner, job, namespace_id, None);
+            nudge_key(&self.inner, job, namespace_id, None);
         }
     }
 
@@ -714,7 +714,7 @@ impl RunnerInner {
 }
 
 /// Records a request against a key and starts whatever it makes runnable.
-fn nudge_at(
+fn nudge_key(
     inner: &Arc<RunnerInner>,
     job: MaintenanceJobId,
     namespace_id: &NamespaceId,
@@ -731,7 +731,7 @@ fn nudge_at(
             return;
         }
         match not_before_ms {
-            Some(at_ms) => state.admission.nudge_not_before(key, at_ms, now_ms),
+            Some(at_ms) => state.admission.nudge_at(key, at_ms, now_ms),
             None => state.admission.nudge(key),
         }
     }
@@ -748,11 +748,11 @@ fn dispatch_ready(inner: &Arc<RunnerInner>) {
     loop {
         let now_ms = inner.clock.now_ms();
         let claimed = inner.lock_state().admission.try_dispatch(now_ms);
-        let Some(key) = claimed else {
+        let Some(dispatch) = claimed else {
             break;
         };
         dispatched += 1;
-        spawn_chain(inner, key);
+        spawn_chain(inner, dispatch);
     }
     if dispatched > 0 {
         // What is left behind is the useful half: a queue that keeps
@@ -770,24 +770,25 @@ fn dispatch_ready(inner: &Arc<RunnerInner>) {
     }
 }
 
-fn spawn_chain(inner: &Arc<RunnerInner>, key: MaintenanceKey) {
+fn spawn_chain(inner: &Arc<RunnerInner>, dispatch: MaintenanceDispatch) {
     // The guard is built here rather than inside the future's body so the
     // future owns it before it is ever polled. A spawn refused by a
     // shutdown drops the future without running it, and that drop is what
     // gives the claimed key and its permit back.
     let mut chain = PermitChain {
         inner: Arc::clone(inner),
-        key: Some(key),
+        dispatch: Some(dispatch),
     };
     inner.spawn(async move {
-        while let Some(key) = chain.key.clone() {
-            let outcome = run_step(&chain.inner, &key).await;
+        while let Some(dispatch) = chain.dispatch.clone() {
+            let outcome = run_step(&chain.inner, &dispatch).await;
             let now_ms = chain.inner.clock.now_ms();
-            chain.key = chain
-                .inner
-                .lock_state()
-                .admission
-                .finish(&key, outcome, now_ms);
+            chain.dispatch =
+                chain
+                    .inner
+                    .lock_state()
+                    .admission
+                    .finish(&dispatch.key, outcome, now_ms);
         }
         // The last finish may have parked a key on a deadline the timer has
         // not seen, and the permit it gave back may let a waiting key run.
@@ -803,19 +804,22 @@ fn spawn_chain(inner: &Arc<RunnerInner>, key: MaintenanceKey) {
 /// ever stranded.
 struct PermitChain {
     inner: Arc<RunnerInner>,
-    key: Option<MaintenanceKey>,
+    dispatch: Option<MaintenanceDispatch>,
 }
 
 impl Drop for PermitChain {
     fn drop(&mut self) {
-        if let Some(key) = self.key.take() {
-            self.inner.lock_state().admission.abandon(&key);
+        if let Some(dispatch) = self.dispatch.take() {
+            self.inner.lock_state().admission.abandon(&dispatch.key);
             self.inner.wake.notify_one();
         }
     }
 }
 
-async fn run_step(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> StepOutcome {
+/// Runs one claimed step. Everything it needs about the key came with the
+/// claim, so nothing here reads scheduling state back out of the book.
+async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> StepOutcome {
+    let key = &dispatch.key;
     let Some(job) = inner.job(key.job) else {
         // Nudged for a job nobody registered: there is nothing to run and
         // nothing to reconcile.
@@ -823,18 +827,10 @@ async fn run_step(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> StepOutcome
             MaintenanceStepConclusion::NotEnabled,
         ));
     };
-    // Read under the same lock every scheduling decision takes, and only
-    // this key's own: a step that resumes is resuming from what this
-    // runner stored for it when its last step ended.
-    let (continuation, queued_ms) = {
-        let state = inner.lock_state();
-        (
-            state.admission.continuation(key),
-            state.admission.queue_wait_ms(key),
-        )
-    };
+    let continuation = dispatch.continuation.as_deref();
+    let queued_ms = dispatch.queue_wait_ms;
     let started = tokio::time::Instant::now();
-    match job.step(&key.namespace_id, continuation.as_deref()).await {
+    match job.step(&key.namespace_id, continuation).await {
         Ok(result) => {
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             inner

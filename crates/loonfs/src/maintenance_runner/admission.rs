@@ -4,7 +4,7 @@
 //!
 //! Everything here is synchronous and guarded by the runner's one lock, so
 //! every scheduling decision — singleflight, coalescing, fairness, backoff,
-//! not-before times, continuations, shutdown — can be reasoned about and
+//! timed obligations, continuations, shutdown — can be reasoned about and
 //! tested without a runtime. The async half (permits held across a step,
 //! spawning, timers) lives in the parent module.
 
@@ -49,6 +49,23 @@ impl MaintenanceKey {
     }
 }
 
+/// One claimed step, and everything running it needs.
+///
+/// Taken under the lock that claimed it, so the runner never reads a
+/// dispatched step's state back out of the book — by the time it looked, the
+/// key could be queued again for its next run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaintenanceDispatch {
+    /// The key this permit is running.
+    pub(crate) key: MaintenanceKey,
+    /// Where this key's job said its last step stopped, opaque here and
+    /// handed straight back to the step about to run.
+    pub(crate) continuation: Option<String>,
+    /// How long the claimed run waited between taking its ticket and holding
+    /// a permit. Read by the step's own trace.
+    pub(crate) queue_wait_ms: u64,
+}
+
 /// How one step ended, from admission's point of view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StepOutcome {
@@ -61,38 +78,112 @@ pub(crate) enum StepOutcome {
     Failed,
 }
 
+/// One run a key has asked for.
+#[derive(Debug, Clone, Copy)]
+struct ReadyRun {
+    /// Arrival ticket. Ticket order is the fairness rule: among eligible
+    /// runs the one that has waited longest takes the next free permit.
+    ticket: u64,
+    /// When that ticket was taken, which is what the claim reports as the
+    /// run's queue wait.
+    queued_at_ms: u64,
+    /// Backoff gate: not claimable before this instant.
+    eligible_at_ms: Option<u64>,
+}
+
+impl ReadyRun {
+    fn queued(ticket: u64, now_ms: u64) -> Self {
+        Self {
+            ticket,
+            queued_at_ms: now_ms,
+            eligible_at_ms: None,
+        }
+    }
+
+    fn gated(ticket: u64, now_ms: u64, until_ms: u64) -> Self {
+        Self {
+            eligible_at_ms: Some(until_ms),
+            ..Self::queued(ticket, now_ms)
+        }
+    }
+
+    /// Two requests for one key buy one run: the older ticket keeps its
+    /// place in line and its wait, and a gate on either still has to pass.
+    fn coalesced(self, other: Self) -> Self {
+        Self {
+            ticket: self.ticket.min(other.ticket),
+            queued_at_ms: self.queued_at_ms.min(other.queued_at_ms),
+            // `None` sorts below `Some`, so an ungated request never erases
+            // a backoff the other one is serving.
+            eligible_at_ms: self.eligible_at_ms.max(other.eligible_at_ms),
+        }
+    }
+
+    fn is_eligible(&self, now_ms: u64) -> bool {
+        self.eligible_at_ms.is_none_or(|at_ms| at_ms <= now_ms)
+    }
+}
+
+/// Where one key stands in the singleflight.
+#[derive(Debug, Default, Clone, Copy)]
+enum KeyRunState {
+    /// Nothing asked for, nothing running.
+    #[default]
+    Parked,
+    /// One run asked for, waiting for a permit.
+    Queued(ReadyRun),
+    /// A step is running. `rerun` is a request that arrived while it ran,
+    /// deferred rather than dropped — and deferred rather than run first,
+    /// because it has the newest ticket there is.
+    Running { rerun: Option<ReadyRun> },
+}
+
+/// The deadlines planted on one key.
+///
+/// Two times rather than one because the soonest is when to look and the
+/// latest is when the last thing asked for is definitely due, and a run
+/// consumes only the time it fired on. Every deadline in between is covered
+/// by the last: a pass that runs at the latest deadline reclaims everything
+/// whose own deadline has already passed, so re-arming on the latest loses
+/// nothing while keeping the state per key at two numbers instead of one per
+/// obligation.
+#[derive(Debug, Clone, Copy)]
+struct TimedObligations {
+    earliest_at_ms: u64,
+    latest_at_ms: u64,
+}
+
+impl TimedObligations {
+    fn at(at_ms: u64) -> Self {
+        Self {
+            earliest_at_ms: at_ms,
+            latest_at_ms: at_ms,
+        }
+    }
+
+    fn merged(self, at_ms: u64) -> Self {
+        Self {
+            earliest_at_ms: self.earliest_at_ms.min(at_ms),
+            latest_at_ms: self.latest_at_ms.max(at_ms),
+        }
+    }
+
+    /// What is still owed once the earliest deadline has fired at `now_ms`:
+    /// the latest, while it is still ahead, and nothing after that.
+    fn re_armed(self, now_ms: u64) -> Option<Self> {
+        (self.latest_at_ms > now_ms).then(|| Self::at(self.latest_at_ms))
+    }
+}
+
 /// What one key is waiting for.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 struct KeyState {
-    /// Arrival ticket while the key waits for a permit; `None` means parked.
-    /// Ticket order is the fairness rule: among eligible keys the one that
-    /// has waited longest takes the next free slot.
-    ready_ticket: Option<u64>,
-    /// When the ticket above was taken. Observability only — the ticket is
-    /// what orders the queue — and it is what lets a trace say how long a
-    /// key has been waiting rather than only that it is.
-    ready_at_ms: Option<u64>,
-    /// How long the last dispatch of this key waited between taking its
-    /// ticket and holding a permit. Read by the step's own trace.
-    queue_wait_ms: u64,
-    /// Wall-clock millisecond the next planted obligation comes due. Not a
-    /// gate on a key some other trigger already made ready — a scheduled
-    /// future readiness of its own, so an unrelated run never cancels a
-    /// lease obligation.
-    not_before_ms: Option<u64>,
-    /// The latest deadline anything has planted on this key.
-    ///
-    /// Two times rather than one because the soonest is when to look and
-    /// the latest is when the last thing asked for is definitely due, and a
-    /// run consumes only the time it fired on. Every deadline in between is
-    /// covered by the last: a pass that runs at the latest deadline
-    /// reclaims everything whose own deadline has already passed, so
-    /// re-arming on the latest loses nothing while keeping the state per
-    /// key at two numbers instead of one per obligation.
-    obligation_until_ms: Option<u64>,
-    /// Error backoff deadline. Distinct from `not_before_ms` because it
-    /// gates a retry of work already asked for rather than an obligation.
-    retry_at_ms: Option<u64>,
+    run: KeyRunState,
+    /// Deadlines this key owes on its own, kept apart from `run` on purpose:
+    /// a key can be running right now because a publication nudged it and
+    /// still owe a lease deadline days out, so an unrelated run never
+    /// cancels an obligation.
+    obligations: Option<TimedObligations>,
     /// Consecutive failed steps since the last conclusion, for the backoff.
     consecutive_failures: u32,
     /// Where this key's job said its last step stopped, opaque here and
@@ -103,36 +194,79 @@ struct KeyState {
     /// restarted pass and nothing else: a step re-derives what it may do
     /// from durable state whatever position it starts from.
     continuation: Option<String>,
-    /// A step for this key is running right now (the singleflight).
-    inflight: bool,
 }
 
 impl KeyState {
+    /// The run waiting for a permit, if this key has one.
+    fn queued_run(&self) -> Option<ReadyRun> {
+        match self.run {
+            KeyRunState::Queued(run) => Some(run),
+            KeyRunState::Parked | KeyRunState::Running { .. } => None,
+        }
+    }
+
+    /// The run this key has asked for, whether it is waiting for a permit or
+    /// deferred behind the step that is running.
+    fn requested_run(&self) -> Option<ReadyRun> {
+        match self.run {
+            KeyRunState::Queued(run) | KeyRunState::Running { rerun: Some(run) } => Some(run),
+            KeyRunState::Parked | KeyRunState::Running { rerun: None } => None,
+        }
+    }
+
+    fn is_parked(&self) -> bool {
+        matches!(self.run, KeyRunState::Parked)
+    }
+
+    fn is_running(&self) -> bool {
+        matches!(self.run, KeyRunState::Running { .. })
+    }
+
     #[cfg(test)]
     fn is_pending(&self) -> bool {
-        self.ready_ticket.is_some() || self.owes_an_obligation()
+        self.requested_run().is_some() || self.obligations.is_some()
     }
 
+    /// Records one request to run this key, coalescing into whatever run it
+    /// has already asked for.
+    fn request_run(&mut self, ticket: u64, now_ms: u64) {
+        let asked = ReadyRun::queued(ticket, now_ms);
+        self.run = match self.run {
+            KeyRunState::Parked => KeyRunState::Queued(asked),
+            KeyRunState::Queued(queued) => KeyRunState::Queued(queued.coalesced(asked)),
+            KeyRunState::Running { rerun } => KeyRunState::Running {
+                rerun: Some(rerun.map_or(asked, |deferred| deferred.coalesced(asked))),
+            },
+        };
+    }
+
+    /// Moves this key's queued run into the running slot, reporting the wait
+    /// it just ended. `None` when the key has no queued run to claim.
+    fn claim(&mut self, now_ms: u64) -> Option<u64> {
+        let run = self.queued_run()?;
+        self.run = KeyRunState::Running { rerun: None };
+        Some(now_ms.saturating_sub(run.queued_at_ms))
+    }
+
+    /// Ends the running step, leaving one queued run out of what the
+    /// conclusion asks for and what a request deferred while the step ran —
+    /// two requests for the same key, and so one run.
+    fn settle(&mut self, concluded: Option<ReadyRun>) {
+        self.run = match (self.requested_run(), concluded) {
+            (Some(deferred), Some(concluded)) => KeyRunState::Queued(deferred.coalesced(concluded)),
+            (Some(run), None) | (None, Some(run)) => KeyRunState::Queued(run),
+            (None, None) => KeyRunState::Parked,
+        };
+    }
+
+    /// Drops everything this key is waiting for. A step already running is
+    /// not scheduling: it stays, and reports through [`Admission::finish`].
     fn clear_schedule(&mut self) {
-        self.ready_ticket = None;
-        self.ready_at_ms = None;
-        self.not_before_ms = None;
-        self.obligation_until_ms = None;
-        self.retry_at_ms = None;
-    }
-
-    fn owes_an_obligation(&self) -> bool {
-        self.not_before_ms.is_some() || self.obligation_until_ms.is_some()
-    }
-
-    /// Takes a queue ticket unless the key already holds one, so repeated
-    /// requests coalesce into the one run the first ticket bought.
-    fn queue(&mut self, ticket: u64, now_ms: u64) {
-        if self.ready_ticket.is_some() {
-            return;
-        }
-        self.ready_ticket = Some(ticket);
-        self.ready_at_ms = Some(now_ms);
+        self.run = match self.run {
+            KeyRunState::Running { .. } => KeyRunState::Running { rerun: None },
+            KeyRunState::Parked | KeyRunState::Queued(_) => KeyRunState::Parked,
+        };
+        self.obligations = None;
     }
 }
 
@@ -196,30 +330,29 @@ impl Admission {
         self.keys.get(key).is_some_and(KeyState::is_pending)
     }
 
-    /// The not-before obligation the key still carries, if any.
+    /// The soonest obligation the key still carries, if any.
     #[cfg(test)]
     pub(crate) fn not_before_ms(&self, key: &MaintenanceKey) -> Option<u64> {
-        self.keys.get(key).and_then(|state| state.not_before_ms)
+        self.keys
+            .get(key)
+            .and_then(|state| state.obligations)
+            .map(|owed| owed.earliest_at_ms)
     }
 
-    /// Where the key's job stopped last time, for the step about to run.
+    /// Where the key's job stopped last time. A claim carries this to the
+    /// step it dispatches; nothing on the running path reads it back out.
+    #[cfg(test)]
     pub(crate) fn continuation(&self, key: &MaintenanceKey) -> Option<String> {
         self.keys
             .get(key)
             .and_then(|state| state.continuation.clone())
     }
 
-    /// How long the step about to run waited for its permit.
-    pub(crate) fn queue_wait_ms(&self, key: &MaintenanceKey) -> u64 {
-        self.keys.get(key).map_or(0, |state| state.queue_wait_ms)
-    }
-
-    /// Keys holding a ticket: work admitted, eligible, and waiting for a
-    /// permit.
+    /// Keys holding a ticket: work admitted and waiting for a permit.
     pub(crate) fn ready_queued(&self) -> usize {
         self.keys
             .values()
-            .filter(|state| state.ready_ticket.is_some())
+            .filter(|state| state.queued_run().is_some())
             .count()
     }
 
@@ -228,10 +361,10 @@ impl Admission {
     pub(crate) fn oldest_queued_ms(&self, now_ms: u64) -> u64 {
         self.keys
             .values()
-            .filter(|state| state.ready_ticket.is_some())
-            .filter_map(|state| state.ready_at_ms)
+            .filter_map(|state| state.queued_run())
+            .map(|run| run.queued_at_ms)
             .min()
-            .map_or(0, |ready_at_ms| now_ms.saturating_sub(ready_at_ms))
+            .map_or(0, |queued_at_ms| now_ms.saturating_sub(queued_at_ms))
     }
 
     fn take_ticket(&mut self) -> u64 {
@@ -254,7 +387,10 @@ impl Admission {
         // trace reports. Every scheduling decision still takes its `now_ms`
         // as an argument.
         let now_ms = self.clock.now_ms();
-        self.keys.entry(key).or_default().queue(ticket, now_ms);
+        self.keys
+            .entry(key)
+            .or_default()
+            .request_run(ticket, now_ms);
     }
 
     /// Plants a timed obligation on the key: it becomes eligible on its own
@@ -263,7 +399,7 @@ impl Admission {
     /// Merging keeps the soonest of the times asked for as the next wake,
     /// and the latest as the point past which nothing is still owed. A time
     /// already past is just a nudge.
-    pub(crate) fn nudge_not_before(&mut self, key: MaintenanceKey, at_ms: u64, now_ms: u64) {
+    pub(crate) fn nudge_at(&mut self, key: MaintenanceKey, at_ms: u64, now_ms: u64) {
         if self.closed {
             return;
         }
@@ -271,14 +407,10 @@ impl Admission {
             self.nudge(key);
             return;
         }
-        let state = self.keys.entry(key).or_default();
-        state.not_before_ms = Some(match state.not_before_ms {
-            Some(existing) => existing.min(at_ms),
-            None => at_ms,
-        });
-        state.obligation_until_ms = Some(match state.obligation_until_ms {
-            Some(existing) => existing.max(at_ms),
-            None => at_ms,
+        let owed = &mut self.keys.entry(key).or_default().obligations;
+        *owed = Some(match *owed {
+            Some(existing) => existing.merged(at_ms),
+            None => TimedObligations::at(at_ms),
         });
     }
 
@@ -294,94 +426,75 @@ impl Admission {
         let mut ticket = self.next_ticket;
         let mut promoted = 0usize;
         for state in self.keys.values_mut() {
-            if state.not_before_ms.is_none_or(|at_ms| at_ms > now_ms) {
+            let Some(owed) = state
+                .obligations
+                .filter(|owed| owed.earliest_at_ms <= now_ms)
+            else {
                 continue;
-            }
+            };
             promoted += 1;
-            state.not_before_ms = state
-                .obligation_until_ms
-                .filter(|until_ms| *until_ms > now_ms);
-            if state.not_before_ms.is_none() {
-                state.obligation_until_ms = None;
-            }
-            if state.ready_ticket.is_none() {
-                state.queue(ticket, now_ms);
-                ticket = ticket.saturating_add(1);
-            }
+            state.obligations = owed.re_armed(now_ms);
+            state.request_run(ticket, now_ms);
+            ticket = ticket.saturating_add(1);
         }
         self.next_ticket = ticket;
         promoted
     }
 
     /// Claims a permit for the fairest eligible key, if there is one and the
-    /// pool has room. The caller must run the returned key and report back
-    /// through [`Self::finish`] or [`Self::abandon`].
-    pub(crate) fn try_dispatch(&mut self, now_ms: u64) -> Option<MaintenanceKey> {
+    /// pool has room. The caller must run the returned dispatch and report
+    /// back through [`Self::finish`] or [`Self::abandon`].
+    pub(crate) fn try_dispatch(&mut self, now_ms: u64) -> Option<MaintenanceDispatch> {
         if self.closed || self.running >= self.max_concurrent {
             return None;
         }
-        let key = self.pick_eligible(now_ms)?;
-        self.hold(&key, now_ms);
+        let dispatch = self.claim_oldest_eligible(now_ms)?;
         self.running = self.running.saturating_add(1);
-        Some(key)
+        Some(dispatch)
     }
 
-    /// Ends one step and returns the key the caller must run next on the
-    /// same permit, or `None` after releasing it.
+    /// Ends one step and hands its permit to the next run, or releases the
+    /// permit when nothing is eligible.
     ///
-    /// A request that arrived while the step ran keeps the slot and reruns
-    /// the same key immediately — the finishing rerun the previous scheduler
-    /// guaranteed. A `Progressed` conclusion does not take that fast path:
-    /// it makes the key eligible again but sends it to the back of the
-    /// queue, so folding one namespace's backlog stays fair to its peers.
-    /// The outcome, the release, the pick, and the new hold share one lock,
-    /// so no request is lost between freeing a slot and choosing its heir.
+    /// A request that arrived while the step ran is never lost and never
+    /// jumps the queue: it becomes an ordinary queued run with its own
+    /// ticket, and takes the permit only if it is the oldest eligible run
+    /// there is. Nothing else would bound it — a job that subscribes to
+    /// publications is renudged inside every step it runs, so a rerun that
+    /// kept the permit by finishing would let a couple of busy namespaces
+    /// hold every permit there is while a quiet key's collection never ran.
+    /// The outcome, the release, and the pick share one lock, so no request
+    /// is lost between freeing a permit and choosing its heir.
     pub(crate) fn finish(
         &mut self,
         key: &MaintenanceKey,
         outcome: StepOutcome,
         now_ms: u64,
-    ) -> Option<MaintenanceKey> {
-        let renudged = self
-            .keys
-            .get(key)
-            .is_some_and(|state| state.ready_ticket.is_some());
+    ) -> Option<MaintenanceDispatch> {
         self.apply(key, outcome, now_ms);
-        if let Some(state) = self.keys.get_mut(key) {
-            state.inflight = false;
-        }
-        if self.closed {
+        let next = if self.closed {
+            None
+        } else {
+            self.claim_oldest_eligible(now_ms)
+        };
+        if next.is_none() {
             self.running = self.running.saturating_sub(1);
-            return None;
         }
-        if renudged && self.is_eligible(key, now_ms) {
-            self.hold(key, now_ms);
-            return Some(key.clone());
-        }
-        match self.pick_eligible(now_ms) {
-            Some(next) => {
-                self.hold(&next, now_ms);
-                Some(next)
-            }
-            None => {
-                self.running = self.running.saturating_sub(1);
-                None
-            }
-        }
+        next
     }
 
     /// Releases a key and its permit without deciding anything about it —
     /// the path a panicked or dropped step takes.
     pub(crate) fn abandon(&mut self, key: &MaintenanceKey) {
         if let Some(state) = self.keys.get_mut(key) {
-            state.inflight = false;
+            state.settle(None);
         }
         self.running = self.running.saturating_sub(1);
     }
 
     /// Forgets a key entirely: it is no longer reconciled and owes nothing.
     pub(crate) fn forget(&mut self, key: &MaintenanceKey) {
-        if self.keys.get(key).is_some_and(|state| state.inflight) {
+        if self.keys.get(key).is_some_and(KeyState::is_running) {
             return;
         }
         self.keys.remove(key);
@@ -391,9 +504,10 @@ impl Admission {
     /// obligation — a lease-dated GC key outlives any number of quiet
     /// probes.
     pub(crate) fn forget_if_idle(&mut self, key: &MaintenanceKey) {
-        let forgettable = self.keys.get(key).is_some_and(|state| {
-            !state.inflight && state.ready_ticket.is_none() && !state.owes_an_obligation()
-        });
+        let forgettable = self
+            .keys
+            .get(key)
+            .is_some_and(|state| state.is_parked() && state.obligations.is_none());
         if forgettable {
             self.keys.remove(key);
         }
@@ -419,7 +533,12 @@ impl Admission {
     pub(crate) fn earliest_deadline_ms(&self, now_ms: u64) -> Option<u64> {
         self.keys
             .values()
-            .flat_map(|state| [state.not_before_ms, state.retry_at_ms])
+            .flat_map(|state| {
+                [
+                    state.obligations.map(|owed| owed.earliest_at_ms),
+                    state.requested_run().and_then(|run| run.eligible_at_ms),
+                ]
+            })
             .flatten()
             .filter(|deadline_ms| *deadline_ms > now_ms)
             .min()
@@ -437,14 +556,14 @@ impl Admission {
                 .keys
                 .range((Bound::Excluded(cursor.clone()), Bound::Unbounded))
                 .chain(self.keys.range((Bound::Unbounded, Bound::Included(cursor))))
-                .filter(|(_, state)| !state.inflight && state.ready_ticket.is_none())
+                .filter(|(_, state)| state.is_parked())
                 .map(|(key, _)| key.clone())
                 .take(budget)
                 .collect(),
             None => self
                 .keys
                 .iter()
-                .filter(|(_, state)| !state.inflight && state.ready_ticket.is_none())
+                .filter(|(_, state)| state.is_parked())
                 .map(|(key, _)| key.clone())
                 .take(budget)
                 .collect(),
@@ -453,6 +572,9 @@ impl Admission {
         batch
     }
 
+    /// Ends the running step: what it concluded decides the key's
+    /// continuation and whether it is queued again, and the key stops
+    /// running either way.
     fn apply(&mut self, key: &MaintenanceKey, outcome: StepOutcome, now_ms: u64) {
         let result = match outcome {
             StepOutcome::Failed => {
@@ -471,32 +593,38 @@ impl Admission {
         let ticket = self.take_ticket();
         if let Some(state) = self.keys.get_mut(key) {
             state.consecutive_failures = 0;
-            state.retry_at_ms = None;
-            match result.conclusion {
+            let concluding_run = match result.conclusion {
                 // Work happened, or the step lost a race it should simply
                 // take again: eligible immediately, behind whatever else is
                 // waiting, resuming from wherever this step stopped.
                 MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded => {
                     state.continuation = result.continuation;
-                    state.queue(ticket, now_ms);
+                    Some(ReadyRun::queued(ticket, now_ms))
                 }
                 // Work is left and this step's policy could not move it.
                 // Parks like `Idle` — requeueing zero-progress work would
                 // only spin — but keeps where the step stopped, so a retry
                 // with room to work resumes instead of walking the same
                 // ground again.
-                MaintenanceStepConclusion::Blocked => state.continuation = result.continuation,
+                MaintenanceStepConclusion::Blocked => {
+                    state.continuation = result.continuation;
+                    None
+                }
                 // Nothing to do. Whatever the last pass was carrying is
                 // spent, and the next step starts a fresh one.
-                MaintenanceStepConclusion::Idle => state.continuation = None,
-                MaintenanceStepConclusion::NotEnabled => {}
-            }
+                MaintenanceStepConclusion::Idle => {
+                    state.continuation = None;
+                    None
+                }
+                MaintenanceStepConclusion::NotEnabled => None,
+            };
+            state.settle(concluding_run);
         }
         // A deadline the step itself observed joins the ones triggers
         // plant, under the same merge: soonest is when to wake, latest is
         // when the key stops owing anything.
         if let Some(at_ms) = result.not_before_ms {
-            self.nudge_not_before(key.clone(), at_ms, now_ms);
+            self.nudge_at(key.clone(), at_ms, now_ms);
         }
     }
 
@@ -517,19 +645,14 @@ impl Admission {
             return;
         };
         state.consecutive_failures = failures;
-        state.retry_at_ms = Some(now_ms.saturating_add(delay_ms));
-        state.queue(ticket, now_ms);
+        state.settle(Some(ReadyRun::gated(
+            ticket,
+            now_ms,
+            now_ms.saturating_add(delay_ms),
+        )));
     }
 
-    fn is_eligible(&self, key: &MaintenanceKey, now_ms: u64) -> bool {
-        self.keys.get(key).is_some_and(|state| {
-            !state.inflight
-                && state.ready_ticket.is_some()
-                && state.retry_at_ms.is_none_or(|at_ms| at_ms <= now_ms)
-        })
-    }
-
-    /// The eligible key that has waited longest.
+    /// The key whose eligible queued run has waited longest.
     ///
     /// Linear in the admitted set, which is bounded by the namespaces this
     /// process has touched and re-walked once per finished step — far
@@ -537,25 +660,24 @@ impl Admission {
     fn pick_eligible(&self, now_ms: u64) -> Option<MaintenanceKey> {
         self.keys
             .iter()
-            .filter(|(_, state)| {
-                !state.inflight && state.retry_at_ms.is_none_or(|at_ms| at_ms <= now_ms)
-            })
-            .filter_map(|(key, state)| state.ready_ticket.map(|ticket| (ticket, key)))
-            .min_by_key(|(ticket, _)| *ticket)
+            .filter_map(|(key, state)| state.queued_run().map(|run| (run, key)))
+            .filter(|(run, _)| run.is_eligible(now_ms))
+            .min_by_key(|(run, _)| run.ticket)
             .map(|(_, key)| key.clone())
     }
 
-    /// Marks a key as the one this permit is running; the permit count is
-    /// the caller's business, because a handoff keeps it.
-    fn hold(&mut self, key: &MaintenanceKey, now_ms: u64) {
-        if let Some(state) = self.keys.get_mut(key) {
-            state.queue_wait_ms = state
-                .ready_at_ms
-                .map_or(0, |ready_at_ms| now_ms.saturating_sub(ready_at_ms));
-            state.ready_ticket = None;
-            state.ready_at_ms = None;
-            state.inflight = true;
-        }
+    /// Runs the fairest eligible key on this permit and reports what its
+    /// step needs. The permit count is the caller's business, because a
+    /// handoff keeps it.
+    fn claim_oldest_eligible(&mut self, now_ms: u64) -> Option<MaintenanceDispatch> {
+        let key = self.pick_eligible(now_ms)?;
+        let state = self.keys.get_mut(&key)?;
+        let queue_wait_ms = state.claim(now_ms)?;
+        Some(MaintenanceDispatch {
+            key,
+            continuation: state.continuation.clone(),
+            queue_wait_ms,
+        })
     }
 }
 
@@ -584,7 +706,9 @@ fn backoff_window_ms(consecutive_failures: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::maintenance_runner::{split_mix_64, JITTER_GAMMA};
     use loonfs_test_support::ids::namespace_id;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const NOW: u64 = 1_000_000;
@@ -659,6 +783,13 @@ mod tests {
         concluded(MaintenanceStepConclusion::Idle)
     }
 
+    /// The key a claim landed on. Most of these tests are about which key
+    /// runs next; the ones about what a claim carries assert on the whole
+    /// dispatch.
+    fn claimed(dispatch: Option<MaintenanceDispatch>) -> Option<MaintenanceKey> {
+        dispatch.map(|dispatch| dispatch.key)
+    }
+
     /// The delay the `Top` clock produces for the nth consecutive failure.
     fn top_delay_ms(consecutive_failures: u32) -> u64 {
         backoff_window_ms(consecutive_failures) - 1
@@ -672,26 +803,27 @@ mod tests {
         let key = metadata("demo");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             None,
             "one in-flight step per key"
         );
         admission.nudge(key.clone());
         assert_eq!(
-            admission.finish(&key, idle(), NOW),
+            claimed(admission.finish(&key, idle(), NOW)),
             Some(key.clone()),
-            "the deferred request keeps the slot held and reruns the step"
+            "with nothing else waiting the deferred request is the oldest \
+             eligible run, so it takes the permit the step gave back"
         );
         assert_eq!(
-            admission.finish(&key, idle(), NOW),
+            claimed(admission.finish(&key, idle(), NOW)),
             None,
             "a quiet finish releases the slot"
         );
         admission.nudge(key.clone());
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             Some(key.clone()),
             "the released slot claims fresh for the next crossing"
         );
@@ -704,13 +836,125 @@ mod tests {
         let key = metadata("demo");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         admission.nudge(key.clone());
         admission.close();
         assert_eq!(
-            admission.finish(&key, idle(), NOW),
+            claimed(admission.finish(&key, idle(), NOW)),
             None,
             "a deferred request must not rerun after shutdown closed admission"
+        );
+    }
+
+    /// The fairness rule has no exception for the key that just finished: a
+    /// request that arrived mid-step holds the newest ticket there is, so a
+    /// peer that was already waiting runs first.
+    #[test]
+    fn a_waiting_peer_outranks_a_rerun_asked_for_later() {
+        let mut admission = book(1);
+        let (busy, peer) = (metadata("busy"), metadata("peer"));
+
+        admission.nudge(busy.clone());
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(busy.clone()));
+        admission.nudge(peer.clone());
+        admission.nudge(busy.clone());
+
+        assert_eq!(
+            claimed(admission.finish(&busy, idle(), NOW)),
+            Some(peer.clone()),
+            "the peer took its ticket first, so the permit is the peer's"
+        );
+        assert_eq!(
+            claimed(admission.finish(&peer, idle(), NOW)),
+            Some(busy),
+            "and the deferred rerun runs next, on the ticket it took"
+        );
+    }
+
+    /// A job that subscribes to publications is renudged inside every step
+    /// it runs, and a busy namespace publishes without pause. Its reruns
+    /// must not add up to a permit it never gives back.
+    #[test]
+    fn a_key_renudged_on_every_run_cannot_hold_the_permit_past_a_peer() {
+        let mut admission = book(1);
+        let (busy, peer) = (metadata("busy"), metadata("peer"));
+
+        admission.nudge(busy.clone());
+        let mut running = admission.try_dispatch(NOW);
+        admission.nudge(peer.clone());
+
+        let mut ran = Vec::new();
+        for _ in 0..4 {
+            let key = running
+                .map(|dispatch| dispatch.key)
+                .expect("a key is running");
+            // The nudge every publication plants, arriving mid-step.
+            admission.nudge(key.clone());
+            ran.push(key.clone());
+            running = admission.finish(&key, concluded(MaintenanceStepConclusion::Progressed), NOW);
+        }
+
+        assert_eq!(
+            ran,
+            vec![busy.clone(), peer.clone(), busy, peer],
+            "an endless chain of reruns cannot starve the peer: the two alternate"
+        );
+    }
+
+    /// Losing the handoff is not losing the request.
+    #[test]
+    fn a_rerun_that_loses_the_handoff_runs_when_a_permit_frees() {
+        let mut admission = book(1);
+        let (busy, peer) = (metadata("busy"), metadata("peer"));
+
+        admission.nudge(busy.clone());
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(busy.clone()));
+        admission.nudge(peer.clone());
+        admission.nudge(busy.clone());
+        assert_eq!(
+            claimed(admission.finish(&busy, idle(), NOW)),
+            Some(peer.clone())
+        );
+        assert_eq!(
+            claimed(admission.try_dispatch(NOW)),
+            None,
+            "the one permit is the peer's while it runs"
+        );
+
+        admission.abandon(&peer);
+        assert_eq!(
+            claimed(admission.try_dispatch(NOW)),
+            Some(busy),
+            "the rerun was queued rather than spent, and takes the freed permit"
+        );
+    }
+
+    /// The other half of a claim: what the step it dispatches is told about
+    /// the wait it ended.
+    #[test]
+    fn a_claim_reports_how_long_its_run_waited() {
+        let mut admission = book(1);
+        let key = metadata("waiting");
+
+        admission.nudge(key.clone());
+        let dispatch = admission
+            .try_dispatch(NOW + 5_000)
+            .expect("the queued key claims the permit");
+        assert_eq!(
+            dispatch.queue_wait_ms, 5_000,
+            "the claim reports the wait between the ticket and the permit"
+        );
+
+        let handed_off = admission
+            .finish(
+                &key,
+                concluded(MaintenanceStepConclusion::Progressed),
+                NOW + 5_000,
+            )
+            .expect("a progressing key with nothing else waiting runs again");
+        assert_eq!(
+            handed_off.queue_wait_ms, 0,
+            "a run created by the finish that hands it the permit waited for nothing"
         );
     }
 
@@ -721,12 +965,12 @@ mod tests {
         let key = metadata("demo");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
-        assert_eq!(admission.try_dispatch(NOW), None);
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), None);
         admission.abandon(&key);
         admission.nudge(key.clone());
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             Some(key.clone()),
             "a released slot is claimable again"
         );
@@ -734,7 +978,7 @@ mod tests {
         admission.close();
         admission.nudge(key.clone());
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             None,
             "no new claims after shutdown"
         );
@@ -749,15 +993,15 @@ mod tests {
         for key in [&first, &second, &third] {
             admission.nudge(key.clone());
         }
-        assert_eq!(admission.try_dispatch(NOW), Some(first.clone()));
-        assert_eq!(admission.try_dispatch(NOW), Some(second.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(first.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(second.clone()));
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             None,
             "a third key must wait for a slot"
         );
         assert_eq!(
-            admission.finish(&first, idle(), NOW),
+            claimed(admission.finish(&first, idle(), NOW)),
             Some(third),
             "the finishing path transfers its slot to the queued key"
         );
@@ -770,22 +1014,22 @@ mod tests {
         let (active, queued) = (metadata("active"), metadata("queued"));
 
         admission.nudge(active.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(active.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(active.clone()));
         for _ in 0..8 {
             admission.nudge(queued.clone());
             assert_eq!(
-                admission.try_dispatch(NOW),
+                claimed(admission.try_dispatch(NOW)),
                 None,
                 "the queued key cannot claim the occupied slot"
             );
         }
         assert_eq!(
-            admission.finish(&active, idle(), NOW),
+            claimed(admission.finish(&active, idle(), NOW)),
             Some(queued.clone()),
             "one queued run consumes all coalesced requests"
         );
         assert_eq!(
-            admission.finish(&queued, idle(), NOW),
+            claimed(admission.finish(&queued, idle(), NOW)),
             None,
             "coalesced requests must not create a second run"
         );
@@ -798,17 +1042,17 @@ mod tests {
         let (active, queued) = (metadata("active"), metadata("queued"));
 
         admission.nudge(active.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(active.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(active.clone()));
         admission.nudge(queued.clone());
         admission.close();
-        assert_eq!(admission.finish(&active, idle(), NOW), None);
+        assert_eq!(claimed(admission.finish(&active, idle(), NOW)), None);
         assert!(
             !admission.is_pending(&queued),
             "shutdown must clear the queue"
         );
         admission.nudge(queued.clone());
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             None,
             "closed admission must not revive the cleared queue"
         );
@@ -821,14 +1065,14 @@ mod tests {
 
         admission.nudge(busy.clone());
         admission.nudge(peer.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(busy.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(busy.clone()));
         assert_eq!(
-            admission.finish(&busy, concluded(MaintenanceStepConclusion::Progressed), NOW),
+            claimed(admission.finish(&busy, concluded(MaintenanceStepConclusion::Progressed), NOW)),
             Some(peer.clone()),
             "one unit per step: the peer runs before the busy key folds again"
         );
         assert_eq!(
-            admission.finish(&peer, idle(), NOW),
+            claimed(admission.finish(&peer, idle(), NOW)),
             Some(busy),
             "the progressed key is still eligible and takes the next slot"
         );
@@ -840,13 +1084,13 @@ mod tests {
         let key = metadata("alone");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.finish(&key, concluded(MaintenanceStepConclusion::Progressed), NOW),
+            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::Progressed), NOW)),
             Some(key.clone()),
             "a sole progressing key folds its backlog without waiting"
         );
-        assert_eq!(admission.finish(&key, idle(), NOW), None);
+        assert_eq!(claimed(admission.finish(&key, idle(), NOW)), None);
     }
 
     #[test]
@@ -855,16 +1099,16 @@ mod tests {
         let key = metadata("blocked");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.finish(&key, concluded(MaintenanceStepConclusion::Blocked), NOW),
+            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::Blocked), NOW)),
             None,
             "zero-progress work must not requeue itself"
         );
-        assert_eq!(admission.try_dispatch(NOW), None);
+        assert_eq!(claimed(admission.try_dispatch(NOW)), None);
         admission.nudge(key.clone());
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             Some(key),
             "a later nudge retries the blocked key"
         );
@@ -876,9 +1120,9 @@ mod tests {
         let key = metadata("raced");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.finish(&key, concluded(MaintenanceStepConclusion::Superseded), NOW),
+            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::Superseded), NOW)),
             Some(key),
             "a superseded step takes the race again"
         );
@@ -889,17 +1133,17 @@ mod tests {
         let mut admission = book(1);
         let key = gc("gone");
 
-        admission.nudge_not_before(key.clone(), NOW + 5_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 5_000, NOW);
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.finish(&key, concluded(MaintenanceStepConclusion::NotEnabled), NOW),
+            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::NotEnabled), NOW)),
             None
         );
         assert!(!admission.is_pending(&key), "the key is forgotten");
         admission.promote_due(NOW + 10_000);
         assert_eq!(
-            admission.try_dispatch(NOW + 10_000),
+            claimed(admission.try_dispatch(NOW + 10_000)),
             None,
             "an evicted key's obligation goes with it"
         );
@@ -915,34 +1159,32 @@ mod tests {
         let key = gc("paged");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
-        assert_eq!(
-            admission.continuation(&key),
-            None,
-            "a first step starts a fresh pass"
-        );
+        let first = admission
+            .try_dispatch(NOW)
+            .expect("the nudged key claims the permit");
+        assert_eq!(first.key, key);
+        assert_eq!(first.continuation, None, "a first step starts a fresh pass");
 
-        assert_eq!(
-            admission.finish(
+        let resumed = admission
+            .finish(
                 &key,
                 continuing(MaintenanceStepConclusion::Progressed, "page-1"),
-                NOW
-            ),
-            Some(key.clone()),
-            "a progressing key is eligible again"
-        );
+                NOW,
+            )
+            .expect("a progressing key is eligible again");
+        assert_eq!(resumed.key, key);
         assert_eq!(
-            admission.continuation(&key),
+            resumed.continuation,
             Some("page-1".to_owned()),
-            "and the next step resumes where this one stopped"
+            "and the handoff carries where this step stopped to the next one"
         );
 
         assert_eq!(
-            admission.finish(
+            claimed(admission.finish(
                 &key,
                 continuing(MaintenanceStepConclusion::Blocked, "page-2"),
                 NOW
-            ),
+            )),
             None,
             "a blocked key parks"
         );
@@ -953,13 +1195,16 @@ mod tests {
         );
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        let retried = admission
+            .try_dispatch(NOW)
+            .expect("a later nudge claims the permit again");
+        assert_eq!(retried.key, key);
         assert_eq!(
-            admission.continuation(&key),
+            retried.continuation,
             Some("page-2".to_owned()),
             "the parked position is what the resumed step is handed"
         );
-        assert_eq!(admission.finish(&key, idle(), NOW), None);
+        assert_eq!(claimed(admission.finish(&key, idle(), NOW)), None);
         assert_eq!(
             admission.continuation(&key),
             None,
@@ -973,17 +1218,17 @@ mod tests {
         let key = gc("gone");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.finish(
+            claimed(admission.finish(
                 &key,
                 continuing(MaintenanceStepConclusion::Progressed, "page-1"),
                 NOW
-            ),
+            )),
             Some(key.clone())
         );
         assert_eq!(
-            admission.finish(&key, concluded(MaintenanceStepConclusion::NotEnabled), NOW),
+            claimed(admission.finish(&key, concluded(MaintenanceStepConclusion::NotEnabled), NOW)),
             None
         );
         assert_eq!(
@@ -993,7 +1238,7 @@ mod tests {
         );
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
             admission.continuation(&key),
             None,
@@ -1007,16 +1252,19 @@ mod tests {
         let key = gc("flaky");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.finish(
+            claimed(admission.finish(
                 &key,
                 continuing(MaintenanceStepConclusion::Progressed, "page-1"),
                 NOW
-            ),
+            )),
             Some(key.clone())
         );
-        assert_eq!(admission.finish(&key, StepOutcome::Failed, NOW), None);
+        assert_eq!(
+            claimed(admission.finish(&key, StepOutcome::Failed, NOW)),
+            None
+        );
         assert_eq!(
             admission.continuation(&key),
             Some("page-1".to_owned()),
@@ -1032,9 +1280,9 @@ mod tests {
         let key = gc("leased");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.finish(
+            claimed(admission.finish(
                 &key,
                 StepOutcome::Concluded(MaintenanceStepResult {
                     conclusion: MaintenanceStepConclusion::Idle,
@@ -1042,7 +1290,7 @@ mod tests {
                     not_before_ms: Some(NOW + 60_000),
                 }),
                 NOW
-            ),
+            )),
             None,
             "an idle step with a deadline still parks until that deadline"
         );
@@ -1050,12 +1298,12 @@ mod tests {
 
         admission.promote_due(NOW + 60_000);
         assert_eq!(
-            admission.try_dispatch(NOW + 60_000),
+            claimed(admission.try_dispatch(NOW + 60_000)),
             Some(key.clone()),
             "the observed deadline brings the key back on its own"
         );
         assert_eq!(
-            admission.finish(
+            claimed(admission.finish(
                 &key,
                 StepOutcome::Concluded(MaintenanceStepResult {
                     conclusion: MaintenanceStepConclusion::Progressed,
@@ -1063,7 +1311,7 @@ mod tests {
                     not_before_ms: Some(NOW + 30_000),
                 }),
                 NOW + 60_000
-            ),
+            )),
             Some(key.clone()),
             "a deadline already past is just a nudge, and this step progressed"
         );
@@ -1079,18 +1327,18 @@ mod tests {
         let mut admission = book(1);
         let key = gc("leased");
 
-        admission.nudge_not_before(key.clone(), NOW + 60_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 60_000, NOW);
         admission.promote_due(NOW);
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             None,
             "the runner must not fire a key before its time"
         );
         admission.promote_due(NOW + 59_999);
-        assert_eq!(admission.try_dispatch(NOW + 59_999), None);
+        assert_eq!(claimed(admission.try_dispatch(NOW + 59_999)), None);
         admission.promote_due(NOW + 60_000);
         assert_eq!(
-            admission.try_dispatch(NOW + 60_000),
+            claimed(admission.try_dispatch(NOW + 60_000)),
             Some(key),
             "the key fires once its time arrives"
         );
@@ -1101,13 +1349,13 @@ mod tests {
         let mut admission = book(1);
         let key = gc("leased");
 
-        admission.nudge_not_before(key.clone(), NOW + 90_000, NOW);
-        admission.nudge_not_before(key.clone(), NOW + 30_000, NOW);
-        admission.nudge_not_before(key.clone(), NOW + 60_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 90_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 30_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 60_000, NOW);
         assert_eq!(admission.not_before_ms(&key), Some(NOW + 30_000));
         assert_eq!(admission.earliest_deadline_ms(NOW), Some(NOW + 30_000));
         admission.promote_due(NOW + 30_000);
-        assert_eq!(admission.try_dispatch(NOW + 30_000), Some(key));
+        assert_eq!(claimed(admission.try_dispatch(NOW + 30_000)), Some(key));
     }
 
     #[test]
@@ -1115,21 +1363,21 @@ mod tests {
         let mut admission = book(1);
         let key = gc("leased");
 
-        admission.nudge_not_before(key.clone(), NOW + 60_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 60_000, NOW);
         admission.nudge(key.clone());
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             Some(key.clone()),
             "an explicit nudge runs now; the obligation is a separate future"
         );
-        assert_eq!(admission.finish(&key, idle(), NOW), None);
+        assert_eq!(claimed(admission.finish(&key, idle(), NOW)), None);
         assert_eq!(
             admission.not_before_ms(&key),
             Some(NOW + 60_000),
             "the obligation survives the run it did not ask for"
         );
         admission.promote_due(NOW + 60_000);
-        assert_eq!(admission.try_dispatch(NOW + 60_000), Some(key));
+        assert_eq!(claimed(admission.try_dispatch(NOW + 60_000)), Some(key));
     }
 
     #[test]
@@ -1137,9 +1385,9 @@ mod tests {
         let mut admission = book(1);
         let key = gc("overdue");
 
-        admission.nudge_not_before(key.clone(), NOW - 1, NOW);
+        admission.nudge_at(key.clone(), NOW - 1, NOW);
         assert_eq!(admission.not_before_ms(&key), None);
-        assert_eq!(admission.try_dispatch(NOW), Some(key));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key));
     }
 
     #[test]
@@ -1148,18 +1396,21 @@ mod tests {
         let key = metadata("flaky");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.finish(&key, StepOutcome::Failed, NOW),
+            claimed(admission.finish(&key, StepOutcome::Failed, NOW)),
             None,
             "a failed step waits out its backoff before retrying"
         );
-        assert_eq!(admission.try_dispatch(NOW), None);
+        assert_eq!(claimed(admission.try_dispatch(NOW)), None);
         assert_eq!(
-            admission.try_dispatch(NOW + top_delay_ms(1)),
+            claimed(admission.try_dispatch(NOW + top_delay_ms(1))),
             Some(key.clone())
         );
-        assert_eq!(admission.finish(&key, StepOutcome::Failed, NOW), None);
+        assert_eq!(
+            claimed(admission.finish(&key, StepOutcome::Failed, NOW)),
+            None
+        );
         assert_eq!(
             admission.earliest_deadline_ms(NOW),
             Some(NOW + top_delay_ms(2)),
@@ -1229,7 +1480,8 @@ mod tests {
                 admission
                     .keys
                     .get(key)
-                    .and_then(|state| state.retry_at_ms)
+                    .and_then(KeyState::queued_run)
+                    .and_then(|run| run.eligible_at_ms)
                     .expect("a failed key carries a retry deadline")
             })
             .collect();
@@ -1252,16 +1504,19 @@ mod tests {
         let key = metadata("recovered");
 
         admission.nudge(key.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
-        assert_eq!(admission.finish(&key, StepOutcome::Failed, NOW), None);
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            admission.try_dispatch(NOW + top_delay_ms(1)),
+            claimed(admission.finish(&key, StepOutcome::Failed, NOW)),
+            None
+        );
+        assert_eq!(
+            claimed(admission.try_dispatch(NOW + top_delay_ms(1))),
             Some(key.clone())
         );
-        assert_eq!(admission.finish(&key, idle(), NOW), None);
+        assert_eq!(claimed(admission.finish(&key, idle(), NOW)), None);
         admission.nudge(key.clone());
         assert_eq!(
-            admission.try_dispatch(NOW),
+            claimed(admission.try_dispatch(NOW)),
             Some(key),
             "a concluded step starts the next failure streak from scratch"
         );
@@ -1273,8 +1528,8 @@ mod tests {
         let keys = [metadata("a"), metadata("b"), metadata("c")];
         for key in &keys {
             admission.nudge(key.clone());
-            assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
-            assert_eq!(admission.finish(key, idle(), NOW), None);
+            assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
+            assert_eq!(claimed(admission.finish(key, idle(), NOW)), None);
         }
 
         assert_eq!(
@@ -1293,8 +1548,8 @@ mod tests {
         let mut admission = book(1);
         let touched = metadata("touched");
         admission.nudge(touched.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(touched.clone()));
-        assert_eq!(admission.finish(&touched, idle(), NOW), None);
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(touched.clone()));
+        assert_eq!(claimed(admission.finish(&touched, idle(), NOW)), None);
 
         assert_eq!(
             admission.reconcile_batch(16),
@@ -1308,10 +1563,10 @@ mod tests {
         let mut admission = book(1);
         let (running, queued, parked) = (metadata("a"), metadata("b"), metadata("c"));
         admission.nudge(parked.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(parked.clone()));
-        assert_eq!(admission.finish(&parked, idle(), NOW), None);
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(parked.clone()));
+        assert_eq!(claimed(admission.finish(&parked, idle(), NOW)), None);
         admission.nudge(running.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(running.clone()));
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(running.clone()));
         admission.nudge(queued);
 
         assert_eq!(
@@ -1326,9 +1581,9 @@ mod tests {
         let mut admission = book(1);
         let (quiet, leased) = (metadata("quiet"), gc("leased"));
         admission.nudge(quiet.clone());
-        assert_eq!(admission.try_dispatch(NOW), Some(quiet.clone()));
-        assert_eq!(admission.finish(&quiet, idle(), NOW), None);
-        admission.nudge_not_before(leased.clone(), NOW + 60_000, NOW);
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(quiet.clone()));
+        assert_eq!(claimed(admission.finish(&quiet, idle(), NOW)), None);
+        admission.nudge_at(leased.clone(), NOW + 60_000, NOW);
 
         admission.forget_if_idle(&quiet);
         admission.forget_if_idle(&leased);
@@ -1352,18 +1607,18 @@ mod tests {
 
         // What an upload session and its completion plant: a lease that
         // passes in a day, and content reclamation a week out.
-        admission.nudge_not_before(key.clone(), NOW + 86_400_000, NOW);
-        admission.nudge_not_before(key.clone(), NOW + 604_800_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 86_400_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 604_800_000, NOW);
         assert_eq!(admission.not_before_ms(&key), Some(NOW + 86_400_000));
 
         let day = NOW + 86_400_000;
         admission.promote_due(day);
         assert_eq!(
-            admission.try_dispatch(day),
+            claimed(admission.try_dispatch(day)),
             Some(key.clone()),
             "the soonest deadline is what the runner wakes for"
         );
-        assert_eq!(admission.finish(&key, idle(), day), None);
+        assert_eq!(claimed(admission.finish(&key, idle(), day)), None);
         assert_eq!(
             admission.not_before_ms(&key),
             Some(NOW + 604_800_000),
@@ -1372,8 +1627,8 @@ mod tests {
 
         let week = NOW + 604_800_000;
         admission.promote_due(week);
-        assert_eq!(admission.try_dispatch(week), Some(key.clone()));
-        assert_eq!(admission.finish(&key, idle(), week), None);
+        assert_eq!(claimed(admission.try_dispatch(week)), Some(key.clone()));
+        assert_eq!(claimed(admission.finish(&key, idle(), week)), None);
         assert_eq!(
             admission.not_before_ms(&key),
             None,
@@ -1384,14 +1639,384 @@ mod tests {
     }
 
     #[test]
+    fn a_backoff_survives_an_ordinary_nudge() {
+        let mut admission = book(1);
+        let key = metadata("flaky");
+
+        admission.nudge(key.clone());
+        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
+        assert_eq!(
+            claimed(admission.finish(&key, StepOutcome::Failed, NOW)),
+            None
+        );
+        admission.nudge(key.clone());
+        assert_eq!(
+            claimed(admission.try_dispatch(NOW)),
+            None,
+            "coalescing into the queued retry must not erase the gate it is serving"
+        );
+        assert_eq!(
+            claimed(admission.try_dispatch(NOW + top_delay_ms(1))),
+            Some(key),
+            "and the retry still comes back when its backoff has passed"
+        );
+    }
+
+    #[test]
     fn closing_admission_clears_pending_obligations() {
         let mut admission = book(1);
         let key = gc("leased");
-        admission.nudge_not_before(key.clone(), NOW + 60_000, NOW);
+        admission.nudge_at(key.clone(), NOW + 60_000, NOW);
         admission.close();
         assert_eq!(admission.not_before_ms(&key), None);
         assert_eq!(admission.earliest_deadline_ms(NOW), None);
         admission.promote_due(NOW + 60_000);
-        assert_eq!(admission.try_dispatch(NOW + 60_000), None);
+        assert_eq!(claimed(admission.try_dispatch(NOW + 60_000)), None);
+    }
+
+    /// Seeds the model below replays. Fixed, so a failure is the same
+    /// failure on the next run and on someone else's machine.
+    const MODEL_SEEDS: [u64; 8] = [1, 2, 3, 5, 8, 13, 21, 34];
+    /// Actions per sequence, before admission closes and after.
+    const MODEL_ACTIONS: usize = 256;
+    const MODEL_ACTIONS_AFTER_CLOSE: usize = 32;
+
+    /// A seeded draw.
+    ///
+    /// The runner's own SplitMix64 finalizer over a counter: this workspace
+    /// has no `rand` dependency, ambient randomness is banned, and a model
+    /// whose failures cannot be replayed is not worth running.
+    struct Draws(u64);
+
+    impl Draws {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self.0.wrapping_add(JITTER_GAMMA);
+            let bound = u64::try_from(bound).unwrap_or(1).max(1);
+            usize::try_from(split_mix_64(self.0) % bound).unwrap_or(0)
+        }
+    }
+
+    /// The key the one selection rule has to pick, stated here rather than
+    /// asked of the book: the eligible queued run holding the oldest ticket.
+    fn oldest_eligible(admission: &Admission, now_ms: u64) -> Option<MaintenanceKey> {
+        let mut oldest: Option<(u64, &MaintenanceKey)> = None;
+        for (key, state) in &admission.keys {
+            let Some(run) = state.queued_run().filter(|run| run.is_eligible(now_ms)) else {
+                continue;
+            };
+            if oldest.is_none_or(|(ticket, _)| run.ticket < ticket) {
+                oldest = Some((run.ticket, key));
+            }
+        }
+        oldest.map(|(_, key)| key.clone())
+    }
+
+    /// What a caller of the book knows, held beside it.
+    ///
+    /// Deliberately not a second scheduler: it tracks the steps it started
+    /// and has not ended, the deadlines it planted, and how often a key
+    /// sitting eligible has been passed over — and holds the book to all
+    /// three after every single action.
+    struct Model {
+        admission: Admission,
+        draws: Draws,
+        keys: Vec<MaintenanceKey>,
+        cap: usize,
+        now_ms: u64,
+        closed: bool,
+        /// Keys this driver dispatched and has not finished or abandoned.
+        running: BTreeSet<MaintenanceKey>,
+        /// The soonest and latest deadline planted per key.
+        owed: BTreeMap<MaintenanceKey, (u64, u64)>,
+        /// Dispatches that went past a key while it sat eligible.
+        passed_over: BTreeMap<MaintenanceKey, usize>,
+        action: usize,
+        dispatches: usize,
+        deepest_wait: usize,
+    }
+
+    impl Model {
+        fn new(seed: u64, cap: usize, key_count: usize) -> Self {
+            let keys = (0..key_count)
+                .map(|index| {
+                    let name = format!("key-{index}");
+                    // Both jobs, so the admitted set is ordered by something
+                    // other than the order keys arrive in.
+                    if index % 2 == 0 {
+                        metadata(&name)
+                    } else {
+                        gc(&name)
+                    }
+                })
+                .collect();
+            Self {
+                admission: Admission::new(cap, TestClock::top()),
+                draws: Draws(seed),
+                keys,
+                cap,
+                now_ms: NOW,
+                closed: false,
+                running: BTreeSet::new(),
+                owed: BTreeMap::new(),
+                passed_over: BTreeMap::new(),
+                action: 0,
+                dispatches: 0,
+                deepest_wait: 0,
+            }
+        }
+
+        fn run(mut self) {
+            for _ in 0..MODEL_ACTIONS {
+                self.act();
+                self.check();
+                self.action += 1;
+            }
+            self.close();
+            self.check();
+            for _ in 0..MODEL_ACTIONS_AFTER_CLOSE {
+                self.act();
+                self.check();
+                self.action += 1;
+            }
+            // A sequence that stopped claiming, or one whose keys never
+            // queued behind each other, would assert nothing worth
+            // asserting. Both floors are far below what the seeds produce.
+            assert!(
+                self.dispatches > MODEL_ACTIONS / 8,
+                "the sequence ran {} steps, which is too few to have tested anything",
+                self.dispatches
+            );
+            assert!(
+                self.deepest_wait > 0,
+                "no key ever waited behind another, so ticket order was never in question"
+            );
+        }
+
+        fn act(&mut self) {
+            let key = self.keys[self.draws.below(self.keys.len())].clone();
+            let eligible = self.eligible();
+            match self.draws.below(32) {
+                0..=9 => self.admission.nudge(key),
+                10..=13 => self.plant(key),
+                14..=20 => self.dispatch(&eligible),
+                21..=27 => self.finish(&eligible),
+                28..=30 => self.advance_time(),
+                // Closing is the one action `run` places itself: drawn, it
+                // would end most sequences in their first dozen actions.
+                _ => self.abandon(),
+            }
+        }
+
+        /// A deadline ahead of now plants an obligation; one already past is
+        /// an ordinary nudge.
+        fn plant(&mut self, key: MaintenanceKey) {
+            let at_ms = self
+                .now_ms
+                .saturating_add(u64::try_from(self.draws.below(4)).unwrap_or(0) * 1_000);
+            self.admission.nudge_at(key.clone(), at_ms, self.now_ms);
+            if at_ms > self.now_ms && !self.closed {
+                let owed = self.owed.entry(key).or_insert((at_ms, at_ms));
+                *owed = (owed.0.min(at_ms), owed.1.max(at_ms));
+            }
+        }
+
+        fn dispatch(&mut self, eligible: &BTreeSet<MaintenanceKey>) {
+            let expected = (!self.closed && self.running.len() < self.cap)
+                .then(|| oldest_eligible(&self.admission, self.now_ms))
+                .flatten();
+            let dispatched = self.admission.try_dispatch(self.now_ms);
+            assert_eq!(
+                dispatched.as_ref().map(|dispatch| &dispatch.key),
+                expected.as_ref(),
+                "action {}: a claim takes the oldest eligible run, and only when a permit is free",
+                self.action
+            );
+            self.took(dispatched, eligible);
+        }
+
+        fn finish(&mut self, eligible: &BTreeSet<MaintenanceKey>) {
+            let Some(key) = self.pick_running() else {
+                return;
+            };
+            let conclusion = match self.draws.below(6) {
+                0 => Some(MaintenanceStepConclusion::Progressed),
+                1 => Some(MaintenanceStepConclusion::Idle),
+                2 => Some(MaintenanceStepConclusion::Blocked),
+                3 => Some(MaintenanceStepConclusion::Superseded),
+                4 => Some(MaintenanceStepConclusion::NotEnabled),
+                // The failing step, which is the same report with a backoff
+                // behind it.
+                _ => None,
+            };
+            let outcome = conclusion.map_or(StepOutcome::Failed, concluded);
+            let dispatched = self.admission.finish(&key, outcome, self.now_ms);
+            self.running.remove(&key);
+            if conclusion == Some(MaintenanceStepConclusion::NotEnabled) {
+                // The key and everything on it, obligations included, is
+                // gone.
+                self.owed.remove(&key);
+            }
+            if dispatched.is_none() && !self.closed {
+                assert!(
+                    oldest_eligible(&self.admission, self.now_ms).is_none(),
+                    "action {}: a permit must not be released while eligible work waits",
+                    self.action
+                );
+            }
+            self.took(dispatched, eligible);
+        }
+
+        fn advance_time(&mut self) {
+            self.now_ms = self
+                .now_ms
+                .saturating_add(u64::try_from(1 + self.draws.below(3)).unwrap_or(1) * 1_000);
+            let due = self
+                .owed
+                .values()
+                .filter(|(earliest_at_ms, _)| *earliest_at_ms <= self.now_ms)
+                .count();
+            assert_eq!(
+                self.admission.promote_due(self.now_ms),
+                if self.closed { 0 } else { due },
+                "action {}: exactly the arrived deadlines are promoted",
+                self.action
+            );
+            let now_ms = self.now_ms;
+            self.owed.retain(|_, (earliest_at_ms, latest_at_ms)| {
+                if *earliest_at_ms > now_ms {
+                    return true;
+                }
+                // The pass that fires re-arms on the latest deadline, and
+                // owes nothing once that one is past too.
+                *earliest_at_ms = *latest_at_ms;
+                *latest_at_ms > now_ms
+            });
+        }
+
+        fn abandon(&mut self) {
+            let Some(key) = self.pick_running() else {
+                return;
+            };
+            self.admission.abandon(&key);
+            self.running.remove(&key);
+        }
+
+        fn close(&mut self) {
+            self.admission.close();
+            self.closed = true;
+            self.owed.clear();
+        }
+
+        /// Records a claim: the driver is running one more key, and every
+        /// key it went past has waited one claim longer.
+        ///
+        /// Ticket order across a whole sequence is what this bounds. A key
+        /// sitting eligible can be passed over at most once per other key:
+        /// only an older ticket takes a permit ahead of it, each key holds
+        /// one run at a time, and every run asked for after it takes a newer
+        /// ticket. A rerun that kept its permit by finishing is exactly what
+        /// breaks that, and breaks it without bound.
+        fn took(
+            &mut self,
+            dispatched: Option<MaintenanceDispatch>,
+            eligible_before: &BTreeSet<MaintenanceKey>,
+        ) {
+            let dispatched = dispatched.map(|dispatch| dispatch.key);
+            assert!(
+                dispatched.is_none() || !self.closed,
+                "action {}: closed admission must never dispatch",
+                self.action
+            );
+            if let Some(dispatched) = &dispatched {
+                self.dispatches += 1;
+                for key in eligible_before.iter().filter(|key| *key != dispatched) {
+                    *self.passed_over.entry(key.clone()).or_default() += 1;
+                }
+                self.running.insert(dispatched.clone());
+            }
+            let eligible = self.eligible();
+            self.passed_over.retain(|key, _| eligible.contains(key));
+            self.deepest_wait = self
+                .deepest_wait
+                .max(self.passed_over.values().copied().max().unwrap_or(0));
+            for (key, passed) in &self.passed_over {
+                assert!(
+                    *passed < self.keys.len(),
+                    "action {}: {key:?} sat eligible while {passed} claims went past it",
+                    self.action
+                );
+            }
+        }
+
+        /// Everything that has to hold whatever the driver just did.
+        fn check(&self) {
+            let running: BTreeSet<MaintenanceKey> = self
+                .admission
+                .keys
+                .iter()
+                .filter(|(_, state)| state.is_running())
+                .map(|(key, _)| key.clone())
+                .collect();
+            assert_eq!(
+                running, self.running,
+                "action {}: the book and its caller disagree about what is running",
+                self.action
+            );
+            assert_eq!(
+                self.admission.running(),
+                running.len(),
+                "action {}: one permit per running step, and no permit lost",
+                self.action
+            );
+            assert!(
+                running.len() <= self.cap,
+                "action {}: the permit cap is a cap",
+                self.action
+            );
+            for key in &self.keys {
+                assert_eq!(
+                    self.admission.not_before_ms(key),
+                    self.owed
+                        .get(key)
+                        .map(|(earliest_at_ms, _)| *earliest_at_ms),
+                    "action {}: {key:?}'s obligation is only its own to clear",
+                    self.action
+                );
+            }
+        }
+
+        /// The keys whose queued run could be claimed right now.
+        fn eligible(&self) -> BTreeSet<MaintenanceKey> {
+            self.admission
+                .keys
+                .iter()
+                .filter(|(_, state)| {
+                    state
+                        .queued_run()
+                        .is_some_and(|run| run.is_eligible(self.now_ms))
+                })
+                .map(|(key, _)| key.clone())
+                .collect()
+        }
+
+        fn pick_running(&mut self) -> Option<MaintenanceKey> {
+            let running: Vec<MaintenanceKey> = self.running.iter().cloned().collect();
+            running.get(self.draws.below(running.len())).cloned()
+        }
+    }
+
+    /// The properties the book holds whatever order its callers arrive in:
+    /// one step per key, permits accounted for, ticket order, nothing
+    /// dispatched after a close, and an obligation only its own deadline or
+    /// a close may clear.
+    ///
+    /// The book is synchronous under one lock, so a seeded sequence of calls
+    /// is the whole concurrency story — there is no interleaving these
+    /// sequences cannot produce.
+    #[test]
+    fn a_seeded_action_sequence_holds_every_admission_invariant() {
+        for (index, seed) in MODEL_SEEDS.into_iter().enumerate() {
+            Model::new(seed, 1 + index % 2, 3 + index % 3).run();
+        }
     }
 }
