@@ -16,6 +16,7 @@ mod http_retry;
 mod http_smoke;
 mod http_tls;
 mod http_uploads;
+mod local_cache;
 
 // The OpenAPI document only exists behind the feature that generates it.
 #[cfg(feature = "openapi")]

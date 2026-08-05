@@ -1,57 +1,12 @@
 //! What a scrape of a running server actually returns.
 
 use crate::common::http_split_support::*;
-use crate::common::start_server;
+use crate::common::{scrape, series, start_server};
 use loonfs_client::NamespacePath;
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use tempfile::tempdir;
-
-/// The exposition lines of one scrape, keyed by everything left of the
-/// value. Comment lines are dropped; a value that does not parse as a number
-/// is a rendering bug and fails here.
-fn scrape(server_url: &str, token: Option<&str>) -> Result<BTreeMap<String, f64>, u16> {
-    let request = raw_agent().get(&format!("{server_url}/metrics"));
-    let request = match token {
-        Some(token) => request.set("authorization", &format!("Bearer {token}")),
-        None => request,
-    };
-    let response = match request.call() {
-        Ok(response) => response,
-        Err(ureq::Error::Status(status, _)) => return Err(status),
-        Err(error) => unreachable!("metrics scrape failed: {error}"),
-    };
-    assert_eq!(
-        response.header("content-type"),
-        Some("text/plain; version=0.0.4")
-    );
-    let mut body = String::new();
-    response
-        .into_reader()
-        .read_to_string(&mut body)
-        .expect("read scrape body");
-    Ok(body
-        .lines()
-        .filter(|line| !line.starts_with('#') && !line.is_empty())
-        .map(|line| {
-            let (series, value) = line
-                .rsplit_once(' ')
-                .unwrap_or_else(|| unreachable!("exposition line without a value: {line}"));
-            let value: f64 = value
-                .parse()
-                .unwrap_or_else(|_| unreachable!("unparsable value in `{line}`"));
-            (series.to_owned(), value)
-        })
-        .collect())
-}
-
-fn series(scrape: &BTreeMap<String, f64>, name: &str) -> f64 {
-    *scrape
-        .get(name)
-        .unwrap_or_else(|| unreachable!("no series `{name}` in the scrape"))
-}
 
 /// Object-store calls of every operation and outcome, summed.
 fn object_store_calls(scrape: &BTreeMap<String, f64>) -> f64 {

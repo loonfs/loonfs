@@ -32,8 +32,11 @@ use super::runs::{
     MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
     CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_L0_RUNS,
 };
+use super::stored_block_cache::{
+    StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
+};
 use super::{
-    create, flush, load, record, reorganize, reorganize_metadata_step, row, scan,
+    block_fetch, create, flush, load, record, reorganize, reorganize_metadata_step, row, scan,
     MetadataReorganizeOutcome,
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
@@ -52,6 +55,7 @@ use crate::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
+use crate::test_support::{RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache};
 use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -62,7 +66,9 @@ use loonfs_api::wire::manifest::{
     MetadataRow, MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
 };
-use loonfs_api::wire::sst_blocks::{string_prefix_upper_bound, SegmentBlocksBuilder};
+use loonfs_api::wire::sst_blocks::{
+    string_prefix_upper_bound, SegmentBlocksBuilder, SegmentIndexEntry,
+};
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,
     ManifestId, ManifestObjectId, NameKey, NamespaceId, RevisionNo,
