@@ -6,9 +6,11 @@
 use crate::common::*;
 use loonfs::{
     ChangeSeq, CreateDirectoryOptions, CreateNamespaceOptions, ErrorCode, InodeId, InodeKind,
-    NamespaceId, PutFileOptions, RuntimeCacheConfig, SharedObjectStore,
+    NamespaceId, PutFileOptions, RuntimeCacheConfig, SharedObjectStore, StoredMetadataBlockKind,
 };
-use loonfs_core::test_support::RecordingStoredMetadataBlockCache;
+use loonfs_core::test_support::{
+    RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
@@ -659,21 +661,20 @@ fn separate_runtime_instances_share_object_store_state() {
     assert_eq!(file.bytes, b"shared");
 }
 
-/// The stored-block cache is a seam and nothing more until a later change
-/// wires the fetch path into it: a runtime built with one installed reads
-/// and writes exactly as it did without one, and never calls it. The
-/// decoded-cache assertion keeps this honest — it fails if the cycle stops
-/// exercising the metadata table path this tier sits under.
+/// A runtime built with a stored-block cache fills it from the reads that go
+/// through it, and a second runtime on the same store — whose decoded caches
+/// are empty, as a restarted process's are — reads a segment section back
+/// out of it. The decoded-cache assertion keeps this honest: it fails if the
+/// cycle stops exercising the metadata table path this tier sits under.
 #[test]
-fn an_installed_stored_block_cache_is_never_called() {
+fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let fs = open_runtime_with(
-        store(temp_dir.path()),
-        "stored-block-seam-test",
-        |builder| builder.stored_metadata_block_cache(stored_blocks.clone()),
-    );
+    let shared_store = store(temp_dir.path());
+    let fs = open_runtime_with(shared_store.clone(), "stored-block-writer", |builder| {
+        builder.stored_metadata_block_cache(stored_blocks.clone())
+    });
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -709,10 +710,39 @@ fn an_installed_stored_block_cache_is_never_called() {
         fs.runtime_cache_stats().metadata_table_cache_inserts > 0,
         "the cycle must reach the decoded block cache for this to prove anything"
     );
-    assert_eq!(
-        stored_blocks.calls(),
-        Vec::new(),
-        "nothing consults the stored-block cache yet"
+    let offered: Vec<StoredMetadataBlockKind> = stored_blocks
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            RecordedStoredMetadataBlockCall::Insert { key, .. } => Some(key.kind),
+            RecordedStoredMetadataBlockCall::Get { .. }
+            | RecordedStoredMetadataBlockCall::Invalidate { .. } => None,
+        })
+        .collect();
+    for kind in [
+        StoredMetadataBlockKind::Index,
+        StoredMetadataBlockKind::Filter,
+        StoredMetadataBlockKind::Data,
+    ] {
+        assert!(
+            offered.contains(&kind),
+            "the fetched segment's {kind:?} section was not offered to the cache"
+        );
+    }
+
+    let calls_before = stored_blocks.call_count();
+    let reader = open_runtime_with(shared_store, "stored-block-reader", |builder| {
+        builder.stored_metadata_block_cache(stored_blocks.clone())
+    });
+    let entries = reader
+        .list_path_blocking(&namespace_id, "/docs")
+        .expect("list docs from a second runtime");
+    assert_eq!(entries.len(), 2);
+    assert!(
+        stored_blocks.calls()[calls_before..]
+            .iter()
+            .any(|call| matches!(call, RecordedStoredMetadataBlockCall::Get { hit: true, .. })),
+        "the second runtime should have been served a section by the cache"
     );
     assert!(
         !stored_blocks.is_closed(),

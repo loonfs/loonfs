@@ -83,6 +83,19 @@ impl RecordingStoredMetadataBlockCache {
         self.state().closed
     }
 
+    /// Replaces what is held for `key` with the same number of bytes that no
+    /// longer checksum, the way a lost write or a bad sector leaves an
+    /// entry. Does nothing for a key the cache is not holding.
+    ///
+    /// The replacement is not recorded: it is the test arranging the world,
+    /// not a call the code under test made.
+    pub fn corrupt(&self, key: &StoredMetadataBlockKey) {
+        let mut state = self.state();
+        if let Some(held) = state.entries.get_mut(key) {
+            *held = held.iter().map(|byte| !byte).collect::<Vec<_>>().into();
+        }
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, RecordingState> {
         // Poisoning is propagated as a panic: a poisoned lock means a test
         // thread panicked mid-update, and the recording is no longer a

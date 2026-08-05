@@ -108,10 +108,11 @@ pub mod metadata;
 pub mod path;
 /// Test doubles for this crate's public seams, behind the `test-support`
 /// feature. Consumed by the test targets of crates that implement or install
-/// those seams; no production build enables the feature. Doubles live here
-/// rather than in `loonfs-test-support` because that crate is a development
-/// dependency of this one and so cannot depend on these types.
-#[cfg(feature = "test-support")]
+/// those seams, and by this crate's own tests; no production build enables
+/// the feature. Doubles live here rather than in `loonfs-test-support`
+/// because that crate is a development dependency of this one and so cannot
+/// depend on these types.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 /// The wall-clock boundary durable timestamps are stamped at. Consumed by
 /// `loonfs`, whose mutation contexts and maintenance clock stamp from the

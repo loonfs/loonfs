@@ -7,9 +7,56 @@ use loonfs_server::{
     app, serve_with_shutdown, GrepConfig, MaintenanceMode, RuntimeCacheConfigOverrides, ServeError,
     ServerConfig, StoreConfig, TlsServerConfig,
 };
+use loonfs_test_support::http::raw_agent;
+use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// The exposition lines of one scrape, keyed by everything left of the
+/// value. Comment lines are dropped; a value that does not parse as a number
+/// is a rendering bug and fails here.
+pub(crate) fn scrape(server_url: &str, token: Option<&str>) -> Result<BTreeMap<String, f64>, u16> {
+    let request = raw_agent().get(&format!("{server_url}/metrics"));
+    let request = match token {
+        Some(token) => request.set("authorization", &format!("Bearer {token}")),
+        None => request,
+    };
+    let response = match request.call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, _)) => return Err(status),
+        Err(error) => unreachable!("metrics scrape failed: {error}"),
+    };
+    assert_eq!(
+        response.header("content-type"),
+        Some("text/plain; version=0.0.4")
+    );
+    let mut body = String::new();
+    response
+        .into_reader()
+        .read_to_string(&mut body)
+        .expect("read scrape body");
+    Ok(body
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let (series, value) = line
+                .rsplit_once(' ')
+                .unwrap_or_else(|| unreachable!("exposition line without a value: {line}"));
+            let value: f64 = value
+                .parse()
+                .unwrap_or_else(|_| unreachable!("unparsable value in `{line}`"));
+            (series.to_owned(), value)
+        })
+        .collect())
+}
+
+pub(crate) fn series(scrape: &BTreeMap<String, f64>, name: &str) -> f64 {
+    *scrape
+        .get(name)
+        .unwrap_or_else(|| unreachable!("no series `{name}` in the scrape"))
+}
 
 pub(crate) struct TestServer {
     pub(crate) client: Client,
@@ -124,6 +171,68 @@ pub(crate) async fn start_tls_server(mut config: ServerConfig) -> TlsTestServer 
         shutdown,
         server,
         _identity_dir: identity_dir,
+    }
+}
+
+/// A plaintext server started and stopped through the deployed entry point.
+///
+/// Unlike [`start_server`], which aborts its task, this shuts down the way a
+/// host does: the listener drains, the writer settles, and the local block
+/// cache is closed and released. That is what lets a test stop one server
+/// and start another on the same directories.
+pub(crate) struct GracefulTestServer {
+    pub(crate) client: Client,
+    pub(crate) server_url: String,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<Result<(), ServeError>>,
+}
+
+pub(crate) async fn start_graceful_server(mut config: ServerConfig) -> GracefulTestServer {
+    let addr = reserve_loopback_addr().await;
+    config.bind = addr.to_string();
+    let auth_token = config
+        .auth_token
+        .as_ref()
+        .map(|token| token.expose().to_owned());
+
+    let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_with_shutdown(config, async move {
+        let _ = shutdown_signal.await;
+    }));
+    wait_until_listening(addr).await;
+
+    let server_url = format!("http://{addr}");
+    GracefulTestServer {
+        client: Client::new(ClientConfig {
+            server_url: server_url.clone(),
+            auth_token,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        })
+        .expect("valid client config"),
+        server_url,
+        shutdown,
+        server,
+    }
+}
+
+impl GracefulTestServer {
+    /// Stops the server and reports what settling found. The client goes
+    /// first so its idle connections do not hold the listener open.
+    pub(crate) async fn shut_down(self) {
+        let Self {
+            client,
+            shutdown,
+            server,
+            ..
+        } = self;
+        drop(client);
+        shutdown.send(()).expect("signal shutdown");
+        server
+            .await
+            .expect("server task")
+            .expect("graceful shutdown settles");
     }
 }
 

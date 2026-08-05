@@ -784,6 +784,277 @@ async fn corrupt_inline_filter_fails_the_lookup() {
     );
 }
 
+/// One checkpointed direntry segment, with the inline filter copy stripped
+/// from its descriptor so both the filter and the index have to come from
+/// somewhere other than the manifest — the shape a base segment, whose
+/// filter is too big to inline, already has.
+async fn checkpointed_direntry_segment() -> (
+    tempfile::TempDir,
+    CountingStore<LocalFsStore>,
+    MetadataFileRef,
+) {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..4 {
+        let path = format!("/docs/file-{index}.txt");
+        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+            .await
+            .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("load tables");
+    let mut descriptor = tables
+        .manifest()
+        .payload
+        .metadata_files
+        .iter()
+        .find(|descriptor| descriptor.family == ApiMetadataTableFamily::DirentryBinds)
+        .expect("a direntry segment")
+        .clone();
+    descriptor.filter_inline = None;
+    (temp_dir, store, descriptor)
+}
+
+/// A decoded block cache with `blocks` beneath it, which is what a runtime
+/// built with a local cache hands the read paths. A fresh one stands for a
+/// fresh process: only the local tier carries anything over.
+fn table_cache_over(blocks: &Arc<RecordingStoredMetadataBlockCache>) -> MetadataTableCache {
+    MetadataTableCache::with_stored_block_cache(
+        MetadataTableCacheConfig::default(),
+        Some(Arc::clone(blocks) as Arc<dyn StoredMetadataBlockCache>),
+    )
+}
+
+fn stored_key(
+    descriptor: &MetadataFileRef,
+    kind: StoredMetadataBlockKind,
+    offset: u64,
+) -> StoredMetadataBlockKey {
+    StoredMetadataBlockKey {
+        payload_checksum: descriptor.payload_checksum.clone(),
+        kind,
+        offset,
+    }
+}
+
+/// Fills `blocks` the way one cold read fills it, and returns the index that
+/// read decoded.
+async fn warm_local_block_cache(
+    store: &CountingStore<LocalFsStore>,
+    descriptor: &MetadataFileRef,
+    blocks: &Arc<RecordingStoredMetadataBlockCache>,
+) -> Arc<Vec<SegmentIndexEntry>> {
+    let cache = table_cache_over(blocks);
+    let memo = load::SessionBlockMemo::default();
+    load::load_segment_filter(store, Some(&cache), &memo, descriptor)
+        .await
+        .expect("warm the filter");
+    block_fetch::load_segment_index(store, Some(&cache), &memo, descriptor)
+        .await
+        .expect("warm the index")
+}
+
+/// A cold local cache is probed, answers nothing, and is then offered every
+/// section the one fetch produced: the filter that was asked for, the index
+/// beside it, and the data blocks a small segment brings along.
+#[tokio::test]
+async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
+    let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let cache = table_cache_over(&blocks);
+    let memo = load::SessionBlockMemo::default();
+
+    store.reset();
+    load::load_segment_filter(&store, Some(&cache), &memo, &descriptor)
+        .await
+        .expect("load filter");
+
+    assert_eq!(
+        blocks.calls().first(),
+        Some(&RecordedStoredMetadataBlockCall::Get {
+            key: stored_key(
+                &descriptor,
+                StoredMetadataBlockKind::Filter,
+                descriptor.filter_block.offset
+            ),
+            hit: false,
+        }),
+        "a filter load probes the local cache before it asks the store"
+    );
+    assert_eq!(
+        store.count(OperationClass::Read),
+        1,
+        "a cold filter load pays exactly one fetch"
+    );
+
+    // That fetch published the index into the view memo, so asking for it
+    // costs nothing and tells this test which data blocks the segment holds.
+    let index = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
+        .await
+        .expect("load index");
+    assert_eq!(store.count(OperationClass::Read), 1);
+    assert!(!index.is_empty(), "a segment holds at least one data block");
+
+    let offered: Vec<_> = blocks
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            RecordedStoredMetadataBlockCall::Insert { key, .. } => Some(key),
+            RecordedStoredMetadataBlockCall::Get { .. }
+            | RecordedStoredMetadataBlockCall::Invalidate { .. } => None,
+        })
+        .collect();
+    let mut expected = vec![
+        stored_key(
+            &descriptor,
+            StoredMetadataBlockKind::Index,
+            descriptor.index_block.offset,
+        ),
+        stored_key(
+            &descriptor,
+            StoredMetadataBlockKind::Filter,
+            descriptor.filter_block.offset,
+        ),
+    ];
+    expected.extend(index.iter().map(|entry| {
+        stored_key(
+            &descriptor,
+            StoredMetadataBlockKind::Data,
+            entry.block.offset,
+        )
+    }));
+    for key in expected {
+        assert!(
+            offered.contains(&key),
+            "the fetch did not offer {key:?} to the local cache"
+        );
+    }
+}
+
+/// A warm local cache answers both sections with no segment bytes read: the
+/// decoded cache and the view memo are fresh, as a restarted process's are,
+/// so only the local tier can be answering.
+#[tokio::test]
+async fn a_warm_local_block_cache_answers_index_and_filter_without_the_store() {
+    let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let cold_index = warm_local_block_cache(&store, &descriptor, &blocks).await;
+
+    let cache = table_cache_over(&blocks);
+    let memo = load::SessionBlockMemo::default();
+    store.reset();
+    let warm_index = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
+        .await
+        .expect("index from the local cache");
+    load::load_segment_filter(&store, Some(&cache), &memo, &descriptor)
+        .await
+        .expect("filter from the local cache");
+
+    assert_eq!(warm_index, cold_index);
+    assert_eq!(
+        store.count(OperationClass::Read),
+        0,
+        "a warm index and filter should read no segment bytes"
+    );
+    for (kind, offset) in [
+        (
+            StoredMetadataBlockKind::Index,
+            descriptor.index_block.offset,
+        ),
+        (
+            StoredMetadataBlockKind::Filter,
+            descriptor.filter_block.offset,
+        ),
+    ] {
+        assert!(
+            blocks
+                .calls()
+                .contains(&RecordedStoredMetadataBlockCall::Get {
+                    key: stored_key(&descriptor, kind, offset),
+                    hit: true,
+                }),
+            "the {kind:?} section should have been served by the local cache"
+        );
+    }
+}
+
+/// A local entry that no longer decodes is dropped and refetched exactly
+/// once. What it held was a copy; object storage still holds the authority,
+/// so the read succeeds rather than reporting a corrupt segment.
+#[tokio::test]
+async fn a_local_block_cache_entry_that_does_not_decode_is_dropped_and_refetched() {
+    let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let cold_index = warm_local_block_cache(&store, &descriptor, &blocks).await;
+    let index_key = stored_key(
+        &descriptor,
+        StoredMetadataBlockKind::Index,
+        descriptor.index_block.offset,
+    );
+    blocks.corrupt(&index_key);
+
+    let cache = table_cache_over(&blocks);
+    let memo = load::SessionBlockMemo::default();
+    store.reset();
+    let repaired = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
+        .await
+        .expect("a local entry that does not decode must not fail the read");
+
+    assert_eq!(repaired, cold_index);
+    assert_eq!(
+        store.count(OperationClass::Read),
+        1,
+        "the bad entry costs one refetch and no retry loop"
+    );
+    assert_eq!(
+        blocks
+            .calls()
+            .iter()
+            .filter(|call| **call
+                == RecordedStoredMetadataBlockCall::Invalidate {
+                    key: index_key.clone()
+                })
+            .count(),
+        1,
+        "the entry that did not decode should have been dropped once"
+    );
+}
+
+/// A closed cache is a miss, and a miss is only ever a fetch.
+#[tokio::test]
+async fn a_closed_local_block_cache_reads_as_a_miss() {
+    let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let cold_index = warm_local_block_cache(&store, &descriptor, &blocks).await;
+    blocks.close().await.expect("close the local cache");
+    let calls_before = blocks.call_count();
+
+    let cache = table_cache_over(&blocks);
+    let memo = load::SessionBlockMemo::default();
+    store.reset();
+    let index = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
+        .await
+        .expect("a closed local cache must not fail the read");
+
+    assert_eq!(index, cold_index);
+    assert_eq!(store.count(OperationClass::Read), 1);
+    assert_eq!(
+        blocks.call_count(),
+        calls_before,
+        "a closed cache neither serves nor records"
+    );
+}
+
 #[tokio::test]
 async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
     let temp_dir = tempdir().expect("tempdir");
