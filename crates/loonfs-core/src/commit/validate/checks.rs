@@ -333,8 +333,7 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    target_seq: active.generation.seq,
-                    target_delta_index: active.generation.delta_index,
+                    target: active.generation,
                     revoke_tombstone_delta_index: reserve_delta_index(next_delta_index)?,
                     bind_delta_index: reserve_delta_index(next_delta_index)?,
                 }

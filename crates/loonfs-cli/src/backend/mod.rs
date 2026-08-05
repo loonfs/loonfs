@@ -142,11 +142,20 @@ impl FileDownload {
     /// download that skipped a prefix refuses to read until it has been told
     /// what the prefix was. A held answer never resumed, so it has nothing
     /// to be told.
-    pub(crate) fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
+    pub(crate) fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), BackendError> {
         match self {
-            Self::Streamed { stream, .. } => stream.fold_resumed_prefix(bytes),
-            Self::Direct { stream, .. } => stream.fold_resumed_prefix(bytes),
-            Self::Whole(_) => {}
+            Self::Streamed {
+                namespace_id,
+                stream,
+                ..
+            } => stream.fold_resumed_prefix(bytes).map_err(|error| {
+                map_namespace_scoped_runtime_error(namespace_id, RuntimeError::Core(error))
+            }),
+            Self::Direct { stream, .. } => {
+                stream.fold_resumed_prefix(bytes);
+                Ok(())
+            }
+            Self::Whole(_) => Ok(()),
         }
     }
 }

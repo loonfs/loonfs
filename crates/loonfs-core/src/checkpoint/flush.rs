@@ -61,7 +61,10 @@ pub(super) struct FlushedBasis {
 }
 
 pub(super) enum TryFlushWal {
-    Flushed(Box<FlushedBasis>),
+    /// The attempt reached a basis. That basis may have been published by
+    /// this attempt, already current before it, or superseded by a newer
+    /// root while it ran — settled, not necessarily flushed.
+    Settled(Box<FlushedBasis>),
     /// The root compare-and-swap raced another publisher to exhaustion;
     /// retry against a fresh projection.
     RaceLost,
@@ -90,7 +93,7 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
 ) -> Result<FlushWalResponse> {
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
         match try_flush_wal(store, namespace_id, context, timer).await? {
-            TryFlushWal::Flushed(basis) => {
+            TryFlushWal::Settled(basis) => {
                 return Ok(FlushWalResponse {
                     namespace_id: namespace_id.clone(),
                     target_head_seq: basis.target_head_seq,
@@ -137,7 +140,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         && projection.manifest_tables.manifest().payload.head_seq == head_seq
     {
         let basis_manifest = basis_manifest.expect("an owned basis names a manifest");
-        return Ok(TryFlushWal::Flushed(Box::new(FlushedBasis {
+        return Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
             manifest_id: basis_manifest.manifest_id,
             manifest_object_id: basis_manifest.manifest_object_id.clone(),
             manifest_head_seq: head_seq,
@@ -244,7 +247,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
             return Ok(TryFlushWal::RaceLost);
         }
     };
-    Ok(TryFlushWal::Flushed(Box::new(FlushedBasis {
+    Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
         manifest_id: manifest.payload.manifest_id,
         manifest_object_id: manifest.payload.manifest_object_id.clone(),
         manifest_head_seq: manifest.payload.head_seq,

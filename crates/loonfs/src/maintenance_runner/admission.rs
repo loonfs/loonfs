@@ -958,9 +958,9 @@ mod tests {
         );
     }
 
-    /// Ported: claims are singleflight and refused after shutdown.
+    /// Ported: claims are singleflight and refused after close.
     #[test]
-    fn claims_are_singleflight_and_refused_after_shut_down() {
+    fn claims_are_singleflight_and_refused_after_close() {
         let mut admission = book(8);
         let key = metadata("demo");
 
@@ -980,7 +980,7 @@ mod tests {
         assert_eq!(
             claimed(admission.try_dispatch(NOW)),
             None,
-            "no new claims after shutdown"
+            "no new claims after close"
         );
     }
 
