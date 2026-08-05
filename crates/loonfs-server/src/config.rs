@@ -1,6 +1,7 @@
 //! Server configuration: strict TOML decoding of the listen address,
 //! store, and runtime cache overrides.
 
+use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
 use loonfs::RuntimeCacheConfig;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, SecretString, StoreConfigError};
@@ -191,7 +192,11 @@ pub struct LocalCacheConfig {
     /// Bytes of memory the cache's in-memory tier may hold.
     pub memory_bytes: u64,
     /// Bytes of disk the cache's disk tier may hold. The tier claims this
-    /// much space up front, in files under `path`.
+    /// much space up front, in whole blocks, one file per block under
+    /// `path`; six blocks is the smallest tier that may be configured.
+    /// Raising this across a restart keeps what the directory holds, and
+    /// lowering it starts the directory empty rather than leaving the
+    /// blocks it no longer claims behind.
     pub disk_bytes: u64,
 }
 
@@ -485,12 +490,19 @@ impl ServerConfig {
                         .to_owned(),
                 });
             }
-            if local_cache.disk_bytes == 0 {
+            // The disk tier allocates whole blocks and never a partial one,
+            // so a capacity under the floor is a cache that starts, holds
+            // nothing on disk, and says nothing about it. Refuse it here
+            // instead.
+            if local_cache.disk_bytes < MIN_DISK_BYTES {
                 return Err(ServerConfigError::InvalidField {
                     field: "local_cache.disk_bytes",
-                    reason: "must be greater than zero; \
-                             omit the `[local_cache]` table to run without a local cache"
-                        .to_owned(),
+                    reason: format!(
+                        "must be at least {MIN_DISK_BYTES}; the disk tier allocates whole \
+                         blocks of {DISK_BLOCK_BYTES} bytes, and six blocks is the floor \
+                         for stable operation. Omit the `[local_cache]` table to run \
+                         without a local cache"
+                    ),
                 });
             }
         }
@@ -574,7 +586,7 @@ mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{load_server_config, ServerConfigError};
+    use super::{load_server_config, ServerConfigError, DISK_BLOCK_BYTES, MIN_DISK_BYTES};
     use std::fs;
     use tempfile::tempdir;
 
@@ -1588,6 +1600,50 @@ root = "/tmp/loonfs-server"
             let error = load_server_config(&path).expect_err("a zero size must be rejected");
             assert_invalid_field(error, field);
         }
+    }
+
+    /// A disk tier smaller than one block holds nothing on disk, and foyer
+    /// says so in a warning rather than an error. The config check is what
+    /// makes it a startup failure with a number in it.
+    #[test]
+    fn a_local_cache_disk_tier_has_a_floor() {
+        let with_disk_bytes = |disk_bytes: u64| {
+            write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[local_cache]
+path = "/var/lib/loonfs/cache"
+memory_bytes = 67108864
+disk_bytes = {disk_bytes}
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ))
+        };
+
+        // Eight megabytes is a plausible value that would have started a
+        // server whose disk tier holds nothing at all.
+        let error = load_server_config(with_disk_bytes(8 * 1024 * 1024))
+            .expect_err("a disk tier under one block must be rejected");
+        let message = error.to_string();
+        assert!(message.contains(&MIN_DISK_BYTES.to_string()), "{message}");
+        assert!(message.contains(&DISK_BLOCK_BYTES.to_string()), "{message}");
+        assert_invalid_field(error, "local_cache.disk_bytes");
+
+        let error = load_server_config(with_disk_bytes(MIN_DISK_BYTES - 1))
+            .expect_err("one byte under the floor is still under it");
+        assert_invalid_field(error, "local_cache.disk_bytes");
+
+        let local_cache = load_server_config(with_disk_bytes(MIN_DISK_BYTES))
+            .expect("the floor itself is a valid disk tier")
+            .local_cache
+            .expect("a local cache table");
+        assert_eq!(local_cache.disk_bytes, MIN_DISK_BYTES);
     }
 
     #[test]

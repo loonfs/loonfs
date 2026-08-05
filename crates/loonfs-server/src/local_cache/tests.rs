@@ -2,9 +2,9 @@
 // Cache tests panic in unexpected match arms for precise diagnostics.
 
 use super::{
-    FoyerOverflowCounters, FoyerStoredMetadataBlockCache, OverflowRegistry, CACHE_DIRECTORY,
-    DISK_BLOCK_BYTES, FOYER_BUFFER_OVERFLOW_LABEL, FOYER_CHANNEL_OVERFLOW_LABEL,
-    FOYER_INNER_OP_COUNTER_VEC,
+    DiskGeometry, FoyerOverflowCounters, FoyerStoredMetadataBlockCache, OverflowRegistry,
+    CACHE_DIRECTORY, DISK_BLOCK_BYTES, FOYER_BUFFER_OVERFLOW_LABEL, FOYER_CHANNEL_OVERFLOW_LABEL,
+    FOYER_INNER_OP_COUNTER_VEC, GEOMETRY_MARKER, MIN_DISK_BYTES,
 };
 use crate::config::{LocalCacheConfig, ServerConfigError};
 use bytes::Bytes;
@@ -16,30 +16,70 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-/// The smallest disk tier these tests can ask for.
+/// The disk tier these tests ask for by default.
 ///
 /// foyer claims the device as whole blocks and warns when the block count is
 /// not comfortably above the flusher count, so the floor is set by
 /// [`DISK_BLOCK_BYTES`] rather than by anything the tests want. Eight blocks
-/// clears it. The block files are sparse, so a test pays for the bytes it
-/// writes and not for the capacity it asked for.
+/// clears it with room to shrink toward [`MIN_DISK_BYTES`]. The block files
+/// are sparse, so a test pays for the bytes it writes and not for the
+/// capacity it asked for.
 const TEST_DISK_BYTES: u64 = 8 * DISK_BLOCK_BYTES as u64;
 
 /// A memory tier larger than everything these tests insert.
 const TEST_MEMORY_BYTES: u64 = 4 * 1024 * 1024;
 
+/// The prefix foyer names one block file by, followed by the block's index.
+///
+/// Nothing in foyer's api reports this, so the geometry marker's whole job
+/// rests on a naming convention read out of foyer's source. The workspace
+/// resolves one foyer version, and a release that renames these files
+/// should break the tests below rather than start quietly orphaning them.
+const BLOCK_FILE_PREFIX: &str = "foyer-storage-direct-fs-";
+
 fn test_config(root: &Path) -> LocalCacheConfig {
+    sized_config(root, TEST_DISK_BYTES)
+}
+
+fn sized_config(root: &Path, disk_bytes: u64) -> LocalCacheConfig {
     LocalCacheConfig {
         path: root.display().to_string(),
         memory_bytes: TEST_MEMORY_BYTES,
-        disk_bytes: TEST_DISK_BYTES,
+        disk_bytes,
     }
 }
 
 async fn open(root: &Path) -> FoyerStoredMetadataBlockCache {
-    FoyerStoredMetadataBlockCache::open(&test_config(root), &NoopMetricsRecorder)
+    open_sized(root, TEST_DISK_BYTES).await
+}
+
+async fn open_sized(root: &Path, disk_bytes: u64) -> FoyerStoredMetadataBlockCache {
+    FoyerStoredMetadataBlockCache::open(&sized_config(root, disk_bytes), &NoopMetricsRecorder)
         .await
         .expect("open local cache")
+}
+
+/// The block files under the versioned directory, which is every file in it
+/// but the geometry marker.
+fn block_files(root: &Path) -> usize {
+    std::fs::read_dir(root.join(CACHE_DIRECTORY))
+        .expect("read the versioned directory")
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .expect("read a directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(BLOCK_FILE_PREFIX)
+        })
+        .count()
+}
+
+/// The geometry the versioned directory records.
+fn geometry(root: &Path) -> DiskGeometry {
+    let bytes = std::fs::read(root.join(CACHE_DIRECTORY).join(GEOMETRY_MARKER))
+        .expect("read the geometry marker");
+    serde_json::from_slice(&bytes).expect("parse the geometry marker")
 }
 
 fn key(offset: u64) -> StoredMetadataBlockKey {
@@ -171,14 +211,145 @@ async fn the_disk_tier_claims_the_capacity_as_block_files() {
         directory.is_dir(),
         "the versioned directory is where the tier's files go"
     );
-    let files = std::fs::read_dir(&directory)
-        .expect("read the versioned directory")
-        .count();
     assert_eq!(
-        files,
+        block_files(temp_dir.path()),
         (TEST_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize,
         "the tier holds one file per block of the capacity it was given"
     );
+    assert_eq!(
+        geometry(temp_dir.path()),
+        DiskGeometry {
+            block_bytes: DISK_BLOCK_BYTES,
+            blocks: (TEST_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize,
+        },
+        "the directory records the geometry it was built for"
+    );
+}
+
+/// A tier that shrinks starts over rather than leaving blocks behind.
+///
+/// foyer names block files from a counter and never reads the directory, so
+/// a smaller capacity would reopen the low-numbered files and abandon the
+/// rest: cached bytes on disk that nothing opens, nothing counts, and
+/// nothing reclaims, holding the tier above the size it was configured for.
+/// The file count is the assertion because it is the thing that leaks.
+#[tokio::test]
+async fn a_shrunk_disk_tier_starts_over() {
+    let temp_dir = tempdir().expect("tempdir");
+    let bytes = Bytes::from_static(b"encoded stored block");
+
+    let cache = open_sized(temp_dir.path(), TEST_DISK_BYTES).await;
+    cache.insert(key(0), bytes.clone());
+    assert_eq!(cache.get(&key(0)).await, Some(bytes));
+    cache.close().await.expect("close local cache");
+    drop(cache);
+    assert_eq!(block_files(temp_dir.path()), 8);
+
+    let shrunk_blocks = (MIN_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize;
+    let reopened = open_sized(temp_dir.path(), MIN_DISK_BYTES).await;
+    assert_eq!(
+        block_files(temp_dir.path()),
+        shrunk_blocks,
+        "the directory holds the blocks this start claims and no others"
+    );
+    assert_eq!(
+        geometry(temp_dir.path()),
+        DiskGeometry {
+            block_bytes: DISK_BLOCK_BYTES,
+            blocks: shrunk_blocks,
+        },
+        "the marker records the smaller geometry"
+    );
+    assert_eq!(
+        reopened.get(&key(0)).await,
+        None,
+        "the discarded directory took what it held with it"
+    );
+    reopened.close().await.expect("close reopened cache");
+}
+
+/// A tier that grows keeps what it had.
+///
+/// The files foyer already wrote are the ones it reopens, so a bigger
+/// capacity is the one geometry change that costs nothing: it adds files
+/// above the ones that are there. Discarding here would throw away a warm
+/// cache for no reason.
+#[tokio::test]
+async fn a_grown_disk_tier_keeps_what_it_had() {
+    let temp_dir = tempdir().expect("tempdir");
+    let bytes = Bytes::from_static(b"encoded stored block");
+
+    let cache = open_sized(temp_dir.path(), MIN_DISK_BYTES).await;
+    cache.insert(key(0), bytes.clone());
+    cache.close().await.expect("close local cache");
+    drop(cache);
+
+    let grown_blocks = (TEST_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize;
+    let reopened = open_sized(temp_dir.path(), TEST_DISK_BYTES).await;
+    assert_eq!(
+        reopened.get(&key(0)).await,
+        Some(bytes),
+        "a grown tier still serves what the smaller one wrote"
+    );
+    assert_eq!(
+        block_files(temp_dir.path()),
+        grown_blocks,
+        "the directory holds one file per block of the larger capacity"
+    );
+    assert_eq!(
+        geometry(temp_dir.path()),
+        DiskGeometry {
+            block_bytes: DISK_BLOCK_BYTES,
+            blocks: grown_blocks,
+        },
+        "the marker records the geometry this start claimed"
+    );
+    reopened.close().await.expect("close reopened cache");
+}
+
+/// A directory whose marker says nothing readable is discarded.
+///
+/// The marker is the only account of how many block files are down there.
+/// One this process cannot parse is no account at all, and a directory of
+/// unknown geometry is exactly the one that leaks, so it is treated like a
+/// shrink rather than trusted.
+#[tokio::test]
+async fn an_unreadable_geometry_marker_starts_over() {
+    let temp_dir = tempdir().expect("tempdir");
+    let bytes = Bytes::from_static(b"encoded stored block");
+
+    let cache = open(temp_dir.path()).await;
+    cache.insert(key(0), bytes);
+    cache.close().await.expect("close local cache");
+    drop(cache);
+
+    std::fs::write(
+        temp_dir.path().join(CACHE_DIRECTORY).join(GEOMETRY_MARKER),
+        b"not json",
+    )
+    .expect("overwrite the geometry marker");
+
+    let blocks = (TEST_DISK_BYTES / DISK_BLOCK_BYTES as u64) as usize;
+    let reopened = open(temp_dir.path()).await;
+    assert_eq!(
+        reopened.get(&key(0)).await,
+        None,
+        "the discarded directory took what it held with it"
+    );
+    assert_eq!(
+        block_files(temp_dir.path()),
+        blocks,
+        "the directory was rebuilt from nothing"
+    );
+    assert_eq!(
+        geometry(temp_dir.path()),
+        DiskGeometry {
+            block_bytes: DISK_BLOCK_BYTES,
+            blocks,
+        },
+        "the rebuilt directory records a marker again"
+    );
+    reopened.close().await.expect("close reopened cache");
 }
 
 /// foyer's overflow counters reach this process's numbers.

@@ -32,6 +32,7 @@ use mixtrics::metrics::{
     BoxedCounter, BoxedCounterVec, BoxedGauge, BoxedGaugeVec, BoxedHistogram, BoxedHistogramVec,
     CounterOps, CounterVecOps, GaugeOps, GaugeVecOps, HistogramOps, HistogramVecOps, RegistryOps,
 };
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::Debug;
 use std::fs::File;
@@ -50,6 +51,13 @@ const CACHE_DIRECTORY: &str = "metadata-blocks-v1";
 /// long as this process owns the directory.
 const LOCK_FILE: &str = "owner.lock";
 
+/// The geometry marker inside the versioned directory, which records the
+/// disk geometry that directory was last built for. See [`DiskGeometry`].
+///
+/// The name cannot collide with a block file: foyer names those from a
+/// fixed prefix and a number.
+const GEOMETRY_MARKER: &str = "geometry.json";
+
 /// The name foyer knows this cache by, which is also the label its own
 /// counters carry.
 const CACHE_NAME: &str = "loonfs-metadata-blocks";
@@ -64,7 +72,7 @@ const CACHE_NAME: &str = "loonfs-metadata-blocks";
 /// foyer claims the whole capacity as blocks at startup, one file per block
 /// and each one held open, and it refuses an entry larger than a block less
 /// its blob index. This is foyer's own default, which sits between the two.
-const DISK_BLOCK_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const DISK_BLOCK_BYTES: usize = 16 * 1024 * 1024;
 /// Flusher tasks writing the disk tier.
 const DISK_FLUSHERS: usize = 2;
 /// Total flush buffer pool, split evenly among the flushers. Each flusher
@@ -74,6 +82,16 @@ const DISK_BUFFER_POOL_BYTES: usize = 64 * 1024 * 1024;
 /// Bytes of queued inserts the disk tier accepts before it drops further
 /// ones. A drop is counted, never surfaced.
 const DISK_SUBMIT_QUEUE_THRESHOLD_BYTES: usize = 256 * 1024 * 1024;
+
+/// The smallest disk tier a deployment may configure, which the config
+/// check enforces so a too-small one is refused rather than run.
+///
+/// The tier allocates whole blocks, so a capacity under one block allocates
+/// none: the cache opens, holds nothing on disk, and a restart is cold with
+/// nothing said about it. Six blocks is the floor because it is also the
+/// smallest count foyer itself calls stable, which wants the flusher count
+/// plus the clean-block threshold to be at most half the block count.
+pub(crate) const MIN_DISK_BYTES: u64 = 6 * DISK_BLOCK_BYTES as u64;
 
 /// Per-entry overhead the memory weigher charges on top of the value's
 /// length: the key's own bytes and foyer's bookkeeping for one entry. It is
@@ -133,9 +151,12 @@ impl FoyerStoredMetadataBlockCache {
     /// The root is created if it is missing and locked exclusively, so a
     /// second process pointed at the same root fails here rather than
     /// writing into a device another process owns. The versioned directory
-    /// beneath it is foyer's, and foyer recovers what it can from it; a
-    /// directory it cannot open at all fails startup, because deleting a
-    /// deployment's files is the operator's decision and not this process's.
+    /// beneath it is foyer's, and foyer recovers what it can from it, but
+    /// only once [`prepare_directory`] has agreed the directory holds the
+    /// geometry this start is about to claim. A directory foyer then cannot
+    /// open at all fails startup rather than being deleted: an open failure
+    /// says something about the machine, and what to do about it is the
+    /// operator's decision and not this process's.
     pub(crate) async fn open(
         config: &LocalCacheConfig,
         recorder: &dyn MetricsRecorder,
@@ -156,6 +177,7 @@ impl FoyerStoredMetadataBlockCache {
                 config.disk_bytes
             ))
         })?;
+        prepare_directory(&directory, capacity)?;
         let device = FsDeviceBuilder::new(&directory)
             .with_capacity(capacity)
             .build()
@@ -331,6 +353,125 @@ pub(crate) struct FoyerCacheStats {
     /// Inserts the disk tier dropped because its submit queue was over
     /// threshold.
     pub(crate) queue_channel_overflows: u64,
+}
+
+/// The disk geometry the versioned directory was built to hold, as its
+/// marker records it.
+///
+/// foyer names one file per disk block from an in-memory counter and never
+/// looks at the directory it was pointed at. A start that claims fewer
+/// blocks than the last one therefore reopens files `0..blocks` and leaves
+/// every higher-numbered file exactly where it is: cached bytes on disk
+/// that no metric counts, that nothing reclaims, and that put the tier over
+/// the size its configuration asked for. The marker is the only record of
+/// how many files could be down there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiskGeometry {
+    /// Bytes in one disk block, which is [`DISK_BLOCK_BYTES`] for a
+    /// directory this build wrote.
+    block_bytes: usize,
+    /// Blocks the directory was built to hold, which is an upper bound on
+    /// the block files it holds.
+    blocks: usize,
+}
+
+/// Makes the versioned directory one that can hold the configured geometry,
+/// discarding it when it cannot.
+///
+/// A directory built for the same block size and no more blocks than this
+/// start claims is kept: foyer reopens the files that are there and creates
+/// the rest, so growing the tier keeps everything it had cached. A shrunk
+/// block count, a different block size, and a directory that says nothing
+/// about itself are all discarded, because each of them would leave files
+/// behind that nothing would ever open again. The tier holds nothing
+/// durable, so discarding costs one cold start.
+///
+/// The marker is written before the device is built, which is what makes it
+/// an upper bound: a build that dies partway can leave fewer block files
+/// than the marker names, never more. The directory lock is already held,
+/// and the lock file sits beside the versioned directory rather than inside
+/// it, so nothing here races and nothing here removes the lock.
+fn prepare_directory(directory: &Path, capacity: usize) -> Result<(), ServerConfigError> {
+    let wanted = DiskGeometry {
+        block_bytes: DISK_BLOCK_BYTES,
+        blocks: capacity / DISK_BLOCK_BYTES,
+    };
+    let found = read_geometry(directory);
+    let keep = found.is_some_and(|found| {
+        found.block_bytes == wanted.block_bytes && found.blocks <= wanted.blocks
+    });
+
+    if !keep && directory.exists() {
+        let reason = match found {
+            None => "it records no geometry of its own".to_owned(),
+            Some(found) if found.block_bytes != wanted.block_bytes => format!(
+                "it was built for blocks of {} bytes and this start uses {}",
+                found.block_bytes, wanted.block_bytes
+            ),
+            Some(found) => format!(
+                "it was built for {} blocks and this start claims only {}",
+                found.blocks, wanted.blocks
+            ),
+        };
+        tracing::info!(
+            cache = CACHE_NAME,
+            "discarding the local cache directory `{}` and starting it empty because {reason}; \
+             it holds nothing durable, and keeping it would leave block files behind that \
+             nothing reads and nothing reclaims",
+            display_path(directory)
+        );
+        std::fs::remove_dir_all(directory).map_err(|error| {
+            invalid_local_cache(format!(
+                "failed to remove `{}`: {error}",
+                display_path(directory)
+            ))
+        })?;
+    }
+
+    std::fs::create_dir_all(directory).map_err(|error| {
+        invalid_local_cache(format!(
+            "failed to create `{}`: {error}",
+            display_path(directory)
+        ))
+    })?;
+    // A marker that already says exactly this is left alone. Every other
+    // case — a discarded directory, and a kept one this start grows — needs
+    // the new geometry on disk before any block file is.
+    if found != Some(wanted) {
+        write_geometry(directory, wanted)?;
+    }
+    Ok(())
+}
+
+/// The geometry the versioned directory records, or `None` when it records
+/// none this process can make sense of.
+///
+/// A marker that cannot be read or cannot be parsed says nothing about the
+/// directory, and a directory that says nothing about itself is discarded.
+/// There is no repair path, because the marker is smaller than one write.
+fn read_geometry(directory: &Path) -> Option<DiskGeometry> {
+    let bytes = std::fs::read(directory.join(GEOMETRY_MARKER)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Records the geometry this start claims.
+///
+/// A marker that cannot be written fails startup. The directory is about to
+/// be filled with block files, so a process that cannot write a few bytes
+/// beside them has a problem the next start would inherit as orphaned
+/// blocks.
+fn write_geometry(directory: &Path, geometry: DiskGeometry) -> Result<(), ServerConfigError> {
+    let path = directory.join(GEOMETRY_MARKER);
+    let bytes = serde_json::to_vec(&geometry).map_err(|error| {
+        invalid_local_cache(format!("failed to encode `{geometry:?}`: {error}"))
+    })?;
+    std::fs::write(&path, bytes).map_err(|error| {
+        invalid_local_cache(format!(
+            "failed to write `{}`: {error}",
+            display_path(&path)
+        ))
+    })
 }
 
 /// Takes the exclusive lock that says this process owns the configured root.

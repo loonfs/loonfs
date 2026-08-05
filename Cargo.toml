@@ -40,7 +40,9 @@ http = "1"
 http-body = "1"
 # The `serde` feature makes foyer encode keys and values through their serde
 # impls, which is how the server's cache key reaches foyer's storage traits.
-foyer = { version = "0.22.3", features = ["serde"] }
+# Pinned exactly: the cache-directory geometry code reads foyer's block-file
+# naming, so a version bump is a deliberate change with its own review.
+foyer = { version = "=0.22.3", features = ["serde"] }
 futures = "0.3"
 fs4 = "0.13"
 getrandom = "0.3"

@@ -75,9 +75,13 @@ writer_id = "loonfs-server-local"
 #
 # `disk_bytes` is claimed up front in 16 MiB files under `path`, each held
 # open, so the value below asks for 6400 files and an open-file limit above
-# that. Nothing else about the tier is configurable: how it is laid out on
-# disk, how many flushers write it, and how large its write buffers are are
-# engine-tuning numbers rather than deployment decisions.
+# that. Six files is the smallest tier that may be configured; anything
+# under 100663296 is refused. Raising the value across a restart keeps what
+# the directory already holds, and lowering it starts the directory empty
+# rather than leaving the files it no longer claims behind. Nothing else
+# about the tier is configurable: how it is laid out on disk, how many
+# flushers write it, and how large its write buffers are are engine-tuning
+# numbers rather than deployment decisions.
 #[local_cache]
 #path = "/var/lib/loonfs/cache"
 #memory_bytes = 67108864
