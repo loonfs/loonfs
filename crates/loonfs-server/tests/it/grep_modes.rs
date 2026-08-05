@@ -35,7 +35,7 @@ use tower::ServiceExt;
 async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "disabled").await;
-    let (router, server) = app(test_config(temp_dir.path(), GrepMode::Disabled))
+    let (router, server, _local_cache) = app(test_config(temp_dir.path(), GrepMode::Disabled))
         .await
         .expect("build app");
 
@@ -68,9 +68,10 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespace() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "both").await;
-    let (router, server) = app(test_config(temp_dir.path(), GrepMode::ServeAndMaintain))
-        .await
-        .expect("build app");
+    let (router, server, _local_cache) =
+        app(test_config(temp_dir.path(), GrepMode::ServeAndMaintain))
+            .await
+            .expect("build app");
     assert!(maintains_grep_index(&server));
     // Before anything is enabled the status route answers honestly rather
     // than inventing a namespace-not-found.
@@ -299,9 +300,10 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 
     // Nothing has nudged either namespace in this process: the first search
     // is what re-admits the index that trails its head.
-    let (router, server) = app(test_config(temp_dir.path(), GrepMode::ServeAndMaintain))
-        .await
-        .expect("reopen app");
+    let (router, server, _local_cache) =
+        app(test_config(temp_dir.path(), GrepMode::ServeAndMaintain))
+            .await
+            .expect("reopen app");
     let stale_response = grep(&router, &stale, "stale steady needle").await;
     assert_eq!(stale_response.matches.len(), 1);
     settle(&server).await;
@@ -336,7 +338,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "serve-only").await;
-    let (router, server) = app(test_config(temp_dir.path(), GrepMode::ServeOnly))
+    let (router, server, _local_cache) = app(test_config(temp_dir.path(), GrepMode::ServeOnly))
         .await
         .expect("build app");
     assert!(!maintains_grep_index(&server));
@@ -394,7 +396,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
 async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "maintain-only").await;
-    let (router, server) = app(test_config(temp_dir.path(), GrepMode::MaintainOnly))
+    let (router, server, _local_cache) = app(test_config(temp_dir.path(), GrepMode::MaintainOnly))
         .await
         .expect("build app");
     assert!(maintains_grep_index(&server));
@@ -456,7 +458,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
 async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
-    let (router, server) = app(ServerConfig {
+    let (router, server, _local_cache) = app(ServerConfig {
         maintenance: MaintenanceMode::Manual,
         ..test_config(temp_dir.path(), GrepMode::ServeAndMaintain)
     })
@@ -531,6 +533,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         content_token_secret: "test-content-token-secret".into(),
         writer_id: format!("grep-mode-{mode:?}"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        local_cache: None,
         grep: GrepConfig {
             mode,
             ..GrepConfig::default()

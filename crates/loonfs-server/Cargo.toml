@@ -17,15 +17,19 @@ path = "src/bin/loonfs-openapi.rs"
 required-features = ["openapi"]
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
 clap.workspace = true
+foyer.workspace = true
+fs4.workspace = true
 futures.workspace = true
 http.workspace = true
 loonfs-api.workspace = true
 loonfs.workspace = true
 loonfs-grep.workspace = true
 loonfs-objectstore.workspace = true
+mixtrics.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
@@ -39,7 +43,6 @@ tracing-subscriber.workspace = true
 utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
-async-trait.workspace = true
 base64.workspace = true
 loonfs-client.workspace = true
 loonfs-test-support = { path = "../loonfs-test-support" }
