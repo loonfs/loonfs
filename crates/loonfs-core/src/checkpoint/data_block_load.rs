@@ -1,9 +1,18 @@
 //! Fetching, decoding, coalescing, and cache publication for SST data blocks.
+//!
+//! Both loads below consult the same three places [`super::block_fetch`]
+//! describes — the per-view memo, the decoded block cache, and the
+//! node-local cache of stored bytes — before object storage answers, and
+//! offer every block a fetch produced back to the local tier.
 
-use super::block_fetch::{load_section_bytes, segment_block_cache_key, segment_codec_error};
+use super::block_fetch::{
+    load_section_bytes, offer_stored_block, publish_segment_block, segment_block_cache_key,
+    segment_codec_error, stored_block_section,
+};
 use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache};
 use super::error::ManifestLoadError;
+use super::stored_block_cache::StoredMetadataBlockKind;
 use crate::metadata::content_ref_evidence_bytes;
 use loonfs_api::wire::manifest::{
     ActiveDeletionRowAction, MetadataFileRef, MetadataRow, MetadataTableFamily,
@@ -16,7 +25,7 @@ use std::sync::Arc;
 /// spans split into consecutive requests.
 const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 
-async fn load_segment_data_block<S: ObjectStore + ?Sized>(
+pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
@@ -31,6 +40,19 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         return Ok(block);
     }
     let fetch = || async {
+        // Between the decoded cache above and the store below: a local copy
+        // of the same stored bytes.
+        if let Some(decoded) = stored_block_section(
+            table_cache,
+            descriptor,
+            StoredMetadataBlockKind::Data,
+            &handle,
+            decode_data_block,
+        )
+        .await
+        {
+            return Ok(decoded_data_cache_block(family, decoded));
+        }
         let bytes = load_section_bytes(
             store,
             &descriptor.object_key,
@@ -38,6 +60,13 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
             handle.stored_len as u64,
         )
         .await?;
+        offer_stored_block(
+            table_cache,
+            descriptor,
+            StoredMetadataBlockKind::Data,
+            &handle,
+            &bytes,
+        );
         Ok(decoded_data_cache_block(
             family,
             decode_data_block(&bytes, &handle)
@@ -70,11 +99,12 @@ pub(super) fn decoded_data_cache_block(
     }
 }
 
-/// Bulk path for wide selections: consult the cache per block, group the
-/// misses into consecutive spans, and fetch each span with coalesced ranged
-/// GETs instead of one request per block. Duplicate concurrent span fetches
-/// are possible and benign; the narrow path keeps single-flight for the hot
-/// point lookups.
+/// Bulk path for wide selections: resolve each block against the caches in
+/// turn, group the blocks none of them answered into consecutive spans, and
+/// fetch each span with coalesced ranged GETs instead of one request per
+/// block. Duplicate concurrent span fetches are possible and benign — two
+/// fetches of one block offer the same bytes under the same key; the narrow
+/// path keeps single-flight for the hot point lookups.
 pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -88,7 +118,8 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     // clone the segment checksum once per block on every warm scan.
     let mut probe_key = segment_block_cache_key(descriptor, MetadataTableBlockKind::Data, 0);
     for (position, entry) in entries.iter().enumerate() {
-        probe_key.block_offset = entry.block.offset;
+        let handle = entry.block;
+        probe_key.block_offset = handle.offset;
         if let Some(DecodedMetadataTableBlock::Data { block, .. }) = memo.get(&probe_key) {
             blocks[position] = Some(block);
             continue;
@@ -96,7 +127,33 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
         if let Some(cache) = table_cache {
             if let Some(DecodedMetadataTableBlock::Data { block, .. }) = cache.get(&probe_key) {
                 blocks[position] = Some(block);
+                continue;
             }
+        }
+        // The local stored-block cache, one tier below the two above. A hit
+        // is decoded and published exactly as a fetched block is; a miss —
+        // including an entry that did not decode, which drops itself — is a
+        // true miss the span grouping below covers.
+        if let Some(decoded) = stored_block_section(
+            table_cache,
+            descriptor,
+            StoredMetadataBlockKind::Data,
+            &handle,
+            decode_data_block,
+        )
+        .await
+        {
+            let block = Arc::new(decoded);
+            publish_segment_block(
+                table_cache,
+                memo,
+                probe_key.clone(),
+                &DecodedMetadataTableBlock::Data {
+                    decoded_byte_len: decoded_manifest_block_weight(family, &block.rows),
+                    block: Arc::clone(&block),
+                },
+            );
+            blocks[position] = Some(block);
         }
     }
 
@@ -170,8 +227,9 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
 
 /// Fetches one contiguous span with a single ranged GET, decodes every
 /// block, and publishes them to the per-view memo and (when populating) the
-/// shared cache. Returns the first block's cache entry for the
-/// single-flight cell.
+/// shared cache. Every block the GET covered is also offered to the local
+/// stored-block cache under its own key. Returns the first block's cache
+/// entry for the single-flight cell.
 async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -189,6 +247,15 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
         let handle = entry.block;
         let begin = (handle.offset - first.offset) as usize;
         let stored = &bytes[begin..begin + handle.stored_len as usize];
+        // Every block the span GET produced is offered under its own key, so
+        // a later read of any one of them needs no fetch.
+        offer_stored_block(
+            table_cache,
+            descriptor,
+            StoredMetadataBlockKind::Data,
+            &handle,
+            stored,
+        );
         let decoded = Arc::new(
             decode_data_block(stored, &handle)
                 .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,

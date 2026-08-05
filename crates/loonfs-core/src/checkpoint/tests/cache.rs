@@ -1055,6 +1055,446 @@ async fn a_closed_local_block_cache_reads_as_a_miss() {
     );
 }
 
+/// One checkpointed direntry segment rebuilt with a one-byte block target,
+/// so every row lands in its own data block. A handful of test rows would
+/// otherwise fit in one block, and the coalescing span path only says
+/// anything with several. Returns the segment's index, read with no caches,
+/// so a test can drive the span path without an index load filling either
+/// cache first.
+async fn multi_block_direntry_segment() -> (
+    tempfile::TempDir,
+    CountingStore<LocalFsStore>,
+    MetadataFileRef,
+    Arc<Vec<SegmentIndexEntry>>,
+) {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..12 {
+        let path = format!("/docs/file-{index:02}.txt");
+        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+            .await
+            .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("load tables");
+    let mut descriptor = tables
+        .manifest()
+        .payload
+        .metadata_files
+        .iter()
+        .find(|descriptor| descriptor.family == ApiMetadataTableFamily::DirentryBinds)
+        .expect("a direntry segment")
+        .clone();
+    descriptor.filter_inline = None;
+
+    let rows = segment_rows(&store, &descriptor).await;
+    let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::MIN);
+    for row in &rows {
+        builder
+            .push(
+                &row.row_key_for_family(descriptor.family),
+                &row.filter_key_for_family(descriptor.family),
+                row,
+            )
+            .expect("rebuilt rows should encode");
+    }
+    let built = builder.finish().expect("rebuilt segment");
+    store
+        .put_overwrite(&descriptor.object_key, Bytes::from(built.bytes.clone()))
+        .await
+        .expect("overwrite segment");
+    descriptor.row_count = built.row_count;
+    descriptor.min_key = built.min_key;
+    descriptor.max_key = built.max_key;
+    descriptor.index_block = built.index;
+    descriptor.filter_block = built.filter;
+    descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
+
+    let index = block_fetch::load_segment_index(
+        &store,
+        None,
+        &load::SessionBlockMemo::default(),
+        &descriptor,
+    )
+    .await
+    .expect("rebuilt segment index");
+    assert!(
+        index.len() >= 9,
+        "the span tests need several data blocks, got {}",
+        index.len()
+    );
+    (temp_dir, store, descriptor, index)
+}
+
+/// Every row of one segment, in row-key order, read straight through with
+/// no caches of either kind.
+async fn segment_rows(
+    store: &CountingStore<LocalFsStore>,
+    descriptor: &MetadataFileRef,
+) -> Vec<MetadataRow> {
+    let memo = load::SessionBlockMemo::default();
+    let index = block_fetch::load_segment_index(store, None, &memo, descriptor)
+        .await
+        .expect("segment index");
+    data_block_load::load_segment_data_block_span(
+        store,
+        None,
+        &memo,
+        descriptor.family,
+        descriptor,
+        &index,
+    )
+    .await
+    .expect("segment data blocks")
+    .iter()
+    .flat_map(|block| block.rows.iter().cloned())
+    .collect()
+}
+
+/// One segment object's whole body, which the seeding helpers slice.
+async fn segment_object_bytes(
+    store: &CountingStore<LocalFsStore>,
+    descriptor: &MetadataFileRef,
+) -> Bytes {
+    store
+        .get(&descriptor.object_key, None)
+        .await
+        .expect("read segment object")
+        .expect("segment object present")
+}
+
+fn stored_block_bytes(object: &Bytes, handle: &BlockHandle) -> Bytes {
+    let start = handle.offset as usize;
+    object.slice(start..start + handle.stored_len as usize)
+}
+
+/// Puts the named blocks into the decoded cache, as an earlier read through
+/// this process would have left them.
+fn seed_decoded_blocks(
+    cache: &MetadataTableCache,
+    object: &Bytes,
+    descriptor: &MetadataFileRef,
+    index: &[SegmentIndexEntry],
+    positions: &[usize],
+) {
+    for position in positions {
+        let handle = index[*position].block;
+        let decoded = decode_data_block(&stored_block_bytes(object, &handle), &handle)
+            .expect("seeded block decodes");
+        cache.insert(
+            block_fetch::segment_block_cache_key(
+                descriptor,
+                MetadataTableBlockKind::Data,
+                handle.offset,
+            ),
+            data_block_load::decoded_data_cache_block(descriptor.family, decoded),
+        );
+    }
+}
+
+/// Puts the named blocks into the local stored-block cache, as an earlier
+/// process's reads would have left them.
+fn seed_local_blocks(
+    blocks: &RecordingStoredMetadataBlockCache,
+    object: &Bytes,
+    descriptor: &MetadataFileRef,
+    index: &[SegmentIndexEntry],
+    positions: &[usize],
+) {
+    for position in positions {
+        let handle = index[*position].block;
+        blocks.insert(
+            stored_key(descriptor, StoredMetadataBlockKind::Data, handle.offset),
+            stored_block_bytes(object, &handle),
+        );
+    }
+}
+
+/// The block offsets one recorded slice inserted, in ascending order. Spans
+/// are fetched concurrently, so the order they are offered in is not fixed.
+fn offered_offsets(calls: &[RecordedStoredMetadataBlockCall]) -> Vec<u64> {
+    let mut offsets: Vec<u64> = calls
+        .iter()
+        .filter_map(|call| match call {
+            RecordedStoredMetadataBlockCall::Insert { key, .. } => Some(key.offset),
+            RecordedStoredMetadataBlockCall::Get { .. }
+            | RecordedStoredMetadataBlockCall::Invalidate { .. } => None,
+        })
+        .collect();
+    offsets.sort_unstable();
+    offsets
+}
+
+fn block_offsets(index: &[SegmentIndexEntry], positions: &[usize]) -> Vec<u64> {
+    let mut offsets: Vec<u64> = positions
+        .iter()
+        .map(|position| index[*position].block.offset)
+        .collect();
+    offsets.sort_unstable();
+    offsets
+}
+
+/// One wide read over a whole segment through `cache`, with the per-view
+/// memo a fresh request would carry, and the segment fetches it paid.
+async fn wide_read(
+    store: &CountingStore<LocalFsStore>,
+    cache: Option<&MetadataTableCache>,
+    descriptor: &MetadataFileRef,
+    index: &[SegmentIndexEntry],
+) -> (Vec<Arc<DecodedDataBlock>>, usize) {
+    let memo = load::SessionBlockMemo::default();
+    store.reset();
+    let blocks = data_block_load::load_segment_data_block_span(
+        store,
+        cache,
+        &memo,
+        descriptor.family,
+        descriptor,
+        index,
+    )
+    .await
+    .expect("wide read");
+    (blocks, store.count(OperationClass::Read))
+}
+
+/// A narrow data-block load probes the local cache, misses, pays one fetch,
+/// and offers what it fetched. A second load whose decoded caches are fresh
+/// — a restarted process's shape — is answered without reading the store.
+#[tokio::test]
+async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let entry = &index[0];
+    let data_key = stored_key(
+        &descriptor,
+        StoredMetadataBlockKind::Data,
+        entry.block.offset,
+    );
+
+    let cold_cache = table_cache_over(&blocks);
+    store.reset();
+    let cold = data_block_load::load_segment_data_block(
+        &store,
+        Some(&cold_cache),
+        &load::SessionBlockMemo::default(),
+        descriptor.family,
+        &descriptor,
+        entry,
+    )
+    .await
+    .expect("cold data block load");
+
+    assert_eq!(
+        store.count(OperationClass::Read),
+        1,
+        "a cold data block costs exactly one fetch"
+    );
+    assert_eq!(
+        blocks.calls(),
+        vec![
+            RecordedStoredMetadataBlockCall::Get {
+                key: data_key.clone(),
+                hit: false,
+            },
+            RecordedStoredMetadataBlockCall::Insert {
+                key: data_key.clone(),
+                bytes: entry.block.stored_len as usize,
+            },
+        ],
+        "a cold load probes the local cache, misses, and offers what it fetched"
+    );
+
+    let warm_cache = table_cache_over(&blocks);
+    store.reset();
+    let warm = data_block_load::load_segment_data_block(
+        &store,
+        Some(&warm_cache),
+        &load::SessionBlockMemo::default(),
+        descriptor.family,
+        &descriptor,
+        entry,
+    )
+    .await
+    .expect("warm data block load");
+
+    assert_eq!(warm, cold);
+    assert_eq!(
+        store.count(OperationClass::Read),
+        0,
+        "a warm data block reads no segment bytes"
+    );
+    assert_eq!(
+        blocks.calls().last(),
+        Some(&RecordedStoredMetadataBlockCall::Get {
+            key: data_key,
+            hit: true,
+        }),
+        "the warm load was served by the local cache"
+    );
+}
+
+/// A wide read over a mixed segment: two blocks already decoded, two held
+/// locally in their stored form, the rest nowhere. Only the blocks nothing
+/// answered are fetched, in one ranged GET per run of consecutive ones, and
+/// exactly those blocks are offered back.
+#[tokio::test]
+async fn a_wide_read_fetches_and_offers_only_the_blocks_no_cache_answered() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
+
+    // Positions 0 and 1 are decoded, 3 and 7 are held locally; the rest are
+    // nowhere. That leaves three runs of consecutive misses — {2}, {4, 5, 6},
+    // and {8..} — so three ranged GETs.
+    let decoded = [0usize, 1];
+    let local = [3usize, 7];
+    let missing: Vec<usize> = (0..index.len())
+        .filter(|position| !decoded.contains(position) && !local.contains(position))
+        .collect();
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let cache = table_cache_over(&blocks);
+    let object = segment_object_bytes(&store, &descriptor).await;
+    seed_decoded_blocks(&cache, &object, &descriptor, &index, &decoded);
+    seed_local_blocks(&blocks, &object, &descriptor, &index, &local);
+
+    let calls_before = blocks.call_count();
+    let (read, gets) = wide_read(&store, Some(&cache), &descriptor, &index).await;
+    let calls = blocks.calls();
+    let during = &calls[calls_before..];
+
+    assert_eq!(read, expected);
+    assert_eq!(
+        gets, 3,
+        "one ranged GET per run of consecutive blocks nothing answered"
+    );
+    assert_eq!(
+        offered_offsets(during),
+        block_offsets(&index, &missing),
+        "exactly the fetched blocks are offered to the local cache"
+    );
+    let probed: Vec<u64> = during
+        .iter()
+        .filter_map(|call| match call {
+            RecordedStoredMetadataBlockCall::Get { key, .. } => Some(key.offset),
+            RecordedStoredMetadataBlockCall::Insert { .. }
+            | RecordedStoredMetadataBlockCall::Invalidate { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        probed,
+        (0..index.len())
+            .filter(|position| !decoded.contains(position))
+            .map(|position| index[position].block.offset)
+            .collect::<Vec<_>>(),
+        "a decoded block short-circuits the probe; every other block is probed once, in order"
+    );
+}
+
+/// A cold local cache changes nothing about how a wide read groups its
+/// fetches: it is one more tier consulted per block, and the blocks nothing
+/// answered coalesce exactly as they do without it.
+#[tokio::test]
+async fn a_cold_local_block_cache_does_not_change_how_a_wide_read_groups_its_fetches() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    let plain = MetadataTableCache::new(MetadataTableCacheConfig::default());
+    let (plain_read, plain_gets) = wide_read(&store, Some(&plain), &descriptor, &index).await;
+
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let cold = table_cache_over(&blocks);
+    let (cold_read, cold_gets) = wide_read(&store, Some(&cold), &descriptor, &index).await;
+
+    assert_eq!(cold_read, plain_read);
+    assert_eq!(plain_gets, 1, "a selection nothing answered is one span");
+    assert_eq!(cold_gets, plain_gets);
+    assert_eq!(
+        blocks
+            .calls()
+            .iter()
+            .filter(|call| matches!(
+                call,
+                RecordedStoredMetadataBlockCall::Get { hit: false, .. }
+            ))
+            .count(),
+        index.len(),
+        "the cold tier was consulted for every block"
+    );
+
+    // The same comparison where the grouping is not trivial: two decoded
+    // blocks split the selection into two spans on both sides.
+    let object = segment_object_bytes(&store, &descriptor).await;
+    let split_plain = MetadataTableCache::new(MetadataTableCacheConfig::default());
+    seed_decoded_blocks(&split_plain, &object, &descriptor, &index, &[0, 4]);
+    let (_, split_plain_gets) = wide_read(&store, Some(&split_plain), &descriptor, &index).await;
+    let split_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let split_cold = table_cache_over(&split_blocks);
+    seed_decoded_blocks(&split_cold, &object, &descriptor, &index, &[0, 4]);
+    let (_, split_cold_gets) = wide_read(&store, Some(&split_cold), &descriptor, &index).await;
+
+    assert_eq!(
+        split_plain_gets, 2,
+        "a decoded block in the middle splits the selection into two spans"
+    );
+    assert_eq!(split_cold_gets, split_plain_gets);
+}
+
+/// One local entry inside a span that no longer decodes is dropped, refetched
+/// with the span it falls in, and the read succeeds. What it held was a copy;
+/// object storage still holds the authority.
+#[tokio::test]
+async fn a_corrupt_local_entry_inside_a_span_is_dropped_and_refetched() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
+
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let object = segment_object_bytes(&store, &descriptor).await;
+    let every_block: Vec<usize> = (0..index.len()).collect();
+    seed_local_blocks(&blocks, &object, &descriptor, &index, &every_block);
+    let corrupt = 5usize;
+    let corrupt_key = stored_key(
+        &descriptor,
+        StoredMetadataBlockKind::Data,
+        index[corrupt].block.offset,
+    );
+    blocks.corrupt(&corrupt_key);
+
+    let cache = table_cache_over(&blocks);
+    let calls_before = blocks.call_count();
+    let (read, gets) = wide_read(&store, Some(&cache), &descriptor, &index).await;
+    let calls = blocks.calls();
+    let during = &calls[calls_before..];
+
+    assert_eq!(read, expected);
+    assert_eq!(
+        gets, 1,
+        "the bad entry costs one span fetch and no retry loop"
+    );
+    assert_eq!(
+        during
+            .iter()
+            .filter(|call| **call
+                == RecordedStoredMetadataBlockCall::Invalidate {
+                    key: corrupt_key.clone()
+                })
+            .count(),
+        1,
+        "the entry that did not decode should have been dropped once"
+    );
+    assert_eq!(
+        offered_offsets(during),
+        block_offsets(&index, &[corrupt]),
+        "only the refetched block is offered back"
+    );
+}
+
 #[tokio::test]
 async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
     let temp_dir = tempdir().expect("tempdir");

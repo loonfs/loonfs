@@ -15,7 +15,7 @@ mod retention;
 use super::build::{
     build_manifest_tables, build_manifest_tables_from_rows, MetadataTableSegmentation,
 };
-use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
+use super::cache::{MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheConfig};
 use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
 use super::load::load_verified_manifest_tables_with_cache;
@@ -36,8 +36,8 @@ use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 use super::{
-    block_fetch, create, flush, load, record, reorganize, reorganize_metadata_step, row, scan,
-    MetadataReorganizeOutcome,
+    block_fetch, create, data_block_load, flush, load, record, reorganize,
+    reorganize_metadata_step, row, scan, MetadataReorganizeOutcome,
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
@@ -67,7 +67,8 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestPayload,
 };
 use loonfs_api::wire::sst_blocks::{
-    string_prefix_upper_bound, SegmentBlocksBuilder, SegmentIndexEntry,
+    decode_data_block, string_prefix_upper_bound, BlockHandle, DecodedDataBlock,
+    SegmentBlocksBuilder, SegmentIndexEntry,
 };
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,
