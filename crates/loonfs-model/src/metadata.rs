@@ -73,22 +73,40 @@ pub struct SubtreeTombstoneRecord {
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
     pub deleted_at_ms: u64,
-    pub parent_inode_id: Option<InodeId>,
-    pub name_key: Option<String>,
-    pub display_name: Option<String>,
     /// What this event did, mirroring the core row semantics: the newest
     /// event per root wins, and a revoke as the newest means no active
     /// tombstone.
     pub action: SubtreeTombstoneAction,
 }
 
+/// Where one deletion event committed. A revoke names its target this way,
+/// so the two events it takes to cancel a deletion stay tied together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletionGeneration {
+    pub seq: ChangeSeq,
+    pub delta_index: u32,
+}
+
+/// The binding a path delete removed, restated in this crate's own plain
+/// spelling. The three fields describe one binding, so they travel as one:
+/// an event either recorded a binding or it did not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedBinding {
+    pub parent_inode_id: InodeId,
+    pub name_key: String,
+    pub display_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtreeTombstoneAction {
-    Set,
-    Revoke {
-        target_seq: ChangeSeq,
-        target_delta_index: u32,
+    /// Deletes the subtree rooted at the record's inode. Only a delete has
+    /// a binding to remove, so this is the one action that can carry one —
+    /// absent when the delete was addressed by inode.
+    Set {
+        deleted_binding: Option<DeletedBinding>,
     },
+    /// Cancels exactly the deletion recorded at `target`.
+    Revoke { target: DeletionGeneration },
 }
 
 impl MetadataState {
@@ -175,16 +193,15 @@ impl MetadataState {
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
                             deleted_at_ms: committed_at_ms,
-                            parent_inode_id: deleted_direntry
-                                .as_ref()
-                                .map(|direntry| direntry.parent_inode_id),
-                            name_key: deleted_direntry
-                                .as_ref()
-                                .map(|direntry| direntry.name_key.as_str().to_owned()),
-                            display_name: deleted_direntry
-                                .as_ref()
-                                .map(|direntry| direntry.display_name.as_str().to_owned()),
-                            action: SubtreeTombstoneAction::Set,
+                            action: SubtreeTombstoneAction::Set {
+                                deleted_binding: deleted_direntry.as_ref().map(|direntry| {
+                                    DeletedBinding {
+                                        parent_inode_id: direntry.parent_inode_id,
+                                        name_key: direntry.name_key.as_str().to_owned(),
+                                        display_name: direntry.display_name.as_str().to_owned(),
+                                    }
+                                }),
+                            },
                         });
                 }
                 WalDelta::RevokeSubtreeTombstone {
@@ -199,12 +216,11 @@ impl MetadataState {
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
                             deleted_at_ms: committed_at_ms,
-                            parent_inode_id: None,
-                            name_key: None,
-                            display_name: None,
                             action: SubtreeTombstoneAction::Revoke {
-                                target_seq: target.seq,
-                                target_delta_index: target.delta_index,
+                                target: DeletionGeneration {
+                                    seq: target.seq,
+                                    delta_index: target.delta_index,
+                                },
                             },
                         });
                 }
@@ -218,6 +234,7 @@ impl MetadataState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
     use loonfs_api::NameKey;
 
     #[test]
@@ -237,5 +254,56 @@ mod tests {
 
         assert_eq!(applied.direntry_binds.len(), 1);
         assert_eq!(applied.direntry_binds[0].name_key, "persisted-key");
+    }
+
+    #[test]
+    fn tombstone_replay_restates_the_deleted_binding_and_the_revoked_generation() {
+        let applied = MetadataState::default().apply_committed_wal_deltas(
+            ChangeSeq(9),
+            4_200,
+            &[
+                WalDelta::TombstoneSubtree {
+                    delta_index: 1,
+                    root_inode_id: InodeId(2),
+                    deleted_direntry: Some(DeletedDirentry {
+                        parent_inode_id: InodeId(1),
+                        name_key: NameKey::parse("report.txt").expect("valid name key"),
+                        display_name: loonfs_api::DisplayName::parse("Report.TXT")
+                            .expect("valid display name"),
+                    }),
+                },
+                WalDelta::RevokeSubtreeTombstone {
+                    delta_index: 2,
+                    root_inode_id: InodeId(2),
+                    target: TombstoneGeneration {
+                        seq: ChangeSeq(4),
+                        delta_index: 3,
+                    },
+                },
+            ],
+        );
+
+        assert_eq!(
+            applied
+                .subtree_tombstones
+                .iter()
+                .map(|tombstone| tombstone.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                SubtreeTombstoneAction::Set {
+                    deleted_binding: Some(DeletedBinding {
+                        parent_inode_id: InodeId(1),
+                        name_key: "report.txt".to_owned(),
+                        display_name: "Report.TXT".to_owned(),
+                    }),
+                },
+                SubtreeTombstoneAction::Revoke {
+                    target: DeletionGeneration {
+                        seq: ChangeSeq(4),
+                        delta_index: 3,
+                    },
+                },
+            ]
+        );
     }
 }
