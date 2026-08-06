@@ -300,7 +300,11 @@ pub(crate) mod commit_split_support {
     ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
-            .resolve_path(absolute_path, &context)
+            .resolve_path(
+                absolute_path,
+                loonfs_api::options::StatPathOptions::default(),
+                &context,
+            )
             .await
     }
 

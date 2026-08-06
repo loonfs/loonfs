@@ -12,7 +12,7 @@ use loonfs::{
     FileContentStream, FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceHandle,
     MaintenanceJob, MaintenanceJobId, MaintenancePlan, MaintenanceStepConclusion, MoveOptions,
     PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore,
-    UndeleteOptions,
+    StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
 };
 use loonfs_api::{
     v0::{
@@ -220,9 +220,14 @@ impl EmbeddedBackend {
     pub(super) async fn stat_path(
         &self,
         spec: &NamespacePath,
+        options: &StatPathOptions,
     ) -> Result<AuthoritativePathEntry, BackendError> {
         self.reader
-            .stat_path(spec.namespace(), spec.absolute_path().as_str())
+            .stat_path_with_options(
+                spec.namespace(),
+                spec.absolute_path().as_str(),
+                options.clone(),
+            )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
@@ -683,6 +688,21 @@ impl EmbeddedBackend {
         .await
     }
 
+    pub(super) async fn update_attributes(
+        &self,
+        spec: &NamespacePath,
+        options: &UpdateAttributesOptions,
+    ) -> Result<CommitResponse, BackendError> {
+        self.publish_with_maintenance_recovery(spec.namespace(), || {
+            self.writer.update_attributes(
+                spec.namespace(),
+                spec.absolute_path().as_str(),
+                options.clone(),
+            )
+        })
+        .await
+    }
+
     pub(super) async fn move_path(
         &self,
         from: &NamespacePath,
@@ -924,7 +944,7 @@ mod tests {
     use loonfs::{
         BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsBackgroundWork, FsWriter,
         MaintenanceJobId, MaintenanceStepConclusion, MetadataMaintenanceOptions, PutFileOptions,
-        RuntimeError, SharedObjectStore,
+        RuntimeError, SharedObjectStore, StatPathOptions,
     };
     use loonfs_api::{
         ChangeSeq, CreateCheckpointRequest, DestinationBehavior, ErrorCode, InodeId, NamespaceId,
@@ -1527,7 +1547,10 @@ mod tests {
 
         let missing = rival
             .backend
-            .stat_path(&NamespacePath::parse("demo", "/three.txt").expect("namespace path"))
+            .stat_path(
+                &NamespacePath::parse("demo", "/three.txt").expect("namespace path"),
+                &StatPathOptions::default(),
+            )
             .await
             .expect_err("the fenced put committed nothing");
         assert_eq!(missing.code, ErrorCode::PathNotFound.as_str());

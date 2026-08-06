@@ -18,7 +18,10 @@ use super::{
 };
 use crate::error::CoreError;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
+use loonfs_api::{
+    AbsolutePath, AttributeRevisionNo, Attributes, ChangeSeq, InodeId, InodeKind, NameKey,
+    ROOT_INODE_ID,
+};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -72,6 +75,8 @@ pub(crate) struct MetadataViewSessionCounters {
     pub(crate) current_parent_binding_calls: u64,
     pub(crate) covering_tombstone_calls: u64,
     pub(crate) latest_revision_calls: u64,
+    pub(crate) latest_attributes_calls: u64,
+    pub(crate) preload_attribute_lookups: u64,
     pub(crate) direntry_child_scan_calls: u64,
     pub(crate) scan_prefix_calls: u64,
     pub(crate) scan_range_page_calls: u64,
@@ -91,6 +96,7 @@ pub struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     current_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
     latest_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
     latest_revision_head_cache: HashMap<InodeId, Option<RevisionRecord>>,
+    attributes_cache: HashMap<InodeId, (AttributeRevisionNo, Attributes)>,
     active_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     unbind_cache: HashMap<BindingCacheKey, bool>,
@@ -107,6 +113,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             current_parent_binding_cache: HashMap::new(),
             latest_parent_binding_cache: HashMap::new(),
             latest_revision_head_cache: HashMap::new(),
+            attributes_cache: HashMap::new(),
             active_tombstone_cache: HashMap::new(),
             covering_tombstone_cache: HashMap::new(),
             unbind_cache: HashMap::new(),
@@ -651,6 +658,65 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.latest_revision_head_cache
             .insert(inode_id, revision.clone());
         Ok(revision)
+    }
+
+    /// Returns the attribute map and revision of an inode already proven
+    /// visible at this session's seq.
+    ///
+    /// This is the attribute half of
+    /// [`Self::latest_revision_head_of_visible`], and it skips re-deriving
+    /// visibility for the same reason: the enumeration that admitted the
+    /// entry decided that at this seq. An inode with no attribute record is
+    /// at revision 0 with an empty map, which is an answer rather than a
+    /// miss, so the cache holds it like any other.
+    pub(crate) async fn attributes_of_visible(
+        &mut self,
+        inode_id: InodeId,
+    ) -> Result<(AttributeRevisionNo, Attributes), CoreError> {
+        self.counters.latest_attributes_calls =
+            self.counters.latest_attributes_calls.saturating_add(1);
+        if let Some(cached) = self.attributes_cache.get(&inode_id).cloned() {
+            return Ok(cached);
+        }
+        let attributes = self.base.attributes_at_visible_seq(inode_id).await?;
+        self.attributes_cache.insert(inode_id, attributes.clone());
+        Ok(attributes)
+    }
+
+    /// Reads a whole page's attribute maps as one concurrent wave and seeds
+    /// the cache the per-entry build reads through.
+    ///
+    /// Without this the build loop awaits one probe per entry in turn, which
+    /// is a thousand serialized round trips on a full page. The preload
+    /// decides nothing: seeded values are what the per-entry lookup would
+    /// have fetched, so an entry built with or without it is identical.
+    pub(crate) async fn preload_attributes(
+        &mut self,
+        inode_ids: &[InodeId],
+    ) -> Result<(), CoreError> {
+        let mut pending: Vec<InodeId> = inode_ids
+            .iter()
+            .copied()
+            .filter(|inode_id| !self.attributes_cache.contains_key(inode_id))
+            .collect();
+        pending.sort_unstable();
+        pending.dedup();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.counters.preload_attribute_lookups = self
+            .counters
+            .preload_attribute_lookups
+            .saturating_add(pending.len() as u64);
+
+        let base = &self.base;
+        let loaded =
+            futures::future::try_join_all(pending.into_iter().map(|inode_id| async move {
+                Ok::<_, CoreError>((inode_id, base.attributes_at_visible_seq(inode_id).await?))
+            }))
+            .await?;
+        self.attributes_cache.extend(loaded);
+        Ok(())
     }
 
     pub(crate) async fn revisions_for_inode_page_desc(

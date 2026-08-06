@@ -6,7 +6,8 @@ use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
 use loonfs_api::{
-    CheckpointOwnerSummary, GcResponse, NamespaceId, ReorganizeStepOutcome, WalFlushStepOutcome,
+    AttributeValue, CheckpointOwnerSummary, GcResponse, NamespaceId, ReorganizeStepOutcome,
+    WalFlushStepOutcome,
 };
 use serde::Serialize;
 use std::io::{self, Write};
@@ -753,6 +754,14 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 lines.push(format!("content_id: {}", content_ref.content_id));
                 lines.push(format!("content_kind: {}", content_ref.kind));
             }
+            // One line per attribute, after the fields that say what the item
+            // is. An inode holding no attributes prints nothing extra: the
+            // header already answered the question that was asked.
+            if let Some(attributes) = &entry.attributes {
+                for (key, value) in attributes.iter() {
+                    lines.push(format!("attr.{key}: {}", render_attribute_value(value)));
+                }
+            }
             lines.join("\n")
         }
         CommandData::FileRevisions {
@@ -832,6 +841,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             CommandKind::FilesystemUndelete => {
                 format!("recovered {target} @ seq {committed_seq} (commit {commit_id})")
             }
+            CommandKind::FilesystemAnnotate => {
+                format!("annotated {target} @ seq {committed_seq} (commit {commit_id})")
+            }
             _ => format!("{target} @ seq {committed_seq} (commit {commit_id})"),
         },
         CommandData::DirectoryAlreadyExists { target, .. } => {
@@ -882,6 +894,16 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
     }
 }
 
+/// One attribute value on one line. A list joins on `, `, which is a display
+/// of the value rather than a spelling that round-trips; `--json` is what a
+/// script reads.
+fn render_attribute_value(value: &AttributeValue) -> String {
+    match value {
+        AttributeValue::String { value } => value.clone(),
+        AttributeValue::StringList { values } => values.join(", "),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{human_success, json_error, json_success};
@@ -909,6 +931,8 @@ mod tests {
             size_bytes: None,
             content_ref: None,
             committed_at_ms: None,
+            attributes: None,
+            attributes_revision_no: None,
         }
     }
 

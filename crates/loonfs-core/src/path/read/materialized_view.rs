@@ -29,6 +29,30 @@ use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 use tracing::Instrument;
 
+/// Whether an entry build reads the inode's attributes.
+///
+/// Attributes are the one part of an entry a read pays for per inode, so the
+/// caller states it rather than the builder guessing: a stat includes them,
+/// a listing omits them unless asked, and every other read that resolves a
+/// path on its way to content omits them.
+///
+/// A second projectable field should grow this into a projection struct
+/// rather than add a second parameter beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttributeProjection {
+    Include,
+    Omit,
+}
+
+impl From<bool> for AttributeProjection {
+    fn from(include: bool) -> Self {
+        match include {
+            true => Self::Include,
+            false => Self::Omit,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ReadViewContext<'a> {
     /// Fresh head+root read with no caches: the shape embedded unit tests
@@ -238,7 +262,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         skip_all,
         fields(phase = "walk_path")
     )]
-    pub(crate) async fn resolve_path(&self, absolute_path: &str) -> Result<AuthoritativePathEntry> {
+    pub(crate) async fn resolve_path(
+        &self,
+        absolute_path: &str,
+        attributes: AttributeProjection,
+    ) -> Result<AuthoritativePathEntry> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         // One session serves the resolution and the entry build: the walk's
         // preloaded probes (including the leaf's head revision) are exactly
@@ -247,7 +275,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let resolved = session
             .resolve_visible_path(&absolute_path, LeafRevisionPrefetch::Prefetch)
             .await?;
-        self.build_authoritative_path_entry_with_session(&mut session, &resolved)
+        self.build_authoritative_path_entry_with_session(&mut session, &resolved, attributes)
             .await
     }
 
@@ -274,7 +302,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
     ) -> Result<(AuthoritativePathEntry, ContentRef)> {
-        let entry = self.resolve_path(absolute_path).await?;
+        let entry = self
+            .resolve_path(absolute_path, AttributeProjection::Omit)
+            .await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
                 path: entry.absolute_path.to_string(),
@@ -307,7 +337,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadTarget> {
-        let entry = self.resolve_path(absolute_path).await?;
+        let entry = self
+            .resolve_path(absolute_path, AttributeProjection::Omit)
+            .await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
                 path: entry.absolute_path.to_string(),
@@ -341,7 +373,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
-        let entry = self.resolve_path(absolute_path).await?;
+        let entry = self
+            .resolve_path(absolute_path, AttributeProjection::Omit)
+            .await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
                 path: entry.absolute_path.to_string(),
@@ -502,7 +536,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes> {
-        let mut entry = self.resolve_path(absolute_path).await?;
+        let mut entry = self
+            .resolve_path(absolute_path, AttributeProjection::Omit)
+            .await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
                 path: entry.absolute_path.to_string(),
@@ -547,6 +583,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
+        attributes: AttributeProjection,
     ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
         validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
 
@@ -567,8 +604,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
             return Ok(Page {
                 items: vec![
-                    self.build_authoritative_path_entry_with_session(&mut session, &resolved)
-                        .await?,
+                    self.build_authoritative_path_entry_with_session(
+                        &mut session,
+                        &resolved,
+                        attributes,
+                    )
+                    .await?,
                 ],
                 next_cursor: None,
             });
@@ -626,13 +667,25 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             list_page_current_parent_binding_calls = tracing::field::Empty,
             list_page_covering_tombstone_calls = tracing::field::Empty,
             list_page_latest_revision_calls = tracing::field::Empty,
+            list_page_latest_attributes_calls = tracing::field::Empty,
             list_page_direntry_child_scan_calls = tracing::field::Empty,
             list_page_scan_prefix_calls = tracing::field::Empty,
             list_page_scan_range_page_calls = tracing::field::Empty,
             list_page_preload_unbind_range_scans = tracing::field::Empty,
             list_page_preload_child_lookups = tracing::field::Empty,
+            list_page_preload_attribute_lookups = tracing::field::Empty,
         );
         let entries = async {
+            // A projected page reads every child's attributes as one wave,
+            // so the build loop below runs over cache hits instead of a
+            // round trip per entry.
+            if attributes == AttributeProjection::Include {
+                let child_inode_ids: Vec<InodeId> = children
+                    .iter()
+                    .map(|child| child.binding.child_inode_id)
+                    .collect();
+                session.preload_attributes(&child_inode_ids).await?;
+            }
             let mut entries = Vec::with_capacity(children.len());
             for child in children {
                 entries.push(
@@ -640,6 +693,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                         &mut session,
                         &resolved,
                         child,
+                        attributes,
                     )
                     .await?,
                 );
@@ -670,6 +724,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             counters.latest_revision_calls,
         );
         build_span.record(
+            "list_page_latest_attributes_calls",
+            counters.latest_attributes_calls,
+        );
+        build_span.record(
             "list_page_direntry_child_scan_calls",
             counters.direntry_child_scan_calls,
         );
@@ -686,6 +744,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             "list_page_preload_child_lookups",
             counters.list_preload_child_lookups,
         );
+        build_span.record(
+            "list_page_preload_attribute_lookups",
+            counters.preload_attribute_lookups,
+        );
 
         Ok(Page {
             items: entries,
@@ -694,12 +756,18 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     /// `resolved` must come from visible resolution or enumeration at this
-    /// session's seq (both callers do), so the revision lookup does not
-    /// re-derive the inode's visibility.
+    /// session's seq (both callers do), so the revision and attribute lookups
+    /// do not re-derive the inode's visibility.
+    ///
+    /// The two attribute fields are set together or left together: an
+    /// included projection carries the map and its revision even when the map
+    /// is empty, and an omitted one carries neither. Nothing in between is
+    /// representable from here.
     async fn build_authoritative_path_entry_with_session(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved: &ResolvedVisiblePath,
+        attributes: AttributeProjection,
     ) -> Result<AuthoritativePathEntry> {
         let revision = if resolved.inode_kind == InodeKind::File {
             session
@@ -708,6 +776,17 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         } else {
             None
         };
+        // Attributes belong to the inode, so a directory answers as readily
+        // as a file; only the projection decides whether the read happens.
+        // The pair is unzipped into the entry's two fields, which is what
+        // makes a half-projected entry unrepresentable from here.
+        let (attributes_revision_no, attributes) = match attributes {
+            AttributeProjection::Include => {
+                Some(session.attributes_of_visible(resolved.inode_id).await?)
+            }
+            AttributeProjection::Omit => None,
+        }
+        .unzip();
         let content_ref = revision
             .as_ref()
             .map(|revision| revision.content_ref.clone());
@@ -743,6 +822,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             size_bytes,
             content_ref,
             committed_at_ms: revision.as_ref().map(|revision| revision.committed_at_ms),
+            attributes,
+            attributes_revision_no,
         })
     }
 
@@ -751,6 +832,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved_dir: &ResolvedVisiblePath,
         child: VisibleChildEntry,
+        attributes: AttributeProjection,
     ) -> Result<AuthoritativePathEntry> {
         let child_path = AbsolutePath::parse(&resolved_dir.absolute_path)
             .map_err(map_path_error_to_core)?
@@ -764,6 +846,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 parent_inode_id: Some(child.binding.parent_inode_id),
                 display_name: child.binding.display_name.to_string(),
             },
+            attributes,
         )
         .await
     }
@@ -821,4 +904,254 @@ fn validate_file_revisions_cursor(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
+    use crate::context::MutationContext;
+    use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::path::write::{CommitRequest, FilesystemOperation};
+    use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, CommitId};
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use std::collections::BTreeMap;
+    use tempfile::TempDir;
+
+    fn context() -> MutationContext {
+        MutationContext {
+            writer_id: "reader-tests".to_owned(),
+            now_ms: 1,
+        }
+    }
+
+    fn attribute_key(key: &str) -> AttributeKey {
+        AttributeKey::parse(key).expect("attribute key")
+    }
+
+    /// Bootstraps a namespace holding `/docs` with one annotated child
+    /// directory and one bare child directory, so an entry build has both an
+    /// inode with attributes and an inode without.
+    async fn namespace_with_annotated_children() -> (TempDir, LocalFsStore, NamespaceId) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let context = context();
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+
+        for (commit_id, operation) in [
+            (
+                "create-docs",
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/docs").expect("path"),
+                    parents: false,
+                },
+            ),
+            (
+                "create-annotated",
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/docs/annotated").expect("path"),
+                    parents: false,
+                },
+            ),
+            (
+                "create-bare",
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/docs/bare").expect("path"),
+                    parents: false,
+                },
+            ),
+            (
+                "annotate",
+                FilesystemOperation::UpdateAttributes {
+                    path: AbsolutePath::parse("/docs/annotated").expect("path"),
+                    set: BTreeMap::from([(
+                        attribute_key("owner"),
+                        AttributeValue::String {
+                            value: "ops".to_owned(),
+                        },
+                    )]),
+                    remove: Vec::new(),
+                    expected_inode_id: None,
+                    expected_attributes_revision_no: None,
+                },
+            ),
+        ] {
+            publish_namespace_commits_batch(
+                &store,
+                &namespace_id,
+                vec![CommitCandidate::new(CommitRequest::single(
+                    CommitId::parse(commit_id).expect("commit id"),
+                    None,
+                    operation,
+                ))],
+                &context,
+            )
+            .await
+            .into_iter()
+            .next()
+            .expect("one result")
+            .expect("commit lands");
+        }
+        (temp_dir, store, namespace_id)
+    }
+
+    /// A stat-shaped build with the projection on carries both attribute
+    /// fields; with it off it carries neither. The empty map is a projected
+    /// answer, not an absent one.
+    #[tokio::test]
+    async fn an_entry_build_projects_both_attribute_fields_or_neither() {
+        let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
+        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+            .await
+            .expect("load view");
+
+        let annotated = view
+            .resolve_path("/docs/annotated", AttributeProjection::Include)
+            .await
+            .expect("stat annotated");
+        assert_eq!(
+            annotated.attributes_revision_no,
+            Some(AttributeRevisionNo(1))
+        );
+        assert_eq!(
+            annotated
+                .attributes
+                .as_ref()
+                .and_then(|attributes| attributes.get(&attribute_key("owner")))
+                .cloned(),
+            Some(AttributeValue::String {
+                value: "ops".to_owned()
+            })
+        );
+
+        let bare = view
+            .resolve_path("/docs/bare", AttributeProjection::Include)
+            .await
+            .expect("stat bare");
+        assert_eq!(bare.attributes_revision_no, Some(AttributeRevisionNo(0)));
+        assert_eq!(
+            bare.attributes.as_ref().map(|attributes| attributes.len()),
+            Some(0)
+        );
+
+        let omitted = view
+            .resolve_path("/docs/annotated", AttributeProjection::Omit)
+            .await
+            .expect("stat without attributes");
+        assert!(omitted.attributes.is_none());
+        assert!(omitted.attributes_revision_no.is_none());
+
+        for entry in [&annotated, &bare, &omitted] {
+            assert!(
+                entry.attributes_are_projected_together(),
+                "an entry carried one attribute field without the other: {entry:?}"
+            );
+        }
+    }
+
+    /// The listing pays for attributes only when it was asked to. The session
+    /// counter is the evidence: an omitted projection never calls the lookup,
+    /// so a wide listing cannot quietly grow a per-entry read.
+    #[tokio::test]
+    async fn a_listing_reads_attributes_only_when_it_projects_them() {
+        let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
+        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+            .await
+            .expect("load view");
+        let directory = AbsolutePath::parse("/docs").expect("path");
+
+        for (projection, expected_calls, expect_projected) in [
+            (AttributeProjection::Omit, 0, false),
+            (AttributeProjection::Include, 2, true),
+        ] {
+            let mut session = view.metadata_view().session();
+            let resolved = session
+                .resolve_visible_path(&directory, LeafRevisionPrefetch::Skip)
+                .await
+                .expect("resolve directory");
+            let children = session
+                .visible_children_page_by_name_key(resolved.inode_id, None, 16)
+                .await
+                .expect("children");
+            assert_eq!(children.len(), 2);
+            for child in children {
+                let entry = view
+                    .build_authoritative_path_entry_from_visible_child(
+                        &mut session,
+                        &resolved,
+                        child,
+                        projection,
+                    )
+                    .await
+                    .expect("build entry");
+                assert!(entry.attributes_are_projected_together());
+                assert_eq!(entry.attributes.is_some(), expect_projected);
+            }
+            assert_eq!(
+                session.counters().latest_attributes_calls,
+                expected_calls,
+                "{projection:?} made the wrong number of attribute lookups"
+            );
+        }
+    }
+
+    /// A projected listing reads every entry's attributes in one wave, so the
+    /// per-entry build runs over cache hits and the page costs one round of
+    /// lookups rather than one per entry.
+    #[tokio::test]
+    async fn a_projected_listing_reads_its_attributes_in_one_wave() {
+        let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
+        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+            .await
+            .expect("load view");
+
+        for (projection, expected_preloads) in [
+            (AttributeProjection::Omit, 0),
+            (AttributeProjection::Include, 2),
+        ] {
+            let mut session = view.metadata_view().session();
+            let directory = AbsolutePath::parse("/docs").expect("path");
+            let resolved = session
+                .resolve_visible_path(&directory, LeafRevisionPrefetch::Skip)
+                .await
+                .expect("resolve directory");
+            let children = session
+                .visible_children_page_by_name_key(resolved.inode_id, None, 16)
+                .await
+                .expect("children");
+            let child_inode_ids: Vec<InodeId> = children
+                .iter()
+                .map(|child| child.binding.child_inode_id)
+                .collect();
+            if projection == AttributeProjection::Include {
+                session
+                    .preload_attributes(&child_inode_ids)
+                    .await
+                    .expect("preload");
+            }
+            assert_eq!(
+                session.counters().preload_attribute_lookups,
+                expected_preloads
+            );
+
+            for child in children {
+                view.build_authoritative_path_entry_from_visible_child(
+                    &mut session,
+                    &resolved,
+                    child,
+                    projection,
+                )
+                .await
+                .expect("build entry");
+            }
+            // Nothing beyond the wave: every per-entry lookup was seeded.
+            assert_eq!(
+                session.counters().preload_attribute_lookups,
+                expected_preloads
+            );
+        }
+    }
 }

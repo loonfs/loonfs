@@ -10,10 +10,10 @@ use super::output::{CommandData, CommandFailure, CommandOutput, TrashListing};
 use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
 use crate::args::{
-    CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
-    FilesystemMkdirArgs, FilesystemPathArgs, FilesystemPutArgs, FilesystemRestoreArgs,
-    FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemTransferArgs, FilesystemUndeleteArgs,
-    RuntimeBehavior, TrashArgs,
+    CommandKind, FilesystemAnnotateArgs, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs,
+    FilesystemLsArgs, FilesystemMkdirArgs, FilesystemPathArgs, FilesystemPutArgs,
+    FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemTransferArgs,
+    FilesystemUndeleteArgs, RuntimeBehavior, TrashArgs,
 };
 use crate::backend::FileDownload;
 use crate::config::ConfigLocation;
@@ -23,10 +23,13 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
-    CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind,
-    RevisionNo,
+    AttributeKey, AttributeRevisionNo, AttributeValue, CommitId, CommitResponse,
+    DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeId, InodeKind, RevisionNo,
 };
-use loonfs_client::{CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{
+    CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions, UpdateAttributesOptions,
+};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -136,6 +139,103 @@ pub(crate) async fn run_filesystem_stat(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::PathEntry(entry),
+    })
+}
+
+/// One `--set key=value` argument. The key ends at the first `=` so a value
+/// may contain more of them, and a missing `=` names the flag rather than
+/// guessing what the caller meant.
+fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, AttributeValue), CliError> {
+    let Some((key, value)) = argument.split_once('=') else {
+        return Err(CliError::invalid_input(format!(
+            "invalid --set `{argument}`: expected key=value"
+        )));
+    };
+    Ok((
+        parse_attribute_key_arg("--set", key)?,
+        AttributeValue::String {
+            value: value.to_owned(),
+        },
+    ))
+}
+
+fn parse_attribute_key_arg(flag: &str, key: &str) -> Result<AttributeKey, CliError> {
+    AttributeKey::parse(key)
+        .map_err(|error| CliError::invalid_input(format!("invalid {flag} key: {error}")))
+}
+
+/// The `--attributes-json` form of the update: one object carrying the same
+/// `set` and `remove` the flags build, with values in the wire encoding.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttributeUpdateJson {
+    #[serde(default)]
+    set: BTreeMap<AttributeKey, AttributeValue>,
+    #[serde(default)]
+    remove: Vec<AttributeKey>,
+}
+
+fn update_attributes_options(
+    args: &FilesystemAnnotateArgs,
+) -> Result<UpdateAttributesOptions, CliError> {
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())?;
+    let (set, remove) = match args.attributes_json.as_deref() {
+        Some(document) => {
+            let update: AttributeUpdateJson = serde_json::from_str(document).map_err(|error| {
+                CliError::invalid_input(format!(
+                    "invalid --attributes-json attribute update: {error}"
+                ))
+            })?;
+            (update.set, update.remove)
+        }
+        None => (
+            args.sets
+                .iter()
+                .map(|assignment| parse_attribute_assignment(assignment))
+                .collect::<Result<BTreeMap<_, _>, _>>()?,
+            args.removes
+                .iter()
+                .map(|key| parse_attribute_key_arg("--remove", key))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    };
+    Ok(UpdateAttributesOptions {
+        set,
+        remove,
+        commit_id,
+        message: args.message.clone(),
+        expected_inode_id: args.expected_inode_id.map(InodeId),
+        expected_attributes_revision_no: args.expected_attributes_revision.map(AttributeRevisionNo),
+    })
+}
+
+pub(crate) async fn run_filesystem_annotate(
+    kind: CommandKind,
+    config_path: &Path,
+    args: FilesystemAnnotateArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let allow_root = true;
+    let spec = namespace_path(&context.namespace, &args.path, allow_root)
+        .map_err(|error| context.fail(kind, error))?;
+    let options = update_attributes_options(&args).map_err(|error| context.fail(kind, error))?;
+    let result = context
+        .target
+        .update_attributes(&spec, &options)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::FileMutation {
+            target: render_target(&context.namespace, spec.absolute_path()),
+            committed_seq: result.committed_seq,
+            commit_id: result.commit_id,
+            inode_id: None,
+            recovery_command: None,
+        },
     })
 }
 
@@ -262,7 +362,7 @@ pub(crate) async fn run_filesystem_get(
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
-        .stat_path(&spec)
+        .stat_path_without_attributes(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?;
     if args.recursive {
@@ -906,7 +1006,7 @@ pub(crate) async fn run_filesystem_rm(
     // instead of removing (and mis-reporting) a different inode.
     let deleted_inode = context
         .target
-        .stat_path(&spec)
+        .stat_path_without_attributes(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?
         .inode_id;
@@ -1067,7 +1167,7 @@ pub(crate) async fn run_filesystem_mkdir(
         Err(error) if args.parents && error.code == ErrorCode::PathConflict.as_str() => {
             let existing = context
                 .target
-                .stat_path(&spec)
+                .stat_path_without_attributes(&spec)
                 .await
                 .map_err(|_| context.fail(kind, error.clone()))?;
             if existing.inode_kind != InodeKind::Directory {
@@ -1143,7 +1243,7 @@ async fn resolve_transfer_destination(
     named: NamespacePath,
     source_leaf: &str,
 ) -> Result<NamespacePath, CliError> {
-    let Ok(existing) = context.target.stat_path(&named).await else {
+    let Ok(existing) = context.target.stat_path_without_attributes(&named).await else {
         // Absent, or unreadable for a reason the transfer itself will
         // report: either way this is not a directory to land inside.
         return Ok(named);
@@ -1205,7 +1305,7 @@ async fn run_filesystem_transfer(
     let result = if transfer_kind == TransferKind::Copy {
         let entry = context
             .target
-            .stat_path(&from)
+            .stat_path_without_attributes(&from)
             .await
             .map_err(|error| context.fail(kind, error))?;
         if args.recursive {

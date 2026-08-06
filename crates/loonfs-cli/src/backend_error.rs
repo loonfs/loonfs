@@ -91,7 +91,9 @@ impl From<ClientError> for BackendError {
                 // behavior.
                 Self::new(ErrorCode::InvalidRequest.as_str(), message)
             }
-            ClientError::Http(message) | ClientError::Json(message) => Self::client_error(message),
+            ClientError::Http(message)
+            | ClientError::Json(message)
+            | ClientError::Protocol(message) => Self::client_error(message),
             ClientError::Api {
                 code,
                 message,

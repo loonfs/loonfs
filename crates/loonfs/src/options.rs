@@ -3,9 +3,9 @@
 //!
 //! The options that also parameterize the HTTP client's identical operations
 //! are defined once in [`loonfs_api::options`] and re-exported here, so the
-//! two surfaces cannot drift a field apart. That is every path operation. What
-//! stays defined below is runtime-only: maintenance, checkpoints, namespace
-//! creation, and change-feed paging.
+//! two surfaces cannot drift a field apart. That is every path operation,
+//! read and write. What stays defined below is runtime-only: maintenance,
+//! checkpoints, namespace creation, and change-feed paging.
 //!
 //! Results are the `loonfs-api` wire shapes themselves: the handles return
 //! `MaintenanceStepResponse` and `GcResponse` directly, the same way they
@@ -19,8 +19,9 @@ use loonfs_core::publish::WalTailPolicy;
 use std::num::NonZeroU64;
 
 pub use loonfs_api::options::{
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, UndeleteOptions,
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions, MoveOptions,
+    PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 
 /// The actions one maintenance step performs.

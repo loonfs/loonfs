@@ -141,7 +141,8 @@ Reading
     --cursor resumes from
 
   loonfs stat <path>
-    Describe one path: kind, size, revision, and content digest
+    Describe one path: kind, size, revision, content digest, and the
+    inode's attributes as `attr.<key>` lines
 
   loonfs cat <path> [--revision <n>]
     Print a file's bytes to stdout; --revision prints that revision instead
@@ -174,6 +175,18 @@ Writing
   loonfs mkdir <path> [-p]
     Create a directory; -p creates missing parents as well and succeeds when
     the directory is already there
+
+  loonfs annotate <path> [--set key=value]... [--remove key]...
+                         [--attributes-json '<update>']
+                         [--expected-inode-id <n>]
+                         [--expected-attributes-revision <n>]
+    Write and remove attributes on a file or directory. --set takes
+    key=value and splits on the first `=`, --remove takes a key, and both
+    repeat. A list value needs --attributes-json, which takes the whole
+    update as {"set": {...}, "remove": [...]} in the wire encoding and
+    cannot be combined with --set or --remove. The two --expected flags
+    refuse the update when the path has been rebound or the attributes have
+    moved on
 
   loonfs rm <path> [-r]
     Delete a file, or with -r a directory and everything under it as one
@@ -242,7 +255,7 @@ Maintenance
     on standard error as it lands, and the summary says what the pass kept
     and mostly why; --json carries every retention reason
 
-  loonfs admin probe-store
+  loonfs admin store-probe
     Prove the profile's object store honours the contract LoonFS depends on
     (create-if-absent, compare-and-swap, visibility, listing, ranged reads)
     and print one line per check; the run writes and deletes objects under a

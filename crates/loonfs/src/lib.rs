@@ -161,9 +161,10 @@ pub use maintenance_runner::{
 };
 pub use options::{
     gc_config_from_request, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, MaintenancePlan,
-    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
-    RestoreRevisionOptions, UndeleteOptions,
+    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, ListPathEntriesOptions,
+    MaintenancePlan, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
+    ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

@@ -1536,6 +1536,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "include_attributes",
+            "in": "query",
+            "description": "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1550,7 +1559,7 @@
             }
           },
           "400": {
-            "description": "Invalid path, limit, or cursor",
+            "description": "Invalid path, limit, cursor, or include_attributes",
             "content": {
               "application/json": {
                 "schema": {
@@ -1698,7 +1707,7 @@
           "filesystem"
         ],
         "summary": "Stat path",
-        "description": "Returns the current metadata for a path, including inode identity, kind, display name, and file content metadata.",
+        "description": "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
         "operationId": "stat_path",
         "parameters": [
           {
@@ -1718,6 +1727,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "include_attributes",
+            "in": "query",
+            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1732,7 +1750,7 @@
             }
           },
           "400": {
-            "description": "Invalid path",
+            "description": "Invalid path or include_attributes",
             "content": {
               "application/json": {
                 "schema": {
@@ -2837,7 +2855,7 @@
       },
       "AuthoritativePathEntry": {
         "type": "object",
-        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. File entries include\nrevision and content summary fields; directory entries leave those empty.",
+        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. File entries include\nrevision and content summary fields; directory entries leave those empty.\n\nThe two attribute fields are projected together or not at all. A read that\nasked for attributes carries both — including an empty map with the\nrevision that map is at — and a read that did not carries neither, so\nabsence never has to be read as \"no attributes\".",
         "required": [
           "namespace_id",
           "absolute_path",
@@ -2849,6 +2867,28 @@
           "absolute_path": {
             "$ref": "#/components/schemas/AbsolutePath",
             "description": "Absolute path as rendered from stored display names."
+          },
+          "attributes": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Attributes",
+                "description": "The inode's complete attribute map, when the read projected\nattributes. Present alongside `attributes_revision_no` or not at all."
+              }
+            ]
+          },
+          "attributes_revision_no": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AttributeRevisionNo",
+                "description": "The revision that attribute map is at, when the read projected\nattributes. An inode that has never had attributes written is at\nrevision 0 with an empty map."
+              }
+            ]
           },
           "committed_at_ms": {
             "type": [

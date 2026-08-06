@@ -3,8 +3,8 @@
 //! The mutating operation shapes live in [`super::operations`].
 
 use crate::{
-    AbsolutePath, ChangeSeq, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
-    RevisionNo,
+    AbsolutePath, AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName, InodeId,
+    InodeKind, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// This is the result shape for stat/list style reads. File entries include
 /// revision and content summary fields; directory entries leave those empty.
+///
+/// The two attribute fields are projected together or not at all. A read that
+/// asked for attributes carries both — including an empty map with the
+/// revision that map is at — and a read that did not carries neither, so
+/// absence never has to be read as "no attributes".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AuthoritativePathEntry {
@@ -41,6 +46,23 @@ pub struct AuthoritativePathEntry {
     /// Observational: `head_seq` and revision sequences are the order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_at_ms: Option<u64>,
+    /// The inode's complete attribute map, when the read projected
+    /// attributes. Present alongside `attributes_revision_no` or not at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<Attributes>,
+    /// The revision that attribute map is at, when the read projected
+    /// attributes. An inode that has never had attributes written is at
+    /// revision 0 with an empty map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributes_revision_no: Option<AttributeRevisionNo>,
+}
+
+impl AuthoritativePathEntry {
+    /// Reports whether the entry's two attribute fields agree: both
+    /// projected, or neither.
+    pub fn attributes_are_projected_together(&self) -> bool {
+        self.attributes.is_some() == self.attributes_revision_no.is_some()
+    }
 }
 
 /// One directory listing and the namespace head it was answered at.
@@ -98,6 +120,8 @@ mod tests {
             size_bytes: None,
             content_ref: None,
             committed_at_ms: None,
+            attributes: None,
+            attributes_revision_no: None,
         }
     }
 
@@ -157,6 +181,31 @@ mod tests {
         let named_json = serde_json::to_value(entry("/docs", Some(InodeId(1)), Some("docs")))
             .expect("serialize named entry");
         assert_eq!(named_json["display_name"], "docs");
+    }
+
+    /// An unprojected entry omits both attribute fields; a projected one
+    /// carries both, and an empty map is a projected answer rather than an
+    /// absent one.
+    #[test]
+    fn attribute_fields_serialize_together_or_not_at_all() {
+        let unprojected = entry("/docs", Some(InodeId(1)), Some("docs"));
+        assert!(unprojected.attributes_are_projected_together());
+        let unprojected_json =
+            serde_json::to_value(&unprojected).expect("serialize unprojected entry");
+        assert!(unprojected_json.get("attributes").is_none());
+        assert!(unprojected_json.get("attributes_revision_no").is_none());
+
+        let mut projected = unprojected;
+        projected.attributes = Some(crate::Attributes::default());
+        projected.attributes_revision_no = Some(crate::AttributeRevisionNo(0));
+        assert!(projected.attributes_are_projected_together());
+        let projected_json = serde_json::to_value(&projected).expect("serialize projected entry");
+        assert_eq!(projected_json["attributes"], serde_json::json!({}));
+        assert_eq!(projected_json["attributes_revision_no"], 0);
+
+        let mut half_projected = projected;
+        half_projected.attributes_revision_no = None;
+        assert!(!half_projected.attributes_are_projected_together());
     }
 }
 

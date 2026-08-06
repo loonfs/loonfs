@@ -8,6 +8,7 @@ use crate::{
     ChangeSeq, CommitId, CommitResponse, ContentRef, CopyOptions, CoreError,
     CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceJobId, MetadataMaintenanceOptions,
     MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 use crate::{CommittedChange, FilesystemChange};
 use crate::{Result, RuntimeError};
@@ -700,6 +701,35 @@ impl FsWriter {
                 FilesystemOperation::RestoreRevision {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     source_revision_no,
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Writes and removes attributes on the inode a path resolves to. The
+    /// target may be a file or a directory, because an attribute belongs to
+    /// the resource.
+    ///
+    /// Naming neither a write nor a removal is rejected, as is an update that
+    /// would leave the map exactly as it was.
+    pub async fn update_attributes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: UpdateAttributesOptions,
+    ) -> Result<CommitResponse> {
+        self.commit(
+            namespace_id,
+            CommitRequest::single(
+                options.commit_id.unwrap_or_else(CommitId::generate),
+                options.message,
+                FilesystemOperation::UpdateAttributes {
+                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    set: options.set,
+                    remove: options.remove,
+                    expected_inode_id: options.expected_inode_id,
+                    expected_attributes_revision_no: options.expected_attributes_revision_no,
                 },
             ),
         )

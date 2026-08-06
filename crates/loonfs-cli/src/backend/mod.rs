@@ -37,7 +37,8 @@ use loonfs_api::{
 };
 use loonfs_client::{
     CopyOptions, CreateDirectoryOptions, DeleteOptions, DirectDownloadStream, MoveOptions,
-    NamespacePath, PutFileOptions, RestoreRevisionOptions, UndeleteOptions,
+    NamespacePath, PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
@@ -359,14 +360,39 @@ impl ResolvedTarget {
         }
     }
 
-    /// Describes a single path entry.
+    /// Describes a single path entry, attributes included.
     pub(crate) async fn stat_path(
         &self,
         spec: &NamespacePath,
     ) -> Result<AuthoritativePathEntry, BackendError> {
+        self.stat_path_with_options(spec, &StatPathOptions::default())
+            .await
+    }
+
+    /// Describes a single path entry without its attributes: the shape a
+    /// command that only needs the kind or the inode id asks for, so it pays
+    /// neither the extra lookup nor the extra bytes over the wire.
+    pub(crate) async fn stat_path_without_attributes(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<AuthoritativePathEntry, BackendError> {
+        self.stat_path_with_options(
+            spec,
+            &StatPathOptions {
+                include_attributes: false,
+            },
+        )
+        .await
+    }
+
+    async fn stat_path_with_options(
+        &self,
+        spec: &NamespacePath,
+        options: &StatPathOptions,
+    ) -> Result<AuthoritativePathEntry, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.stat_path(spec).await,
-            Self::Remote(target) => Ok(target.client.stat_path(spec).await?),
+            Self::Embedded(target) => target.backend.stat_path(spec, options).await,
+            Self::Remote(target) => Ok(target.client.stat_path_with_options(spec, options).await?),
         }
     }
 
@@ -700,6 +726,18 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => target.backend.delete_path(spec, options).await,
             Self::Remote(target) => Ok(target.client.delete_path(spec, options).await?),
+        }
+    }
+
+    /// Writes and removes attributes on the inode a path resolves to.
+    pub(crate) async fn update_attributes(
+        &self,
+        spec: &NamespacePath,
+        options: &UpdateAttributesOptions,
+    ) -> Result<CommitResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => target.backend.update_attributes(spec, options).await,
+            Self::Remote(target) => Ok(target.client.update_attributes(spec, options).await?),
         }
     }
 

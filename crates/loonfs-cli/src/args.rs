@@ -44,8 +44,10 @@ pub(crate) enum Command {
     Current(CurrentArgs),
     /// List a directory.
     Ls(FilesystemLsArgs),
-    /// Describe one path (kind, size, revision, content digest).
+    /// Describe one path (kind, size, revision, content digest, attributes).
     Stat(FilesystemPathArgs),
+    /// Write and remove attributes on a file or directory.
+    Annotate(FilesystemAnnotateArgs),
     /// Print a file's content to stdout.
     Cat(FilesystemCatArgs),
     /// Search file content through the grep index.
@@ -381,6 +383,46 @@ pub(crate) struct FilesystemPathArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct FilesystemAnnotateArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: String,
+    /// Attribute to write, as `key=value`. The key ends at the first `=`, so
+    /// the value may contain more of them. Repeat the flag to write more.
+    /// This flag writes text values only; a list value needs
+    /// --attributes-json.
+    #[arg(long = "set", conflicts_with = "attributes_json")]
+    pub sets: Vec<String>,
+    /// Attribute key to remove. Repeat the flag to remove more.
+    #[arg(long = "remove", conflicts_with = "attributes_json")]
+    pub removes: Vec<String>,
+    /// The whole update as one JSON object, `{"set": {...}, "remove": [...]}`,
+    /// with values in the wire encoding: `{"kind": "string", "value": "x"}` or
+    /// `{"kind": "string_list", "values": ["x", "y"]}`. This is how a list
+    /// value is written, and how a script passes an update it built. Cannot be
+    /// combined with --set or --remove. Named for what it carries because
+    /// --json is already the global output-format flag.
+    #[arg(long)]
+    pub attributes_json: Option<String>,
+    /// Update only while the path still resolves to this inode; a raced
+    /// rebinding fails instead of annotating a different inode.
+    #[arg(long)]
+    pub expected_inode_id: Option<u64>,
+    /// Update only while the inode's attribute revision is still this one.
+    #[arg(long)]
+    pub expected_attributes_revision: Option<u64>,
+    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
+    /// of the commit's identity: resubmitting the same --commit-id with a
+    /// different message is a commit id conflict.
+    #[arg(short = 'm', long)]
+    pub message: Option<String>,
+    /// Idempotency key for the commit; resubmit with the same id to retry
+    /// safely. Generated when absent and returned in the output.
+    #[arg(long)]
+    pub commit_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct FilesystemRmArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
@@ -653,7 +695,7 @@ pub(crate) enum AdminCommand {
     Gc(AdminGcArgs),
     /// Prove the profile's object store honours the contract LoonFS
     /// depends on, and report what it found check by check.
-    ProbeStore(AdminProbeStoreArgs),
+    StoreProbe(AdminStoreProbeArgs),
     /// Enable the gram content index and wait for its backfill to reach the
     /// sequence the namespace was at when this command started.
     IndexEnable(AdminIndexEnableArgs),
@@ -806,7 +848,7 @@ pub(crate) struct AdminGcArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminProbeStoreArgs {
+pub(crate) struct AdminStoreProbeArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
 }
@@ -863,6 +905,7 @@ pub(crate) enum CommandKind {
     Current,
     FilesystemLs,
     FilesystemStat,
+    FilesystemAnnotate,
     FilesystemCat,
     FilesystemGrep,
     FilesystemGet,
@@ -884,7 +927,7 @@ pub(crate) enum CommandKind {
     AdminRun,
     AdminStep,
     AdminGc,
-    AdminProbeStore,
+    AdminStoreProbe,
     AdminIndexEnable,
     AdminIndexDisable,
     AdminIndexStatus,
@@ -911,6 +954,7 @@ impl CommandKind {
             CommandKind::Current => "current",
             CommandKind::FilesystemLs => "filesystem_ls",
             CommandKind::FilesystemStat => "filesystem_stat",
+            CommandKind::FilesystemAnnotate => "filesystem_annotate",
             CommandKind::FilesystemCat => "filesystem_cat",
             CommandKind::FilesystemGrep => "filesystem_grep",
             CommandKind::FilesystemGet => "filesystem_get",
@@ -932,7 +976,7 @@ impl CommandKind {
             CommandKind::AdminRun => "admin_run",
             CommandKind::AdminStep => "admin_step",
             CommandKind::AdminGc => "admin_gc",
-            CommandKind::AdminProbeStore => "admin_probe_store",
+            CommandKind::AdminStoreProbe => "admin_store_probe",
             CommandKind::AdminIndexEnable => "admin_index_enable",
             CommandKind::AdminIndexDisable => "admin_index_disable",
             CommandKind::AdminIndexStatus => "admin_index_status",
@@ -969,6 +1013,7 @@ impl Cli {
             Command::Current(_) => CommandKind::Current,
             Command::Ls(_) => CommandKind::FilesystemLs,
             Command::Stat(_) => CommandKind::FilesystemStat,
+            Command::Annotate(_) => CommandKind::FilesystemAnnotate,
             Command::Cat(_) => CommandKind::FilesystemCat,
             Command::Grep(_) => CommandKind::FilesystemGrep,
             Command::Get(_) => CommandKind::FilesystemGet,
@@ -991,7 +1036,7 @@ impl Cli {
                 AdminCommand::Run(_) => CommandKind::AdminRun,
                 AdminCommand::Step(_) => CommandKind::AdminStep,
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
-                AdminCommand::ProbeStore(_) => CommandKind::AdminProbeStore,
+                AdminCommand::StoreProbe(_) => CommandKind::AdminStoreProbe,
                 AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,
                 AdminCommand::IndexDisable(_) => CommandKind::AdminIndexDisable,
                 AdminCommand::IndexStatus(_) => CommandKind::AdminIndexStatus,

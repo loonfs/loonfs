@@ -157,8 +157,9 @@ pub use ClientError as Error;
 /// Per-operation options, defined once in `loonfs-api` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_api::options::{
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, UndeleteOptions,
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions, MoveOptions,
+    PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.
@@ -654,17 +655,29 @@ impl Client {
     /// resumes in name-key order against the head the server has loaded —
     /// so aggregation never restarts. The envelope's `head_seq` reports the
     /// newest head that served a page. Use
-    /// [`Self::list_path_entries_page`] for page-level control.
+    /// [`Self::list_path_entries_page`] for page-level control. Entries carry
+    /// no attributes; [`Self::list_path_entries_all_with_options`] projects
+    /// them.
     pub async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
+    ) -> Result<ListPathEntriesResponse> {
+        self.list_path_entries_all_with_options(spec, &ListPathEntriesOptions::default())
+            .await
+    }
+
+    /// [`Self::list_path_entries_all`], projecting what `options` asks for.
+    pub async fn list_path_entries_all_with_options(
+        &self,
+        spec: &NamespacePath,
+        options: &ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
         let mut entries = Vec::new();
         let mut envelope = None;
         let mut cursor = None;
         loop {
             let page = self
-                .list_path_entries_page(spec, None, cursor.as_deref())
+                .list_path_entries_page_with_options(spec, None, cursor.as_deref(), options)
                 .await?;
             let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
                 namespace_id: page.namespace_id.clone(),
@@ -685,11 +698,30 @@ impl Client {
         }
     }
 
+    /// Lists one page of a directory. Entries carry no attributes;
+    /// [`Self::list_path_entries_page_with_options`] projects them.
     pub async fn list_path_entries_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
+    ) -> Result<ListPathEntriesResponse> {
+        self.list_path_entries_page_with_options(
+            spec,
+            limit,
+            cursor,
+            &ListPathEntriesOptions::default(),
+        )
+        .await
+    }
+
+    /// [`Self::list_path_entries_page`], projecting what `options` asks for.
+    pub async fn list_path_entries_page_with_options(
+        &self,
+        spec: &NamespacePath,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+        options: &ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
         let mut url = format!(
             "{}/v0/namespaces/{}/filesystem/list?path={}",
@@ -697,21 +729,52 @@ impl Client {
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())
         );
-        let has_query = true;
-        append_optional_pagination_query(&mut url, has_query, limit, cursor);
-        self.request_json::<(), ListPathEntriesResponse>(self.get(&url), None)
+        let mut has_query = true;
+        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
+        append_query_param(
+            &mut url,
+            &mut has_query,
+            "include_attributes",
+            &options.include_attributes.to_string(),
+        );
+        let listing: ListPathEntriesResponse =
+            self.request_json::<(), _>(self.get(&url), None).await?;
+        for entry in &listing.entries {
+            check_attribute_projection(entry)?;
+        }
+        Ok(listing)
+    }
+
+    /// Stats one path, projecting the inode's attributes.
+    /// [`Self::stat_path_with_options`] chooses otherwise.
+    pub async fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry> {
+        self.stat_path_with_options(spec, &StatPathOptions::default())
             .await
     }
 
-    pub async fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry> {
-        let url = format!(
+    /// [`Self::stat_path`], projecting what `options` asks for.
+    pub async fn stat_path_with_options(
+        &self,
+        spec: &NamespacePath,
+        options: &StatPathOptions,
+    ) -> Result<AuthoritativePathEntry> {
+        let mut url = format!(
             "{}/v0/namespaces/{}/filesystem/stat?path={}",
             self.base_url,
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())
         );
-        self.request_json::<(), AuthoritativePathEntry>(self.get(&url), None)
-            .await
+        let mut has_query = true;
+        append_query_param(
+            &mut url,
+            &mut has_query,
+            "include_attributes",
+            &options.include_attributes.to_string(),
+        );
+        let entry: AuthoritativePathEntry =
+            self.request_json::<(), _>(self.get(&url), None).await?;
+        check_attribute_projection(&entry)?;
+        Ok(entry)
     }
 
     pub async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
@@ -904,8 +967,8 @@ impl Client {
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())
         );
-        let has_query = true;
-        append_optional_pagination_query(&mut url, has_query, limit, cursor);
+        let mut has_query = true;
+        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None)
             .await
     }
@@ -921,8 +984,8 @@ impl Client {
             self.base_url,
             namespace_id.as_str()
         );
-        let has_query = false;
-        append_optional_pagination_query(&mut url, has_query, limit, cursor);
+        let mut has_query = false;
+        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
         self.request_json::<(), ListTrashResponse>(self.get(&url), None)
             .await
     }
@@ -2328,6 +2391,33 @@ impl Client {
         Ok(response)
     }
 
+    /// Writes and removes attributes on the inode a path resolves to. The
+    /// target may be a file or a directory.
+    pub async fn update_attributes(
+        &self,
+        spec: &NamespacePath,
+        options: &UpdateAttributesOptions,
+    ) -> Result<ApiCommitResponse> {
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let response = self
+            .commit(
+                spec.namespace(),
+                &CommitRequest::single(
+                    commit_id,
+                    options.message.clone(),
+                    FilesystemOperation::UpdateAttributes {
+                        path: spec.absolute_path().clone(),
+                        set: options.set.clone(),
+                        remove: options.remove.clone(),
+                        expected_inode_id: options.expected_inode_id,
+                        expected_attributes_revision_no: options.expected_attributes_revision_no,
+                    },
+                ),
+            )
+            .await?;
+        Ok(response)
+    }
+
     pub async fn move_path(
         &self,
         from: &NamespacePath,
@@ -2479,17 +2569,32 @@ impl NamespacePath {
 
 fn append_optional_pagination_query(
     url: &mut String,
-    has_query: bool,
+    has_query: &mut bool,
     limit: Option<u32>,
     cursor: Option<&str>,
 ) {
-    let mut has_query = has_query;
     if let Some(limit) = limit {
-        append_query_param(url, &mut has_query, "limit", &limit.to_string());
+        append_query_param(url, has_query, "limit", &limit.to_string());
     }
     if let Some(cursor) = cursor {
-        append_query_param(url, &mut has_query, "cursor", cursor);
+        append_query_param(url, has_query, "cursor", cursor);
     }
+}
+
+/// Refuses a read whose entry carries one attribute field without the other.
+///
+/// The projection contract is both-or-neither (API spec, section 6.4), and a
+/// half-projected entry would otherwise read as "this inode has no
+/// attributes" — a wrong answer rather than a missing one. Only a
+/// non-conforming server can produce it.
+fn check_attribute_projection(entry: &AuthoritativePathEntry) -> Result<()> {
+    if entry.attributes_are_projected_together() {
+        return Ok(());
+    }
+    Err(ClientError::Protocol(format!(
+        "server answered `{}` with one attribute field and not the other",
+        entry.absolute_path
+    )))
 }
 
 fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value: &str) {

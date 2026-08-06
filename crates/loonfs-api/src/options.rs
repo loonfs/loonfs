@@ -12,9 +12,68 @@
 //!
 //! These are plain in-process argument structs, not wire shapes: nothing here
 //! serializes. The request bodies that do cross the wire live in
-//! [`crate::v0`], and each surface resolves these options into one.
+//! [`crate::v0`], and each surface resolves these options into one. A read's
+//! options reach the wire as query parameters the surface builds from them.
 
-use crate::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo};
+use crate::{
+    AttributeKey, AttributeRevisionNo, AttributeValue, CommitId, DeleteDirectoryBehavior,
+    DestinationBehavior, InodeId, RevisionNo,
+};
+use std::collections::BTreeMap;
+
+/// Options for stating one path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatPathOptions {
+    /// Project the inode's attribute map and its revision onto the answer.
+    ///
+    /// Defaults to on. A stat answers for one path, and an attribute map is
+    /// capped at 64 KiB, so the cost of including it is bounded by the
+    /// request.
+    pub include_attributes: bool,
+}
+
+impl Default for StatPathOptions {
+    fn default() -> Self {
+        Self {
+            include_attributes: true,
+        }
+    }
+}
+
+/// Options for listing a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListPathEntriesOptions {
+    /// Project each entry's attribute map and its revision onto the answer.
+    ///
+    /// Defaults to off, and that default is what bounds a listing: a page
+    /// holds up to 1,000 entries and each attribute map may be 64 KiB, so an
+    /// always-on projection would put a 64 MiB response behind a request that
+    /// declares no byte budget anywhere. A caller that wants attributes for a
+    /// whole directory asks for them, and pages accordingly.
+    pub include_attributes: bool,
+}
+
+/// Options for writing and removing an inode's attributes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UpdateAttributesOptions {
+    /// Attributes to write. Each key replaces whatever the inode holds under
+    /// it; keys the inode holds and this map does not name are left alone.
+    pub set: BTreeMap<AttributeKey, AttributeValue>,
+    /// Keys to remove.
+    pub remove: Vec<AttributeKey>,
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
+    /// When set, the update applies only while the path still resolves to
+    /// this inode, so a raced rebinding fails instead of writing attributes
+    /// onto the wrong inode.
+    pub expected_inode_id: Option<InodeId>,
+    /// When set, the update applies only while the inode's attribute revision
+    /// is still this one. Every update carries its own revision guard either
+    /// way, so a concurrent update never merges silently.
+    pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
+}
 
 /// Options for writing a file path.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -33,7 +33,7 @@ use crate::commit_engine::delete_namespace;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
-use crate::path::read::{load_metadata_view, ReadLoadContext};
+use crate::path::read::{load_metadata_view, AttributeProjection, ReadLoadContext};
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -135,7 +135,7 @@ async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     load_metadata_view(store, namespace_id, ReadLoadContext::latest())
         .await
         .expect("load latest view")
-        .resolve_path("/")
+        .resolve_path("/", AttributeProjection::Omit)
         .await
         .expect("resolve root");
 }
@@ -585,7 +585,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("load clone view");
     clone_view
-        .resolve_path("/docs/shared.txt")
+        .resolve_path("/docs/shared.txt", AttributeProjection::Omit)
         .await
         .expect("clone reads through the deleted source");
 
@@ -1831,7 +1831,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
     let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
         .await
         .expect("load view");
-    view.resolve_path("/docs/two.txt")
+    view.resolve_path("/docs/two.txt", AttributeProjection::Omit)
         .await
         .expect("tail commit stays readable");
 }
@@ -2048,9 +2048,12 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("load view");
     for round in 0..3 {
-        view.resolve_path(&format!("/docs/file-{round}.txt"))
-            .await
-            .expect("file readable after sweep");
+        view.resolve_path(
+            &format!("/docs/file-{round}.txt"),
+            AttributeProjection::Omit,
+        )
+        .await
+        .expect("file readable after sweep");
     }
 }
 
@@ -2715,7 +2718,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     load_metadata_view(&store, &clone, ReadLoadContext::latest())
         .await
         .expect("target readable after every pass")
-        .resolve_path("/docs/one.txt")
+        .resolve_path("/docs/one.txt", AttributeProjection::Omit)
         .await
         .expect("forked file readable");
 }
@@ -2854,7 +2857,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
     load_metadata_view(&store, &clone, ReadLoadContext::latest())
         .await
         .expect("target readable after retry")
-        .resolve_path("/docs/one.txt")
+        .resolve_path("/docs/one.txt", AttributeProjection::Omit)
         .await
         .expect("forked file readable");
 }
