@@ -1,7 +1,8 @@
 //! Behavior tests for namespace GC.
 
+use super::budget::PassBudget;
 use super::config::GcConfig;
-use super::live_set::collect_live_set;
+use super::live_set::{recollect_live_set, LiveSet};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
@@ -21,11 +22,11 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table,
-    metadata_table_prefix, wal_segment, wal_segment_prefix,
+    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_root,
+    metadata_table, metadata_table_prefix, wal_head, wal_segment, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 
 use crate::commit_engine::delete_namespace;
@@ -38,7 +39,8 @@ use futures::stream::BoxStream;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
-    BlockingStore, CountingStore, KeyPredicate, MetadataMapStore, OperationContext, OperationKind,
+    BlockingStore, CountingStore, KeyPredicate, MetadataMapStore, OperationClass, OperationContext,
+    OperationKind, RecordingStore,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
@@ -55,6 +57,41 @@ fn config() -> GcConfig {
 
 fn context(now_ms: u64) -> MutationContext {
     mutation_context("gc-test", now_ms)
+}
+
+/// The roots one unbounded collection finds, for tests that assert against
+/// the same set a pass marks.
+async fn live_set<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> LiveSet {
+    marked(store, namespace_id, context).await.0
+}
+
+/// What marking this namespace costs, in budget units. Marking is inside
+/// `max_objects`, so a bounded test asks for the roots plus the candidates
+/// it means to buy rather than for a number kept true by hand.
+async fn marking_units<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> u64 {
+    marked(store, namespace_id, context).await.1
+}
+
+async fn marked<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> (LiveSet, u64) {
+    let mut budget = PassBudget::new(None);
+    let live = recollect_live_set(store, namespace_id, &mut budget, context)
+        .await
+        .expect("collect live set")
+        .complete()
+        .expect("an unbounded collection cannot run out");
+    (live, budget.spent())
 }
 
 /// The durable lifecycle of one checkpoint record, stamp included.
@@ -1134,13 +1171,13 @@ async fn namespace_with_a_scan_worth_bounding(
     }
 }
 
-/// The reference scan is the one place a bounded pass used to do unbounded
-/// work. A one-object budget cannot finish it, and the honest response to
-/// that is to reclaim nothing and say so: the session and its content stay
-/// exactly where they were, `content_reclamation_deferred` reports the
-/// skip, and the walk keeps moving past the session rather than pinning
-/// itself to it. A later pass with room for the scan reaches the verdict an
-/// unbounded pass would have reached.
+/// A budget with room for the roots and one candidate a pass has nothing
+/// left for the reference scan, and the honest response to that is to
+/// reclaim nothing and say so: the session and its content stay exactly
+/// where they were, `content_reclamation_deferred` reports the skip, and
+/// the walk keeps moving past the session rather than pinning itself to it.
+/// A later pass with room for the scan reaches the verdict an unbounded
+/// pass would have reached.
 #[tokio::test]
 async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1152,20 +1189,18 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
     let content_key =
         loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
-    let live = collect_live_set(&store, &namespace_id, &setup)
-        .await
-        .expect("collect live set");
+    let live = live_set(&store, &namespace_id, &setup).await;
     assert!(
         !live.manifests.is_empty() && !live.wal_segments.is_empty(),
         "the fixture must give the scan more than one object to read"
     );
 
-    // One object per pass: the sweep advances a key at a time until it
-    // reaches the session, and the scan behind that session never fits in
-    // one object. The walk has to get past it anyway.
+    // One candidate a pass: the sweep advances a key at a time until it
+    // reaches the session, and nothing is left over for the scan behind
+    // that session. The walk has to get past it anyway.
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let mut tiny = config();
-    tiny.max_objects = Some(1);
+    tiny.max_objects = Some(marking_units(&store, &namespace_id, &past).await + 1);
     let mut cursor: Option<String> = None;
     let mut deferred = false;
     let mut passes = 0;
@@ -1173,7 +1208,7 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
         passes += 1;
         assert!(
             passes <= 64,
-            "a one-object budget must still walk the namespace to the end"
+            "a one-candidate budget must still walk the namespace to the end"
         );
         tiny.cursor.clone_from(&cursor);
         let pass = gc_namespace(&store, &namespace_id, &tiny, &past)
@@ -1197,7 +1232,7 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
     }
     assert!(
         deferred,
-        "a one-object budget cannot afford the scan, and the pass must say so"
+        "a budget spent on the roots cannot afford the scan, and the pass must say so"
     );
     assert!(
         store.head(&content_key).await.expect("head").is_some(),
@@ -1223,6 +1258,214 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .is_none());
+}
+
+/// Marking spends out of the same budget as everything else, and it spends
+/// first. One unit buys the head and the metadata root beside it and
+/// nothing more: no floor, no manifest, and above all no retained WAL
+/// chain, which is where the unmetered reading used to be. The pass says it
+/// ran out rather than reporting an empty pass, which is what an operator
+/// would otherwise read as a clean namespace.
+#[tokio::test]
+async fn a_budget_below_the_roots_reads_no_chain_and_says_it_ran_out() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
+    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
+    assert!(
+        live_set(&inner, &namespace_id, &aged)
+            .await
+            .wal_segments
+            .len()
+            > 1,
+        "the fixture must retain a chain worth more than one unit"
+    );
+
+    let store = RecordingStore::new(inner, KeyPredicate::any());
+    let mut tiny = config();
+    tiny.max_objects = Some(1);
+    let report = gc_namespace(&store, &namespace_id, &tiny, &aged)
+        .await
+        .expect("one-unit pass");
+
+    let mut exhausted_before_marking = GcResponse::empty(namespace_id.clone());
+    exhausted_before_marking.budget_exhausted = true;
+    exhausted_before_marking.content_reclamation_deferred = true;
+    assert_eq!(
+        report, exhausted_before_marking,
+        "a pass that never marked decides nothing and invents no cursor"
+    );
+    let mut read = store.take_get_keys();
+    read.sort();
+    assert_eq!(
+        read,
+        vec![
+            metadata_root(namespace_id.as_str()),
+            wal_head(namespace_id.as_str())
+        ],
+        "the pair the pass charged itself for is all it read"
+    );
+}
+
+/// The chain loader is shared with foreground reads and cannot stop
+/// partway, so the pass refuses to start a load it has nothing left to pay
+/// for. A budget sized to everything before the chain therefore stops at
+/// that gate: no segment is fetched, no candidate is decided, and a rerun
+/// with room does the whole job.
+#[tokio::test]
+async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
+    let (upload_id, ..) =
+        complete_upload_for_gc(&inner, &namespace_id, b"unpublished\n", &setup).await;
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let (live, marking) = marked(&inner, &namespace_id, &past).await;
+    let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
+    assert!(chain_units > 0, "the fixture must retain a chain");
+
+    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str()));
+    let store = CountingStore::new(inner, segment_reads);
+    let mut at_the_gate = config();
+    at_the_gate.max_objects = Some(marking - chain_units);
+    let report = gc_namespace(&store, &namespace_id, &at_the_gate, &past)
+        .await
+        .expect("pass stopped at the chain gate");
+
+    assert!(report.budget_exhausted);
+    assert_eq!(report.next_cursor, None);
+    assert_eq!(report.retained_candidates, 0, "no candidate was examined");
+    assert_eq!(report.deleted_upload_sessions, 0);
+    assert_eq!(
+        store.count(OperationClass::Read),
+        0,
+        "the gate holds before the chain is fetched, not after"
+    );
+
+    // The same namespace, unbounded: the work the gate deferred is exactly
+    // the work that gets done.
+    let resumed = gc_namespace(&store, &namespace_id, &config(), &past)
+        .await
+        .expect("unbounded rerun");
+    assert!(!resumed.budget_exhausted);
+    assert_eq!(resumed.deleted_upload_sessions, 1);
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_none());
+}
+
+/// Marking decodes and validates every retained segment already, so the
+/// content those commits name is read off the same bodies rather than by a
+/// second pass over the same objects. One complete pass, one fetch per
+/// segment — and the reference that only exists in a retained WAL record
+/// still protects its bytes, because that harvest is where it comes from.
+#[tokio::test]
+async fn a_complete_pass_fetches_each_retained_segment_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
+    let (upload_id, content_ref, content_store_id, prepared) =
+        complete_upload_for_gc(&inner, &namespace_id, b"wal-only\n", &setup).await;
+    // Nothing has been flushed since this publish, so the newest WAL
+    // segment is the only place the reference lives.
+    publish_completed_content(
+        &inner,
+        &namespace_id,
+        "/docs/wal-only.txt",
+        content_ref.clone(),
+        prepared,
+        &setup,
+    )
+    .await;
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let retained = live_set(&inner, &namespace_id, &past).await.wal_segments;
+    assert!(!retained.is_empty(), "the fixture must retain a chain");
+
+    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str()));
+    let store = RecordingStore::new(inner, segment_reads);
+    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+        .await
+        .expect("unbounded pass");
+
+    let mut fetches: BTreeMap<String, usize> = BTreeMap::new();
+    for key in store.take_get_keys() {
+        *fetches.entry(key).or_default() += 1;
+    }
+    assert_eq!(
+        fetches.keys().cloned().collect::<BTreeSet<_>>(),
+        retained,
+        "a pass reads the retained chain and nothing else under the segment prefix"
+    );
+    for (key, count) in &fetches {
+        assert_eq!(*count, 1, "segment `{key}` was fetched {count} times");
+    }
+    assert_eq!(
+        report.deleted_content_objects, 0,
+        "a reference that only a retained WAL record carries still protects its bytes"
+    );
+    assert!(store.head(&content_key).await.expect("head").is_some());
+    assert_eq!(
+        report.deleted_upload_sessions, 1,
+        "the session itself has said everything it will say"
+    );
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_none());
+}
+
+/// Checkpoint records are read one at a time while marking, and each one
+/// costs a unit like everything else. A budget that covers the head-and-root
+/// pair, the floor, and exactly one of six records stops inside that loop:
+/// one record read, nothing marked, nothing decided.
+#[tokio::test]
+async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    add_bounded_gc_fixture(&inner, &namespace_id, &setup).await;
+    let aged = context(
+        now_after_newest_object(
+            &inner,
+            &namespace_id,
+            UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1,
+        )
+        .await,
+    );
+
+    let record_reads = KeyPredicate::prefix(checkpoint_prefix(namespace_id.as_str()));
+    let store = CountingStore::new(inner, record_reads);
+    let mut bounded = config();
+    bounded.max_objects = Some(3);
+    let report = gc_namespace(&store, &namespace_id, &bounded, &aged)
+        .await
+        .expect("pass stopped among the records");
+
+    assert!(report.budget_exhausted);
+    assert_eq!(report.next_cursor, None);
+    assert_eq!(report.retained_candidates, 0);
+    assert_eq!(
+        (
+            report.deleted_wal_segments,
+            report.deleted_metadata_tables,
+            report.deleted_manifests,
+            report.deleted_checkpoint_records,
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(
+        store.count(OperationClass::Read),
+        1,
+        "the third unit bought exactly one record read"
+    );
 }
 
 /// The only reference keeping this content alive lives in the newest WAL
@@ -2775,7 +3018,10 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     )
     .await;
     let mut bounded_config = config();
-    bounded_config.max_objects = Some(3);
+    // Three candidates a pass, on top of what marking this namespace's
+    // roots costs every time the pass rebuilds them.
+    bounded_config.max_objects =
+        Some(marking_units(&bounded_store, &namespace_id, &context(bounded_now)).await + 3);
     let mut bounded_report = GcResponse::empty(namespace_id.clone());
     let mut passes = 0;
     loop {
@@ -2847,7 +3093,9 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     let wal_prefix = wal_segment_prefix(namespace_id.as_str());
     let store = CountingStore::new(inner, KeyPredicate::prefix(wal_prefix));
     let mut bounded = config();
-    bounded.max_objects = Some(2);
+    // Two candidates a pass, plus the roots the pass marks before it walks.
+    bounded.max_objects = Some(marking_units(&store, &namespace_id, &aged).await + 2);
+    store.reset();
 
     let first = gc_namespace(&store, &namespace_id, &bounded, &aged)
         .await
@@ -2917,7 +3165,8 @@ async fn stale_cursor_rebuilds_roots_before_resuming() {
     }
     let first_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
     let mut bounded = config();
-    bounded.max_objects = Some(1);
+    // One candidate a pass, on top of the roots the pass marks first.
+    bounded.max_objects = Some(marking_units(&store, &namespace_id, &context(first_now)).await + 1);
     let first = gc_namespace(&store, &namespace_id, &bounded, &context(first_now))
         .await
         .expect("first bounded pass");
@@ -2936,9 +3185,7 @@ async fn stale_cursor_rebuilds_roots_before_resuming() {
         .expect("new checkpoint");
     let resume_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
     let resume_context = context(resume_now);
-    let live = collect_live_set(&store, &namespace_id, &resume_context)
-        .await
-        .expect("collect advanced live set");
+    let live = live_set(&store, &namespace_id, &resume_context).await;
 
     let mut resume = config();
     resume.cursor = Some(cursor);

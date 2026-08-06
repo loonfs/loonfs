@@ -30,7 +30,6 @@ use crate::storage::content::delete_unpublished_content_object;
 use loonfs_api::wire::control::{UploadSessionLifecycle, UploadSessionState};
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalDelta};
 use loonfs_api::{ContentId, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -349,23 +348,26 @@ impl<'a> ContentReferences<'a> {
 ///
 /// The roots are the same ones the rest of the pass uses: every manifest the
 /// live set protects, which includes each fork basis a fork-owned checkpoint
-/// record pins, plus every retained WAL segment for commits that are durable
+/// record pins, plus the retained WAL chain for commits that are durable
 /// but not yet materialized. A fork target can only carry forward references
 /// that were in the basis it forked from, and a commit in any other
 /// namespace can only name content minted by that namespace's own sessions,
 /// so those two sources are the whole reachable set.
 ///
-/// Every root read costs a budget unit — one per manifest opened, one per
-/// page of revision rows, one per WAL segment fetched — so this scan is
-/// part of the pass's bound rather than an exception to it. Running out
-/// stops the scan where it stands and reports
-/// [`ScanOutcome::BudgetExhausted`]; the caller retains the session that
-/// triggered it, marks the pass as having deferred content reclamation,
-/// and carries on. A namespace whose scan never fits therefore keeps its
-/// completed content — `max_objects` has to be at least the scan's size
-/// for content reclamation to happen at all — but the sweep around it
-/// still advances, which is the difference between leaking content for a
-/// while and not collecting anything ever.
+/// Only the manifest half is read here. The chain's references were
+/// harvested off the bodies marking already decoded, so this half is a set
+/// union rather than a second pass over the same objects.
+///
+/// Every manifest root read costs a budget unit — one per manifest opened,
+/// one per page of revision rows — so this scan is part of the pass's bound
+/// rather than an exception to it. Running out stops the scan where it
+/// stands and reports [`ScanOutcome::BudgetExhausted`]; the caller retains
+/// the session that triggered it, marks the pass as having deferred content
+/// reclamation, and carries on. A namespace whose scan never fits therefore
+/// keeps its completed content — `max_objects` has to be at least the
+/// scan's size for content reclamation to happen at all — but the sweep
+/// around it still advances, which is the difference between leaking
+/// content for a while and not collecting anything ever.
 async fn collect_referenced_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -415,30 +417,10 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
         }
     }
 
-    for segment_key in &live.wal_segments {
-        if !budget.try_charge() {
-            return Ok(ScanOutcome::BudgetExhausted);
-        }
-        let Some(bytes) = store
-            .get(segment_key, None)
-            .await
-            .map_err(|error| CoreError::store(segment_key, &error))?
-        else {
-            // A retained segment that vanished mid-pass is exactly the
-            // ambiguity rule 5 is about.
-            return Ok(ScanOutcome::Unavailable);
-        };
-        let Ok(envelope) = decode_wal_segment_envelope_zstd(&bytes) else {
-            return Ok(ScanOutcome::Unavailable);
-        };
-        for record in &envelope.payload.records {
-            for delta in &record.deltas {
-                if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
-                    referenced.insert(content_ref.content_id.clone());
-                }
-            }
-        }
-    }
+    // The retained chain's own references came back with the marking that
+    // validated it, already paid for there, so no segment is fetched twice
+    // in one pass.
+    referenced.extend(live.wal_content_ids.iter().cloned());
 
     Ok(ScanOutcome::Complete(referenced))
 }

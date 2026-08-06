@@ -4502,9 +4502,13 @@
           "degraded_retention"
         ],
         "properties": {
+          "budget_exhausted": {
+            "type": "boolean",
+            "description": "True when the pass stopped because `max_objects` ran out before it\nfinished. Whatever it did before that is reported here and stands;\nrerun with the returned cursor, or with a larger budget, to\ncontinue. A budget too small for the namespace's own roots stops a\npass before it decides anything at all, which is what this says and\nan empty report on its own does not."
+          },
           "content_reclamation_deferred": {
             "type": "boolean",
-            "description": "True when the pass skipped completed-content reclamation because\nthe reference collection it needs did not fit in `max_objects`.\nNothing was ever decided from a partial collection and the rest of\nthe sweep ran normally; a later pass with room for the whole scan\nreclaims what this one left behind."
+            "description": "True when the pass skipped completed-content reclamation because\nwhat it needs — the namespace's live roots, then the reference\ncollection over them — did not fit in `max_objects`. Nothing was\never decided from a partial collection; a later pass with room for\nthe whole scan reclaims what this one left behind. A pass that had\nroom for the roots swept every other candidate normally around the\nskip, and one that did not also reports `budget_exhausted`."
           },
           "degraded_retention": {
             "type": "boolean",

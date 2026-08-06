@@ -1,19 +1,23 @@
 //! Collects the live set: every object the current namespace state
 //! can still reach, re-verified in chunks as the sweep advances.
 
+use super::budget::PassBudget;
 use super::fork_checkpoints::fork_target_proven_gone;
 use super::reap::lease_expired;
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::basis::{read_head_and_metadata_basis, resolve_retention_floor_seq};
+use crate::namespace::basis::{
+    read_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
+};
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use futures::StreamExt;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, NamespaceState,
 };
-use loonfs_api::{ManifestObjectId, NamespaceId};
+use loonfs_api::wire::wal::WalDelta;
+use loonfs_api::{ContentId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{checkpoint_prefix, metadata_manifest_object};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +28,12 @@ pub(super) struct LiveSet {
     pub(super) manifests: BTreeSet<ManifestObjectId>,
     pub(super) tables: BTreeSet<String>,
     pub(super) wal_segments: BTreeSet<String>,
+    /// Content the retained chain's commits append, harvested from the same
+    /// decoded bodies the chain walk validated. These are the references
+    /// that protect bytes a durable commit named but no manifest has
+    /// materialized yet, and reading them here is why no later scan fetches
+    /// a segment a second time.
+    pub(super) wal_content_ids: BTreeSet<ContentId>,
     pub(super) checkpoint_keys: BTreeSet<String>,
     /// Still-active records whose basis manifest is verifiably absent —
     /// the crash window between record write and verification. The pass
@@ -34,6 +44,32 @@ pub(super) struct LiveSet {
     pub(super) degraded: bool,
     /// The inspected namespace head is the terminal, absorbing tombstone.
     pub(super) namespace_deleted: bool,
+}
+
+/// What one collection produced. Marking is all or nothing: a partial root
+/// set is not a smaller answer, it is no answer, and deciding a deletion
+/// against one would delete something live.
+pub(super) enum LiveSetCollection {
+    Complete(LiveSet),
+    BudgetExhausted,
+}
+
+impl LiveSetCollection {
+    /// The roots, when the collection got all of them.
+    #[cfg(test)]
+    pub(super) fn complete(self) -> Option<LiveSet> {
+        match self {
+            Self::Complete(live) => Some(live),
+            Self::BudgetExhausted => None,
+        }
+    }
+}
+
+/// Whether the pass may go on from here, or stopped because its budget did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SweepStep {
+    Continue,
+    BudgetExhausted,
 }
 
 /// Delete-time re-verification state (rule 3): deletion decisions consult a
@@ -60,28 +96,56 @@ impl SweepVerifier {
         &mut self,
         store: &S,
         namespace_id: &NamespaceId,
+        budget: &mut PassBudget,
         context: &MutationContext,
-    ) -> Result<()> {
+    ) -> Result<SweepStep> {
         if self.decided_since_collect >= self.reverify_chunk {
-            self.live = Arc::new(collect_live_set(store, namespace_id, context).await?);
-            self.degraded |= self.live.degraded;
-            self.decided_since_collect = 0;
+            match recollect_live_set(store, namespace_id, budget, context).await? {
+                LiveSetCollection::Complete(live) => {
+                    self.live = Arc::new(live);
+                    self.degraded |= self.live.degraded;
+                    self.decided_since_collect = 0;
+                }
+                // Rule 3 does not bend for a budget: a decision needs a
+                // live set no staler than the chunk, so a pass that cannot
+                // pay for a fresh one stops sweeping rather than deciding
+                // against the stale one.
+                LiveSetCollection::BudgetExhausted => return Ok(SweepStep::BudgetExhausted),
+            }
         }
         self.decided_since_collect += 1;
-        Ok(())
+        Ok(SweepStep::Continue)
     }
 }
 
-pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
+/// Collects against a freshly read head and basis. Re-collecting is what a
+/// mid-sweep refresh is for, so it pays for the pair like the pass's own
+/// first read did.
+pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    budget: &mut PassBudget,
     context: &MutationContext,
-) -> Result<LiveSet> {
-    let now_ms = context.now_ms;
+) -> Result<LiveSetCollection> {
+    if !budget.try_charge() {
+        return Ok(LiveSetCollection::BudgetExhausted);
+    }
     let loaded = read_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
-    let head = loaded.head.envelope.state;
+    collect_live_set(store, namespace_id, &loaded, budget, context).await
+}
+
+/// Collects from the head and basis the pass already read and charged for.
+pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    loaded: &LoadedNamespaceBasis,
+    budget: &mut PassBudget,
+    context: &MutationContext,
+) -> Result<LiveSetCollection> {
+    let now_ms = context.now_ms;
+    let head = &loaded.head.envelope.state;
     // A namespace with no root of its own roots no manifest here: the
     // genesis basis has none, and a fork target's basis is a source-prefix
     // object that the source's own pass protects through the fork-owned
@@ -96,7 +160,10 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     });
     // A missing floor means retain from the namespace's birth sequence
     // (format spec, "WAL floor").
-    let floor_seq = resolve_retention_floor_seq(store, &head)
+    if !budget.try_charge() {
+        return Ok(LiveSetCollection::BudgetExhausted);
+    }
+    let floor_seq = resolve_retention_floor_seq(store, head)
         .await
         .map_err(CoreError::load_head)?;
 
@@ -105,6 +172,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         manifests: BTreeSet::new(),
         tables: BTreeSet::new(),
         wal_segments: BTreeSet::new(),
+        wal_content_ids: BTreeSet::new(),
         checkpoint_keys: BTreeSet::new(),
         missing_basis_records: BTreeSet::new(),
         degraded: false,
@@ -133,6 +201,9 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     let mut checkpoint_keys = store.list_prefix_stream(&checkpoints_prefix);
     while let Some(item) = checkpoint_keys.next().await {
         let key = item.map_err(|error| CoreError::store(&checkpoints_prefix, &error))?;
+        if !budget.try_charge() {
+            return Ok(LiveSetCollection::BudgetExhausted);
+        }
         let Some(body) = store
             .get_with_metadata(&key)
             .await
@@ -159,6 +230,9 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
                     CheckpointOwner::Fork {
                         target_namespace_id,
                     } => {
+                        if !budget.try_charge() {
+                            return Ok(LiveSetCollection::BudgetExhausted);
+                        }
                         fork_target_proven_gone(store, target_namespace_id, &record, context)
                             .await?
                     }
@@ -204,6 +278,9 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     // are trusted to protect data — the envelope loader checks the payload
     // checksum).
     for manifest_object_id in live.manifests.clone() {
+        if !budget.try_charge() {
+            return Ok(LiveSetCollection::BudgetExhausted);
+        }
         let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
         match load_namespace_manifest_envelope_if_present(
             store,
@@ -242,6 +319,13 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     // root-to-head replay (rule 7). A terminal namespace has no replay
     // future: its chain ages out.
     if !namespace_deleted && head.seq > floor_seq {
+        // The loader is shared with foreground reads and the changefeed, so
+        // it carries no budget and cannot stop partway. What the pass can
+        // do is refuse to start a load it has nothing left to pay for, and
+        // charge the whole chain as one block once it validates.
+        if budget.exhausted() {
+            return Ok(LiveSetCollection::BudgetExhausted);
+        }
         let chain = load_validated_wal_chain(
             store,
             WalChainLoadRequest {
@@ -257,10 +341,24 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
         })?;
-        for segment in chain.segments() {
+        let segments = chain.segments();
+        if !budget.charge_block(u64::try_from(segments.len()).unwrap_or(u64::MAX)) {
+            return Ok(LiveSetCollection::BudgetExhausted);
+        }
+        for segment in segments {
             live.wal_segments.insert(segment.object_key().to_owned());
+            // The bodies are decoded and validated right here, so the
+            // content these commits name is read off them now rather than
+            // by a second pass over the same objects.
+            for record in segment.records() {
+                for delta in &record.deltas {
+                    if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
+                        live.wal_content_ids.insert(content_ref.content_id.clone());
+                    }
+                }
+            }
         }
     }
 
-    Ok(live)
+    Ok(LiveSetCollection::Complete(live))
 }

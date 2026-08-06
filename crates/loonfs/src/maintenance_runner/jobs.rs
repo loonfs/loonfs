@@ -336,17 +336,23 @@ fn gc_step_result(gc: GcResponse, submitted_cursor: Option<&str>) -> Maintenance
 /// Progress is where the enumeration got to, never what the counters say. A
 /// pass that hands back a cursor past the one it was given walked keyspace
 /// and has more to walk, so it runs again. A pass that hands back the very
-/// cursor it started from decided nothing at all — its budget died inside
-/// the content-reference scan, which every pass has to redo before it may
-/// delete anything — and repeating it immediately would repeat that exact
-/// result forever, so it parks like any other zero-progress step and waits
-/// for something to change.
+/// cursor it started from decided nothing at all — its budget died in the
+/// marking or the content-reference scan, both of which every pass redoes
+/// before it may delete anything — and repeating it immediately would
+/// repeat that exact result forever, so it parks like any other
+/// zero-progress step and waits for something to change.
 ///
 /// A pass that walked the whole keyspace is finished: idle when it freed
 /// nothing, eligible again when it did, because reclamation cascades — a
 /// deleted manifest can leave tables unreferenced. Ambiguous roots that
 /// suppressed deletion are the one clean-pass case with work provably left
 /// undone, so they park distinctly rather than reading as idle.
+///
+/// A pass with no cursor at all can still have run out: a namespace whose
+/// roots cost more than `max_objects` never gets as far as the keyspace,
+/// and says so outright. That parks too, and pointedly not as idle — idle
+/// clears the stored continuation, and this pass freed nothing and walked
+/// nowhere.
 fn gc_conclusion(gc: &GcResponse, submitted_cursor: Option<&str>) -> MaintenanceStepConclusion {
     match gc.next_cursor.as_deref() {
         Some(next_cursor) if Some(next_cursor) == submitted_cursor => {
@@ -354,6 +360,7 @@ fn gc_conclusion(gc: &GcResponse, submitted_cursor: Option<&str>) -> Maintenance
         }
         Some(_) => MaintenanceStepConclusion::Progressed,
         None if reclaimed_anything(gc) => MaintenanceStepConclusion::Progressed,
+        None if gc.budget_exhausted => MaintenanceStepConclusion::Blocked,
         None if gc.degraded_retention => MaintenanceStepConclusion::Blocked,
         None => MaintenanceStepConclusion::Idle,
     }
@@ -516,6 +523,48 @@ mod tests {
             gc_conclusion(&parked, Some("first")),
             MaintenanceStepConclusion::Blocked,
             "a pass whose budget died before it decided anything must not requeue hot"
+        );
+    }
+
+    /// A budget that ran out before the pass finished is a park, not an
+    /// idle: idle clears the stored continuation, and a pass that never got
+    /// to the keyspace has nothing to show for itself but that.
+    #[test]
+    fn a_pass_that_ran_out_of_budget_parks_unless_it_got_somewhere_first() {
+        let namespace = namespace_id("demo");
+        let mut marked_nothing = GcResponse::empty(namespace.clone());
+        marked_nothing.budget_exhausted = true;
+        assert_eq!(
+            gc_conclusion(&marked_nothing, None),
+            MaintenanceStepConclusion::Blocked
+        );
+
+        // The same pass on a resumed step: it echoes the cursor it came in
+        // with rather than inventing progress, which parks it too.
+        let mut echoed = GcResponse::empty(namespace.clone());
+        echoed.budget_exhausted = true;
+        echoed.next_cursor = Some("page-2".to_owned());
+        assert_eq!(
+            gc_conclusion(&echoed, Some("page-2")),
+            MaintenanceStepConclusion::Blocked
+        );
+
+        let mut swept_then_stopped = GcResponse::empty(namespace.clone());
+        swept_then_stopped.budget_exhausted = true;
+        swept_then_stopped.next_cursor = Some("page-3".to_owned());
+        assert_eq!(
+            gc_conclusion(&swept_then_stopped, Some("page-2")),
+            MaintenanceStepConclusion::Progressed,
+            "a pass that walked keyspace before running out has more to walk"
+        );
+
+        let mut reclaimed_then_stopped = GcResponse::empty(namespace);
+        reclaimed_then_stopped.budget_exhausted = true;
+        reclaimed_then_stopped.deleted_wal_segments = 2;
+        assert_eq!(
+            gc_conclusion(&reclaimed_then_stopped, None),
+            MaintenanceStepConclusion::Progressed,
+            "reclamation cascades whether or not the budget lasted"
         );
     }
 

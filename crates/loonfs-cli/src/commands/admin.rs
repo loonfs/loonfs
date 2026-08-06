@@ -125,7 +125,10 @@ async fn run_admin_gc(
             Some(total) => accumulate_gc_response(total, pass),
             None => response = Some(pass),
         }
-        if single_pass || next_cursor.is_none() {
+        // A pass that hands back the cursor it was given ran out of budget
+        // before deciding anything, and would again; the summary's
+        // budget-exhausted line says why the drain stopped short.
+        if single_pass || next_cursor.is_none() || next_cursor == request.cursor {
             break;
         }
         request.cursor = next_cursor;
@@ -221,6 +224,7 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
     total.retained.add(&pass.retained);
     total.degraded_retention |= pass.degraded_retention;
     total.content_reclamation_deferred |= pass.content_reclamation_deferred;
+    total.budget_exhausted |= pass.budget_exhausted;
     // The summary keeps the soonest obligation any pass reported — the same
     // soonest-wake rule the maintenance runner applies. A later pass with
     // nothing deferred does not erase an earlier pass's pending horizon.

@@ -4915,14 +4915,33 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_success(&quiet_gc);
         assert!(!stderr_string(&quiet_gc).contains("pass 1:"));
 
-        // Supplying a candidate budget requests exactly one pass and exposes
-        // the opaque cursor instead of the CLI's default completion loop.
-        let bounded_gc = harness.run(&[
+        // The budget covers marking too, so one object buys the head and
+        // the root beside it and nothing else. That pass says it ran out
+        // rather than reporting a clean sweep, and hands back no position
+        // it never reached.
+        let starved_gc = harness.run(&[
             "--json",
             "admin",
             "gc",
             "--max-objects",
             "1",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&starved_gc);
+        let starved_data = json_data(&starved_gc);
+        assert_eq!(starved_data["budget_exhausted"], true);
+        assert!(starved_data.get("next_cursor").is_none());
+
+        // Supplying a budget with room for the roots and some candidates
+        // requests exactly one pass and exposes the opaque cursor instead
+        // of the CLI's default completion loop.
+        let bounded_gc = harness.run(&[
+            "--json",
+            "admin",
+            "gc",
+            "--max-objects",
+            "8",
             "--profile",
             profile,
         ]);
