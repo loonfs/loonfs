@@ -26,6 +26,7 @@
 
 #![warn(missing_docs)]
 
+mod attributes;
 mod capability;
 mod commit_identity;
 mod content;
@@ -90,6 +91,11 @@ pub mod wire {
     }
 }
 
+pub use attributes::{
+    AttributeKey, AttributeKeyValidationError, AttributeRevisionNo, AttributeValue, Attributes,
+    AttributesError, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES,
+    MAX_ATTRIBUTE_LIST_MEMBERS, MAX_ATTRIBUTE_VALUE_BYTES, RESERVED_ATTRIBUTE_KEY_PREFIX,
+};
 pub use capability::{
     direct_put_checksum_feature, CapabilityDocument, CapabilityDocumentError,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,

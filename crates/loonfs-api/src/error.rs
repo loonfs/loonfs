@@ -138,6 +138,7 @@ error_codes! {
     DirectoryNotEmpty => "directory_not_empty",
     StaleHead => "stale_head",
     StaleRevision => "stale_revision",
+    StaleAttributes => "stale_attributes",
     NotDeleted => "not_deleted",
     WriterFenced => "writer_fenced",
     WouldCycle => "would_cycle",
@@ -205,6 +206,10 @@ impl ErrorCode {
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
+            // An attribute update was decided against a different attribute
+            // revision than the one it wrote from, whether the caller stated
+            // that revision or the update's own guard observed it.
+            | ErrorCode::StaleAttributes
             // Undelete's target is not the root of a live deletion: a
             // state conflict, resolved by re-reading namespace state.
             | ErrorCode::NotDeleted

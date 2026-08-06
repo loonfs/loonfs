@@ -216,7 +216,9 @@ macro_rules! numeric_id {
     };
 }
 
+pub(crate) use numeric_id;
 pub(crate) use string_id;
+pub(crate) use validation_error;
 
 // ---------------------------------------------------------------------------
 // Shared validators and generators

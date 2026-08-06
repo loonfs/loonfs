@@ -6,8 +6,8 @@
 
 use super::ValidatedContentToken;
 use crate::{
-    AbsolutePath, ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, ManifestId, NamespaceId,
-    RevisionNo, WriterEpoch,
+    AbsolutePath, AttributeRevisionNo, ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId,
+    ManifestId, NamespaceId, RevisionNo, WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,6 +96,12 @@ pub struct ErrorDetails {
     /// Revision that is actually current; absent when the inode has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_revision: Option<RevisionNo>,
+    /// Attribute revision the request expected to be current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
+    /// Attribute revision that is actually current for the inode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_attributes_revision_no: Option<AttributeRevisionNo>,
     /// Change-feed cursor the request asked to resume after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_seq: Option<ChangeSeq>,
