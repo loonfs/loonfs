@@ -142,7 +142,9 @@ Reading
 
   loonfs stat <path>
     Describe one path: kind, size, revision, content digest, and the
-    inode's attributes as `attr.<key>` lines
+    inode's attributes as `attr.<key>` lines. Control characters in a
+    value print escaped, so a value stays on its own line; --json carries
+    the value itself
 
   loonfs cat <path> [--revision <n>]
     Print a file's bytes to stdout; --revision prints that revision instead

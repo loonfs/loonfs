@@ -667,6 +667,10 @@ impl Client {
     }
 
     /// [`Self::list_path_entries_all`], projecting what `options` asks for.
+    ///
+    /// Every entry it returns came through
+    /// [`Self::list_path_entries_page_with_options`], which checks each one
+    /// against the projection, so the aggregate does not re-check them.
     pub async fn list_path_entries_all_with_options(
         &self,
         spec: &NamespacePath,
@@ -740,7 +744,7 @@ impl Client {
         let listing: ListPathEntriesResponse =
             self.request_json::<(), _>(self.get(&url), None).await?;
         for entry in &listing.entries {
-            check_attribute_projection(entry)?;
+            check_attribute_projection(entry, options.include_attributes)?;
         }
         Ok(listing)
     }
@@ -773,7 +777,7 @@ impl Client {
         );
         let entry: AuthoritativePathEntry =
             self.request_json::<(), _>(self.get(&url), None).await?;
-        check_attribute_projection(&entry)?;
+        check_attribute_projection(&entry, options.include_attributes)?;
         Ok(entry)
     }
 
@@ -2581,18 +2585,28 @@ fn append_optional_pagination_query(
     }
 }
 
-/// Refuses a read whose entry carries one attribute field without the other.
+/// Refuses a read whose entry did not project what the request asked for.
 ///
-/// The projection contract is both-or-neither (API spec, section 6.4), and a
-/// half-projected entry would otherwise read as "this inode has no
-/// attributes" — a wrong answer rather than a missing one. Only a
-/// non-conforming server can produce it.
-fn check_attribute_projection(entry: &AuthoritativePathEntry) -> Result<()> {
-    if entry.attributes_are_projected_together() {
+/// Three shapes are wrong, and each one misleads differently. An entry
+/// carrying one attribute field without the other breaks the both-or-neither
+/// contract (API spec, section 6.4). An entry that dropped a projection the
+/// request asked for reads as "this inode has no attributes", which is a
+/// wrong answer rather than a missing one. An entry that added a projection
+/// the request declined carries bytes the caller sized its pages against not
+/// receiving. Only a non-conforming server produces any of them.
+fn check_attribute_projection(entry: &AuthoritativePathEntry, include: bool) -> Result<()> {
+    if entry.attributes_match_projection(include) {
         return Ok(());
     }
+    let lean = if !entry.attributes_are_projected_together() {
+        "one attribute field and not the other"
+    } else if include {
+        "no attributes, for a read that asked for them"
+    } else {
+        "attributes, for a read that did not ask for them"
+    };
     Err(ClientError::Protocol(format!(
-        "server answered `{}` with one attribute field and not the other",
+        "server answered `{}` with {lean}",
         entry.absolute_path
     )))
 }
@@ -2621,6 +2635,113 @@ mod tests {
 
     fn test_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef::blob_v1(ContentId::generate(), bytes)
+    }
+
+    /// A decoded stat answer carrying whichever attribute fields the test
+    /// wants, so the guard can be driven past every shape a server could
+    /// send back.
+    fn decoded_entry(
+        attributes: Option<loonfs_api::Attributes>,
+        attributes_revision_no: Option<loonfs_api::AttributeRevisionNo>,
+    ) -> AuthoritativePathEntry {
+        AuthoritativePathEntry {
+            namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            absolute_path: loonfs_api::AbsolutePath::parse("/docs/report.txt").expect("path"),
+            inode_id: loonfs_api::InodeId(42),
+            inode_kind: loonfs_api::InodeKind::File,
+            head_seq: loonfs_api::ChangeSeq(7),
+            parent_inode_id: Some(loonfs_api::InodeId(1)),
+            display_name: Some(loonfs_api::DisplayName::parse("report.txt").expect("display name")),
+            revision_no: None,
+            size_bytes: None,
+            content_ref: None,
+            committed_at_ms: None,
+            attributes,
+            attributes_revision_no,
+        }
+    }
+
+    fn projected_entry() -> AuthoritativePathEntry {
+        decoded_entry(
+            Some(loonfs_api::Attributes::default()),
+            Some(loonfs_api::AttributeRevisionNo(0)),
+        )
+    }
+
+    fn unprojected_entry() -> AuthoritativePathEntry {
+        decoded_entry(None, None)
+    }
+
+    /// The four answers that match what was asked for. An empty map counts
+    /// as projected: `{}` at its revision is the cleared state, not a
+    /// missing answer.
+    #[test]
+    fn a_conforming_answer_passes_the_projection_check() {
+        check_attribute_projection(&projected_entry(), true).expect("empty map is projected");
+        check_attribute_projection(&unprojected_entry(), false)
+            .expect("nothing asked, nothing sent");
+
+        let populated = decoded_entry(
+            Some(
+                loonfs_api::Attributes::new(std::collections::BTreeMap::from([(
+                    loonfs_api::AttributeKey::parse("owner").expect("key"),
+                    loonfs_api::AttributeValue::String {
+                        value: "platform".to_owned(),
+                    },
+                )]))
+                .expect("attributes"),
+            ),
+            Some(loonfs_api::AttributeRevisionNo(3)),
+        );
+        check_attribute_projection(&populated, true).expect("a populated map is projected");
+        // The same entry with the projection dropped is the other passing
+        // shape, so both directions are covered by construction.
+        check_attribute_projection(&decoded_entry(None, None), false).expect("both absent");
+    }
+
+    /// A read that asked for attributes and got none back is refused: read
+    /// as an answer it would say the inode holds nothing.
+    #[test]
+    fn a_dropped_projection_is_refused() {
+        let error = check_attribute_projection(&unprojected_entry(), true)
+            .expect_err("a requested projection that went missing is a protocol error");
+        let message = error.to_string();
+        assert!(
+            message.contains("asked for them"),
+            "the message should say which way the answer leaned: {message}"
+        );
+    }
+
+    /// A read that declined attributes and got them anyway is refused too:
+    /// the caller sized its pages against not receiving them.
+    #[test]
+    fn an_unrequested_projection_is_refused() {
+        let error = check_attribute_projection(&projected_entry(), false)
+            .expect_err("an unrequested projection is a protocol error");
+        let message = error.to_string();
+        assert!(
+            message.contains("did not ask for them"),
+            "the message should say which way the answer leaned: {message}"
+        );
+    }
+
+    /// Half an answer stays refused under either request, and says so.
+    #[test]
+    fn a_half_projected_entry_is_refused_either_way() {
+        for (entry, include) in [
+            (
+                decoded_entry(Some(loonfs_api::Attributes::default()), None),
+                true,
+            ),
+            (
+                decoded_entry(None, Some(loonfs_api::AttributeRevisionNo(0))),
+                false,
+            ),
+        ] {
+            let error = check_attribute_projection(&entry, include)
+                .expect_err("one field without the other is a protocol error");
+            assert!(error.to_string().contains("one attribute field"), "{error}");
+        }
     }
 
     fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {

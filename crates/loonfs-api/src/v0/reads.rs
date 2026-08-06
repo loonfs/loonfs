@@ -60,8 +60,24 @@ pub struct AuthoritativePathEntry {
 impl AuthoritativePathEntry {
     /// Reports whether the entry's two attribute fields agree: both
     /// projected, or neither.
+    ///
+    /// This says the entry is internally consistent, not that it answered
+    /// what was asked. A reader that made the request checks
+    /// [`Self::attributes_match_projection`] instead.
     pub fn attributes_are_projected_together(&self) -> bool {
         self.attributes.is_some() == self.attributes_revision_no.is_some()
+    }
+
+    /// Reports whether the entry projected what the request asked for:
+    /// `include` means both fields are present, and not including means
+    /// both are absent.
+    ///
+    /// An empty map counts as present. `{}` at its revision is the cleared
+    /// state, which is an answer, so a read that asked for attributes and
+    /// got nothing back did not receive the empty map — it received a
+    /// response that dropped the projection.
+    pub fn attributes_match_projection(&self, include: bool) -> bool {
+        self.attributes_are_projected_together() && self.attributes.is_some() == include
     }
 }
 

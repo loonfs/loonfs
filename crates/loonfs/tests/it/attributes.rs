@@ -7,10 +7,10 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    CommitId, CreateNamespaceOptions, ListPathEntriesOptions, PageRequest, PutFileOptions,
-    StatPathOptions, UpdateAttributesOptions,
+    AttributeRevisionNo, CommitId, CreateNamespaceOptions, ListPathEntriesOptions, PageRequest,
+    PutFileOptions, StatPathOptions, UpdateAttributesOptions,
 };
-use loonfs_api::{semantic_commit_fingerprint, AttributeRevisionNo};
+use loonfs_api::semantic_commit_fingerprint;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use std::collections::BTreeMap;
@@ -255,10 +255,46 @@ fn the_embedded_capability_document_advertises_attributes() {
     let fs = runtime(temp_dir.path(), "attributes-capability");
     let document = fs.reader.capabilities();
     assert_eq!(
-        document.features.get(loonfs_api::FEATURE_ATTRIBUTES),
+        document.features.get(loonfs::FEATURE_ATTRIBUTES),
         Some(&true)
     );
     document
         .validate()
         .expect("`core.attributes` is parented by the advertised core plane");
+}
+
+/// Pins the re-export surface by compiling against it.
+///
+/// This module names `loonfs` and nothing else, so an embedded application
+/// can write an attribute update and gate on the feature key without
+/// depending on `loonfs-api` directly. Dropping any of these re-exports
+/// fails to compile here rather than reaching an application.
+mod reexports {
+    use loonfs::{
+        AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, InodeId,
+        UpdateAttributesOptions, FEATURE_ATTRIBUTES,
+    };
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn the_attribute_vocabulary_is_reachable_through_the_runtime_crate() {
+        let key = AttributeKey::parse("owner").expect("attribute key");
+        let value = AttributeValue::String {
+            value: "platform".to_owned(),
+        };
+        let options = UpdateAttributesOptions {
+            set: BTreeMap::from([(key.clone(), value.clone())]),
+            remove: vec![AttributeKey::parse("stale").expect("attribute key")],
+            expected_inode_id: Some(InodeId(42)),
+            expected_attributes_revision_no: Some(AttributeRevisionNo(3)),
+            ..UpdateAttributesOptions::default()
+        };
+        assert_eq!(options.set.get(&key), Some(&value));
+        assert_eq!(options.remove.len(), 1);
+
+        let map = Attributes::new(BTreeMap::from([(key, value)])).expect("attribute map");
+        assert_eq!(map.len(), 1);
+
+        assert_eq!(FEATURE_ATTRIBUTES, "core.attributes");
+    }
 }
