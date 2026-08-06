@@ -1,5 +1,6 @@
 //! Behavior tests for WAL segment preparation and validated chain loading.
 
+use super::reader::RECENT_SEGMENT_PREFETCH_CONCURRENCY;
 use super::*;
 use crate::commit::{
     materialize_commit, wal_payload_from_materialized_commit, CommitFingerprint, CommitIr,
@@ -9,9 +10,10 @@ use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WalSegmentId, WriterEpoch};
-use loonfs_objectstore::keys::wal_segment;
+use loonfs_objectstore::keys::{wal_segment, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
 use std::borrow::Cow;
 use tempfile::tempdir;
 
@@ -681,85 +683,186 @@ fn newest_first_pointers(chain: &[PreparedWalSegment]) -> Vec<WalSegmentPointer>
         .collect()
 }
 
-#[tokio::test]
-async fn tail_count_from_contiguous_hints_reads_no_bodies() {
-    // The store stays empty on purpose: any body fetch would fail with
-    // `MissingWalObject`, so a successful count came from pointers alone.
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+async fn store_chain<S: ObjectStore + ?Sized>(store: &S, chain: &[PreparedWalSegment]) {
+    for segment in chain {
+        store
+            .put_if_absent(
+                &segment.object_key,
+                Bytes::copy_from_slice(&segment.encoded_bytes),
+            )
+            .await
+            .expect("write wal segment");
+    }
+}
+
+fn tail_count_request<'a>(
+    namespace_id: &'a NamespaceId,
+    chain_base_seq: ChangeSeq,
+    head_seq: ChangeSeq,
+    hints: &'a [WalSegmentPointer],
+) -> WalChainLoadRequest<'a> {
+    WalChainLoadRequest {
+        namespace_id,
+        chain_base_seq,
+        head_seq,
+        visible_tip: hints.first().cloned(),
+        stop_after_seq: None,
+        recent_segments: hints,
+    }
+}
+
+/// The count takes no store at all, so "reads no bodies" is the signature
+/// rather than an assertion — and it holds at the longest tail a landed
+/// publish can leave behind, which is what the head is sized to describe.
+#[test]
+fn tail_count_from_contiguous_hints_covers_the_longest_legal_tail() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let chain = prepared_unstored_chain(&namespace_id, 3);
+    let boundary = crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
+    let chain = prepared_unstored_chain(&namespace_id, boundary);
     let hints = newest_first_pointers(&chain);
 
-    let count = count_visible_wal_tail_segments(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(3),
-            visible_tip: Some(hints[0].clone()),
-            stop_after_seq: None,
-            recent_segments: &hints,
-        },
-    )
-    .await
+    let count = count_visible_wal_tail_segments(tail_count_request(
+        &namespace_id,
+        ChangeSeq(0),
+        ChangeSeq(boundary),
+        &hints,
+    ))
     .expect("count from pointers");
-    assert_eq!(count, 3);
+    assert_eq!(count, boundary);
 
     // A manifest boundary inside the hinted window is honored: only the
     // segments above it are tail.
-    let count = count_visible_wal_tail_segments(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(2),
-            head_seq: ChangeSeq(3),
-            visible_tip: Some(hints[0].clone()),
-            stop_after_seq: None,
-            recent_segments: &hints,
-        },
-    )
-    .await
+    let count = count_visible_wal_tail_segments(tail_count_request(
+        &namespace_id,
+        ChangeSeq(boundary - 1),
+        ChangeSeq(boundary),
+        &hints,
+    ))
     .expect("count above interior boundary");
     assert_eq!(count, 1);
 
     // An empty tail costs nothing and consults nothing.
-    let count = count_visible_wal_tail_segments(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(3),
-            head_seq: ChangeSeq(3),
-            visible_tip: Some(hints[0].clone()),
-            stop_after_seq: None,
-            recent_segments: &hints,
-        },
-    )
-    .await
+    let count = count_visible_wal_tail_segments(tail_count_request(
+        &namespace_id,
+        ChangeSeq(boundary),
+        ChangeSeq(boundary),
+        &hints,
+    ))
     .expect("count of empty tail");
     assert_eq!(count, 0);
 }
 
+/// A head that does not name its whole tail is corrupted or predates the
+/// coverage guarantee. Either way the count says so instead of walking
+/// chain links one round trip at a time on an inspection call.
+#[test]
+fn tail_count_rejects_a_head_that_does_not_describe_its_tail() {
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let chain = prepared_unstored_chain(&namespace_id, 4);
+    let pointers = newest_first_pointers(&chain);
+    let head_seq = ChangeSeq(4);
+
+    // A run that stops short of the basis boundary.
+    let error = count_visible_wal_tail_segments(tail_count_request(
+        &namespace_id,
+        ChangeSeq(0),
+        head_seq,
+        &pointers[..2],
+    ))
+    .expect_err("a short run must not be walked");
+    assert_eq!(
+        error,
+        WalChainLoadError::TailNotDescribedByHead {
+            boundary_seq: ChangeSeq(0),
+            described_segments: 2,
+            described_from_seq: ChangeSeq(3),
+        }
+    );
+
+    // A run with a hole in it: nothing below the hole is described.
+    let discontiguous = [
+        pointers[0].clone(),
+        pointers[2].clone(),
+        pointers[3].clone(),
+    ];
+    let error = count_visible_wal_tail_segments(tail_count_request(
+        &namespace_id,
+        ChangeSeq(0),
+        head_seq,
+        &discontiguous,
+    ))
+    .expect_err("a discontiguous run must not be walked");
+    assert!(matches!(
+        error,
+        WalChainLoadError::TailNotDescribedByHead {
+            described_segments: 1,
+            ..
+        }
+    ));
+
+    // A run whose newest entry is not the tip carries no authority at all.
+    let error = count_visible_wal_tail_segments(WalChainLoadRequest {
+        namespace_id: &namespace_id,
+        chain_base_seq: ChangeSeq(0),
+        head_seq,
+        visible_tip: Some(pointers[0].clone()),
+        stop_after_seq: None,
+        recent_segments: &pointers[1..],
+    })
+    .expect_err("a run that does not start at the tip must not be walked");
+    assert!(matches!(
+        error,
+        WalChainLoadError::TailNotDescribedByHead {
+            described_segments: 1,
+            ..
+        }
+    ));
+}
+
+/// The two readers diverge on purpose: replay walks chain links for history
+/// the head no longer names, and the count refuses to.
 #[tokio::test]
-async fn tail_count_walks_only_past_the_hinted_window() {
+async fn tail_count_and_chain_load_agree_where_the_head_describes_the_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let chain = prepared_unstored_chain(&namespace_id, 3);
-    // Store only the middle segment: the tip is hint-covered and the
-    // oldest is resolved through the middle segment's chain link, so
-    // neither body may be touched.
-    store
-        .put_if_absent(
-            &chain[1].object_key,
-            Bytes::copy_from_slice(&chain[1].encoded_bytes),
-        )
+    store_chain(&store, &chain).await;
+    let pointers = newest_first_pointers(&chain);
+
+    let request = tail_count_request(&namespace_id, ChangeSeq(0), ChangeSeq(3), &pointers);
+    let count = count_visible_wal_tail_segments(request.clone()).expect("count tail");
+    let loaded = load_validated_wal_chain(&store, request)
         .await
-        .expect("write middle wal segment");
+        .expect("load chain");
+    assert_eq!(count as usize, loaded.segments().len());
+    assert_eq!(count, 3);
+
+    let unhinted = WalChainLoadRequest {
+        recent_segments: &[],
+        ..tail_count_request(&namespace_id, ChangeSeq(0), ChangeSeq(3), &pointers)
+    };
+    count_visible_wal_tail_segments(unhinted.clone())
+        .expect_err("an unhinted head describes no tail to count");
+    let loaded = load_validated_wal_chain(&store, unhinted)
+        .await
+        .expect("replay still walks the links");
+    assert_eq!(loaded.segments().len(), 3);
+}
+
+/// The change feed reads history below the accelerator window, so the chain
+/// loader keeps its predecessor walk.
+#[tokio::test]
+async fn chain_load_walks_predecessor_links_past_the_hinted_window() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let chain = prepared_unstored_chain(&namespace_id, 3);
+    store_chain(&store, &chain).await;
     let pointers = newest_first_pointers(&chain);
     let short_window = &pointers[..2];
 
-    let count = count_visible_wal_tail_segments(
+    let loaded = load_validated_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
@@ -771,122 +874,147 @@ async fn tail_count_walks_only_past_the_hinted_window() {
         },
     )
     .await
-    .expect("count past hinted window");
-    assert_eq!(count, 3);
+    .expect("load past the hinted window");
+
+    assert_eq!(loaded.segments().len(), 3);
+    assert_eq!(loaded.segments()[0].records()[0].seq, ChangeSeq(1));
 }
 
+/// A boundary-length replay is one wave shape: every segment arrives from
+/// the hints, none is fetched twice, and the width is the prefetch bound.
 #[tokio::test]
-async fn tail_count_matches_loaded_chain_length() {
+async fn boundary_length_replay_fetches_every_segment_once_in_bounded_waves() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = ConcurrencyWatchStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+    );
+    let segments =
+        usize::try_from(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS).expect("a segment count");
+    assert!(
+        segments > RECENT_SEGMENT_PREFETCH_CONCURRENCY,
+        "a tail inside one wave would not pin the wave's width"
+    );
+    let chain = prepared_unstored_chain(&namespace_id, crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS);
+    store_chain(&store, &chain).await;
+    let hints = newest_first_pointers(&chain);
+
+    let loaded = load_validated_wal_chain(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS),
+            visible_tip: Some(hints[0].clone()),
+            stop_after_seq: None,
+            recent_segments: &hints,
+        },
+    )
+    .await
+    .expect("load the whole legal tail");
+
+    assert_eq!(loaded.segments().len(), segments);
+    let reads = store.reads();
+    assert_eq!(
+        reads.total, segments,
+        "every segment came from the prefetch; the walk re-fetched none"
+    );
+    assert_eq!(reads.peak_in_flight, RECENT_SEGMENT_PREFETCH_CONCURRENCY);
+}
+
+/// The prefetch fetches only the segments the replay gap intersects.
+#[tokio::test]
+async fn prefetch_fetches_only_the_segments_the_gap_intersects() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+    );
+    let chain = prepared_unstored_chain(&namespace_id, 5);
+    store_chain(&store, &chain).await;
+    let hints = newest_first_pointers(&chain);
+    store.reset();
+
+    let loaded = load_validated_wal_chain(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(5),
+            visible_tip: Some(hints[0].clone()),
+            stop_after_seq: Some(ChangeSeq(3)),
+            recent_segments: &hints,
+        },
+    )
+    .await
+    .expect("load the newest two segments");
+
+    assert_eq!(loaded.segments().len(), 2);
+    let mut fetched = store.take_get_keys();
+    fetched.sort();
+    let mut expected = vec![chain[3].object_key.clone(), chain[4].object_key.clone()];
+    expected.sort();
+    assert_eq!(fetched, expected);
+}
+
+/// Prefetching moves where the bytes come from, not what is checked: every
+/// chain validation runs in the sequential pass either way.
+#[tokio::test]
+async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let chain = prepared_unstored_chain(&namespace_id, 3);
-    for segment in &chain {
-        store
-            .put_if_absent(
-                &segment.object_key,
-                Bytes::copy_from_slice(&segment.encoded_bytes),
-            )
-            .await
-            .expect("write wal segment");
-    }
-    let pointers = newest_first_pointers(&chain);
+    store_chain(&store, &chain).await;
+    // Rewrite the middle segment's body at its own key: it decodes, but its
+    // payload no longer matches the checksum its successor's chain link
+    // recorded.
+    let mut tampered = chain[1].envelope.clone();
+    tampered.payload.records[0].committed_at_ms += 1;
+    rewrap_envelope(&mut tampered);
+    store
+        .put_overwrite(
+            &chain[1].object_key,
+            Bytes::from(encode_wal_segment_envelope_zstd(&tampered).expect("encode tampered")),
+        )
+        .await
+        .expect("overwrite middle wal segment");
+    let hints = newest_first_pointers(&chain);
 
-    for hints in [&pointers[..], &[]] {
-        let request = WalChainLoadRequest {
+    let hinted = load_validated_wal_chain(
+        &store,
+        WalChainLoadRequest {
             namespace_id: &namespace_id,
             chain_base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(3),
-            visible_tip: Some(pointers[0].clone()),
+            visible_tip: Some(hints[0].clone()),
             stop_after_seq: None,
-            recent_segments: hints,
-        };
-        let count = count_visible_wal_tail_segments(&store, request.clone())
-            .await
-            .expect("count tail");
-        let loaded = load_validated_wal_chain(&store, request)
-            .await
-            .expect("load chain");
-        assert_eq!(count as usize, loaded.segments().len());
-        assert_eq!(count, 3);
-    }
-}
-
-#[tokio::test]
-async fn tail_count_ignores_hints_that_do_not_start_at_the_tip() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let chain = prepared_unstored_chain(&namespace_id, 2);
-    for segment in &chain {
-        store
-            .put_if_absent(
-                &segment.object_key,
-                Bytes::copy_from_slice(&segment.encoded_bytes),
-            )
-            .await
-            .expect("write wal segment");
-    }
-    let pointers = newest_first_pointers(&chain);
-    let mut lying_tip = pointers[0].clone();
-    lying_tip.end_seq = ChangeSeq(999);
-    let garbage = [lying_tip, pointers[1].clone()];
-
-    let count = count_visible_wal_tail_segments(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(2),
-            visible_tip: Some(pointers[0].clone()),
-            stop_after_seq: None,
-            recent_segments: &garbage,
+            recent_segments: &hints,
         },
     )
     .await
-    .expect("count despite garbage hints");
-    assert_eq!(count, 2);
-}
-
-#[tokio::test]
-async fn tail_count_reports_broken_chains_truthfully() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    // A segment claiming seqs (1, 2] with no predecessor link cannot reach
-    // a chain base of 0.
-    let orphan = prepared_create_directory_segment(
-        &namespace_id,
-        None,
-        "c_count_orphan",
-        "orphan",
-        ChangeSeq(1),
-        ChangeSeq(2),
-    );
-    store
-        .put_if_absent(
-            &orphan.object_key,
-            Bytes::copy_from_slice(&orphan.encoded_bytes),
-        )
-        .await
-        .expect("write wal segment");
-    let tip = orphan.envelope.pointer(orphan.object_key.clone());
-
-    let error = count_visible_wal_tail_segments(
+    .expect_err("a prefetched corrupt segment must be rejected");
+    let serial = load_validated_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
             chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(2),
-            visible_tip: Some(tip),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(hints[0].clone()),
             stop_after_seq: None,
             recent_segments: &[],
         },
     )
     .await
-    .expect_err("broken chain must not count");
-    assert!(matches!(
-        error,
-        WalChainLoadError::Replay(WalReplayError::BrokenChainLink { .. })
-    ));
+    .expect_err("the serial path rejects it too");
+
+    assert_eq!(
+        hinted,
+        WalChainLoadError::PointerMismatch {
+            object_key: chain[1].object_key.clone(),
+        }
+    );
+    assert_eq!(hinted, serial);
 }

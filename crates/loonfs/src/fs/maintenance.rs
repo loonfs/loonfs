@@ -13,9 +13,8 @@ use crate::{
     MaintenanceStepResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
     ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
 };
-use crate::{Result, RuntimeError};
-use loonfs_core::cache::load_namespace_head_summary;
-use std::num::NonZeroU64;
+use crate::{ChangeSeq, Result, RuntimeError};
+use loonfs_core::cache::{load_namespace_fold_basis, load_namespace_head_summary};
 
 impl FsAdmin {
     /// A mutating engine under this handle's actor identity.
@@ -172,7 +171,21 @@ impl FsAdmin {
         options: MetadataMaintenanceOptions,
         status_before: &NamespaceStatusResponse,
     ) -> Result<MetadataMaintenanceResponse> {
-        let wal_flush = if status_before.wal_tail_segments >= options.max_wal_tail_segments.get() {
+        let fold = status_before.wal_tail_segments >= options.max_wal_tail_segments.get();
+        self.fold_then_reorganize(namespace_id, fold, status_before.head_seq)
+            .await
+    }
+
+    /// Folds the tail when asked, then merges one reorganization unit,
+    /// reporting both. `observed_head_seq` is what the caller saw before the
+    /// fold, and is only reported when another publisher wins the head race.
+    async fn fold_then_reorganize(
+        &self,
+        namespace_id: &NamespaceId,
+        fold: bool,
+        observed_head_seq: ChangeSeq,
+    ) -> Result<MetadataMaintenanceResponse> {
+        let wal_flush = if fold {
             match self.run_wal_flush(namespace_id).await {
                 Ok(flush) => match flush.outcome {
                     FlushWalOutcome::Published => WalFlushStepOutcome::Flushed {
@@ -186,9 +199,7 @@ impl FsAdmin {
                     }
                 },
                 Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
-                    WalFlushStepOutcome::RaceLost {
-                        observed_head_seq: status_before.head_seq,
-                    }
+                    WalFlushStepOutcome::RaceLost { observed_head_seq }
                 }
                 Err(error) => return Err(error),
             }
@@ -353,35 +364,28 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Runs one metadata-upkeep pass at a threshold of one segment, so any
-    /// visible WAL tail is folded.
+    /// Folds any visible WAL tail, then merges one reorganization unit.
     ///
-    /// One name over the one step path: exactly
-    /// [`Self::maintenance_step_namespace`] with a metadata-only plan. The
-    /// reorganization unit rides along and is reported beside the fold —
-    /// upkeep is one action, and folding a tail is what creates the delta
-    /// runs a merge consumes. A namespace with an empty tail has nothing to
-    /// fold and reports [`WalFlushStepOutcome::NotNeeded`]: this is the
-    /// flush an operator asks for, not a way to publish a manifest for a
-    /// namespace that has never been written to.
+    /// The same upkeep [`Self::maintenance_step_namespace`] runs for a
+    /// metadata plan, at a threshold of one segment. The reorganization unit
+    /// rides along and is reported beside the fold — upkeep is one action,
+    /// and folding a tail is what creates the delta runs a merge consumes. A
+    /// namespace with an empty tail has nothing to fold and reports
+    /// [`WalFlushStepOutcome::NotNeeded`]: this is the flush an operator
+    /// asks for, not a way to publish a manifest for a namespace that has
+    /// never been written to.
+    ///
+    /// It asks whether there is a tail rather than how long one is, so it
+    /// does not read the namespace status. That matters for the one
+    /// namespace shape status refuses to answer for — a head that does not
+    /// describe its own WAL tail — because folding the tail is the repair.
     pub async fn flush_wal(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<MetadataMaintenanceResponse> {
-        let step = self
-            .maintenance_step_namespace(
-                namespace_id,
-                MaintenancePlan {
-                    metadata: Some(MetadataMaintenanceOptions {
-                        max_wal_tail_segments: NonZeroU64::MIN,
-                    }),
-                    ..MaintenancePlan::default()
-                },
-            )
-            .await?;
-        Ok(step
-            .metadata
-            .expect("a plan selecting metadata upkeep reports it"))
+        let basis = load_namespace_fold_basis(self.core.store(), namespace_id).await?;
+        self.fold_then_reorganize(namespace_id, basis.has_unflushed_wal_tail, basis.head_seq)
+            .await
     }
 
     /// Advances the namespace retention floor when a verified checkpoint

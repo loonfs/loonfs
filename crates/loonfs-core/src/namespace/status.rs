@@ -6,7 +6,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::{read_head_and_metadata_basis, resolve_retention_floor_seq};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
-use loonfs_api::wire::control::NamespaceState;
+use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -23,18 +23,37 @@ pub struct NamespaceHeadSummary {
     /// Number of visible WAL segments after the current manifest.
     ///
     /// Counted from the head's chain pointers (`recent_segments`, published
-    /// under the same CAS as the tip); segment bodies are fetched and
-    /// validated only for a tail extending past the hinted window. An
-    /// inspection count for maintenance gating and operators — replay
-    /// consumers load the validated chain instead.
+    /// under the same CAS as the tip and long enough to name every segment a
+    /// legal unflushed tail can hold); no segment body is read. A head that
+    /// under-describes its own tail fails the summary rather than being
+    /// walked. An inspection count for maintenance gating and operators —
+    /// replay consumers load the validated chain instead.
     pub wal_tail_segments: u64,
     pub retention_floor_seq: ChangeSeq,
 }
 
-pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
+/// Whether a namespace carries visible commits its basis manifest does not
+/// cover, and the head sequence they run to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamespaceFoldBasis {
+    pub head_seq: ChangeSeq,
+    pub has_unflushed_wal_tail: bool,
+}
+
+/// The head-derived half of a status: everything it reports except the WAL
+/// tail count.
+struct LoadedHeadBasis {
+    head: HeadState,
+    current_manifest_id: Option<ManifestId>,
+    /// Sequence the basis manifest covers; the visible tail sits above it.
+    basis_head_seq: ChangeSeq,
+    retention_floor_seq: ChangeSeq,
+}
+
+async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceHeadSummary> {
+) -> Result<LoadedHeadBasis> {
     let loaded = read_head_and_metadata_basis(store, expected_namespace_id)
         .await
         .map_err(|error| {
@@ -46,53 +65,85 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
             namespace_id: expected_namespace_id.clone(),
         });
     }
-    // The tail is counted from the basis manifest's coverage, whoever owns
-    // it: a fork target that has not flushed counts from its fork point.
-    let (current_manifest_id, basis_head_seq) = match loaded.basis.manifest() {
-        Some(basis) => {
-            let manifest = load_namespace_manifest_envelope(
-                store,
-                &basis.owner_namespace_id,
-                &basis.manifest_object_id,
-            )
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-            let own_manifest_id = loaded
-                .basis
-                .is_owned_by(expected_namespace_id)
-                .then_some(basis.manifest_id);
-            (own_manifest_id, manifest.payload.head_seq)
-        }
-        None => (None, ChangeSeq(0)),
-    };
-    let wal_tail_segments = count_visible_wal_tail_segments(
-        store,
-        WalChainLoadRequest {
-            namespace_id: expected_namespace_id,
-            chain_base_seq: basis_head_seq,
-            head_seq: head.seq,
-            visible_tip: head.visible_wal_tip.clone(),
-            stop_after_seq: None,
-            recent_segments: &head.recent_segments,
+    // The floor object is addressed by the head alone, so it is read beside
+    // the basis manifest rather than after it. The tail is measured from the
+    // basis manifest's coverage, whoever owns it: a fork target that has not
+    // flushed measures from its fork point.
+    let (basis, retention_floor_seq) = futures::join!(
+        async {
+            match loaded.basis.manifest() {
+                Some(basis) => load_namespace_manifest_envelope(
+                    store,
+                    &basis.owner_namespace_id,
+                    &basis.manifest_object_id,
+                )
+                .await
+                .map(|manifest| {
+                    let own_manifest_id = loaded
+                        .basis
+                        .is_owned_by(expected_namespace_id)
+                        .then_some(basis.manifest_id);
+                    (own_manifest_id, manifest.payload.head_seq)
+                }),
+                None => Ok((None, ChangeSeq(0))),
+            }
         },
-    )
-    .await
+        resolve_retention_floor_seq(store, &head)
+    );
+    let (current_manifest_id, basis_head_seq) = basis.map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
+    let retention_floor_seq = retention_floor_seq.map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+    })?;
+    Ok(LoadedHeadBasis {
+        head,
+        current_manifest_id,
+        basis_head_seq,
+        retention_floor_seq,
+    })
+}
+
+pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace_id: &NamespaceId,
+) -> Result<NamespaceHeadSummary> {
+    let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
+    let wal_tail_segments = count_visible_wal_tail_segments(WalChainLoadRequest {
+        namespace_id: expected_namespace_id,
+        chain_base_seq: loaded.basis_head_seq,
+        head_seq: loaded.head.seq,
+        visible_tip: loaded.head.visible_wal_tip.clone(),
+        stop_after_seq: None,
+        recent_segments: &loaded.head.recent_segments,
+    })
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
-    let retention_floor_seq = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
     Ok(NamespaceHeadSummary {
-        namespace_id: head.namespace_id,
-        head_seq: head.seq,
-        current_manifest_id,
+        namespace_id: loaded.head.namespace_id,
+        head_seq: loaded.head.seq,
+        current_manifest_id: loaded.current_manifest_id,
         wal_tail_segments,
-        retention_floor_seq,
+        retention_floor_seq: loaded.retention_floor_seq,
+    })
+}
+
+/// Answers the one question a WAL fold decides on — is there anything to
+/// fold — without sizing the tail.
+///
+/// [`load_namespace_head_summary`] answers it too, but only alongside a
+/// segment count the head must be able to describe. A head that
+/// under-describes its own tail is exactly the state an explicit fold
+/// repairs, so the fold must not be gated on the count it cannot produce.
+pub async fn load_namespace_fold_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace_id: &NamespaceId,
+) -> Result<NamespaceFoldBasis> {
+    let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
+    Ok(NamespaceFoldBasis {
+        head_seq: loaded.head.seq,
+        has_unflushed_wal_tail: loaded.basis_head_seq < loaded.head.seq,
     })
 }
 

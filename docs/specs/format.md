@@ -149,7 +149,8 @@ The load-bearing invariants of this layout, in one place:
 
 > **Throughput is group commit; deadlines are local monotonic budgets a
 > writer applies to itself.** No validator ever compares clocks, and
-> accelerators (`recent_segments`, WAL indexes) prefetch but never decide.
+> accelerators (`recent_segments`, WAL indexes) prefetch but never decide
+> what the history is.
 
 ### 1.4 Head update authority
 

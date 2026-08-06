@@ -178,6 +178,16 @@ pub enum WalChainLoadError {
     },
     #[error("WAL chain suffix does not cover requested cursor `{after_seq}`")]
     CursorNotCovered { after_seq: ChangeSeq },
+    #[error(
+        "namespace head describes `{described_segments}` visible WAL tail segments reaching down \
+         to seq `{described_from_seq}`, which does not reach the tail boundary at seq \
+         `{boundary_seq}`"
+    )]
+    TailNotDescribedByHead {
+        boundary_seq: ChangeSeq,
+        described_segments: u64,
+        described_from_seq: ChangeSeq,
+    },
     #[error("wal replay validation failed: {0}")]
     Replay(#[from] WalReplayError),
 }

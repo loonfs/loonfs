@@ -658,6 +658,7 @@ fn classify_wal_chain_load_error(error: &WalChainLoadError) -> ErrorCode {
         | WalChainLoadError::PointerMismatch { .. }
         | WalChainLoadError::HeadSeqMismatch { .. }
         | WalChainLoadError::CursorNotCovered { .. }
+        | WalChainLoadError::TailNotDescribedByHead { .. }
         | WalChainLoadError::Replay(_) => ErrorCode::NamespaceCorrupt,
     }
 }

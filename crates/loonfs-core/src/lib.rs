@@ -134,7 +134,8 @@ pub mod cache {
         DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
-        load_deleted_namespace_head_summary, load_namespace_head_summary, NamespaceHeadSummary,
+        load_deleted_namespace_head_summary, load_namespace_fold_basis,
+        load_namespace_head_summary, NamespaceFoldBasis, NamespaceHeadSummary,
     };
 }
 
