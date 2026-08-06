@@ -539,8 +539,8 @@ mod tests {
             MaintenanceStepConclusion::Blocked
         );
 
-        // The same pass on a resumed step: it echoes the cursor it came in
-        // with rather than inventing progress, which parks it too.
+        // The same pass on a resumed step returns the token it was given,
+        // byte for byte, because it made no progress. That parks it too.
         let mut echoed = GcResponse::empty(namespace.clone());
         echoed.budget_exhausted = true;
         echoed.next_cursor = Some("page-2".to_owned());
