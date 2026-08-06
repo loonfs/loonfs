@@ -1,6 +1,7 @@
 //! Checkpoint retention, reorganization, compaction, and publication budgets.
 
 use super::*;
+use loonfs_objectstore::keys::wal_segment_prefix;
 
 async fn current_manifest_id<S: ObjectStore + ?Sized>(
     store: &S,
@@ -700,8 +701,16 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
     assert!(!verified, "sub-floor basis must not verify");
 }
 
+async fn wal_segment_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
+    store
+        .list_prefix(&wal_segment_prefix(namespace_id.as_str()))
+        .await
+        .expect("list wal segments")
+        .len()
+}
+
 #[tokio::test]
-async fn publish_backpressure_rejects_when_wal_tail_outruns_maintenance() {
+async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -709,10 +718,12 @@ async fn publish_backpressure_rejects_when_wal_tail_outruns_maintenance() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let limit =
-        u32::try_from(crate::commit_engine::WalTailPolicy::DEFAULT.reject_writes_at_segments)
-            .expect("limit");
-    for round in 0..=limit {
+    let boundary =
+        usize::try_from(crate::commit_engine::WalTailPolicy::DEFAULT.reject_writes_at_segments)
+            .expect("the write-stop bound fits a segment count");
+
+    // Stop one short, so the next publish is the one that reaches the bound.
+    for round in 0..boundary - 1 {
         write_file_bytes(
             &store,
             &namespace_id,
@@ -724,6 +735,19 @@ async fn publish_backpressure_rejects_when_wal_tail_outruns_maintenance() {
         .await
         .expect("write within backpressure window");
     }
+    assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary - 1);
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/at-the-boundary.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("the publish that lands exactly at the bound is still admitted");
+    assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary);
 
     let error = write_file_bytes(
         &store,
@@ -734,8 +758,33 @@ async fn publish_backpressure_rejects_when_wal_tail_outruns_maintenance() {
         None,
     )
     .await
-    .expect_err("publish past the backpressure limit must be rejected");
+    .expect_err("a publish against a tail at the bound must be rejected");
     assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
+    assert_eq!(
+        wal_segment_count(&store, &namespace_id).await,
+        boundary,
+        "the rejection lands before the segment PUT, so nothing new is written"
+    );
+
+    // The whole legal tail is named by the head, so no reader has to walk
+    // predecessor links to reach any of it.
+    let head = read_head_object(&store, &namespace_id)
+        .await
+        .expect("read head")
+        .envelope
+        .state;
+    assert_eq!(head.recent_segments.len(), boundary);
+    assert_eq!(head.recent_segments.first(), head.visible_wal_tip.as_ref());
+    for pair in head.recent_segments.windows(2) {
+        let [newer, older] = pair else {
+            unreachable!("windows(2) yields pairs")
+        };
+        assert_eq!(
+            older.end_seq.0 + 1,
+            newer.start_seq.0,
+            "hints must be newest-first and gap-free"
+        );
+    }
 
     // Reads never gate: the change feed still serves the whole tail.
     let changes = list_changes_after(
@@ -746,7 +795,10 @@ async fn publish_backpressure_rejects_when_wal_tail_outruns_maintenance() {
     )
     .await
     .expect("list changes");
-    assert_eq!(changes.through_seq, ChangeSeq(129));
+    assert_eq!(
+        changes.through_seq,
+        ChangeSeq(u64::try_from(boundary).expect("one commit per segment"))
+    );
 }
 
 #[tokio::test]

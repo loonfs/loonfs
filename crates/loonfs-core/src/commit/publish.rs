@@ -2,6 +2,7 @@
 //! compare-and-swap that makes its commits visible.
 
 use super::{CommitHeadPublishError, CommitPlan};
+use crate::limits::RECENT_SEGMENTS_LIMIT;
 use crate::wal::PreparedWalSegment;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -121,13 +122,9 @@ pub fn prepare_commit_head_publish(
     })
 }
 
-/// How many segment pointers the head carries as a replay accelerator.
-///
-/// Newest first, tip included. The bound keeps the head one small object at
-/// any commit rate; readers needing older history walk the chain links,
-/// which remain the only authority.
-const RECENT_SEGMENTS_LIMIT: usize = 32;
-
+/// Rebuilds the head's replay accelerator: newest first, tip included,
+/// capped at [`RECENT_SEGMENTS_LIMIT`]. Readers reaching past it walk the
+/// chain links, which remain the only history authority.
 fn next_recent_segments(
     current_head: &HeadState,
     new_tip: WalSegmentPointer,
@@ -214,7 +211,7 @@ mod tests {
     }
     use loonfs_api::wire::control::WriterBlock;
     use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
-    use loonfs_api::{CommitId, InodeId, NamespaceId, WalSegmentId, WriterEpoch};
+    use loonfs_api::{CommitId, InodeId, NamespaceId, WalSegmentId, WriterEpoch, MAX_ID_BYTES};
 
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
         HeadState {
@@ -342,7 +339,8 @@ mod tests {
     #[test]
     fn head_publish_prepends_the_tip_and_truncates_recent_segments() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let mut current_head = head(namespace_id.clone(), ChangeSeq(100));
+        let limit = u64::try_from(RECENT_SEGMENTS_LIMIT).expect("limit fits a sequence");
+        let mut current_head = head(namespace_id.clone(), ChangeSeq(limit));
         let filler = |index: u64| {
             let segment = wal_segment(
                 namespace_id.clone(),
@@ -353,18 +351,19 @@ mod tests {
             );
             segment.envelope.pointer(segment.object_key.clone())
         };
-        current_head.recent_segments = (0..32).rev().map(filler).collect();
+        // A list already at the cap: the tip has to displace something.
+        current_head.recent_segments = (0..limit).rev().map(filler).collect();
         let oldest = current_head
             .recent_segments
             .last()
             .cloned()
             .expect("oldest");
-        let plan = plan(namespace_id.clone(), ChangeSeq(101));
+        let plan = plan(namespace_id.clone(), ChangeSeq(limit + 1));
         let wal = wal_segment(
             namespace_id,
-            ChangeSeq(100),
-            ChangeSeq(101),
-            ChangeSeq(101),
+            ChangeSeq(limit),
+            ChangeSeq(limit + 1),
+            ChangeSeq(limit + 1),
             1,
         );
 
@@ -372,7 +371,7 @@ mod tests {
             prepare_commit_head_publish(&current_head, &plan, &wal).expect("prepare head publish");
 
         let recent = &prepared.resulting_head.recent_segments;
-        assert_eq!(recent.len(), 32);
+        assert_eq!(recent.len(), RECENT_SEGMENTS_LIMIT);
         assert_eq!(recent[0], wal.envelope.pointer(wal.object_key.clone()));
         assert!(!recent.contains(&oldest), "oldest hint must fall off");
     }
@@ -477,5 +476,52 @@ mod tests {
             Err(CommitHeadPublishError::WalSegmentNamespaceMismatch { head, wal })
                 if head == NamespaceId::parse("demo").expect("valid namespace id") && wal == NamespaceId::parse("other").expect("valid namespace id")
         ));
+    }
+
+    /// Encodes a full accelerator through the real codec, so the numbers
+    /// the cap is justified by are measured rather than estimated.
+    fn encoded_head_bytes(namespace: &str, newest_seq: u64) -> usize {
+        let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
+        let segments: Vec<WalSegmentPointer> = (0..RECENT_SEGMENTS_LIMIT)
+            .map(|index| {
+                let offset = u64::try_from(index).expect("test index");
+                let seq = ChangeSeq(newest_seq - offset);
+                let segment_id = WalSegmentId::parse(format!("{:020}-{offset:016x}", seq.0))
+                    .expect("valid segment id");
+                WalSegmentPointer {
+                    object_key: wal_segment_key(namespace_id.as_str(), segment_id.as_str()),
+                    segment_id,
+                    start_seq: seq,
+                    end_seq: seq,
+                    payload_checksum: format!("sha256:{}", "b".repeat(64)),
+                }
+            })
+            .collect();
+        let mut state = head(namespace_id, ChangeSeq(newest_seq));
+        state.visible_wal_tip = segments.first().cloned();
+        state.recent_segments = segments;
+
+        let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, state)
+            .expect("head envelope");
+        encode_control_object(&envelope).expect("encode head").len()
+    }
+
+    /// The head is the one control object whose size grows with the tail it
+    /// describes, so raising the accelerator's cap is a claim about how big
+    /// the head gets. This measures it at the cap, from both ends of what
+    /// the identifier grammars allow.
+    #[test]
+    fn a_head_at_the_accelerator_cap_stays_a_small_object() {
+        const CEILING_BYTES: usize = 256 * 1024;
+
+        let realistic = encoded_head_bytes("demo", 4_200);
+        let worst_case = encoded_head_bytes(&"n".repeat(MAX_ID_BYTES), u64::MAX);
+
+        assert!(
+            worst_case < CEILING_BYTES,
+            "a full head encodes to {worst_case} bytes at the longest namespace id and \
+             sequence numbers the grammars allow, and {realistic} bytes at realistic ones; \
+             the ceiling is {CEILING_BYTES}"
+        );
     }
 }

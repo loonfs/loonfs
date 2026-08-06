@@ -35,6 +35,35 @@ pub const MAX_COMMIT_MESSAGE_BYTES: usize = 4096;
 /// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
 pub const CONTENTION_RETRY_LIMIT: usize = 8;
 
+/// Longest visible WAL tail, in segments, a namespace may carry unflushed.
+/// Every publish surface rejects at this length with `maintenance_required`,
+/// so a landed publication never leaves more than this behind.
+pub const MAX_UNFLUSHED_WAL_SEGMENTS: u64 = 128;
+
+/// Segment pointers the head carries as a replay accelerator, newest first
+/// and always including the tip. Sized so the head describes the whole
+/// legal unflushed tail rather than to keep the head small: a full list
+/// encodes to roughly 68 KiB at realistic identifier lengths and 107 KiB at
+/// the worst case the grammars allow.
+pub(crate) const RECENT_SEGMENTS_LIMIT: usize = 256;
+
+/// The head-coverage inequality, shared by the compile-time assertion below
+/// and the test that proves the assertion has teeth.
+const fn covers_every_unflushed_segment(pointers: usize) -> bool {
+    pointers >= MAX_UNFLUSHED_WAL_SEGMENTS as usize
+}
+
+// A reader that wants a segment the head does not name walks predecessor
+// links to reach it, one round trip per segment, so an accelerator shorter
+// than the tail the rejection bound admits is a latency cliff the write
+// path can legally produce. The two constants have to move together, and
+// that is an inequality rather than a judgement call, so it is checked
+// where a broken derivation is a compile error instead of a test failure.
+const _: () = assert!(
+    covers_every_unflushed_segment(RECENT_SEGMENTS_LIMIT),
+    "the head must describe every legal unflushed WAL segment"
+);
+
 /// Provider operation deadline, in milliseconds (`loonfs-objectstore`
 /// consumes it across every retry of one single-request operation).
 /// Multipart transfers of large immutable payloads carry no
@@ -232,6 +261,20 @@ mod tests {
         // 7 days of re-minting + 1 hour of receipt life + 20.5 minutes of
         // publication.
         assert_eq!(CONTENT_RECLAMATION_GRACE_MS, 608_400_000 + 1_230_000);
+    }
+
+    /// Same bargain as above: the head-coverage assertion is only worth
+    /// having if its predicate can fail, so one pointer short of the legal
+    /// tail is exercised too.
+    #[test]
+    fn the_head_coverage_floor_rejects_a_list_one_segment_short() {
+        assert!(covers_every_unflushed_segment(RECENT_SEGMENTS_LIMIT));
+        assert!(covers_every_unflushed_segment(
+            MAX_UNFLUSHED_WAL_SEGMENTS as usize
+        ));
+        assert!(!covers_every_unflushed_segment(
+            MAX_UNFLUSHED_WAL_SEGMENTS as usize - 1
+        ));
     }
 
     #[test]
