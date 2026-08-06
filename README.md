@@ -103,6 +103,8 @@ allow_remote_without_tls = true
 
 Connect remote clients with an `https://` server URL and the same `LOONFS_AUTH_TOKEN`. If a private CA issued the server certificate, pass its bundle with `--ca-cert-path`.
 
+If you are upgrading a deployment, flush any long WAL tail before you switch builds. This build reads how long a namespace's WAL tail is from the segment pointers its head carries, and heads written by earlier builds carried only the newest 32 of them. A namespace holding more unflushed segments than that answers the namespace status read with a head-coverage error, by design, until the tail is folded — so run `loonfs admin flush` against it (or recreate the namespace) with your current build first.
+
 ## Documentation
 
 Visit loonfs.com/docs to learn more.

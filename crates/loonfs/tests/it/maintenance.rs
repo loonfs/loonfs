@@ -7,7 +7,12 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, ErrorCode, MaintenancePlan, ManifestId,
-    PutFileOptions, ReorganizeStepOutcome, RuntimeError, SharedObjectStore, WalFlushStepOutcome,
+    NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeError, SharedObjectStore,
+    WalFlushStepOutcome,
+};
+use loonfs_api::wire::control::{
+    decode_control_object, encode_control_object, ControlObjectEnvelope, ControlObjectKind,
+    HeadState, HeadStateEnvelope,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, wal_head, wal_segment_prefix};
@@ -91,6 +96,93 @@ fn namespace_status_counts_wal_tail_without_reading_segments() {
         .expect("status with populated tail");
     assert_eq!(status.wal_tail_segments, 3);
     assert_eq!(store.count(OperationClass::Read), 0);
+}
+
+/// Pointers a head published before the accelerator was sized to cover the
+/// whole legal WAL tail.
+const LEGACY_RECENT_SEGMENTS: usize = 32;
+
+/// Rewrites a head's replay accelerator to its newest `keep` pointers,
+/// which is the shape a head published by an older build carries.
+fn truncate_recent_segments(store: &SharedObjectStore, namespace_id: &NamespaceId, keep: usize) {
+    let key = wal_head(namespace_id.as_str());
+    let bytes = block_on(store.get(&key, None))
+        .expect("read head")
+        .expect("head exists");
+    let envelope: ControlObjectEnvelope<HeadState> =
+        decode_control_object(&bytes, ControlObjectKind::WalHead).expect("decode head");
+    let mut state = envelope.state;
+    assert!(
+        state.recent_segments.len() > keep,
+        "the fixture must publish more pointers than the legacy window held"
+    );
+    state.recent_segments.truncate(keep);
+    let truncated =
+        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, state).expect("head envelope");
+    let encoded = encode_control_object(&truncated).expect("encode head");
+    block_on(store.put_overwrite(&key, bytes::Bytes::from(encoded))).expect("rewrite head");
+}
+
+/// The documented escape for a namespace whose WAL tail already outran the
+/// pointer window the head was published with: status refuses to answer,
+/// and an explicit flush is what repairs it.
+#[test]
+fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = store(temp_dir.path());
+    let fs = open_runtime(store.clone(), "legacy-head-test");
+    let namespace_id = namespace_id("demo");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for revision in 0..LEGACY_RECENT_SEGMENTS + 4 {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            &format!("/docs/hello-{revision}.txt"),
+            format!("rev {revision}").as_bytes(),
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    }
+    truncate_recent_segments(&store, &namespace_id, LEGACY_RECENT_SEGMENTS);
+
+    let error = fs
+        .namespace_status_blocking(&namespace_id)
+        .expect_err("a head that does not describe its tail cannot be counted");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+    assert!(
+        error
+            .to_string()
+            .contains("does not reach the tail boundary"),
+        "unexpected message: {error}"
+    );
+
+    let flushed = fs
+        .flush_wal_blocking(&namespace_id)
+        .expect("an explicit flush does not read the status it cannot get");
+    assert!(
+        matches!(flushed.wal_flush, WalFlushStepOutcome::Flushed { .. }),
+        "unexpected flush outcome: {:?}",
+        flushed.wal_flush
+    );
+
+    let status = fs
+        .namespace_status_blocking(&namespace_id)
+        .expect("status after the flush");
+    assert_eq!(status.wal_tail_segments, 0);
+
+    // And the pointer count answers again for the tail written after it.
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/after-the-flush.txt",
+        b"after",
+        PutFileOptions::default(),
+    )
+    .expect("put file after the flush");
+    let status = fs
+        .namespace_status_blocking(&namespace_id)
+        .expect("status after the flush");
+    assert_eq!(status.wal_tail_segments, 1);
 }
 
 #[test]

@@ -10,7 +10,10 @@ use loonfs_api::ChangeSeq;
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
-const RECENT_SEGMENT_PREFETCH_CONCURRENCY: usize = 8;
+/// Hinted segments fetched at once. The head names every segment a legal
+/// unflushed tail can hold, so a replay's whole gap is usually hinted and
+/// this is what decides how many round trips it costs.
+pub(super) const RECENT_SEGMENT_PREFETCH_CONCURRENCY: usize = 32;
 
 /// Fetches the hinted segments covering the replay gap concurrently.
 ///
@@ -184,22 +187,29 @@ fn validate_pointer_matches_envelope(
     Ok(())
 }
 
-/// Counts the visible WAL tail segments above `chain_base_seq` without
-/// loading bodies the head already describes.
+/// Counts the visible WAL tail segments above `chain_base_seq` from the
+/// head's chain pointers alone.
 ///
 /// Every head publish prepends its tip pointer to `recent_segments` under
 /// the same compare-and-swap that installs `visible_wal_tip`, so a hint run
 /// that is contiguous from the tip carries the same authority as the tip
-/// itself: those segments are counted from pointer seq ranges alone. Only
-/// a tail extending past the hinted window (or an unusable hint list) walks
-/// chain links, fetching and pointer-validating one body per unresolved
-/// segment.
+/// itself. The list holds every segment a legal unflushed tail can reach
+/// (see [`crate::limits::RECENT_SEGMENTS_LIMIT`]), so that run describes
+/// the whole tail and this takes no store parameter: the signature is the
+/// guarantee.
 ///
-/// Unlike [`load_validated_wal_chain`], hint-covered bodies are neither
-/// fetched nor checksum-verified, and the manifest boundary is accepted at
-/// `base <= chain_base_seq` rather than exact equality: this serves
-/// inspection surfaces (status, maintenance gating) whose callers do not
-/// replay the tail. Replay consumers keep loading the validated chain.
+/// A head that under-describes its own tail is corrupted or predates that
+/// coverage, and either way is reported as
+/// [`WalChainLoadError::TailNotDescribedByHead`] rather than walked. This
+/// serves inspection surfaces (status, maintenance gating), and a serial
+/// chain walk of an unbounded tail is not something a foreground call
+/// should pay for silently. Replay consumers keep loading the validated
+/// chain, which does walk.
+///
+/// Unlike [`load_validated_wal_chain`], bodies are never fetched or
+/// checksum-verified, and the manifest boundary is accepted at
+/// `base <= chain_base_seq` rather than exact equality: callers here do not
+/// replay the tail.
 #[tracing::instrument(
     level = "info",
     name = "loonfs.phase",
@@ -207,8 +217,7 @@ fn validate_pointer_matches_envelope(
     skip_all,
     fields(phase = "count_wal_tail_segments", key_class = "wal_segment")
 )]
-pub(crate) async fn count_visible_wal_tail_segments<S: ObjectStore + ?Sized>(
-    store: &S,
+pub(crate) fn count_visible_wal_tail_segments(
     request: WalChainLoadRequest<'_>,
 ) -> Result<u64, WalChainLoadError> {
     if request.chain_base_seq > request.head_seq {
@@ -239,17 +248,17 @@ pub(crate) async fn count_visible_wal_tail_segments<S: ObjectStore + ?Sized>(
     }
 
     let mut count: u64 = 1;
-    // Newest pointer whose tail membership is decided but whose predecessor
-    // is not; the body walk resumes here when pointer math runs out.
-    let mut newest_unresolved = tip.clone();
-    if pointer_reaches_base(&newest_unresolved, stop_after_seq) {
+    // Oldest pointer counted so far: the run has to keep descending from
+    // here, contiguously, until it crosses the boundary.
+    let mut oldest_counted = &tip;
+    if pointer_reaches_base(oldest_counted, stop_after_seq) {
         return Ok(count);
     }
 
     if request.recent_segments.first() == Some(&tip) {
         for pointer in &request.recent_segments[1..] {
-            if pointer.end_seq.0 + 1 != newest_unresolved.start_seq.0 {
-                // Contiguity break: chain links resume authority below.
+            if pointer.end_seq.0 + 1 != oldest_counted.start_seq.0 {
+                // Contiguity break: nothing below is described.
                 break;
             }
             if pointer.end_seq <= stop_after_seq {
@@ -257,43 +266,18 @@ pub(crate) async fn count_visible_wal_tail_segments<S: ObjectStore + ?Sized>(
                 return Ok(count);
             }
             count += 1;
-            newest_unresolved = pointer.clone();
-            if pointer_reaches_base(&newest_unresolved, stop_after_seq) {
+            oldest_counted = pointer;
+            if pointer_reaches_base(oldest_counted, stop_after_seq) {
                 return Ok(count);
             }
         }
     }
 
-    loop {
-        let object_key = newest_unresolved.object_key.clone();
-        let encoded_bytes = store
-            .get(&object_key, None)
-            .await
-            .map_err(|err| WalChainLoadError::ReadWal {
-                object_key: object_key.clone(),
-                message: err.to_string(),
-            })?
-            .ok_or_else(|| WalChainLoadError::MissingWalObject {
-                object_key: object_key.clone(),
-            })?;
-        let envelope = decode_wal_segment_envelope_zstd(&encoded_bytes)
-            .map_err(|err| WalReplayError::Codec(err.to_string()))?;
-        validate_pointer_matches_envelope(&newest_unresolved, &object_key, &envelope)?;
-        let prev = envelope.payload.prev_visible_segment.clone().ok_or(
-            WalReplayError::BrokenChainLink {
-                object_key,
-                required_seq: stop_after_seq,
-            },
-        )?;
-        if prev.end_seq <= stop_after_seq {
-            return Ok(count);
-        }
-        count += 1;
-        newest_unresolved = prev;
-        if pointer_reaches_base(&newest_unresolved, stop_after_seq) {
-            return Ok(count);
-        }
-    }
+    Err(WalChainLoadError::TailNotDescribedByHead {
+        boundary_seq: stop_after_seq,
+        described_segments: count,
+        described_from_seq: oldest_counted.start_seq,
+    })
 }
 
 /// True when the pointer's base (the seq before its first commit) sits at
