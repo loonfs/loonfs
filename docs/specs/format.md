@@ -2248,8 +2248,49 @@ This metadata belongs to the logical commit, not to the resource itself.
 
 A resource may carry optional structured properties such as display hints,
 application tags, or a resource-type hint. These properties belong to the
-resource, not to the commit. They should move with the inode when the path
-changes.
+resource, not to the commit. The core model spells them as **attributes**: a
+map from an attribute key to an attribute value, held against inode identity.
+Attributes move with the inode. A rename, a move, or a new file revision
+leaves an inode's attributes unchanged.
+
+An attribute key is 1 to 128 UTF-8 bytes and contains no Unicode control
+character (general category `Cc`, which covers NUL). Keys are compared
+exactly: nothing case-folds or normalizes them, so two spellings that differ
+in any byte name two different attributes. Keys beginning with `loonfs.` are
+reserved for system-owned attributes. The durable format carries a reserved
+key like any other; a caller may not write one.
+
+An attribute value is one of two kinds:
+
+| Kind | Meaning |
+| --- | --- |
+| **string** | One UTF-8 text value. |
+| **string_list** | An ordered list of UTF-8 text values. The order is the order the writer supplied. |
+
+Five named format constants bound every map. Every size is counted in logical
+UTF-8 bytes — the bytes of the text itself — so no encoder's framing changes
+what a namespace may hold:
+
+| Constant | Value | Bound |
+| --- | --- | --- |
+| `MAX_ATTRIBUTE_KEY_BYTES` | 128 | Longest attribute key. |
+| `MAX_ATTRIBUTE_VALUE_BYTES` | 4,096 | Longest string, and longest member of a string list. |
+| `MAX_ATTRIBUTE_LIST_MEMBERS` | 256 | Most members in one string list. |
+| `MAX_ATTRIBUTE_ENTRIES` | 100 | Most entries in one map. |
+| `MAX_ATTRIBUTES_TOTAL_BYTES` | 65,536 | Largest map, counting every key's bytes plus every value's bytes, with each list member counted. |
+
+Durable state that breaks any of these bounds fails to decode. Nothing is
+truncated, dropped, or defaulted on a reader's behalf.
+
+Every inode carries an attribute revision counter beside its map. An inode
+begins at revision 0 with an empty map, and every effective update — one that
+changes the map — advances the counter by one. The counter is the
+optimistic-concurrency token for attribute writes: a writer states the
+revision it expects, and the write fails when the inode has moved past it.
+The counter is not an index into a history. A namespace keeps the current map
+and this number, and offers no queryable record of earlier maps. An empty map
+is a state and not an absence: clearing an inode's attributes advances the
+counter to a revision whose map has no entries.
 
 The semantic creation marker in the core model is the create commit in
 namespace history, not a wall-clock field. Every WAL commit record, commit

@@ -217,6 +217,7 @@ The codes that populate it:
 | --- | --- |
 | `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
+| `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq`, when the failure was a caller-supplied `expected_head_seq` precondition rather than a raced head advance. A caller that still means to delete retries against the sequence it found |
@@ -251,6 +252,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
 | `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` no longer matches the head; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
+| `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision guard every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |

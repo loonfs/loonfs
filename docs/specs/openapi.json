@@ -2767,6 +2767,12 @@
           }
         }
       },
+      "AttributeRevisionNo": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Monotonically increasing attribute revision counter within one inode.\n\nEvery inode starts at revision 0 with an empty attribute map, and every\neffective update — one that changes the map — advances the counter by\none. The counter is the optimistic-concurrency token for attribute\nwrites: a writer states the revision it expects, and the write fails\nwhen the inode has moved past it. The counter is not an index into a\nhistory. LoonFS keeps the current map and this number, and promises no\nqueryable record of earlier maps.",
+        "minimum": 0
+      },
       "AuthoritativePathEntry": {
         "type": "object",
         "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. File entries include\nrevision and content summary fields; directory entries leave those empty.",
@@ -3831,6 +3837,17 @@
               }
             ]
           },
+          "actual_attributes_revision_no": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AttributeRevisionNo",
+                "description": "Attribute revision that is actually current for the inode."
+              }
+            ]
+          },
           "actual_head_seq": {
             "oneOf": [
               {
@@ -3890,6 +3907,17 @@
               {
                 "$ref": "#/components/schemas/ChangeSeq",
                 "description": "Sequence at which that commit id already landed. Present when the\nfailure was decided against a durable commit receipt, which is what\nholds the sequence; absent when nothing has committed under the id\nyet and two live requests are simply claiming it at once."
+              }
+            ]
+          },
+          "expected_attributes_revision_no": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AttributeRevisionNo",
+                "description": "Attribute revision the request expected to be current."
               }
             ]
           },
