@@ -670,19 +670,27 @@ below the derived safety floor or a zero budget is rejected as
 behind are not under `grace_window_ms` alone: a session carries its own
 lease, and how long a completed session's content is protected is derived
 rather than configured (format spec, "Garbage collection", rule 11).
-`max_objects` bounds every object the pass reads, not only the candidates it
-enumerates: deciding whether a completed session's content is still
-referenced means reading each live manifest and each retained WAL segment,
-and each of those reads spends the same budget. A pass that runs out partway
-through that reading skips completed-content reclamation for the rest of the
-invocation: the session is retained, `content_reclamation_deferred` is set,
-and the sweep goes on through every other candidate under the usual budget.
-Deletion only ever follows a complete collection, so a partial one decides
-nothing. A budget smaller than the namespace's live manifests plus retained
-segments therefore keeps that content rather than reclaiming it — a pass with
-room for the whole scan collects it later. Step-driven GC defaults
-`max_objects` to 1024 and returns any `next_cursor` for a later step rather
-than looping internally. Nothing sweeps unless `gc` is present.
+`max_objects` bounds the whole pass, from its first read to its last, and
+not only the candidates it enumerates. Building the live root set spends it
+too: the head and metadata root together, the retention floor, each
+checkpoint record, each live manifest, and each retained WAL segment, read
+once, while marking. Deciding whether a completed session's content is still
+referenced then spends it again on each live manifest and the revision rows
+inside it. A pass that runs out partway through that scan skips
+completed-content reclamation for the rest of the invocation: the session is
+retained, `content_reclamation_deferred` is set, and the sweep goes on
+through every other candidate under the usual budget. Deletion only ever
+follows a complete collection, so a partial one decides nothing. A budget
+too small for the roots themselves does nothing at all: it reports
+`budget_exhausted` alongside `content_reclamation_deferred`, deletes
+nothing, and hands back the cursor it was given rather than a new one. A
+pass that did have room for the roots decides at least one candidate
+whatever is left over, so a bounded walk always advances. A budget above
+the roots but below the scan on top of them keeps completed content rather
+than reclaiming it — a pass with room for the whole scan collects it later.
+Step-driven GC defaults `max_objects` to 1024 and returns any `next_cursor`
+for a later step rather than looping internally. Nothing sweeps unless `gc`
+is present.
 
 The retention floor bounds incremental replay only. File revision history
 is never pruned: a revisions listing is always complete, however far the

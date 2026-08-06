@@ -286,18 +286,20 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
     post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
     // A bounded pass returns an opaque cursor, and the route accepts it
-    // on the next invocation without carrying any safety state.
+    // on the next invocation without carrying any safety state. The budget
+    // covers the roots this namespace marks before it walks, so what is
+    // left over is what bounds the walk.
     let bounded = post_gc_with(
         &server_url,
         namespace.as_str(),
-        serde_json::json!({ "max_objects": 1 }),
+        serde_json::json!({ "max_objects": 6 }),
     )
     .expect("bounded gc pass");
     let cursor = bounded.next_cursor.expect("more candidate families remain");
     let resumed = post_gc_with(
         &server_url,
         namespace.as_str(),
-        serde_json::json!({ "max_objects": 1, "cursor": cursor }),
+        serde_json::json!({ "max_objects": 6, "cursor": cursor }),
     )
     .expect("resumed gc pass");
     assert!(resumed.next_cursor.is_some());

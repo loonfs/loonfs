@@ -152,6 +152,9 @@ fn gc_summary(report: &GcResponse) -> String {
             "; content reclamation deferred: the reference scan did not fit in --max-objects",
         );
     }
+    if report.budget_exhausted {
+        summary.push_str("; stopped on --max-objects before the pass finished");
+    }
     if let Some(cursor) = &report.next_cursor {
         summary.push_str(&format!("; next_cursor: {cursor}"));
     }

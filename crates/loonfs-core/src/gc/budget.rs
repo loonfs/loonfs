@@ -2,16 +2,25 @@
 
 use super::config::GcConfig;
 
-/// The work one garbage-collection pass is allowed to do.
+/// The work one garbage-collection pass is allowed to do, from its first
+/// read to its last. Marking is inside the bound, not before it.
 ///
 /// One unit is one object the pass reads or decides on a candidate's
 /// behalf:
 ///
-/// * one enumerated candidate key, decided — the original meaning of
-///   `max_objects`;
-/// * one manifest opened by the content reference scan;
+/// * the head and the metadata root together — one unit for the pair,
+///   because they are read concurrently and neither is a root without the
+///   other;
+/// * the retention floor;
+/// * one checkpoint record read while marking, plus one more for the fork
+///   target head that decides whether that record's target is gone;
+/// * one manifest opened, whether to mark its tables or by the content
+///   reference scan;
 /// * one page of revision rows read out of an opened manifest;
-/// * one retained WAL segment fetched by the scan.
+/// * the retained WAL chain, charged as one block of one unit per segment
+///   once the chain validates;
+/// * one enumerated candidate key, decided — the original meaning of
+///   `max_objects`.
 ///
 /// Prefix listing is the one thing not metered: it is how a family finds
 /// candidates at all, and the cursor is what resumes it. Everything else a
@@ -55,6 +64,14 @@ impl PassBudget {
         self.spent = self.spent.saturating_add(1);
     }
 
+    /// What has been charged so far. Tests price a namespace's roots with
+    /// this, so a bounded case can ask for a budget in candidates rather
+    /// than in a number that has to be kept true by hand.
+    #[cfg(test)]
+    pub(super) fn spent(&self) -> u64 {
+        self.spent
+    }
+
     /// Charges one unit for work about to be done. `false` means the
     /// budget is spent and the caller must not do it.
     pub(super) fn try_charge(&mut self) -> bool {
@@ -63,5 +80,18 @@ impl PassBudget {
         }
         self.charge();
         true
+    }
+
+    /// Charges `units` for one block of work that could not be stopped
+    /// partway — the retained WAL chain, loaded whole by a loader that is
+    /// shared with foreground reads and takes no budget of its own. The
+    /// charge always lands, because the reads happened; `false` says the
+    /// block overdrew what was left and the pass stops having paid for it.
+    pub(super) fn charge_block(&mut self, units: u64) -> bool {
+        let within_budget = self
+            .max_objects
+            .is_none_or(|max_objects| self.spent.saturating_add(units) <= max_objects);
+        self.spent = self.spent.saturating_add(units);
+        within_budget
     }
 }

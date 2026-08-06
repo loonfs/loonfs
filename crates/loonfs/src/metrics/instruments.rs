@@ -797,6 +797,7 @@ mod tests {
             },
             degraded_retention: false,
             content_reclamation_deferred: false,
+            budget_exhausted: false,
             next_cursor: None,
             next_reclamation_at_ms: None,
         };

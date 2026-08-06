@@ -16,13 +16,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
-    /// Maximum objects this invocation may read or decide. `None` keeps the
-    /// run-to-completion behavior. What one unit buys is spelled out on
-    /// `gc::budget::PassBudget`; the short version is that the content
-    /// reference scan pays out of the same purse as candidate enumeration,
-    /// so a budget smaller than that scan defers content reclamation
-    /// instead of finishing it, pass after pass, while the rest of the
-    /// sweep proceeds normally.
+    /// Maximum objects this invocation may read or decide, marking
+    /// included. `None` keeps the run-to-completion behavior. What one unit
+    /// buys is spelled out on `gc::budget::PassBudget`; the short version
+    /// is that everything pays out of one purse, and the pass spends it in
+    /// the order it needs things.
+    ///
+    /// Two budgets are therefore worth naming. One below the namespace's
+    /// roots — the head, the floor, the checkpoint records, the live
+    /// manifests, and the retained WAL chain — buys nothing at all: the
+    /// pass reports `budget_exhausted`, deletes nothing, and hands back the
+    /// position it came in with. One above the roots but below the content
+    /// reference scan on top of them sweeps normally and defers content
+    /// reclamation, pass after pass, until a budget with room for the scan
+    /// runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_objects: Option<u64>,
     /// Opaque enumeration cursor returned by an earlier invocation.

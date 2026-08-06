@@ -642,12 +642,22 @@ pub struct GcResponse {
     /// True when ambiguous roots suppressed manifest/table deletion.
     pub degraded_retention: bool,
     /// True when the pass skipped completed-content reclamation because
-    /// the reference collection it needs did not fit in `max_objects`.
-    /// Nothing was ever decided from a partial collection and the rest of
-    /// the sweep ran normally; a later pass with room for the whole scan
-    /// reclaims what this one left behind.
+    /// what it needs — the namespace's live roots, then the reference
+    /// collection over them — did not fit in `max_objects`. Nothing was
+    /// ever decided from a partial collection; a later pass with room for
+    /// the whole scan reclaims what this one left behind. A pass that had
+    /// room for the roots swept every other candidate normally around the
+    /// skip, and one that did not also reports `budget_exhausted`.
     #[serde(default)]
     pub content_reclamation_deferred: bool,
+    /// True when the pass stopped because `max_objects` ran out before it
+    /// finished. Whatever it did before that is reported here and stands;
+    /// rerun with the returned cursor, or with a larger budget, to
+    /// continue. A budget too small for the namespace's own roots stops a
+    /// pass before it decides anything at all, which is what this says and
+    /// an empty report on its own does not.
+    #[serde(default)]
+    pub budget_exhausted: bool,
     /// Opaque resume token when more candidates remain. Resuming rebuilds
     /// every safety proof; the token carries enumeration position only and
     /// is valid only against the same namespace.
@@ -693,6 +703,7 @@ impl GcResponse {
             retained: RetainedCandidates::default(),
             degraded_retention: false,
             content_reclamation_deferred: false,
+            budget_exhausted: false,
             next_cursor: None,
             next_reclamation_at_ms: None,
         }
