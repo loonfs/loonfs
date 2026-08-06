@@ -1,10 +1,11 @@
 //! Fetching, decoding, and cache publication for SST index and filter blocks.
 //!
 //! A load consults three places in order: the per-view memo, the decoded
-//! block cache, and — for the two sections named here — the node-local cache
-//! of the same blocks in their stored form. Only when all three come up
-//! empty does object storage answer, and what that one GET produced is
-//! offered back to the local tier section by section.
+//! block cache, and the node-local cache of the same blocks in their stored
+//! form. Only when all three come up empty does object storage answer, and
+//! what that one GET produced is offered back to the local tier section by
+//! section. The data-block loads in [`super::data_block_load`] reach the
+//! local tier through the same two helpers.
 
 use super::block_load::SessionBlockMemo;
 use super::cache::{
@@ -72,7 +73,7 @@ fn stored_block_cache(
 /// the authority — so the entry is dropped and the caller falls through to
 /// one ordinary fetch, which reports corruption if the store's bytes fail
 /// too. Nothing retries the local tier.
-async fn stored_block_section<T>(
+pub(super) async fn stored_block_section<T>(
     table_cache: Option<&MetadataTableCache>,
     descriptor: &MetadataFileRef,
     kind: StoredMetadataBlockKind,
@@ -112,7 +113,7 @@ async fn stored_block_section<T>(
 /// read of any one of them needs no GET. The bytes are copied rather than
 /// sliced out of the fetch buffer: a slice would keep the whole fetched span
 /// alive for as long as the cache held any one section of it.
-fn offer_stored_block(
+pub(super) fn offer_stored_block(
     table_cache: Option<&MetadataTableCache>,
     descriptor: &MetadataFileRef,
     kind: StoredMetadataBlockKind,

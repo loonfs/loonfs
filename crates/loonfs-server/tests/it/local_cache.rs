@@ -9,9 +9,17 @@ use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
 use tempfile::tempdir;
 
+/// Every block kind a segment read can ask this cache for.
+const BLOCK_KINDS: [&str; 3] = ["index", "filter", "data"];
+
 /// The `loonfs.local_cache.gets` series for one block kind and outcome.
 fn gets(kind: &str, result: &str) -> String {
     format!("loonfs_local_cache_gets_total{{kind=\"{kind}\",result=\"{result}\"}}")
+}
+
+/// The `loonfs.local_cache.inserts` series for one block kind.
+fn inserts(kind: &str) -> String {
+    format!("loonfs_local_cache_inserts_total{{kind=\"{kind}\"}}")
 }
 
 /// A server holding its cache in `cache_root` and its objects in
@@ -36,15 +44,17 @@ fn test_config_with_local_cache(
     }
 }
 
-/// A restarted server reads its metadata index sections out of the local
-/// cache instead of the store.
+/// A restarted server reads every metadata segment section — index, filter,
+/// and data — out of the local cache instead of the store.
 ///
 /// The second server starts with empty in-memory caches, so the only thing
-/// carried over is the cache directory the first one closed. Every index
-/// lookup it makes is one the first server made and filled, so a single miss
-/// would mean a section did not survive the restart.
+/// carried over is the cache directory the first one closed. Every section it
+/// wants is one the first server fetched and filled, and a section it had to
+/// fetch would show up here twice over: as a miss on the way in and as an
+/// insert on the way back. Zero of both is what makes this a full read with
+/// no segment bytes read at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restarted_server_reads_index_sections_from_its_local_cache() {
+async fn a_restarted_server_reads_every_segment_section_from_its_local_cache() {
     let store_dir = tempdir().expect("store tempdir");
     let cache_dir = tempdir().expect("cache tempdir");
     let namespace = namespace_id("warm");
@@ -101,7 +111,12 @@ async fn a_restarted_server_reads_index_sections_from_its_local_cache() {
         series(&filled, &gets("index", "miss")) >= 1.0,
         "a cold server misses on the sections it then fills"
     );
-    assert!(series(&filled, "loonfs_local_cache_inserts_total{kind=\"index\"}") >= 1.0);
+    for kind in BLOCK_KINDS {
+        assert!(
+            series(&filled, &inserts(kind)) >= 1.0,
+            "a cold server should have filled its {kind} sections"
+        );
+    }
     first.shut_down().await;
 
     let second = start_graceful_server(test_config_with_local_cache(
@@ -118,22 +133,23 @@ async fn a_restarted_server_reads_index_sections_from_its_local_cache() {
     assert_eq!(served.entries, warmed.entries);
 
     let restarted = scrape(&second.server_url, Some("test-token")).expect("scrape the second");
-    assert!(
-        series(&restarted, &gets("index", "hit")) >= 1.0,
-        "the restarted server should read index sections from the cache"
-    );
-    assert_eq!(
-        series(&restarted, &gets("index", "miss")),
-        0.0,
-        "every index section the restarted server wanted should have survived"
-    );
-    assert_eq!(
-        series(
-            &restarted,
-            "loonfs_local_cache_inserts_total{kind=\"index\"}"
-        ),
-        0.0,
-        "a section served from the cache is not fetched, so it is not reinserted"
-    );
+    for kind in ["index", "data"] {
+        assert!(
+            series(&restarted, &gets(kind, "hit")) >= 1.0,
+            "the restarted server should read {kind} sections from the cache"
+        );
+    }
+    for kind in BLOCK_KINDS {
+        assert_eq!(
+            series(&restarted, &gets(kind, "miss")),
+            0.0,
+            "every {kind} section the restarted server wanted should have survived"
+        );
+        assert_eq!(
+            series(&restarted, &inserts(kind)),
+            0.0,
+            "a {kind} section served from the cache is not fetched, so it is not reinserted"
+        );
+    }
     second.shut_down().await;
 }

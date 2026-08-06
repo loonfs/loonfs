@@ -6,7 +6,8 @@
 use crate::common::*;
 use loonfs::{
     ChangeSeq, CreateDirectoryOptions, CreateNamespaceOptions, ErrorCode, InodeId, InodeKind,
-    NamespaceId, PutFileOptions, RuntimeCacheConfig, SharedObjectStore, StoredMetadataBlockKind,
+    NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeCacheConfig, SharedObjectStore,
+    StoredMetadataBlockKind,
 };
 use loonfs_core::test_support::{
     RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache,
@@ -747,5 +748,59 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     assert!(
         !stored_blocks.is_closed(),
         "the host owns the cache and closes it"
+    );
+}
+
+/// Maintenance reads through no metadata table cache, so the local tier
+/// beneath it never sees a maintenance read. Reorganization is the widest
+/// read maintenance has — it decodes every row of the runs it folds — and
+/// this pins the structural argument end to end: not one block offered, and
+/// not one probe either.
+#[test]
+fn metadata_maintenance_offers_nothing_to_the_local_block_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let fs = open_runtime_with(store(temp_dir.path()), "maintenance-cold", |builder| {
+        builder.stored_metadata_block_cache(stored_blocks.clone())
+    });
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    // Each step folds the tail into one more L0 run, and the default policy
+    // admits a reorganization unit once enough of them have piled up. Reads
+    // the writes make on the way are outside every measured window.
+    let mut reorganized = false;
+    for index in 0..16 {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            &format!("/docs/file-{index:02}.txt"),
+            b"file",
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+        let calls_before = stored_blocks.call_count();
+        let step = fs
+            .maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
+            .expect("maintenance step");
+        assert_eq!(
+            stored_blocks.call_count(),
+            calls_before,
+            "a maintenance step carries no table cache, so it reaches neither cache tier"
+        );
+        if upkeep(&step).reorganize == ReorganizeStepOutcome::UnitPublished {
+            reorganized = true;
+            break;
+        }
+    }
+
+    assert!(
+        reorganized,
+        "the steps above should have folded one reorganization unit"
+    );
+    assert!(
+        stored_blocks.call_count() > 0,
+        "the reads around the steps must reach the cache for this to prove anything"
     );
 }
