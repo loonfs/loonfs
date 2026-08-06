@@ -1309,11 +1309,10 @@ async fn a_budget_below_the_roots_reads_no_chain_and_says_it_ran_out() {
     );
 }
 
-/// The chain loader is shared with foreground reads and cannot stop
-/// partway, so the pass refuses to start a load it has nothing left to pay
-/// for. A budget sized to everything before the chain therefore stops at
-/// that gate: no segment is fetched, no candidate is decided, and a rerun
-/// with room does the whole job.
+/// A pass with nothing left does not start a chain load at all. A budget
+/// sized to everything before the chain stops at that gate. It fetches no
+/// segment and decides no candidate, and a rerun with room does the whole
+/// job.
 #[tokio::test]
 async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1346,7 +1345,7 @@ async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
         "the gate holds before the chain is fetched, not after"
     );
 
-    // The same namespace, unbounded: the work the gate deferred is exactly
+    // The same namespace, unbounded. The work the gate deferred is exactly
     // the work that gets done.
     let resumed = gc_namespace(&store, &namespace_id, &config(), &past)
         .await
@@ -1356,6 +1355,157 @@ async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .is_none());
+}
+
+/// The chain can be longer than the budget has room for. The pass caps the
+/// load at what it has left, so the loader reads no more segment bodies
+/// than the pass may pay for. The pass then decides nothing and reports
+/// that it ran out.
+#[tokio::test]
+async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
+    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
+    let (live, marking) = marked(&inner, &namespace_id, &aged).await;
+    let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
+    assert!(
+        chain_units > 2,
+        "the fixture must retain a chain longer than the budget below"
+    );
+    // Two units are left when the pass reaches the chain, and the chain
+    // wants more than two.
+    let at_the_gate = 2;
+
+    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str()));
+    let store = RecordingStore::new(inner, segment_reads);
+    let mut bounded = config();
+    bounded.max_objects = Some(marking - chain_units + at_the_gate);
+    let report = gc_namespace(&store, &namespace_id, &bounded, &aged)
+        .await
+        .expect("pass over a chain it cannot afford");
+
+    let fetched = store.take_get_keys().len();
+    assert!(
+        u64::try_from(fetched).expect("fetch count fits") <= at_the_gate,
+        "the pass read {fetched} segment bodies with {at_the_gate} units left"
+    );
+    assert!(report.budget_exhausted);
+    assert_eq!(
+        report.next_cursor, None,
+        "the pass echoes the cursor it was given, and it was given none"
+    );
+    assert_eq!(report.retained_candidates, 0);
+    assert_eq!(
+        (
+            report.deleted_wal_segments,
+            report.deleted_metadata_tables,
+            report.deleted_manifests,
+            report.deleted_checkpoint_records,
+            report.deleted_upload_sessions,
+            report.deleted_content_objects,
+        ),
+        (0, 0, 0, 0, 0, 0)
+    );
+}
+
+/// A budget that covers the roots exactly reads the whole chain. The cap on
+/// the load is what the budget has left, and that is the chain's own size,
+/// so nothing is truncated. One more unit than that lets the walk begin.
+#[tokio::test]
+async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
+    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
+    let (live, marking) = marked(&inner, &namespace_id, &aged).await;
+    let retained = live.wal_segments;
+    assert!(!retained.is_empty(), "the fixture must retain a chain");
+
+    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str()));
+    let store = RecordingStore::new(inner, segment_reads);
+    let mut exact = config();
+    exact.max_objects = Some(marking);
+    let report = gc_namespace(&store, &namespace_id, &exact, &aged)
+        .await
+        .expect("pass with a budget for the roots");
+
+    assert_eq!(
+        store.take_get_keys().into_iter().collect::<BTreeSet<_>>(),
+        retained,
+        "marking read every retained segment"
+    );
+    assert!(report.budget_exhausted);
+    assert!(
+        !report.content_reclamation_deferred,
+        "this pass did finish marking, so it has a root set and a reference set"
+    );
+
+    // One more unit, and the pass walks: it decides a candidate and hands
+    // back a position instead of the cursor it came in with.
+    let mut one_more = config();
+    one_more.max_objects = Some(marking + 1);
+    let walked = gc_namespace(&store, &namespace_id, &one_more, &aged)
+        .await
+        .expect("pass with one candidate of room");
+    assert!(walked.budget_exhausted);
+    assert!(
+        walked.next_cursor.is_some(),
+        "a pass that decided a candidate reports where it walked to"
+    );
+}
+
+/// A pass whose roots cost the whole budget decides nothing. It returns the
+/// token it was given, byte for byte, so the runner can tell that the pass
+/// made no progress and park it.
+#[tokio::test]
+async fn a_pass_that_decides_nothing_echoes_its_cursor_verbatim() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let marking = marking_units(&store, &namespace_id, &aged).await;
+
+    let mut walking = config();
+    walking.max_objects = Some(marking + 2);
+    let first = gc_namespace(&store, &namespace_id, &walking, &aged)
+        .await
+        .expect("pass with two candidates of room");
+    let submitted = first
+        .next_cursor
+        .expect("two candidates leave more to walk");
+
+    let mut starved = config();
+    starved.max_objects = Some(marking);
+    starved.cursor = Some(submitted.clone());
+    let parked = gc_namespace(&store, &namespace_id, &starved, &aged)
+        .await
+        .expect("pass with no candidate of room");
+
+    assert!(parked.budget_exhausted);
+    assert_eq!(
+        parked.next_cursor,
+        Some(submitted),
+        "the token comes back unchanged, not re-encoded from the position"
+    );
+    assert_eq!(parked.retained_candidates, 0);
+    assert_eq!(
+        (
+            parked.deleted_wal_segments,
+            parked.deleted_metadata_tables,
+            parked.deleted_manifests,
+            parked.deleted_checkpoint_records,
+            parked.deleted_upload_sessions,
+            parked.deleted_content_objects,
+        ),
+        (0, 0, 0, 0, 0, 0)
+    );
 }
 
 /// Marking decodes and validates every retained segment already, so the
@@ -1471,10 +1621,14 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
 /// The only reference keeping this content alive lives in the newest WAL
 /// segment, the very last root the scan reads. A pass that stopped short
 /// and answered from what it had collected would call the content
-/// unreferenced and delete it. Running every budget from one up past the
-/// whole scan's cost, each to the end of its walk, leaves no interleaving
-/// where a partial reference set decides anything — and the budgets that
-/// can afford the scan still reach the right verdict.
+/// unreferenced and delete it. The budgets below run from one candidate a
+/// pass up to sixteen, each walk to its end, which leaves no interleaving
+/// where a partial reference set decides anything. The budgets that can
+/// afford the scan still reach the right verdict.
+///
+/// Every budget is priced from what marking this namespace costs, because
+/// marking spends out of the same purse. A budget below that cost buys no
+/// walk at all, which would prove nothing here.
 #[tokio::test]
 async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1499,11 +1653,13 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
     let content_key =
         loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let marking = marking_units(&seed, &namespace_id, &past).await;
     let mut some_budget_reached_the_verdict = false;
     let mut some_budget_deferred_instead = false;
 
-    for max_objects in 1..=16 {
-        let trial_root = temp_dir.path().join(format!("trial-{max_objects}"));
+    for candidates in 1..=16 {
+        let max_objects = marking + candidates;
+        let trial_root = temp_dir.path().join(format!("trial-{candidates}"));
         copy_tree(&seed_root, &trial_root);
         let store = LocalFsStore::new(&trial_root).expect("trial store");
         let mut bounded = config();

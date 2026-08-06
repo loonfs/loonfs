@@ -10,7 +10,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::{
     read_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
 };
-use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
+use crate::wal::{load_wal_chain_within, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
@@ -319,14 +319,16 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     // root-to-head replay (rule 7). A terminal namespace has no replay
     // future: its chain ages out.
     if !namespace_deleted && head.seq > floor_seq {
-        // The loader is shared with foreground reads and the changefeed, so
-        // it carries no budget and cannot stop partway. What the pass can
-        // do is refuse to start a load it has nothing left to pay for, and
-        // charge the whole chain as one block once it validates.
-        if budget.exhausted() {
+        // The loader keeps no budget of its own, because foreground reads
+        // and the changefeed share it. The pass caps the load at what it
+        // has left to spend instead. The loader then reads no more segment
+        // bodies than the pass can pay for, and the charge below can never
+        // go past the bound.
+        let remaining = budget.remaining();
+        if remaining == 0 {
             return Ok(LiveSetCollection::BudgetExhausted);
         }
-        let chain = load_validated_wal_chain(
+        let load = load_wal_chain_within(
             store,
             WalChainLoadRequest {
                 namespace_id,
@@ -336,15 +338,24 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
                 stop_after_seq: None,
                 recent_segments: &head.recent_segments,
             },
+            usize::try_from(remaining).unwrap_or(usize::MAX),
         )
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
         })?;
+        let chain = match load {
+            WalChainLoad::Complete(chain) => chain,
+            // The load stopped where the budget did. The pass pays for the
+            // bodies it read and then stops, because a partial chain roots
+            // nothing.
+            WalChainLoad::LimitReached { segments_fetched } => {
+                budget.charge_block(u64::try_from(segments_fetched).unwrap_or(u64::MAX));
+                return Ok(LiveSetCollection::BudgetExhausted);
+            }
+        };
         let segments = chain.segments();
-        if !budget.charge_block(u64::try_from(segments.len()).unwrap_or(u64::MAX)) {
-            return Ok(LiveSetCollection::BudgetExhausted);
-        }
+        budget.charge_block(u64::try_from(segments.len()).unwrap_or(u64::MAX));
         for segment in segments {
             live.wal_segments.insert(segment.object_key().to_owned());
             // The bodies are decoded and validated right here, so the

@@ -681,13 +681,16 @@ completed-content reclamation for the rest of the invocation: the session is
 retained, `content_reclamation_deferred` is set, and the sweep goes on
 through every other candidate under the usual budget. Deletion only ever
 follows a complete collection, so a partial one decides nothing. A budget
-too small for the roots themselves does nothing at all: it reports
+too small for the roots themselves does nothing at all. It reports
 `budget_exhausted` alongside `content_reclamation_deferred`, deletes
-nothing, and hands back the cursor it was given rather than a new one. A
-pass that did have room for the roots decides at least one candidate
-whatever is left over, so a bounded walk always advances. A budget above
-the roots but below the scan on top of them keeps completed content rather
-than reclaiming it — a pass with room for the whole scan collects it later.
+nothing, and returns the cursor it was given byte for byte. A budget that
+covers the roots and no more behaves the same way, except that it did
+finish marking, so it does not set `content_reclamation_deferred`. Any pass
+that stops without deciding a candidate returns its submitted cursor
+unchanged, and a caller that loops on `next_cursor` should stop when the
+token it gets back is the token it sent. A budget above the roots but below
+the reference scan on top of them keeps completed content rather than
+reclaiming it, and a pass with room for the whole scan collects it later.
 Step-driven GC defaults `max_objects` to 1024 and returns any `next_cursor`
 for a later step rather than looping internally. Nothing sweeps unless `gc`
 is present.

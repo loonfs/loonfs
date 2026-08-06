@@ -1,5 +1,7 @@
 //! Behavior tests for WAL segment preparation and validated chain loading.
 
+#![allow(clippy::panic)]
+
 use super::reader::RECENT_SEGMENT_PREFETCH_CONCURRENCY;
 use super::*;
 use crate::commit::{
@@ -13,7 +15,9 @@ use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WalSegmentI
 use loonfs_objectstore::keys::{wal_segment, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
+use loonfs_test_support::stores::{
+    ConcurrencyWatchStore, CountingStore, KeyPredicate, OperationClass, RecordingStore,
+};
 use std::borrow::Cow;
 use tempfile::tempdir;
 
@@ -593,6 +597,133 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
     .await
     .expect("chain despite garbage hints");
     assert_eq!(survived.segments(), unhinted.segments());
+}
+
+/// Writes a chain of `length` linked segments and returns their pointers,
+/// oldest first.
+async fn write_linked_chain(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    length: u64,
+) -> Vec<WalSegmentPointer> {
+    let mut pointers: Vec<WalSegmentPointer> = Vec::new();
+    for index in 0..length {
+        let segment = write_create_directory_segment(
+            store,
+            namespace_id,
+            pointers.last().cloned(),
+            &format!("c_wal_bounded_{index:02}"),
+            &format!("dir-{index:02}"),
+            ChangeSeq(index),
+            ChangeSeq(index + 1),
+        )
+        .await;
+        pointers.push(segment.envelope.pointer(segment.object_key.clone()));
+    }
+    pointers
+}
+
+/// A caller that meters its own reads caps the load, and the loader stops
+/// once it has read that many segment bodies. It reports how many it read
+/// so the caller can charge for exactly those.
+#[tokio::test]
+async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let pointers = write_linked_chain(store.inner(), &namespace_id, 5).await;
+    let tip = pointers.last().expect("a chain was written").clone();
+
+    // No hints, so every body comes from the serial walk down the links.
+    store.reset();
+    let bounded = load_wal_chain_within(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(5),
+            visible_tip: Some(tip.clone()),
+            stop_after_seq: None,
+            recent_segments: &[],
+        },
+        2,
+    )
+    .await
+    .expect("bounded chain load");
+    match bounded {
+        WalChainLoad::Complete(_) => panic!("a five-segment chain does not fit in two fetches"),
+        WalChainLoad::LimitReached { segments_fetched } => assert_eq!(segments_fetched, 2),
+    }
+    assert_eq!(
+        store.count(OperationClass::Get),
+        2,
+        "the walk reads no more bodies than the limit allows"
+    );
+
+    // The hinted gap is known before the prefetch issues anything, so a
+    // hint list longer than the limit costs no read at all.
+    let mut newest_first = pointers.clone();
+    newest_first.reverse();
+    store.reset();
+    let hinted = load_wal_chain_within(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(5),
+            visible_tip: Some(tip.clone()),
+            stop_after_seq: None,
+            recent_segments: &newest_first,
+        },
+        2,
+    )
+    .await
+    .expect("bounded hinted load");
+    match hinted {
+        WalChainLoad::Complete(_) => panic!("five hints do not fit in two fetches"),
+        WalChainLoad::LimitReached { segments_fetched } => assert_eq!(segments_fetched, 0),
+    }
+    assert_eq!(store.count(OperationClass::Get), 0);
+}
+
+/// A limit that covers the chain exactly does not truncate it. The load
+/// completes and matches what an unbounded load returns.
+#[tokio::test]
+async fn a_limit_that_covers_the_chain_loads_all_of_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let pointers = write_linked_chain(store.inner(), &namespace_id, 5).await;
+    let tip = pointers.last().expect("a chain was written").clone();
+    let request = |recent: &'static [WalSegmentPointer]| WalChainLoadRequest {
+        namespace_id: &namespace_id,
+        chain_base_seq: ChangeSeq(0),
+        head_seq: ChangeSeq(5),
+        visible_tip: Some(tip.clone()),
+        stop_after_seq: None,
+        recent_segments: recent,
+    };
+    let unbounded = load_validated_wal_chain(&store, request(&[]))
+        .await
+        .expect("unbounded chain");
+
+    store.reset();
+    let bounded = load_wal_chain_within(&store, request(&[]), 5)
+        .await
+        .expect("bounded chain load");
+    match bounded {
+        WalChainLoad::Complete(chain) => assert_eq!(chain.segments(), unbounded.segments()),
+        WalChainLoad::LimitReached { segments_fetched } => {
+            panic!("a five-segment chain fits in five fetches, not {segments_fetched}")
+        }
+    }
+    assert_eq!(store.count(OperationClass::Get), 5);
 }
 
 async fn write_create_directory_segment(

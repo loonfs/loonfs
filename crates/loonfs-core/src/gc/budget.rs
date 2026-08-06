@@ -18,7 +18,8 @@ use super::config::GcConfig;
 ///   reference scan;
 /// * one page of revision rows read out of an opened manifest;
 /// * the retained WAL chain, charged as one block of one unit per segment
-///   once the chain validates;
+///   body read. The pass caps that load at what it has left, so the chain
+///   cannot read past the bound either;
 /// * one enumerated candidate key, decided — the original meaning of
 ///   `max_objects`.
 ///
@@ -55,8 +56,17 @@ impl PassBudget {
     /// stands. The sweep returns its cursor; the content reference scan
     /// gives up on collecting and the pass defers that reclamation.
     pub fn exhausted(&self) -> bool {
-        self.max_objects
-            .is_some_and(|max_objects| self.spent >= max_objects)
+        self.remaining() == 0
+    }
+
+    /// How many units are left to spend. An unmetered pass reports the
+    /// largest count there is, so a caller that sizes work by what remains
+    /// puts no cap on it.
+    pub(super) fn remaining(&self) -> u64 {
+        match self.max_objects {
+            Some(max_objects) => max_objects.saturating_sub(self.spent),
+            None => u64::MAX,
+        }
     }
 
     /// Charges one unit for work already done.
@@ -82,16 +92,11 @@ impl PassBudget {
         true
     }
 
-    /// Charges `units` for one block of work that could not be stopped
-    /// partway — the retained WAL chain, loaded whole by a loader that is
-    /// shared with foreground reads and takes no budget of its own. The
-    /// charge always lands, because the reads happened; `false` says the
-    /// block overdrew what was left and the pass stops having paid for it.
-    pub(super) fn charge_block(&mut self, units: u64) -> bool {
-        let within_budget = self
-            .max_objects
-            .is_none_or(|max_objects| self.spent.saturating_add(units) <= max_objects);
+    /// Charges `units` for one block of work already done — the segment
+    /// bodies one chain load read. The caller sizes that load by what
+    /// [`PassBudget::remaining`] reports, so a block never charges more
+    /// than the budget had left.
+    pub(super) fn charge_block(&mut self, units: u64) {
         self.spent = self.spent.saturating_add(units);
-        within_budget
     }
 }

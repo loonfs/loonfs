@@ -50,9 +50,9 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         None => GcCursor::initial(namespace_id),
     };
     let mut report = GcResponse::empty(namespace_id.clone());
-    // The budget opens before the first read, so marking is inside it. A
-    // pass that cannot afford its own roots has to say so, rather than
-    // reading the whole retained chain for free and metering only what
+    // The budget opens before the first read, so marking spends out of it
+    // too. A pass that cannot afford its own roots reports that. It does
+    // not read the whole retained chain for free and then meter only what
     // comes after.
     let mut budget = PassBudget::of(config);
 
@@ -73,11 +73,11 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // The cursor can skip enumeration only; it never carries safety state.
     let mark = match collect_live_set(store, namespace_id, &loaded, &mut budget, context).await? {
         LiveSetCollection::Complete(live) => Arc::new(live),
-        // Nothing was marked, so nothing may be decided: the pass deletes
-        // nothing, hands back the position it came in with rather than
-        // inventing progress, and says why. Content reclamation is skipped
-        // for the same reason the scan itself skips it — the collection it
-        // needs did not fit.
+        // The pass has no root set, so it may not decide any candidate. It
+        // deletes nothing and hands back the token it was given, because it
+        // made no progress to report. It also skips content reclamation for
+        // the same reason the scan skips it. The collection that decision
+        // needs did not fit in the budget.
         LiveSetCollection::BudgetExhausted => {
             report.budget_exhausted = true;
             report.content_reclamation_deferred = true;
@@ -114,16 +114,11 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             {
                 continue;
             }
-            // The first candidate of a pass is decided whatever is left,
-            // because marking spends out of this same budget: a namespace
-            // whose roots cost the whole of `max_objects` would otherwise
-            // hand back the cursor it came in with forever, marking each
-            // time and walking nowhere. Past that first key the lookahead
-            // is the ordinary one — it proves work remains, performs no
-            // candidate reads or mutations, and leaves the key to be
-            // reconsidered from the exclusive last-examined position.
-            if decided > 0 && budget.exhausted() {
-                return stopped_on_budget(report, &position, &sweep);
+            // This one-key lookahead proves work remains. It performs no
+            // candidate reads or mutations, and the key is reconsidered
+            // from the exclusive last-examined position on resume.
+            if budget.exhausted() {
+                return stopped_on_budget(report, config, &position, decided, &sweep);
             }
 
             let step = process_candidate(
@@ -145,15 +140,15 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
                 // The re-verification this candidate's decision needs could
                 // not be paid for, so the candidate stays undecided and is
                 // reconsidered from the same exclusive position on resume.
-                return stopped_on_budget(report, &position, &sweep);
+                return stopped_on_budget(report, config, &position, decided, &sweep);
             }
             // Every candidate that gets past the check above comes back
             // decided one way or the other, so the cursor always advances
             // past it. The one thing a pass can run out of budget to
-            // answer — whether a completed session's content is still
-            // referenced — is answered by retaining the session, never by
-            // leaving it undecided and stopping: a budget below that scan's
-            // cost would otherwise pin the walk to one key forever.
+            // answer is whether a completed session's content is still
+            // referenced. The sweep answers that by retaining the session
+            // rather than by leaving the key undecided. A budget below that
+            // scan's cost would otherwise pin the walk to one key forever.
             budget.charge();
             decided += 1;
             position = GcCursor::after(namespace_id, family, key);
@@ -164,15 +159,28 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     Ok(report)
 }
 
-/// Closes a pass that stopped mid-enumeration on its budget, reporting the
-/// work it did do and where a rerun picks the walk back up.
+/// Closes a pass that stopped on its budget partway through the sweep. The
+/// pass reports the work it did.
+///
+/// A pass that decided at least one candidate returns the position it
+/// walked to. A pass that decided none returns the token it was given, byte
+/// for byte, because it made no progress to report. The runner compares
+/// that token against the one it submitted to tell a pass that walked from
+/// a pass that did not, so re-encoding the position here would have to rely
+/// on decode-then-encode producing the same bytes.
 fn stopped_on_budget(
     mut report: GcResponse,
+    config: &GcConfig,
     position: &GcCursor,
+    decided: u64,
     sweep: &SweepVerifier,
 ) -> Result<GcResponse> {
     report.budget_exhausted = true;
-    report.next_cursor = Some(position.encode()?);
+    if decided == 0 {
+        report.next_cursor.clone_from(&config.cursor);
+    } else {
+        report.next_cursor = Some(position.encode()?);
+    }
     report.degraded_retention = sweep.degraded;
     Ok(report)
 }
