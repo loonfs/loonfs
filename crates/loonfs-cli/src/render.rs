@@ -204,6 +204,14 @@ fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
             None => format!("delete inode {inode_id}"),
         },
         FilesystemChange::Undeleted { name, .. } => format!("undelete '{name}'"),
+        FilesystemChange::AttributesChanged {
+            inode_id,
+            attributes_revision_no,
+            ..
+        } => format!(
+            "attributes inode {inode_id} rev #{}",
+            attributes_revision_no.0
+        ),
     }
 }
 

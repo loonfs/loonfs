@@ -9,7 +9,10 @@ use super::super::{
 };
 use super::view::CommitValidationView;
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
-use loonfs_api::{ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, RevisionNo};
+use loonfs_api::{
+    AttributeRevisionNo, Attributes, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey,
+    RevisionNo,
+};
 
 /// Running counters shared by every validation pass over one commit's
 /// operations, so a pass that validates the operations in slices numbers
@@ -338,6 +341,57 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     bind_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
+            CommitOp::UpdateAttributes {
+                inode_id,
+                base_attributes_revision_no,
+                attributes_revision_no,
+                attributes,
+            } => {
+                // The target is any visible inode, file or directory: an
+                // attribute belongs to the resource, not to file content.
+                if metadata_state.visible_inode(*inode_id).await?.is_none() {
+                    return Err(CommitValidationError::UpdateAttributesInodeMissing {
+                        inode_id: *inode_id,
+                    }
+                    .into());
+                }
+                validate_inode_attributes_revision_is(
+                    metadata_state,
+                    *inode_id,
+                    *base_attributes_revision_no,
+                )
+                .await?;
+                let successor =
+                    next_attributes_revision_no(*inode_id, *base_attributes_revision_no)?;
+                // The planner numbers the revision, so a plan that publishes
+                // anything but the successor is a planner bug rather than a
+                // race, and it must not reach durable state.
+                if *attributes_revision_no != successor {
+                    return Err(
+                        CommitValidationError::UpdateAttributesRevisionNotSuccessive {
+                            inode_id: *inode_id,
+                            base_attributes_revision_no: *base_attributes_revision_no,
+                            attributes_revision_no: *attributes_revision_no,
+                        }
+                        .into(),
+                    );
+                }
+                validate_not_covered_by_tombstone(metadata_state, *inode_id, |tombstone| {
+                    CommitValidationError::UpdateAttributesUnderSubtreeTombstone {
+                        inode_id: *inode_id,
+                        root_inode_id: tombstone.root_inode_id,
+                        tombstone_seq: tombstone.generation.seq,
+                    }
+                })
+                .await?;
+                ValidatedOp::UpdateAttributes {
+                    op_index,
+                    inode_id: *inode_id,
+                    attributes_revision_no: *attributes_revision_no,
+                    attributes: attributes.clone(),
+                    attributes_delta_index: reserve_delta_index(next_delta_index)?,
+                }
+            }
         };
         metadata_state.apply_validated_op_mut(committed_seq, committed_at_ms, &validated_op);
         validated_ops.push(validated_op);
@@ -388,6 +442,17 @@ async fn validate_explicit_preconditions<V: CommitValidationView>(
             CommitPrecondition::DirectoryEmpty { inode_id } => {
                 validate_directory_empty_precondition(metadata_state, *inode_id).await?;
             }
+            CommitPrecondition::InodeAttributesRevisionIs {
+                inode_id,
+                attributes_revision_no,
+            } => {
+                validate_inode_attributes_revision_is(
+                    metadata_state,
+                    *inode_id,
+                    *attributes_revision_no,
+                )
+                .await?;
+            }
         }
     }
 
@@ -419,6 +484,45 @@ fn next_revision_no(
         .checked_add(1)
         .map(RevisionNo)
         .ok_or_else(|| overflow(inode_id, base_revision_no))
+}
+
+fn next_attributes_revision_no(
+    inode_id: InodeId,
+    base_attributes_revision_no: AttributeRevisionNo,
+) -> Result<AttributeRevisionNo, CommitValidationError> {
+    base_attributes_revision_no
+        .0
+        .checked_add(1)
+        .map(AttributeRevisionNo)
+        .ok_or(CommitValidationError::UpdateAttributesRevisionOverflow {
+            inode_id,
+            base_attributes_revision_no,
+        })
+}
+
+/// Shared by the `UpdateAttributes` op and the `InodeAttributesRevisionIs`
+/// explicit precondition, both of which report the stale-attributes error.
+///
+/// The inode's own attribute revision is the whole check: an inode that has
+/// never had attributes written is at revision 0, so a first write states
+/// zero and a concurrent first write of the same inode conflicts.
+async fn validate_inode_attributes_revision_is<V: CommitValidationView>(
+    metadata_state: &V,
+    inode_id: InodeId,
+    expected: AttributeRevisionNo,
+) -> Result<Attributes, V::Error> {
+    let (actual, attributes) = metadata_state.attributes_at_seq(inode_id).await?;
+    if actual != expected {
+        return Err(
+            CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+                inode_id,
+                expected,
+                actual,
+            }
+            .into(),
+        );
+    }
+    Ok(attributes)
 }
 
 /// Requires the inode to exist and to have `expected_kind`, with the error

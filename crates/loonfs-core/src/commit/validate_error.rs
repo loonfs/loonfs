@@ -1,7 +1,9 @@
 //! [`CommitValidationError`]: every way a commit request can fail
 //! validation.
 
-use loonfs_api::{ChangeSeq, InodeId, InodeKind, NameKey, RevisionNo, WriterEpoch};
+use loonfs_api::{
+    AttributeRevisionNo, ChangeSeq, InodeId, InodeKind, NameKey, RevisionNo, WriterEpoch,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -238,6 +240,39 @@ pub enum CommitValidationError {
     ReplaceFileRevisionOverflow {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
+    },
+    #[error("attribute update target inode `{inode_id}` is missing")]
+    UpdateAttributesInodeMissing { inode_id: InodeId },
+    #[error(
+        "attribute base revision mismatch for inode `{inode_id}`: expected revision {expected}, found revision {actual}"
+    )]
+    UpdateAttributesBaseRevisionMismatch {
+        inode_id: InodeId,
+        expected: AttributeRevisionNo,
+        actual: AttributeRevisionNo,
+    },
+    #[error(
+        "attribute update of inode `{inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
+    )]
+    UpdateAttributesUnderSubtreeTombstone {
+        inode_id: InodeId,
+        root_inode_id: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
+    #[error(
+        "attribute revision counter overflow updating inode `{inode_id}` at base revision `{base_attributes_revision_no}`"
+    )]
+    UpdateAttributesRevisionOverflow {
+        inode_id: InodeId,
+        base_attributes_revision_no: AttributeRevisionNo,
+    },
+    #[error(
+        "attribute update of inode `{inode_id}` publishes revision `{attributes_revision_no}`, which is not one past base revision `{base_attributes_revision_no}`"
+    )]
+    UpdateAttributesRevisionNotSuccessive {
+        inode_id: InodeId,
+        base_attributes_revision_no: AttributeRevisionNo,
+        attributes_revision_no: AttributeRevisionNo,
     },
     #[error("stale writer epoch: requested `{requested}` but active is `{active}`")]
     StaleWriterEpoch {

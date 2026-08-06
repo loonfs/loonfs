@@ -6,10 +6,11 @@
 
 use super::ValidatedContentToken;
 use crate::{
-    AbsolutePath, AttributeRevisionNo, ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId,
-    ManifestId, NamespaceId, RevisionNo, WriterEpoch,
+    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CheckpointId,
+    CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo, WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// HTTP error body used by LoonFS APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +301,34 @@ pub enum FilesystemOperation {
         path: AbsolutePath,
         /// Existing historical revision whose content will be copied into a new current revision.
         source_revision_no: RevisionNo,
+    },
+    /// Write and remove attributes on the inode one path resolves to.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpUpdateAttributes"))]
+    UpdateAttributes {
+        /// Absolute path that must resolve to a visible file or directory.
+        path: AbsolutePath,
+        /// Attributes to write. Each key replaces whatever the inode
+        /// currently holds under it; keys the inode holds and this map does
+        /// not name are left alone.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        set: BTreeMap<AttributeKey, AttributeValue>,
+        /// Keys to remove. A list rather than a set so a repeated key is
+        /// rejected with a message that names it, instead of being folded
+        /// away as if the caller had asked once.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remove: Vec<AttributeKey>,
+        /// When set, the update applies only if the path still resolves to
+        /// this inode; a raced rebinding fails the request instead of
+        /// writing attributes onto the wrong inode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_inode_id: Option<InodeId>,
+        /// When set, the update applies only while the inode's attribute
+        /// revision is still this one. Absent means the update is applied
+        /// over whatever revision is current; either way the write carries
+        /// its own revision guard, so a concurrent update never merges
+        /// silently.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_attributes_revision_no: Option<AttributeRevisionNo>,
     },
 }
 
@@ -991,6 +1020,10 @@ mod tests {
         AbsolutePath::parse(value).expect("valid test path")
     }
 
+    fn attribute_key(value: &str) -> AttributeKey {
+        AttributeKey::parse(value).expect("valid test attribute key")
+    }
+
     #[test]
     fn behavior_enums_use_snake_case_wire_values() {
         assert_eq!(
@@ -1092,6 +1125,96 @@ mod tests {
                 "behavior": "replace"
             })
         );
+
+        let update_attributes = FilesystemOperation::UpdateAttributes {
+            path: path("/docs/a.txt"),
+            set: BTreeMap::from([(
+                attribute_key("owner"),
+                AttributeValue::String {
+                    value: "ada".to_owned(),
+                },
+            )]),
+            remove: vec![attribute_key("draft")],
+            expected_inode_id: Some(InodeId(7)),
+            expected_attributes_revision_no: Some(AttributeRevisionNo(3)),
+        };
+        assert_eq!(
+            serde_json::to_value(&update_attributes).expect("update attributes op json"),
+            serde_json::json!({
+                "kind": "update_attributes",
+                "path": "/docs/a.txt",
+                "set": {"owner": {"kind": "string", "value": "ada"}},
+                "remove": ["draft"],
+                "expected_inode_id": 7,
+                "expected_attributes_revision_no": 3
+            })
+        );
+    }
+
+    #[test]
+    fn update_attributes_omits_empty_collections_and_absent_guards() {
+        let set_only = FilesystemOperation::UpdateAttributes {
+            path: path("/docs/a.txt"),
+            set: BTreeMap::from([(
+                attribute_key("owner"),
+                AttributeValue::StringList {
+                    values: vec!["ada".to_owned(), "grace".to_owned()],
+                },
+            )]),
+            remove: Vec::new(),
+            expected_inode_id: None,
+            expected_attributes_revision_no: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&set_only).expect("set-only op json"),
+            serde_json::json!({
+                "kind": "update_attributes",
+                "path": "/docs/a.txt",
+                "set": {"owner": {"kind": "string_list", "values": ["ada", "grace"]}}
+            })
+        );
+
+        let decoded: FilesystemOperation = serde_json::from_value(serde_json::json!({
+            "kind": "update_attributes",
+            "path": "/docs/a.txt",
+            "remove": ["draft"]
+        }))
+        .expect("remove-only op defaults the set map and both guards");
+        assert_eq!(
+            decoded,
+            FilesystemOperation::UpdateAttributes {
+                path: path("/docs/a.txt"),
+                set: BTreeMap::new(),
+                remove: vec![attribute_key("draft")],
+                expected_inode_id: None,
+                expected_attributes_revision_no: None,
+            }
+        );
+    }
+
+    #[test]
+    fn update_attributes_validates_keys_and_values_during_deserialization() {
+        // The key grammar and the value kinds are enforced on the way in, so
+        // a malformed update never reaches planning.
+        for encoded in [
+            serde_json::json!({
+                "kind": "update_attributes",
+                "path": "/docs/a.txt",
+                "set": {"": {"kind": "string", "value": "ada"}}
+            }),
+            serde_json::json!({
+                "kind": "update_attributes",
+                "path": "/docs/a.txt",
+                "set": {"owner": {"kind": "number", "value": "1"}}
+            }),
+            serde_json::json!({
+                "kind": "update_attributes",
+                "path": "/docs/a.txt",
+                "remove": ["a\u{0}b"]
+            }),
+        ] {
+            assert!(serde_json::from_value::<FilesystemOperation>(encoded).is_err());
+        }
     }
 
     #[test]
@@ -1206,6 +1329,20 @@ mod tests {
                     "source_revision_no": 2
                 }),
             ),
+            (
+                FilesystemOperation::UpdateAttributes {
+                    path: path("/docs/a.txt"),
+                    set: BTreeMap::new(),
+                    remove: vec![attribute_key("draft")],
+                    expected_inode_id: None,
+                    expected_attributes_revision_no: None,
+                },
+                serde_json::json!({
+                    "kind": "update_attributes",
+                    "path": "/docs/a.txt",
+                    "remove": ["draft"]
+                }),
+            ),
         ];
 
         for (operation, string_shaped_json) in cases {
@@ -1246,6 +1383,11 @@ mod tests {
                 "kind": "restore_revision",
                 "path": "relative",
                 "source_revision_no": 2
+            }),
+            serde_json::json!({
+                "kind": "update_attributes",
+                "path": "relative",
+                "remove": ["draft"]
             }),
         ] {
             assert!(serde_json::from_value::<FilesystemOperation>(encoded).is_err());

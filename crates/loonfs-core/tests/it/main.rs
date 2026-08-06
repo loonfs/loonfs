@@ -2,6 +2,7 @@
 //! `tests/<name>.rs` file is a module here, so the suite links once and
 //! runs its tests as threads instead of as separate processes.
 
+mod attributes;
 mod batch_publish;
 mod commit_validation;
 mod common;

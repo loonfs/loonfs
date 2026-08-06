@@ -36,8 +36,8 @@ mod visibility;
 
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::{
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
+    AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
+    InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;

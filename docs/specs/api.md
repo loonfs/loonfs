@@ -1596,6 +1596,61 @@ generation named by `deleted_at_seq` — anything else answers `not_deleted`
 with the requested and active generations in the details, so a stale
 recovery request can never cancel a later deletion.
 
+and `update_attributes`, which writes and removes attributes on the inode a
+path resolves to:
+
+```json
+{
+  "commit_id": "c_6e7f8091a2b3c4d5e6f7081234567890",
+  "operations": [
+    {
+      "kind": "update_attributes",
+      "path": "/docs/report.txt",
+      "set": {
+        "owner": { "kind": "string", "value": "ada" },
+        "tags": { "kind": "string_list", "values": ["draft", "review"] }
+      },
+      "remove": ["stage"],
+      "expected_attributes_revision_no": 3
+    }
+  ]
+}
+```
+
+`set` writes each key over whatever the inode currently holds under it, and
+leaves keys it does not name alone. `remove` drops each key it names. Both
+default to empty, but a request that names neither answers `invalid_request`:
+there is nothing to apply. So do a key that appears in both, a key repeated
+in `remove`, and any key under the reserved `loonfs.` prefix, which is
+system-owned and not a caller's to write.
+
+An update that leaves the map exactly as it was also answers
+`invalid_request`. Attributes are current state with no history, so a
+revision that restates the same map has nothing behind it — unlike a put of
+identical bytes, which appends a revision because a file's revisions *are* its
+history. The resulting map is checked against every limit in the format spec,
+so a small write that pushes an already-large map over a cap is rejected for
+the map it would produce.
+
+The target is any visible file or directory: attributes belong to the
+resource. They travel with inode identity, so a move, a rename, a new file
+revision, and a revision restore all leave them unchanged, a delete keeps them
+while it hides the inode, and an undelete gives back the same map at the same
+revision. A copy to a vacant destination is the one operation that carries
+them: the new inode starts with the source's map at attribute revision 1, as
+its own event in the change feed. A copy over an existing file changes that
+file's content and nothing else.
+
+`expected_inode_id` and `expected_attributes_revision_no` are both optional
+guards, and both are part of the commit's semantic identity for commit-id
+reuse. A wrong `expected_inode_id` answers `path_conflict`, like the delete
+guard it mirrors, so a raced rebinding cannot land attributes on the wrong
+inode. A stale
+`expected_attributes_revision_no` answers `stale_attributes`. Omitting the
+revision guard does not make the write a merge: every update carries the
+revision it read as its own guard, so a concurrent update still answers
+`stale_attributes` with the expected and actual revisions in the details.
+
 ### 6.9 Upload transport
 
 The upload transport standardizes staged content publication, not one specific
@@ -1888,8 +1943,12 @@ presign writes either, no file it holds can be larger than it will proxy.
 
 Each change is one commit carrying its identity (`seq`,
 `commit_id`, observational `committed_at_ms`, writer provenance, optional
-`message`) and `events`: semantic filesystem events, exactly one per
-committed operation, in request-operation order.
+`message`) and `events`: the semantic filesystem operations the commit
+applied, in the order it applied them. One request operation may apply
+several — a put creates each missing parent directory, a replacing move
+deletes the file it moves over, a copy carries the source's attributes onto
+the inode it just created — so a request with three operations may report
+more than three events. The events stay in request order.
 
 ```json
 {
@@ -1930,6 +1989,7 @@ Event kinds:
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_name`, `to_parent_inode_id`, `to_name`. |
 | `deleted` | A file or directory subtree was deleted. The enclosing change's `seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus `parent_inode_id` and `name` when the delete recorded them. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `name`. |
+| `attributes_changed` | An inode's attributes changed. `attributes` is the complete map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 
 Events name inodes and their parent-directory bindings rather than full
 paths; a consumer that needs paths can stat the inode or maintain its own

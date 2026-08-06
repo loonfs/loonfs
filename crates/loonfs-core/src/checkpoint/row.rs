@@ -132,6 +132,17 @@ pub(super) fn manifest_rows_for_family(
                 message: record.message.clone(),
             })
             .collect::<Vec<_>>(),
+        MetadataTableFamily::Attributes => metadata_state
+            .attributes_revisions()
+            .iter()
+            .map(|record| MetadataRow::AttributesRevision {
+                inode_id: record.inode_id,
+                attributes_revision_no: record.attributes_revision_no,
+                committed_seq: record.committed_seq,
+                delta_index: record.delta_index,
+                attributes: record.attributes.clone(),
+            })
+            .collect::<Vec<_>>(),
     };
     rows.sort_by_key(|row| row.row_key_for_family(family));
     rows
@@ -166,6 +177,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
             ActiveDeletionRowAction::Removed { revoked_at_seq } => *revoked_at_seq,
         },
         MetadataRow::CommitReceipt { committed_seq, .. } => *committed_seq,
+        MetadataRow::AttributesRevision { committed_seq, .. } => *committed_seq,
     }
 }
 
@@ -179,5 +191,6 @@ pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::Tombstone { .. } => "tombstone",
         MetadataRow::ActiveDeletion { .. } => "active_deletion",
         MetadataRow::CommitReceipt { .. } => "commit_receipt",
+        MetadataRow::AttributesRevision { .. } => "attributes_revision",
     }
 }

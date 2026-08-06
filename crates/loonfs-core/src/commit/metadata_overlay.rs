@@ -61,7 +61,9 @@ mod tests {
     use crate::commit::ResolvedBinding;
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::ContentId;
-    use loonfs_api::{ContentRef, InodeId, NameKey, RevisionNo};
+    use loonfs_api::{
+        AttributeKey, AttributeValue, Attributes, ContentRef, InodeId, NameKey, RevisionNo,
+    };
 
     /// The commit overlay derives its rows from the WAL encoding
     /// (`materialize_validated_op` + `apply_committed_wal_delta_mut`), the
@@ -128,10 +130,32 @@ mod tests {
             replayed.commit_receipts(),
             "commit receipt rows diverged"
         );
+        assert_eq!(
+            overlay.attributes_revisions(),
+            replayed.attributes_revisions(),
+            "attribute revision rows diverged"
+        );
     }
 
     fn content_ref(seed: u8) -> ContentRef {
         ContentRef::blob_v1(ContentId::generate(), &[seed; 12])
+    }
+
+    fn attributes(entries: impl IntoIterator<Item = (&'static str, &'static str)>) -> Attributes {
+        Attributes::new(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        AttributeKey::parse(key).expect("valid attribute key"),
+                        AttributeValue::String {
+                            value: value.to_owned(),
+                        },
+                    )
+                })
+                .collect(),
+        )
+        .expect("valid attribute map")
     }
 
     fn binding(
@@ -279,6 +303,45 @@ mod tests {
                     new_name_key: NameKey::parse("final.md").expect("valid name key"),
                     unbind_delta_index: 3,
                     bind_delta_index: 4,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn update_attributes_overlay_rows_match_replayed_wal_deltas() {
+        assert_overlay_matches_replay(
+            ChangeSeq(25),
+            &[ValidatedOp::UpdateAttributes {
+                op_index: 0,
+                inode_id: InodeId(4),
+                attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
+                attributes: attributes([("owner", "ada")]),
+                attributes_delta_index: 0,
+            }],
+        );
+    }
+
+    /// A clear is a real revision carrying the empty map, so the overlay and
+    /// replay must both hold a row for it.
+    #[test]
+    fn cleared_attributes_overlay_rows_match_replayed_wal_deltas() {
+        assert_overlay_matches_replay(
+            ChangeSeq(26),
+            &[
+                ValidatedOp::UpdateAttributes {
+                    op_index: 0,
+                    inode_id: InodeId(4),
+                    attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
+                    attributes: attributes([("owner", "ada")]),
+                    attributes_delta_index: 0,
+                },
+                ValidatedOp::UpdateAttributes {
+                    op_index: 1,
+                    inode_id: InodeId(4),
+                    attributes_revision_no: loonfs_api::AttributeRevisionNo(2),
+                    attributes: loonfs_api::Attributes::default(),
+                    attributes_delta_index: 1,
                 },
             ],
         );

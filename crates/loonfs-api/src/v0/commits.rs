@@ -4,7 +4,8 @@
 //! [`super::operations`].
 
 use crate::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
+    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
+    InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,10 +29,14 @@ pub struct CommitResponse {
 
 /// One semantic filesystem change inside a commit.
 ///
-/// Each event corresponds to one operation of the committed request, in
+/// A commit's events are the operations it applied, in the order it applied
+/// them. One request operation can apply several: creating missing parent
+/// directories, or replacing a file by moving over it, each produce an event
+/// per directory created or file replaced. So a request with three
+/// operations may report more than three events, and the events stay in
 /// request order. Events name inodes and their parent-directory bindings
-/// rather than full paths; a consumer that needs paths can stat the inode
-/// or maintain its own binding projection from this feed.
+/// rather than full paths; a consumer that needs paths can stat the inode or
+/// maintain its own binding projection from this feed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -104,6 +109,21 @@ pub enum FilesystemChange {
         /// Spelling of the recovered binding.
         name: DisplayName,
     },
+    /// An inode's attributes changed.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemChangeAttributesChanged")
+    )]
+    AttributesChanged {
+        /// Inode whose attributes advanced.
+        inode_id: InodeId,
+        /// New attribute revision for that inode.
+        attributes_revision_no: AttributeRevisionNo,
+        /// The inode's complete attribute map after the update, so a consumer
+        /// projects it without reading anything back. An empty map is the
+        /// cleared state.
+        attributes: Attributes,
+    },
 }
 
 /// One committed change in namespace order.
@@ -120,8 +140,9 @@ pub struct CommittedChange {
     /// Caller annotation, omitted when absent and carrying no filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Semantic filesystem events, one per committed operation, in
-    /// request-operation order.
+    /// Semantic filesystem events for this commit, in the order the commit
+    /// applied them. One request operation may produce more than one event
+    /// (see [`FilesystemChange`]).
     pub events: Vec<FilesystemChange>,
 }
 
@@ -226,6 +247,33 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&undeleted).expect("serialize undeleted event"),
             r#"{"kind":"undeleted","inode_id":2,"parent_inode_id":1,"name":"a.txt"}"#
+        );
+
+        let attributes_changed = FilesystemChange::AttributesChanged {
+            inode_id: InodeId(2),
+            attributes_revision_no: crate::AttributeRevisionNo(4),
+            attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
+                crate::AttributeKey::parse("owner").expect("valid attribute key"),
+                crate::AttributeValue::String {
+                    value: "ada".to_owned(),
+                },
+            )]))
+            .expect("valid attribute map"),
+        };
+        assert_eq!(
+            serde_json::to_string(&attributes_changed).expect("serialize attributes event"),
+            r#"{"kind":"attributes_changed","inode_id":2,"attributes_revision_no":4,"attributes":{"owner":{"kind":"string","value":"ada"}}}"#
+        );
+
+        // A clear is a real event carrying the empty map, not an absence.
+        let cleared = FilesystemChange::AttributesChanged {
+            inode_id: InodeId(2),
+            attributes_revision_no: crate::AttributeRevisionNo(5),
+            attributes: crate::Attributes::default(),
+        };
+        assert_eq!(
+            serde_json::to_string(&cleared).expect("serialize cleared attributes event"),
+            r#"{"kind":"attributes_changed","inode_id":2,"attributes_revision_no":5,"attributes":{}}"#
         );
     }
 }

@@ -17,8 +17,8 @@ use crate::metadata::MetadataState;
 use loonfs_api::wire::control::{HeadState, WriterBlock};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    ChangeSeq, CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey,
-    NamespaceId, RevisionNo, WriterEpoch,
+    AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, CommitId, ContentId,
+    ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WriterEpoch,
 };
 
 fn test_display_name(value: impl AsRef<str>) -> DisplayName {
@@ -27,6 +27,37 @@ fn test_display_name(value: impl AsRef<str>) -> DisplayName {
 
 fn content_ref(seed: &str) -> ContentRef {
     ContentRef::blob_v1(ContentId::generate(), seed.as_bytes())
+}
+
+fn test_attributes(entries: &[(&str, &str)]) -> Attributes {
+    Attributes::new(
+        entries
+            .iter()
+            .map(|(key, value)| {
+                (
+                    AttributeKey::parse(key).expect("valid attribute key"),
+                    AttributeValue::String {
+                        value: (*value).to_owned(),
+                    },
+                )
+            })
+            .collect(),
+    )
+    .expect("valid attribute map")
+}
+
+fn wal_append_attributes(
+    delta_index: u32,
+    inode_id: InodeId,
+    revision: u64,
+    entries: &[(&str, &str)],
+) -> Vec<WalDelta> {
+    vec![WalDelta::AppendAttributesRevision {
+        delta_index,
+        inode_id,
+        attributes_revision_no: AttributeRevisionNo(revision),
+        attributes: test_attributes(entries),
+    }]
 }
 
 /// Operations with no race checks of their own: these tests drive the
@@ -162,6 +193,165 @@ fn validation_context(
         head,
         metadata_state,
     }
+}
+
+/// Every attribute update carries its own revision guard, whether or not the
+/// caller stated an expectation. A plan built against a revision that is no
+/// longer current is rejected here, not merged.
+#[tokio::test]
+async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() {
+    let metadata_state = metadata_state_after(&[
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_append_attributes(0, InodeId(2), 1, &[("owner", "ada")]),
+        wal_append_attributes(0, InodeId(2), 2, &[("owner", "grace")]),
+    ]);
+    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(3));
+    let request = CommitIr {
+        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+        commit_id: CommitId::parse("stale-attributes").expect("valid commit id"),
+        writer_epoch: WriterEpoch(1),
+        // The op alone, with no explicit precondition: the guard rides the
+        // operation itself.
+        ops: planned(vec![CommitOp::UpdateAttributes {
+            inode_id: InodeId(2),
+            base_attributes_revision_no: AttributeRevisionNo(1),
+            attributes_revision_no: AttributeRevisionNo(2),
+            attributes: test_attributes(&[("owner", "hopper")]),
+        }]),
+        message: None,
+    };
+
+    let error = build_commit_plan(&request, 4_200, &context)
+        .await
+        .expect_err("the base revision is stale");
+    assert!(
+        matches!(
+            error,
+            CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+                inode_id: InodeId(2),
+                expected: AttributeRevisionNo(1),
+                actual: AttributeRevisionNo(2),
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        CoreError::from(error).code(),
+        ErrorCode::StaleAttributes,
+        "the guard reports the attribute-conflict code"
+    );
+}
+
+/// An inode with no attribute row is at revision 0, so a first write states
+/// zero — and a second first write of the same inode conflicts.
+#[tokio::test]
+async fn a_first_attribute_write_states_revision_zero() {
+    let metadata_state = metadata_state_after(&[wal_create_directory(
+        0,
+        InodeId(2),
+        InodeId(1),
+        "docs".to_owned(),
+    )]);
+    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let request = |base: u64, revision: u64| CommitIr {
+        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+        commit_id: CommitId::parse("first-attributes").expect("valid commit id"),
+        writer_epoch: WriterEpoch(1),
+        ops: planned(vec![CommitOp::UpdateAttributes {
+            inode_id: InodeId(2),
+            base_attributes_revision_no: AttributeRevisionNo(base),
+            attributes_revision_no: AttributeRevisionNo(revision),
+            attributes: test_attributes(&[("owner", "ada")]),
+        }]),
+        message: None,
+    };
+
+    build_commit_plan(&request(0, 1), 4_200, &context)
+        .await
+        .expect("a first write states revision zero");
+    let error = build_commit_plan(&request(1, 2), 4_200, &context)
+        .await
+        .expect_err("nothing has written revision 1 yet");
+    assert!(
+        matches!(
+            error,
+            CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+                expected: AttributeRevisionNo(1),
+                actual: AttributeRevisionNo(0),
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+/// The planner numbers the revision, so a plan that publishes anything but
+/// the successor is a bug in this server and must not reach durable state.
+#[tokio::test]
+async fn an_attribute_revision_that_skips_a_number_is_rejected() {
+    let metadata_state = metadata_state_after(&[wal_create_directory(
+        0,
+        InodeId(2),
+        InodeId(1),
+        "docs".to_owned(),
+    )]);
+    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let request = CommitIr {
+        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+        commit_id: CommitId::parse("skipped-attributes").expect("valid commit id"),
+        writer_epoch: WriterEpoch(1),
+        ops: planned(vec![CommitOp::UpdateAttributes {
+            inode_id: InodeId(2),
+            base_attributes_revision_no: AttributeRevisionNo(0),
+            attributes_revision_no: AttributeRevisionNo(7),
+            attributes: test_attributes(&[("owner", "ada")]),
+        }]),
+        message: None,
+    };
+
+    let error = build_commit_plan(&request, 4_200, &context)
+        .await
+        .expect_err("the revision is not one past the base");
+    assert!(
+        matches!(
+            error,
+            CommitValidationError::UpdateAttributesRevisionNotSuccessive { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+/// Attributes belong to the resource, so an inode nothing binds has none to
+/// write.
+#[tokio::test]
+async fn an_attribute_update_of_a_missing_inode_is_rejected() {
+    let metadata_state = metadata_state_after(&[]);
+    let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
+    let request = CommitIr {
+        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+        commit_id: CommitId::parse("missing-attributes").expect("valid commit id"),
+        writer_epoch: WriterEpoch(1),
+        ops: planned(vec![CommitOp::UpdateAttributes {
+            inode_id: InodeId(9),
+            base_attributes_revision_no: AttributeRevisionNo(0),
+            attributes_revision_no: AttributeRevisionNo(1),
+            attributes: test_attributes(&[("owner", "ada")]),
+        }]),
+        message: None,
+    };
+
+    let error = build_commit_plan(&request, 4_200, &context)
+        .await
+        .expect_err("the inode does not exist");
+    assert!(
+        matches!(
+            error,
+            CommitValidationError::UpdateAttributesInodeMissing {
+                inode_id: InodeId(9)
+            }
+        ),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

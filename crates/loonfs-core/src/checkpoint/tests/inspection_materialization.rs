@@ -317,6 +317,9 @@ pub(crate) fn append_rows_to_metadata(
             MetadataTableFamily::CommitReceipts => metadata_state.push_commit_receipt(
                 row_decode::commit_receipt_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
+            MetadataTableFamily::Attributes => metadata_state.push_attributes_revision(
+                row_decode::attributes_revision_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
         }
     }
     Ok(())

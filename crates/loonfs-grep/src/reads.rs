@@ -205,12 +205,13 @@ pub(crate) struct PublishedRevision<'a> {
 /// The revision a change event published, or `None` when the event changed
 /// no file content.
 ///
-/// `Moved`, `Deleted`, and `Undeleted` are deliberately nothing to index:
-/// the index is keyed by durable `(inode_id, revision_no)`, and every query
-/// verifies its candidates against current state before emitting a match.
-/// So a moved file is found at its new path, a deleted one stops verifying,
-/// and an undeleted one verifies again — none of it touches a posting.
-/// Re-indexing them would rewrite postings that are already correct.
+/// `Moved`, `Deleted`, `Undeleted`, and `AttributesChanged` are deliberately
+/// nothing to index: the index is keyed by durable `(inode_id, revision_no)`,
+/// and every query verifies its candidates against current state before
+/// emitting a match. So a moved file is found at its new path, a deleted one
+/// stops verifying, an undeleted one verifies again, and an attribute write
+/// leaves the file's bytes alone — none of it touches a posting. Re-indexing
+/// them would rewrite postings that are already correct.
 pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRevision<'_>> {
     match event {
         FilesystemChange::Created {
@@ -236,7 +237,8 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
         FilesystemChange::Created { .. }
         | FilesystemChange::Moved { .. }
         | FilesystemChange::Deleted { .. }
-        | FilesystemChange::Undeleted { .. } => None,
+        | FilesystemChange::Undeleted { .. }
+        | FilesystemChange::AttributesChanged { .. } => None,
     }
 }
 

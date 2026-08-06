@@ -2767,11 +2767,73 @@
           }
         }
       },
+      "AttributeKey": {
+        "type": "string",
+        "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected."
+      },
       "AttributeRevisionNo": {
         "type": "integer",
         "format": "int64",
         "description": "Monotonically increasing attribute revision counter within one inode.\n\nEvery inode starts at revision 0 with an empty attribute map, and every\neffective update — one that changes the map — advances the counter by\none. The counter is the optimistic-concurrency token for attribute\nwrites: a writer states the revision it expects, and the write fails\nwhen the inode has moved past it. The counter is not an index into a\nhistory. LoonFS keeps the current map and this number, and promises no\nqueryable record of earlier maps.",
         "minimum": 0
+      },
+      "AttributeValue": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "One text value.",
+            "required": [
+              "value",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "string"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "description": "The stored text, at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An ordered list of text values.",
+            "required": [
+              "values",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "string_list"
+                ]
+              },
+              "values": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The stored members in written order, at most\n[`MAX_ATTRIBUTE_LIST_MEMBERS`] of them, each at most\n[`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes."
+              }
+            }
+          }
+        ],
+        "description": "One attribute value.\n\nThe kind is part of the value's identity. A string and a one-member string\nlist are different values, and reading one never yields the other."
+      },
+      "Attributes": {
+        "type": "object",
+        "description": "A validated attribute map for one inode.\n\nConstruction and decoding both enforce the same limits: a map holds at\nmost [`MAX_ATTRIBUTE_ENTRIES`] entries, each string and each list member\nis at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes, each list holds at\nmost [`MAX_ATTRIBUTE_LIST_MEMBERS`] members, and the whole map is at most\n[`MAX_ATTRIBUTES_TOTAL_BYTES`] logical UTF-8 bytes. The total counts key\nbytes and value bytes and nothing else, so it does not depend on the\nencoding the map is written in. Durable state that breaks a limit fails to\ndecode rather than decoding to something smaller.\n\nAn empty map is valid. It is the cleared state, and clearing an inode's\nattributes is a real update with its own revision.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/AttributeValue"
+        },
+        "propertyNames": {
+          "type": "string"
+        }
       },
       "AuthoritativePathEntry": {
         "type": "object",
@@ -3370,7 +3432,7 @@
             "items": {
               "$ref": "#/components/schemas/FilesystemChange"
             },
-            "description": "Semantic filesystem events, one per committed operation, in\nrequest-operation order."
+            "description": "Semantic filesystem events for this commit, in the order the commit\napplied them. One request operation may produce more than one event\n(see [`FilesystemChange`])."
           },
           "message": {
             "type": [
@@ -4238,9 +4300,40 @@
                 "description": "Directory the recovered entry was bound under."
               }
             }
+          },
+          {
+            "type": "object",
+            "title": "FilesystemChangeAttributesChanged",
+            "description": "An inode's attributes changed.",
+            "required": [
+              "inode_id",
+              "attributes_revision_no",
+              "attributes",
+              "kind"
+            ],
+            "properties": {
+              "attributes": {
+                "$ref": "#/components/schemas/Attributes",
+                "description": "The inode's complete attribute map after the update, so a consumer\nprojects it without reading anything back. An empty map is the\ncleared state."
+              },
+              "attributes_revision_no": {
+                "$ref": "#/components/schemas/AttributeRevisionNo",
+                "description": "New attribute revision for that inode."
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Inode whose attributes advanced."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "attributes_changed"
+                ]
+              }
+            }
           }
         ],
-        "description": "One semantic filesystem change inside a commit.\n\nEach event corresponds to one operation of the committed request, in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode\nor maintain its own binding projection from this feed."
+        "description": "One semantic filesystem change inside a commit.\n\nA commit's events are the operations it applied, in the order it applied\nthem. One request operation can apply several: creating missing parent\ndirectories, or replacing a file by moving over it, each produce an event\nper directory created or file replaced. So a request with three\noperations may report more than three events, and the events stay in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode or\nmaintain its own binding projection from this feed."
       },
       "FilesystemOperation": {
         "oneOf": [
@@ -4466,6 +4559,67 @@
               "source_revision_no": {
                 "$ref": "#/components/schemas/RevisionNo",
                 "description": "Existing historical revision whose content will be copied into a new current revision."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "FsOpUpdateAttributes",
+            "description": "Write and remove attributes on the inode one path resolves to.",
+            "required": [
+              "path",
+              "kind"
+            ],
+            "properties": {
+              "expected_attributes_revision_no": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AttributeRevisionNo",
+                    "description": "When set, the update applies only while the inode's attribute\nrevision is still this one. Absent means the update is applied\nover whatever revision is current; either way the write carries\nits own revision guard, so a concurrent update never merges\nsilently."
+                  }
+                ]
+              },
+              "expected_inode_id": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InodeId",
+                    "description": "When set, the update applies only if the path still resolves to\nthis inode; a raced rebinding fails the request instead of\nwriting attributes onto the wrong inode."
+                  }
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "update_attributes"
+                ]
+              },
+              "path": {
+                "$ref": "#/components/schemas/AbsolutePath",
+                "description": "Absolute path that must resolve to a visible file or directory."
+              },
+              "remove": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AttributeKey"
+                },
+                "description": "Keys to remove. A list rather than a set so a repeated key is\nrejected with a message that names it, instead of being folded\naway as if the caller had asked once."
+              },
+              "set": {
+                "type": "object",
+                "description": "Attributes to write. Each key replaces whatever the inode\ncurrently holds under it; keys the inode holds and this map does\nnot name are left alone.",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/AttributeValue"
+                },
+                "propertyNames": {
+                  "type": "string",
+                  "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected."
+                }
               }
             }
           }

@@ -5,7 +5,8 @@
 use super::indexes::MetadataIndexes;
 use loonfs_api::wire::manifest::{lookup_keys, DeletedDirentry, TombstoneGeneration};
 use loonfs_api::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
+    InodeKind, NameKey, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use std::mem::{size_of, size_of_val};
@@ -24,6 +25,8 @@ pub struct MetadataState {
     pub(super) subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
     pub(super) commit_receipts: Vec<CommitReceiptRecord>,
+    #[serde(default)]
+    pub(super) attributes_revisions: Vec<AttributesRevisionRecord>,
     #[serde(skip)]
     pub(super) row_count: usize,
     #[serde(skip)]
@@ -46,11 +49,14 @@ struct MetadataStateRows {
     subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
     commit_receipts: Vec<CommitReceiptRecord>,
+    #[serde(default)]
+    attributes_revisions: Vec<AttributesRevisionRecord>,
 }
 
 impl Default for MetadataState {
     fn default() -> Self {
         Self::from_rows(
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -74,6 +80,7 @@ impl<'de> Deserialize<'de> for MetadataState {
             rows.revisions,
             rows.subtree_tombstones,
             rows.commit_receipts,
+            rows.attributes_revisions,
         ))
     }
 }
@@ -289,7 +296,25 @@ pub struct CommitReceiptRecord {
     pub message: Option<String>,
 }
 
+/// One inode's complete attribute map at one revision.
+///
+/// The record is whole state, so a reader takes the newest one for an inode
+/// and needs nothing older. An inode with no record is at revision 0 with an
+/// empty map, which is why nothing is written until a caller writes an
+/// attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttributesRevisionRecord {
+    pub inode_id: InodeId,
+    pub attributes_revision_no: AttributeRevisionNo,
+    pub committed_seq: ChangeSeq,
+    pub delta_index: u32,
+    /// The inode's attributes after this update. An empty map is the cleared
+    /// state, not an absent record.
+    pub attributes: Attributes,
+}
+
 impl MetadataState {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_rows(
         inodes: Vec<InodeRecord>,
         direntry_binds: Vec<DirentryBindRecord>,
@@ -297,6 +322,7 @@ impl MetadataState {
         revisions: Vec<RevisionRecord>,
         subtree_tombstones: Vec<SubtreeTombstoneRecord>,
         commit_receipts: Vec<CommitReceiptRecord>,
+        attributes_revisions: Vec<AttributesRevisionRecord>,
     ) -> Self {
         let mut state = Self {
             inodes,
@@ -305,6 +331,7 @@ impl MetadataState {
             revisions,
             subtree_tombstones,
             commit_receipts,
+            attributes_revisions,
             row_count: 0,
             decoded_bytes: 0,
             indexes: MetadataIndexes::default(),
@@ -348,6 +375,10 @@ impl MetadataState {
         &self.commit_receipts
     }
 
+    pub fn attributes_revisions(&self) -> &[AttributesRevisionRecord] {
+        &self.attributes_revisions
+    }
+
     pub fn row_count(&self) -> usize {
         self.row_count
     }
@@ -368,6 +399,7 @@ impl MetadataState {
             &self.revisions,
             &self.subtree_tombstones,
             &self.commit_receipts,
+            &self.attributes_revisions,
         );
         self.decoded_bytes = metadata_decoded_bytes(
             &self.inodes,
@@ -376,6 +408,7 @@ impl MetadataState {
             &self.revisions,
             &self.subtree_tombstones,
             &self.commit_receipts,
+            &self.attributes_revisions,
         );
         self.indexes = MetadataIndexes::rebuild(
             &self.inodes,
@@ -384,6 +417,7 @@ impl MetadataState {
             &self.revisions,
             &self.subtree_tombstones,
             &self.commit_receipts,
+            &self.attributes_revisions,
         );
     }
 
@@ -421,6 +455,12 @@ impl MetadataState {
         self.indexes.record_commit_receipt(&record);
         self.record_row_weight(commit_receipt_decoded_bytes(&record));
         self.commit_receipts.push(record);
+    }
+
+    pub(crate) fn push_attributes_revision_record(&mut self, record: AttributesRevisionRecord) {
+        self.indexes.record_attributes_revision(&record);
+        self.record_row_weight(attributes_revision_decoded_bytes(&record));
+        self.attributes_revisions.push(record);
     }
 
     fn record_row_weight(&mut self, decoded_bytes: usize) {
@@ -461,12 +501,17 @@ impl MetadataStateBuilder {
         self.state.push_commit_receipt_record(record);
     }
 
+    pub(crate) fn push_attributes_revision(&mut self, record: AttributesRevisionRecord) {
+        self.state.push_attributes_revision_record(record);
+    }
+
     pub(crate) fn finish(mut self) -> MetadataState {
         self.state.rebuild_indexes();
         self.state
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn metadata_row_count(
     inodes: &[InodeRecord],
     direntry_binds: &[DirentryBindRecord],
@@ -474,6 +519,7 @@ fn metadata_row_count(
     revisions: &[RevisionRecord],
     subtree_tombstones: &[SubtreeTombstoneRecord],
     commit_receipts: &[CommitReceiptRecord],
+    attributes_revisions: &[AttributesRevisionRecord],
 ) -> usize {
     inodes
         .len()
@@ -482,8 +528,10 @@ fn metadata_row_count(
         .saturating_add(revisions.len())
         .saturating_add(subtree_tombstones.len())
         .saturating_add(commit_receipts.len())
+        .saturating_add(attributes_revisions.len())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn metadata_decoded_bytes(
     inodes: &[InodeRecord],
     direntry_binds: &[DirentryBindRecord],
@@ -491,6 +539,7 @@ fn metadata_decoded_bytes(
     revisions: &[RevisionRecord],
     subtree_tombstones: &[SubtreeTombstoneRecord],
     commit_receipts: &[CommitReceiptRecord],
+    attributes_revisions: &[AttributesRevisionRecord],
 ) -> usize {
     size_of_val(inodes)
         .saturating_add(
@@ -511,6 +560,12 @@ fn metadata_decoded_bytes(
             commit_receipts
                 .iter()
                 .map(commit_receipt_decoded_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            attributes_revisions
+                .iter()
+                .map(attributes_revision_decoded_bytes)
                 .sum::<usize>(),
         )
 }
@@ -534,6 +589,12 @@ fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
         + record.commit_id.as_str().len()
         + record.semantic_commit_fingerprint.len()
         + record.message.as_ref().map_or(0, String::len)
+}
+
+/// The record's struct plus the key and value bytes its map owns. Attribute
+/// maps are caller-sized, so the map's own bytes are what this row weighs.
+fn attributes_revision_decoded_bytes(record: &AttributesRevisionRecord) -> usize {
+    size_of::<AttributesRevisionRecord>() + record.attributes.logical_bytes()
 }
 
 fn content_ref_decoded_bytes(content_ref: &ContentRef) -> usize {

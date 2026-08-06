@@ -25,6 +25,8 @@ pub struct MetadataState {
     pub revisions: Vec<RevisionRecord>,
     #[serde(default)]
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
+    #[serde(default)]
+    pub attribute_revisions: Vec<AttributeRevisionRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,34 @@ pub struct SubtreeTombstoneRecord {
     /// event per root wins, and a revoke as the newest means no active
     /// tombstone.
     pub action: SubtreeTombstoneAction,
+}
+
+/// One inode's whole attribute map at one revision, spelled in this crate's
+/// own plain types: text keys, its own value enum, and flat fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttributeRevisionRecord {
+    pub inode_id: InodeId,
+    pub revision: u64,
+    pub committed_seq: ChangeSeq,
+    pub delta_index: u32,
+    /// The map after the update, in key order. An empty list is the cleared
+    /// state, not a missing record.
+    pub entries: Vec<AttributeEntry>,
+}
+
+/// One key and its value inside an attribute map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttributeEntry {
+    pub key: String,
+    pub value: AttributeContent,
+}
+
+/// What one attribute holds. The kind is part of the value: one text and a
+/// one-member text list are different values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttributeContent {
+    Text(String),
+    TextList(Vec<String>),
 }
 
 /// Where one deletion event committed. A revoke names its target this way,
@@ -222,6 +252,35 @@ impl MetadataState {
                                     delta_index: target.delta_index,
                                 },
                             },
+                        });
+                }
+                WalDelta::AppendAttributesRevision {
+                    delta_index,
+                    inode_id,
+                    attributes_revision_no,
+                    attributes,
+                } => {
+                    metadata_state
+                        .attribute_revisions
+                        .push(AttributeRevisionRecord {
+                            inode_id: *inode_id,
+                            revision: attributes_revision_no.0,
+                            committed_seq,
+                            delta_index: *delta_index,
+                            entries: attributes
+                                .iter()
+                                .map(|(key, value)| AttributeEntry {
+                                    key: key.as_str().to_owned(),
+                                    value: match value {
+                                        loonfs_api::AttributeValue::String { value } => {
+                                            AttributeContent::Text(value.clone())
+                                        }
+                                        loonfs_api::AttributeValue::StringList { values } => {
+                                            AttributeContent::TextList(values.clone())
+                                        }
+                                    },
+                                })
+                                .collect(),
                         });
                 }
             }

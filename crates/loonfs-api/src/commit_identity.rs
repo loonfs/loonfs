@@ -14,11 +14,13 @@
 //! whole of the reuse check.
 
 use crate::{
-    AbsolutePath, ChangeSeq, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-    FilesystemOperation, InodeId, NamespaceId, RevisionNo,
+    AbsolutePath, AttributeRevisionNo, AttributeValue, ChangeSeq, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
+    RevisionNo,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use thiserror::Error;
 
@@ -130,6 +132,41 @@ enum OperationFingerprintInput<'a> {
         // form. Both shapes are pinned below.
         absolute_path: Option<&'a str>,
     },
+    // Both guards join the preimage for the same reason the delete guard
+    // does: a changed expectation is a different logical request. `set` is a
+    // map, so it serializes key-ordered whatever order the caller sent; the
+    // translation below sorts and deduplicates `remove` so two spellings of
+    // one removal set reach the same preimage.
+    UpdateAttrs {
+        absolute_path: &'a str,
+        set: BTreeMap<&'a str, AttributeValueFingerprintInput<'a>>,
+        remove: Vec<&'a str>,
+        expected_inode_id: Option<InodeId>,
+        expected_attributes_revision_no: Option<AttributeRevisionNo>,
+    },
+}
+
+/// Canonical preimage for one attribute value.
+///
+/// Restated here rather than embedding [`AttributeValue`]'s own encoding, for
+/// the same reason the content reference above is restated: the wire spelling
+/// of a value has to be free to change without restating the identity of
+/// every already-published update. The kind is part of the value, so a text
+/// and a one-member list fingerprint differently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AttributeValueFingerprintInput<'a> {
+    Text { text: &'a str },
+    TextList { texts: &'a [String] },
+}
+
+fn attribute_value_fingerprint_input(value: &AttributeValue) -> AttributeValueFingerprintInput<'_> {
+    match value {
+        AttributeValue::String { value } => AttributeValueFingerprintInput::Text { text: value },
+        AttributeValue::StringList { values } => {
+            AttributeValueFingerprintInput::TextList { texts: values }
+        }
+    }
 }
 
 /// Canonical preimage for the content a put attaches.
@@ -227,6 +264,30 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             deleted_at_seq: *deleted_at_seq,
             absolute_path: path.as_ref().map(|path| path.as_str()),
         },
+        FilesystemOperation::UpdateAttributes {
+            path,
+            set,
+            remove,
+            expected_inode_id,
+            expected_attributes_revision_no,
+        } => {
+            // Canonicalizing the removal list is this function's job, not the
+            // wire type's: the wire keeps the caller's list so a duplicate can
+            // be rejected by name, and identity is what the list asks for.
+            let mut remove: Vec<&str> = remove.iter().map(|key| key.as_str()).collect();
+            remove.sort_unstable();
+            remove.dedup();
+            OperationFingerprintInput::UpdateAttrs {
+                absolute_path: path.as_str(),
+                set: set
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), attribute_value_fingerprint_input(value)))
+                    .collect(),
+                remove,
+                expected_inode_id: *expected_inode_id,
+                expected_attributes_revision_no: *expected_attributes_revision_no,
+            }
+        }
     }
 }
 
@@ -288,7 +349,180 @@ pub fn put_retry_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ContentId, ContentRefKind, StorageChecksum};
+    use crate::{AttributeKey, ContentId, ContentRefKind, StorageChecksum};
+
+    fn attribute_key(value: &str) -> AttributeKey {
+        AttributeKey::parse(value).expect("valid attribute key")
+    }
+
+    fn text(value: &str) -> AttributeValue {
+        AttributeValue::String {
+            value: value.to_owned(),
+        }
+    }
+
+    fn update_attributes(
+        set: impl IntoIterator<Item = (&'static str, AttributeValue)>,
+        remove: impl IntoIterator<Item = &'static str>,
+        expected_inode_id: Option<InodeId>,
+        expected_attributes_revision_no: Option<AttributeRevisionNo>,
+    ) -> FilesystemOperation {
+        FilesystemOperation::UpdateAttributes {
+            path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+            set: set
+                .into_iter()
+                .map(|(key, value)| (attribute_key(key), value))
+                .collect(),
+            remove: remove.into_iter().map(attribute_key).collect(),
+            expected_inode_id,
+            expected_attributes_revision_no,
+        }
+    }
+
+    /// Pins the exact stored fingerprint for a guarded attribute update.
+    ///
+    /// The literal covers the frozen preimage: the variant name, the field
+    /// order, the canonical attribute-value spelling, and both guards.
+    #[test]
+    fn update_attributes_fingerprint_value_is_pinned() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+
+        let fingerprint = semantic_commit_fingerprint(
+            &namespace_id,
+            None,
+            &[update_attributes(
+                [
+                    ("owner", text("ada")),
+                    (
+                        "tags",
+                        AttributeValue::StringList {
+                            values: vec!["a".to_owned(), "b".to_owned()],
+                        },
+                    ),
+                ],
+                ["draft"],
+                Some(InodeId(42)),
+                Some(AttributeRevisionNo(3)),
+            )],
+        )
+        .expect("fingerprint");
+
+        assert_eq!(
+            fingerprint,
+            "v0:sha256:84786d985326762f31b84a313a9dda928f995474bef6b3b4edd9a4731734a5c5"
+        );
+    }
+
+    /// The set is a map, so the order the caller wrote its keys in is not
+    /// part of what was asked for.
+    #[test]
+    fn json_map_order_does_not_change_attribute_update_identity() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let forward: FilesystemOperation = serde_json::from_str(
+            r#"{"kind":"update_attributes","path":"/docs/report.txt",
+                "set":{"a":{"kind":"string","value":"1"},"b":{"kind":"string","value":"2"}}}"#,
+        )
+        .expect("forward operation");
+        let reversed: FilesystemOperation = serde_json::from_str(
+            r#"{"kind":"update_attributes","path":"/docs/report.txt",
+                "set":{"b":{"kind":"string","value":"2"},"a":{"kind":"string","value":"1"}}}"#,
+        )
+        .expect("reversed operation");
+
+        assert_eq!(
+            semantic_commit_fingerprint(&namespace_id, None, &[forward]).expect("forward"),
+            semantic_commit_fingerprint(&namespace_id, None, &[reversed]).expect("reversed")
+        );
+    }
+
+    /// Removing two keys asks for the same thing whichever order they are
+    /// listed in, and asking twice for one removal asks for the same thing
+    /// as asking once. Canonicalization inside the translation is what makes
+    /// both true.
+    #[test]
+    fn remove_order_and_repeats_do_not_change_attribute_update_identity() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let baseline = semantic_commit_fingerprint(
+            &namespace_id,
+            None,
+            &[update_attributes([], ["a", "b"], None, None)],
+        )
+        .expect("baseline");
+
+        for spelling in [vec!["b", "a"], vec!["a", "b", "a"]] {
+            assert_eq!(
+                semantic_commit_fingerprint(
+                    &namespace_id,
+                    None,
+                    &[update_attributes([], spelling, None, None)]
+                )
+                .expect("variant"),
+                baseline
+            );
+        }
+    }
+
+    /// Everything the update asks for is inside the value.
+    #[test]
+    fn attribute_update_fingerprint_changes_with_every_request_field() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let baseline = semantic_commit_fingerprint(
+            &namespace_id,
+            None,
+            &[update_attributes(
+                [("owner", text("ada"))],
+                ["draft"],
+                None,
+                None,
+            )],
+        )
+        .expect("baseline");
+
+        for (label, variant) in [
+            (
+                "set value",
+                update_attributes([("owner", text("grace"))], ["draft"], None, None),
+            ),
+            (
+                "value kind",
+                update_attributes(
+                    [(
+                        "owner",
+                        AttributeValue::StringList {
+                            values: vec!["ada".to_owned()],
+                        },
+                    )],
+                    ["draft"],
+                    None,
+                    None,
+                ),
+            ),
+            (
+                "removed key",
+                update_attributes([("owner", text("ada"))], ["final"], None, None),
+            ),
+            (
+                "expected inode",
+                update_attributes([("owner", text("ada"))], ["draft"], Some(InodeId(42)), None),
+            ),
+            (
+                "expected attribute revision",
+                update_attributes(
+                    [("owner", text("ada"))],
+                    ["draft"],
+                    None,
+                    Some(AttributeRevisionNo(0)),
+                ),
+            ),
+        ] {
+            assert_ne!(
+                baseline,
+                semantic_commit_fingerprint(&namespace_id, None, &[variant])
+                    .expect("variant fingerprint"),
+                "a changed {label} must change the fingerprint"
+            );
+        }
+    }
 
     /// Pins the exact stored fingerprint for a fixed one-operation request.
     ///

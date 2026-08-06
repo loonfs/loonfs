@@ -94,6 +94,7 @@ fn attribute_key_error(value: &str, reason: impl Into<String>) -> AttributeKeyVa
 /// The kind is part of the value's identity. A string and a one-member string
 /// list are different values, and reading one never yields the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttributeValue {
     /// One text value.
@@ -137,6 +138,11 @@ impl AttributeValue {
 /// An empty map is valid. It is the cleared state, and clearing an inode's
 /// attributes is a real update with its own revision.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(
+    feature = "openapi",
+    schema(value_type = std::collections::BTreeMap<String, AttributeValue>)
+)]
 #[serde(transparent)]
 pub struct Attributes(BTreeMap<AttributeKey, AttributeValue>);
 

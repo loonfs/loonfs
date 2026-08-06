@@ -100,12 +100,19 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
 }
 
 /// Maps one commit's ordered WAL deltas to semantic filesystem events, one
-/// per request operation.
+/// per internal operation.
 ///
-/// The reducer materializes every operation as one fixed delta pattern
-/// (`materialize_validated_op`), so this match is total over well-formed
-/// commits; an unmatched pattern means the feed mapper and the reducer have
-/// drifted and is reported as a server error rather than guessed at.
+/// One request operation can compile into several internal operations —
+/// creating missing parent directories, replacing a file by moving over it,
+/// copying attributes onto a new inode — and each of those gets its own
+/// event. The deltas carry the request-operation index they came from, so the
+/// events stay in request order whatever their count.
+///
+/// The reducer materializes every internal operation as one fixed delta
+/// pattern (`materialize_validated_op`), so this match is total over
+/// well-formed commits; an unmatched pattern means the feed mapper and the
+/// reducer have drifted and is reported as a server error rather than
+/// guessed at.
 pub(crate) fn events_from_wal_deltas(deltas: &[WalCommitDelta]) -> Result<Vec<FilesystemChange>> {
     let mut events = Vec::new();
     let mut group: Vec<&WalDelta> = Vec::new();
@@ -227,6 +234,19 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             parent_inode_id: *parent_inode_id,
             name: display_name.clone(),
         },
+        // UpdateAttributes, including the copy that carries a source's
+        // attributes onto the inode it just created. The delta already holds
+        // the complete resulting map, so the event does too.
+        [WalDelta::AppendAttributesRevision {
+            inode_id,
+            attributes_revision_no,
+            attributes,
+            ..
+        }] => FilesystemChange::AttributesChanged {
+            inode_id: *inode_id,
+            attributes_revision_no: *attributes_revision_no,
+            attributes: attributes.clone(),
+        },
         other => {
             return Err(CoreError::Internal(format!(
                 "change feed cannot map a committed operation's delta \
@@ -236,4 +256,57 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             )))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_from_op_deltas;
+    use loonfs_api::v0::FilesystemChange;
+    use loonfs_api::wire::wal::WalDelta;
+    use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, InodeId};
+
+    fn attributes() -> Attributes {
+        Attributes::new(std::collections::BTreeMap::from([(
+            AttributeKey::parse("owner").expect("valid attribute key"),
+            AttributeValue::String {
+                value: "ada".to_owned(),
+            },
+        )]))
+        .expect("valid attribute map")
+    }
+
+    fn append_attributes(delta_index: u32) -> WalDelta {
+        WalDelta::AppendAttributesRevision {
+            delta_index,
+            inode_id: InodeId(7),
+            attributes_revision_no: AttributeRevisionNo(3),
+            attributes: attributes(),
+        }
+    }
+
+    #[test]
+    fn one_attribute_delta_maps_to_one_event_carrying_the_whole_map() {
+        let delta = append_attributes(0);
+
+        assert_eq!(
+            event_from_op_deltas(&[&delta]).expect("map the operation"),
+            FilesystemChange::AttributesChanged {
+                inode_id: InodeId(7),
+                attributes_revision_no: AttributeRevisionNo(3),
+                attributes: attributes(),
+            }
+        );
+    }
+
+    /// The mapper still refuses a pattern the reducer never produces, rather
+    /// than reading past the delta it recognizes.
+    #[test]
+    fn a_delta_pattern_the_reducer_never_produces_is_rejected() {
+        let first = append_attributes(0);
+        let second = append_attributes(1);
+
+        let error = event_from_op_deltas(&[&first, &second])
+            .expect_err("two attribute deltas are not one operation");
+        assert!(error.to_string().contains("drifted"), "{error}");
+    }
 }

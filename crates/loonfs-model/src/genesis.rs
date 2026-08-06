@@ -16,5 +16,6 @@ pub fn bootstrap_metadata_state() -> MetadataState {
         direntry_unbinds: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
+        attribute_revisions: Vec::new(),
     }
 }

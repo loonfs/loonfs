@@ -4,7 +4,7 @@
 use super::{PreparedCommit, ResolvedBinding, ValidatedOp};
 use loonfs_api::wire::manifest::DeletedDirentry;
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{ContentRef, InodeId, InodeKind, RevisionNo};
+use loonfs_api::{AttributeRevisionNo, ContentRef, InodeId, InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +67,11 @@ pub enum CommitOpResult {
     Undelete {
         op_index: u32,
         inode_id: InodeId,
+    },
+    UpdateAttributes {
+        op_index: u32,
+        inode_id: InodeId,
+        attributes_revision_no: AttributeRevisionNo,
     },
 }
 
@@ -336,6 +341,29 @@ pub(super) fn materialize_validated_op(
                 inode_id: *inode_id,
             }
         }
+        ValidatedOp::UpdateAttributes {
+            op_index,
+            inode_id,
+            attributes_revision_no,
+            attributes,
+            attributes_delta_index,
+        } => {
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::AppendAttributesRevision {
+                    delta_index: *attributes_delta_index,
+                    inode_id: *inode_id,
+                    attributes_revision_no: *attributes_revision_no,
+                    attributes: attributes.clone(),
+                },
+            );
+            CommitOpResult::UpdateAttributes {
+                op_index: *op_index,
+                inode_id: *inode_id,
+                attributes_revision_no: *attributes_revision_no,
+            }
+        }
     };
 
     (deltas, result)
@@ -393,6 +421,7 @@ fn wal_delta_index(wal_delta: &WalDelta) -> u32 {
         | WalDelta::UnbindDirentry { delta_index, .. }
         | WalDelta::AppendFileRevision { delta_index, .. }
         | WalDelta::TombstoneSubtree { delta_index, .. }
-        | WalDelta::RevokeSubtreeTombstone { delta_index, .. } => *delta_index,
+        | WalDelta::RevokeSubtreeTombstone { delta_index, .. }
+        | WalDelta::AppendAttributesRevision { delta_index, .. } => *delta_index,
     }
 }

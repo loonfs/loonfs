@@ -7,7 +7,8 @@ use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
+    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
+    NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +104,13 @@ pub(crate) enum ValidatedOp {
         target: TombstoneGeneration,
         revoke_tombstone_delta_index: u32,
         bind_delta_index: u32,
+    },
+    UpdateAttributes {
+        op_index: u32,
+        inode_id: InodeId,
+        attributes_revision_no: AttributeRevisionNo,
+        attributes: Attributes,
+        attributes_delta_index: u32,
     },
 }
 

@@ -108,6 +108,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemChangeMoved",
                 "FilesystemChangeDeleted",
                 "FilesystemChangeUndeleted",
+                "FilesystemChangeAttributesChanged",
             ][..],
         ),
         (
@@ -120,6 +121,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FsOpCopyPath",
                 "FsOpUndelete",
                 "FsOpRestoreRevision",
+                "FsOpUpdateAttributes",
             ][..],
         ),
         (

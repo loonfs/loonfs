@@ -19,7 +19,7 @@ pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_BYTES: usize = 64 * 1024 * 102
 pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 pub(super) const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
 pub(super) const CHECKPOINT_BASE_RUN_LEVEL: u32 = 1;
-pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 9] = [
+pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
     MetadataTableFamily::Inodes,
     MetadataTableFamily::DirentryBinds,
     MetadataTableFamily::DirentryChildBinds,
@@ -29,6 +29,7 @@ pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 9] = [
     MetadataTableFamily::Tombstones,
     MetadataTableFamily::ActiveDeletions,
     MetadataTableFamily::CommitReceipts,
+    MetadataTableFamily::Attributes,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

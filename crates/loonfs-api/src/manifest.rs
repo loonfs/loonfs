@@ -6,8 +6,8 @@ use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, ManifestId, ManifestObjectId,
-    MetadataTableId, NameKey, NamespaceId, RevisionNo,
+    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
+    InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +59,12 @@ pub enum MetadataTableFamily {
     ActiveDeletions,
     /// Preserves commit idempotency evidence independently of retained WAL history.
     CommitReceipts,
+    /// Stores inode attribute revisions newest-first per inode.
+    ///
+    /// The family stands alone: it has no ascending twin, because nothing
+    /// reads attributes in any other order than newest first for one inode.
+    /// So no cross-family index-parity validator applies to it.
+    Attributes,
 }
 
 /// Describes one immutable metadata SST object referenced by a namespace manifest.
@@ -220,6 +226,25 @@ pub enum MetadataRow {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    /// Publishes one inode's complete attribute map at one revision.
+    ///
+    /// The row is whole state, not a change: a reader takes the newest row
+    /// for an inode and needs nothing older. An inode with no row anywhere is
+    /// at revision 0 with an empty map, so nothing is written until a caller
+    /// writes an attribute.
+    AttributesRevision {
+        /// Inode whose attributes this revision states.
+        inode_id: InodeId,
+        /// Monotonic per-inode attribute revision.
+        attributes_revision_no: AttributeRevisionNo,
+        /// Namespace sequence that published the revision.
+        committed_seq: ChangeSeq,
+        /// Delta position that disambiguates the revision within `committed_seq`.
+        delta_index: u32,
+        /// The inode's complete attribute map at this revision. An empty map
+        /// is the cleared state.
+        attributes: Attributes,
+    },
 }
 
 /// Names one deletion generation: the commit that recorded a tombstone
@@ -347,6 +372,7 @@ impl MetadataRow {
             Self::Tombstone { .. } => MetadataTableFamily::Tombstones,
             Self::ActiveDeletion { .. } => MetadataTableFamily::ActiveDeletions,
             Self::CommitReceipt { .. } => MetadataTableFamily::CommitReceipts,
+            Self::AttributesRevision { .. } => MetadataTableFamily::Attributes,
         })
     }
 
@@ -451,6 +477,18 @@ impl MetadataRow {
                 let commit_id = hex_encode_row_key_component(commit_id.as_str());
                 format!("commit-receipt-{commit_id}-{:020}", committed_seq.0)
             }
+            Self::AttributesRevision {
+                inode_id,
+                attributes_revision_no,
+                committed_seq,
+                delta_index,
+                ..
+            } => lookup_keys::attributes_row_key(
+                *inode_id,
+                *attributes_revision_no,
+                *committed_seq,
+                *delta_index,
+            ),
         }
     }
 
@@ -501,6 +539,7 @@ impl MetadataRow {
                 let commit_id = hex_encode_row_key_component(commit_id.as_str());
                 format!("commit-receipt-{commit_id}")
             }
+            Self::AttributesRevision { inode_id, .. } => lookup_keys::attributes_probe(*inode_id),
         }
     }
 }
@@ -520,7 +559,7 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 /// format and its lookup grammar together, here.
 pub mod lookup_keys {
     use super::hex_encode_row_key_component;
-    use crate::{ChangeSeq, InodeId, RevisionNo};
+    use crate::{AttributeRevisionNo, ChangeSeq, InodeId, RevisionNo};
 
     /// The prefix every inode row key starts with. Inode ids are
     /// zero-padded to a fixed width after it, so a range scan over this
@@ -753,6 +792,42 @@ pub mod lookup_keys {
             u64::MAX - revision_no.0,
             u64::MAX - committed_seq.0,
             u32::MAX - revision_delta_index
+        )
+    }
+
+    /// Builds the bloom-filter probe shared by every attribute revision of one
+    /// inode.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub fn attributes_probe(inode_id: InodeId) -> String {
+        format!("attributes-{:020}", inode_id.0)
+    }
+
+    /// Builds the range prefix selecting one inode's attribute revisions,
+    /// newest first.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub fn attributes_prefix(inode_id: InodeId) -> String {
+        format!("{}-", attributes_probe(inode_id))
+    }
+
+    /// The full attribute row key: revision number, commit seq, and delta
+    /// index all inverted so an ascending scan of one inode's prefix reads
+    /// its newest attribute state first.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub fn attributes_row_key(
+        inode_id: InodeId,
+        attributes_revision_no: AttributeRevisionNo,
+        committed_seq: ChangeSeq,
+        delta_index: u32,
+    ) -> String {
+        format!(
+            "{}{:020}-{:020}-{:010}",
+            attributes_prefix(inode_id),
+            u64::MAX - attributes_revision_no.0,
+            u64::MAX - committed_seq.0,
+            u32::MAX - delta_index
         )
     }
 }
@@ -1058,6 +1133,49 @@ mod tests {
             row.row_key_for_family(MetadataTableFamily::RevisionsByInodeDesc),
             "revision-by-inode-desc-00000000000000000042-18446744073709551608-18446744073709551603-4294967292"
         );
+    }
+
+    /// The attribute family's durable order is newest revision first within
+    /// one inode, and the row key a writer stores must be the exact key a
+    /// reader's prefix selects.
+    #[test]
+    fn attributes_row_keys_sort_newest_revision_first_under_the_inode_prefix() {
+        let row_of =
+            |revision: u64, seq: u64, delta_index: u32| super::MetadataRow::AttributesRevision {
+                inode_id: InodeId(42),
+                attributes_revision_no: crate::AttributeRevisionNo(revision),
+                committed_seq: ChangeSeq(seq),
+                delta_index,
+                attributes: crate::Attributes::default(),
+            };
+        let newest = row_of(3, 12, 1);
+        let older = row_of(2, 11, 0);
+
+        assert_eq!(
+            newest.row_key_for_family(MetadataTableFamily::Attributes),
+            "attributes-00000000000000000042-18446744073709551612-18446744073709551603-4294967294"
+        );
+        assert_eq!(
+            newest.row_key(),
+            newest.row_key_for_family(MetadataTableFamily::Attributes)
+        );
+        assert!(
+            newest.row_key() < older.row_key(),
+            "an ascending scan must reach the newest revision first"
+        );
+        let prefix = super::lookup_keys::attributes_prefix(InodeId(42));
+        assert!(newest.row_key().starts_with(&prefix));
+        assert!(older.row_key().starts_with(&prefix));
+        // A point lookup probes the filter with the inode's shared key, and
+        // the writer stores exactly that key.
+        assert_eq!(
+            newest.filter_key_for_family(MetadataTableFamily::Attributes),
+            super::lookup_keys::attributes_probe(InodeId(42))
+        );
+        // Another inode's rows sort outside the prefix.
+        assert!(!row_of(3, 12, 1)
+            .row_key()
+            .starts_with(&super::lookup_keys::attributes_prefix(InodeId(43))));
     }
 
     fn metadata_file_ref(

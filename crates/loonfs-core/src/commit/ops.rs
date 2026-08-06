@@ -6,7 +6,10 @@
 //! path-oriented operations the planner compiles into the ops below; nothing
 //! outside this crate constructs them.
 
-use loonfs_api::{ChangeSeq, ContentRef, DisplayName, InodeId, NameKey, RevisionNo};
+use loonfs_api::{
+    AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName, InodeId, NameKey,
+    RevisionNo,
+};
 use serde::{Deserialize, Serialize};
 
 /// One planned inode-level operation together with the race checks that must
@@ -116,6 +119,21 @@ pub(crate) enum CommitOp {
         /// Recovered child spelling, whose derived key must be absent.
         display_name: DisplayName,
     },
+    /// Replace an inode's attributes with a new complete map.
+    ///
+    /// The planner has already applied the caller's writes and removals to
+    /// what it read, so the op carries the result rather than the request.
+    UpdateAttributes {
+        /// Visible file or directory whose attributes are replaced.
+        inode_id: InodeId,
+        /// Attribute revision the planner resolved against; the operation
+        /// conflicts if it is no longer current.
+        base_attributes_revision_no: AttributeRevisionNo,
+        /// The revision this update publishes, one past the base.
+        attributes_revision_no: AttributeRevisionNo,
+        /// The inode's complete attribute map after the update.
+        attributes: Attributes,
+    },
 }
 
 /// Race check evaluated immediately before the operation that carries it.
@@ -158,6 +176,13 @@ pub(crate) enum CommitPrecondition {
     DirectoryEmpty {
         /// Visible directory that must have no active child bindings.
         inode_id: InodeId,
+    },
+    /// Inode is still at this attribute revision.
+    InodeAttributesRevisionIs {
+        /// Inode whose attribute revision is tested.
+        inode_id: InodeId,
+        /// Exact attribute revision required at commit evaluation time.
+        attributes_revision_no: AttributeRevisionNo,
     },
 }
 

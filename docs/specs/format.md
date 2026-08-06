@@ -257,12 +257,29 @@ cannot recompute must fail its reads rather than pass them unverified.
 
 Metadata materialization tables include canonical metadata families and
 validated derived families. The canonical families are `inodes`,
-`direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and
-`commit-receipts`. The `direntry-child-binds` family is a secondary index over
-the same direntry bind rows, keyed by child inode, and must be present and
-verified before a namespace manifest is trusted. The `active-deletions` family
-is derived from the tombstone rows and holds current state rather than events
-(section 2.5).
+`direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`,
+`commit-receipts`, and `attributes`. The `direntry-child-binds` family is a
+secondary index over the same direntry bind rows, keyed by child inode, and
+must be present and verified before a namespace manifest is trusted. The
+`active-deletions` family is derived from the tombstone rows and holds current
+state rather than events (section 2.5).
+
+The `attributes` family holds one row per attribute revision of one inode.
+Each row carries `inode_id`, `attributes_revision_no`, `committed_seq`,
+`delta_index`, and the inode's complete `attributes` map (section 8). Its row
+key is
+
+```text
+attributes-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}
+```
+
+and its bloom-filter lookup prefix is `attributes-{inode_id:020}`. The
+revision, the sequence, and the delta index are all stored inverted, so an
+ascending scan of one inode's prefix reads its newest attribute state first
+and a read at a sequence takes the first row at or below it. The family
+stands alone: nothing reads attributes in any order but newest-first for one
+inode, so it has no ascending twin and no cross-family index-parity rule
+applies to it.
 
 ETags remain opaque compare tokens. They may be used for object freshness or
 compare-and-swap, but they are not content digests unless a provider-specific
@@ -1329,6 +1346,7 @@ The first standard lower-level mutation set includes:
 - `delete_subtree(root_inode_id)`
 - `restore_revision(inode_id, source_revision_no, base_revision_no)`
 - `undelete(inode_id, deleted_at_seq, parent_inode_id, display_name)`
+- `update_attributes(inode_id, base_attributes_revision_no, attributes_revision_no, attributes)`
 
 The path-oriented filesystem surface may compile higher-level operations into
 these lower-level mutations.
@@ -1339,17 +1357,34 @@ fails validation. Replacing moves exist on the path-oriented surface
 needed it arrives as a new capability-gated field, not a silently tolerated
 one.
 
+`update_attributes` states the map the inode holds after the update, not the
+writes and removals that produced it. Its `attributes_revision_no` is exactly
+one past `base_attributes_revision_no`, and the operation applies only while
+the inode is still at the base revision. An update whose resulting map equals
+the current one is rejected: attributes are current state with no history, so
+a revision that restates the same map has nothing behind it. Attributes are
+held against inode identity, so an inode is the operation's target whether it
+is a file or a directory, and every other operation leaves them alone.
+
 These are semantic commit operations. Durable WAL payloads store normalized
 metadata deltas derived from the semantic operations: `create_inode`,
 `bind_direntry`, `unbind_direntry`, `append_file_revision`,
-`tombstone_subtree`, and `revoke_subtree_tombstone`. Raw bind/unbind/
-create-inode deltas are not standard client-facing commit operations.
+`tombstone_subtree`, `revoke_subtree_tombstone`, and
+`append_attributes_revision`. Raw bind/unbind/create-inode deltas are not
+standard client-facing commit operations.
 
 The two tombstone deltas carry the same values their rows do (section 2.5):
 `tombstone_subtree` states its `deleted_direntry`, as a whole binding or as
 `null`, and `revoke_subtree_tombstone` names its `target` generation. The
 delta's own generation is implied — its commit's sequence and its
 `delta_index` — so it is not written a second time.
+
+`append_attributes_revision` carries `inode_id`, `attributes_revision_no`,
+and the inode's complete `attributes` map. Complete state rather than a
+change set: replay never needs an earlier revision to answer what an inode
+holds. An empty map is a real revision — the cleared state — and it hides
+every earlier map for that inode. The delta's own position is implied by its
+commit's sequence and its `delta_index`, like every other delta's.
 
 ### 3.6 Preconditions
 
@@ -1364,6 +1399,7 @@ The core kinds of precondition are:
 | **Name-slot based** | "Create this child only if that name slot is still empty." |
 | **Name-binding based** | "Move or delete this item only if this name still points at the inode I saw." |
 | **Revision-based** | "Replace this file only if it is still at the revision I saw." |
+| **Attribute-revision based** | "Write these attributes only if the inode is still at the attribute revision I saw." |
 | **Ancestor-visibility based** | "Apply this only if no ancestor was tombstoned." |
 | **Directory-contents based** | "Delete this directory non-recursively only if it is still empty." |
 
@@ -2000,6 +2036,18 @@ undeleted is not state any reader can still observe. A `removed` row can never
 outlive the row it names: the deletion commits before the undelete, runs merge
 oldest-first, and a rebuild's input is a prefix of that order, so both rows are
 always in the same merge.
+
+The `attributes` family is folded by the same rule the retention floor gives
+every other superseded row, applied per inode: every revision above the floor
+is kept, the newest revision at or below the floor is kept, and the rest are
+dropped. The newest-at-floor row is kept even when its map is empty, because
+an empty map is the cleared state — dropping it would let an older non-empty
+map become the newest row and give a caller back attributes they cleared.
+Attributes are never dropped for being unreachable: a deleted inode keeps its
+rows, the same posture inode and tombstone rows take, and that is what makes
+an undelete give back the map the inode had. A rewrite refuses to compact
+when two rows for one inode share a revision number at or below the floor,
+because that makes "the newest at the floor" arbitrary and the drop unsafe.
 
 Invariants:
 
