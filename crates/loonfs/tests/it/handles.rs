@@ -70,10 +70,12 @@ async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &Namespac
     }
 }
 
-async fn fill_wal_tail_through_write_stop(writer: &FsWriter, namespace_id: &NamespaceId) {
+/// Leaves the tail exactly at the write-stop bound: every write here is
+/// admitted, and the next one is not.
+async fn fill_wal_tail_to_write_stop(writer: &FsWriter, namespace_id: &NamespaceId) {
     let writes =
-        u32::try_from(loonfs_core::publish::WalTailPolicy::DEFAULT.reject_writes_at_segments + 1)
-            .expect("WAL write-stop limit plus one should fit in u32");
+        u32::try_from(loonfs_core::publish::WalTailPolicy::DEFAULT.reject_writes_at_segments)
+            .expect("the WAL write-stop bound should fit in u32");
     for round in 0..writes {
         writer
             .put_file_bytes(
@@ -83,7 +85,7 @@ async fn fill_wal_tail_through_write_stop(writer: &FsWriter, namespace_id: &Name
                 PutFileOptions::default(),
             )
             .await
-            .expect("put file through the write-stop boundary");
+            .expect("put file up to the write-stop boundary");
     }
 }
 
@@ -258,7 +260,7 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
         blocking.block_next();
         fill_wal_tail_past_threshold(&writer, &active_namespace).await;
         blocking.wait_until_blocked().await;
-        fill_wal_tail_through_write_stop(&writer, &write_stopped_namespace).await;
+        fill_wal_tail_to_write_stop(&writer, &write_stopped_namespace).await;
         let error = writer
             .put_file_bytes(
                 &write_stopped_namespace,
@@ -267,7 +269,7 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
                 PutFileOptions::default(),
             )
             .await
-            .expect_err("writes past the hard limit must reject");
+            .expect_err("writes against a tail at the hard limit must reject");
         assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
 
         blocking.release();

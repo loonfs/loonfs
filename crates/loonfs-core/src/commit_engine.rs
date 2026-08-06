@@ -164,16 +164,18 @@ pub struct WalTailPolicy {
     /// Visible WAL-tail length, in segments, at which a maintenance step
     /// publishes a checkpoint. The step fires at or past this length.
     pub checkpoint_at_segments: u64,
-    /// Visible WAL-tail length past which (strictly greater than) every
-    /// publish surface rejects with `maintenance_required`.
+    /// Visible WAL-tail length at which (at or past) every publish surface
+    /// rejects with `maintenance_required`, so a landed publication never
+    /// leaves a longer tail behind.
     pub reject_writes_at_segments: u64,
 }
 
 impl WalTailPolicy {
-    /// The workspace policy: checkpoint at 32 segments, reject past 128.
+    /// The workspace policy: checkpoint at 32 segments, reject at the
+    /// longest tail the format admits.
     pub const DEFAULT: Self = Self {
         checkpoint_at_segments: 32,
-        reject_writes_at_segments: 128,
+        reject_writes_at_segments: crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS,
     };
 }
 
@@ -431,7 +433,9 @@ impl NamespaceCommitEngine {
         };
 
         let reject_writes_at_segments = WalTailPolicy::DEFAULT.reject_writes_at_segments;
-        if projection.wal_tail_segments > reject_writes_at_segments {
+        // `wal_tail_segments` is the tail this publish would extend, so
+        // rejecting at the bound is what keeps the landed tail inside it.
+        if projection.wal_tail_segments >= reject_writes_at_segments {
             let wal_tail_segments = projection.wal_tail_segments;
             self.publish_tail_projection = Some(projection);
             let error = MetadataViewError::MaintenanceRequired {
@@ -512,6 +516,11 @@ impl NamespaceCommitEngine {
             } => {
                 projection.wal_tail_segments = projection.wal_tail_segments.saturating_add(1);
                 let wal_tail_segments = projection.wal_tail_segments;
+                debug_assert!(
+                    wal_tail_segments <= crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS,
+                    "a landed publish left {wal_tail_segments} unflushed segments, \
+                     more than the head can describe"
+                );
                 // The head advanced, but without the etag its
                 // compare-and-swap acknowledged there is nothing to re-anchor
                 // the projection to.

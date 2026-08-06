@@ -1940,7 +1940,7 @@ deployment's read costs bounded regardless of scheduling: the reference
 implementation nudges its maintenance runner after any runtime publish that
 observes the WAL tail at or past the WAL-tail policy's checkpoint threshold
 (32 segments at defaults), and every publish surface rejects with
-`maintenance_required` once the tail exceeds the same policy's
+`maintenance_required` once the tail reaches the same policy's
 write-rejection threshold (128 at defaults). Reads never gate on tail
 length. Bounded reads are the
 automatic half only: the retention floor never advances on its own, so

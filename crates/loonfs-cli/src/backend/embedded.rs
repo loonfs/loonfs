@@ -923,8 +923,8 @@ mod tests {
     use crate::resolve::EmbeddedTarget;
     use loonfs::{
         BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsBackgroundWork, FsWriter,
-        MaintenanceJobId, MaintenanceStepConclusion, PutFileOptions, RuntimeError,
-        SharedObjectStore,
+        MaintenanceJobId, MaintenanceStepConclusion, MetadataMaintenanceOptions, PutFileOptions,
+        RuntimeError, SharedObjectStore,
     };
     use loonfs_api::{
         ChangeSeq, CreateCheckpointRequest, DestinationBehavior, ErrorCode, InodeId, NamespaceId,
@@ -935,6 +935,14 @@ mod tests {
 
     fn namespace_id(value: &str) -> NamespaceId {
         NamespaceId::parse(value).expect("valid namespace id")
+    }
+
+    /// WAL-tail length at which the metadata job checkpoints — what a
+    /// drained namespace must be back under.
+    fn checkpoint_threshold() -> u64 {
+        MetadataMaintenanceOptions::default()
+            .max_wal_tail_segments
+            .get()
     }
 
     /// The three jobs `admin run` hosts by default, in the order it drives
@@ -1055,7 +1063,7 @@ mod tests {
                 .await
                 .expect("status after the drain");
             assert!(
-                status.wal_tail_segments < 32,
+                status.wal_tail_segments < checkpoint_threshold(),
                 "`{namespace_id}` kept a WAL tail of {} segments past the checkpoint threshold",
                 status.wal_tail_segments
             );
@@ -1173,7 +1181,7 @@ mod tests {
             .await
             .expect("status after hosting");
         assert!(
-            status.wal_tail_segments < 32,
+            status.wal_tail_segments < checkpoint_threshold(),
             "the hosted runner left a WAL tail of {} segments",
             status.wal_tail_segments
         );
