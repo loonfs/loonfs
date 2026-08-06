@@ -758,7 +758,7 @@ fn drop_superseded_attribute_revisions(
     let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::Attributes) else {
         return Ok(());
     };
-    // Load-bearing writer invariant: one inode's attribute revisions are
+    // Writer invariant: one inode's attribute revisions are
     // numbered without gaps or repeats, so "the newest at or below the floor"
     // names exactly one row. Two rows sharing a number would make the choice
     // arbitrary and the drop unsafe; refuse to compact state that violates
