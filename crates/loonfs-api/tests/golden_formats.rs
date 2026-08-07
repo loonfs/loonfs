@@ -26,8 +26,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, encode_namespace_manifest_json, DeletedDirentry,
-    MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
+    decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
+    DeletedDirentry, MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
     NamespaceManifestPayload, TombstoneGeneration, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
@@ -1593,6 +1593,61 @@ fn sample_tombstone_revoke_row() -> MetadataRow {
     }
 }
 
+/// The active-deletion row the materializer derives from the set above. It
+/// carries the deletion's stamp and the binding the trash entry renders, both
+/// copied from the tombstone event.
+fn sample_active_deletion_listed_row() -> MetadataRow {
+    MetadataRow::ActiveDeletion {
+        root_inode_id: InodeId(5),
+        deleted_at_seq: ChangeSeq(8),
+        action: ActiveDeletionRowAction::Listed {
+            deleted_at_ms: 4_000,
+            deleted_direntry: Some(DeletedDirentry {
+                parent_inode_id: InodeId(1),
+                name_key: name_key("docs-archive"),
+                display_name: loonfs_api::DisplayName::parse("Docs-Archive")
+                    .expect("valid display name"),
+            }),
+        },
+    }
+}
+
+/// The active-deletion row the materializer derives from the revoke above. It
+/// repeats the deletion's sequence rather than the undelete's, so the two rows
+/// share a key prefix, and its rank sorts it ahead of the row it removes.
+fn sample_active_deletion_removed_row() -> MetadataRow {
+    MetadataRow::ActiveDeletion {
+        root_inode_id: InodeId(5),
+        deleted_at_seq: ChangeSeq(8),
+        action: ActiveDeletionRowAction::Removed {
+            revoked_at_seq: ChangeSeq(9),
+        },
+    }
+}
+
+/// An attribute revision that cleared the map. The empty map has an encoding
+/// of its own, so the sample carries a row that states it.
+fn sample_cleared_attributes_row() -> MetadataRow {
+    MetadataRow::AttributesRevision {
+        inode_id: InodeId(2),
+        attributes_revision_no: AttributeRevisionNo(3),
+        committed_seq: ChangeSeq(7),
+        delta_index: 1,
+        attributes: Attributes::default(),
+    }
+}
+
+/// An attribute revision that states a populated map.
+fn sample_populated_attributes_row() -> MetadataRow {
+    MetadataRow::AttributesRevision {
+        inode_id: InodeId(5),
+        attributes_revision_no: AttributeRevisionNo(2),
+        committed_seq: ChangeSeq(5),
+        delta_index: 0,
+        attributes: sample_attributes(),
+    }
+}
+
 fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
     use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
     // A tiny target block size forces several data blocks, so the fixture
@@ -1601,25 +1656,20 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         std::num::NonZeroUsize::new(256).expect("target block size should be non-zero"),
     );
     let rows = [
-        // `attributes-` sorts ahead of `commit-receipt-`, so both attribute
-        // rows land in the first data block the fixture below pins. The
-        // cleared state goes on the lower inode so it is the smaller row that
-        // opens the block, which keeps both rows inside it; pinning the empty
-        // map's encoding is the point of carrying two.
-        MetadataRow::AttributesRevision {
-            inode_id: InodeId(2),
-            attributes_revision_no: AttributeRevisionNo(3),
-            committed_seq: ChangeSeq(7),
-            delta_index: 1,
-            attributes: Attributes::default(),
-        },
-        MetadataRow::AttributesRevision {
-            inode_id: InodeId(5),
-            attributes_revision_no: AttributeRevisionNo(2),
-            committed_seq: ChangeSeq(5),
-            delta_index: 0,
-            attributes: sample_attributes(),
-        },
+        // `active-deletion-` sorts ahead of every other family prefix, so
+        // these two rows open the first data block the fixture below pins.
+        // The pair covers both actions: the removal that an undelete writes,
+        // and the listing it removes.
+        sample_active_deletion_removed_row(),
+        sample_active_deletion_listed_row(),
+        // `attributes-` sorts after `active-deletion-` and ahead of
+        // `commit-receipt-`, so both attribute rows share the block that
+        // follows. The cleared state goes on the lower inode so it is the
+        // smaller row that opens the family, which keeps both rows inside one
+        // block; pinning the empty map's encoding is the point of carrying
+        // two.
+        sample_cleared_attributes_row(),
+        sample_populated_attributes_row(),
         MetadataRow::CommitReceipt {
             commit_id: commit_id(),
             semantic_commit_fingerprint: "fp:golden".to_owned(),
@@ -1698,12 +1748,69 @@ fn segment_section<'a>(
     &bytes[handle.offset as usize..handle.offset as usize + handle.stored_len as usize]
 }
 
+fn sample_segment_index(
+    built: &loonfs_api::wire::sst_blocks::BuiltSegmentBlocks,
+) -> Vec<loonfs_api::wire::sst_blocks::SegmentIndexEntry> {
+    loonfs_api::wire::sst_blocks::decode_index_block(
+        segment_section(&built.bytes, &built.index),
+        &built.index,
+    )
+    .expect("decode index")
+}
+
+/// Returns the index position of the block holding the first row of the family
+/// `prefix` names. A guard locates its family this way rather than naming a
+/// block position, because a family that starts sorting earlier pushes the
+/// families after it into other blocks. A guard that named a position would
+/// then read a block its family never reaches and assert nothing.
+fn family_block_position(
+    built: &loonfs_api::wire::sst_blocks::BuiltSegmentBlocks,
+    index: &[loonfs_api::wire::sst_blocks::SegmentIndexEntry],
+    prefix: &str,
+) -> usize {
+    use loonfs_api::wire::sst_blocks::decode_data_block;
+    for (position, entry) in index.iter().enumerate() {
+        let block = decode_data_block(segment_section(&built.bytes, &entry.block), &entry.block)
+            .expect("decode data block");
+        if block.row_keys.iter().any(|key| key.starts_with(prefix)) {
+            return position;
+        }
+    }
+    panic!("the sample carries no row under `{prefix}`");
+}
+
+/// Counts the rows one block holds for the family `prefix` names, so a guard
+/// can state that every row of the family landed in the block a fixture pins.
+fn rows_under_prefix(
+    block: &loonfs_api::wire::sst_blocks::DecodedDataBlock,
+    prefix: &str,
+) -> usize {
+    block
+        .row_keys
+        .iter()
+        .filter(|key| key.starts_with(prefix))
+        .count()
+}
+
+/// Reads back the block a fixture pins, so a decode test can state the rows it
+/// expects to find there.
+fn decode_golden_data_block(name: &str) -> loonfs_api::wire::sst_blocks::DecodedDataBlock {
+    use loonfs_api::wire::sst_blocks::{decode_data_block, BlockHandle};
+    let payload = read_golden(name);
+    let stored = rezstd(&payload);
+    let handle = BlockHandle {
+        offset: 0,
+        stored_len: stored.len() as u32,
+        decoded_len: payload.len() as u32,
+        crc32c: crc32c::crc32c(&stored),
+    };
+    decode_data_block(&stored, &handle).expect("decode golden data block")
+}
+
 #[test]
 fn sst_block_data_payload_matches_golden_bytes() {
-    use loonfs_api::wire::sst_blocks::decode_index_block;
     let built = sample_segment_blocks();
-    let index = decode_index_block(segment_section(&built.bytes, &built.index), &built.index)
-        .expect("decode index");
+    let index = sample_segment_index(&built);
     assert!(index.len() > 1, "sample should span several blocks");
     // Compare the decompressed block payload: zstd frames may differ across
     // zstd versions, the entry encoding (which the format defines) may not.
@@ -1713,81 +1820,118 @@ fn sst_block_data_payload_matches_golden_bytes() {
     );
 }
 
-/// The attribute family sorts first, so both attribute rows — the populated
-/// map and the cleared one — sit inside the block the fixture above pins.
-/// This says so, the way the tombstone guard below says the same for the
-/// last block.
+/// The active-deletion family sorts ahead of every other prefix, so both of
+/// its rows — the listing and the removal that cancels it — sit inside the
+/// block the fixture above pins. This says so, the way the guards below say
+/// the same for the attribute and tombstone families.
 #[test]
-fn sst_block_data_first_block_covers_the_attributes_prefix() {
-    use loonfs_api::wire::sst_blocks::{decode_data_block, decode_index_block};
+fn sst_block_data_first_block_covers_the_active_deletion_prefix() {
     let built = sample_segment_blocks();
-    let index = decode_index_block(segment_section(&built.bytes, &built.index), &built.index)
-        .expect("decode index");
-    let first = index.first().expect("sample spans at least one block");
-    let block = decode_data_block(segment_section(&built.bytes, &first.block), &first.block)
-        .expect("decode first block");
-    let attribute_keys: Vec<&String> = block
-        .row_keys
-        .iter()
-        .filter(|key| key.starts_with("attributes-"))
-        .collect();
+    let index = sample_segment_index(&built);
+    let position = family_block_position(&built, &index, "active-deletion-");
+    assert_eq!(position, 0, "the active-deletion family opens the segment");
+    let block = loonfs_api::wire::sst_blocks::decode_data_block(
+        segment_section(&built.bytes, &index[0].block),
+        &index[0].block,
+    )
+    .expect("decode first block");
     assert_eq!(
-        attribute_keys.len(),
+        rows_under_prefix(&block, "active-deletion-"),
         2,
-        "both attribute rows belong to the pinned first block: {:?}",
+        "both active-deletion rows belong to the pinned first block: {:?}",
         block.row_keys
     );
 }
 
+/// The fixture above pins the block's bytes. This test names the rows those
+/// bytes hold, so a regeneration that changed the sample cannot pass
+/// unnoticed.
 #[test]
 fn sst_block_data_golden_decodes_to_sample_rows() {
-    use loonfs_api::wire::sst_blocks::{decode_data_block, BlockHandle};
-    let payload = read_golden("sst_block_data.v1.bin");
-    let stored = rezstd(&payload);
-    let handle = BlockHandle {
-        offset: 0,
-        stored_len: stored.len() as u32,
-        decoded_len: payload.len() as u32,
-        crc32c: crc32c::crc32c(&stored),
-    };
-    let block = decode_data_block(&stored, &handle).expect("decode golden data block");
-    assert!(!block.rows.is_empty());
+    let block = decode_golden_data_block("sst_block_data.v1.bin");
+    assert_eq!(
+        block.rows,
+        [
+            sample_active_deletion_removed_row(),
+            sample_active_deletion_listed_row(),
+        ],
+    );
     assert_eq!(block.row_keys[0], block.rows[0].row_key());
 }
 
-/// The fixture above pins the segment's first block, and the tombstone
-/// family sorts last, so nothing pinned the rows that carry a deletion's
-/// binding and the generation a revoke names. This pins their block too.
+/// The attribute rows no longer open the segment, so the first-block fixture
+/// stopped covering them. This pins their block instead: the populated map and
+/// the cleared one both have encodings nothing else states.
+#[test]
+fn sst_block_data_attribute_rows_match_golden_bytes() {
+    let built = sample_segment_blocks();
+    let index = sample_segment_index(&built);
+    let position = family_block_position(&built, &index, "attributes-");
+    let entry = &index[position];
+    let block = loonfs_api::wire::sst_blocks::decode_data_block(
+        segment_section(&built.bytes, &entry.block),
+        &entry.block,
+    )
+    .expect("decode attribute block");
+    assert_eq!(
+        rows_under_prefix(&block, "attributes-"),
+        2,
+        "both attribute rows belong to the block this pins: {:?}",
+        block.row_keys
+    );
+    assert_matches_golden(
+        "sst_block_data_attributes.v1.bin",
+        &unzstd(segment_section(&built.bytes, &entry.block)),
+    );
+}
+
+#[test]
+fn sst_block_data_attribute_golden_decodes_to_sample_rows() {
+    let block = decode_golden_data_block("sst_block_data_attributes.v1.bin");
+    assert_eq!(
+        block.rows,
+        [
+            sample_cleared_attributes_row(),
+            sample_populated_attributes_row(),
+        ],
+    );
+}
+
+/// The tombstone family sorts last, so nothing pinned the rows that carry a
+/// deletion's binding and the generation a revoke names. This pins their block
+/// too.
 #[test]
 fn sst_block_data_tombstone_rows_match_golden_bytes() {
-    use loonfs_api::wire::sst_blocks::decode_index_block;
     let built = sample_segment_blocks();
-    let index = decode_index_block(segment_section(&built.bytes, &built.index), &built.index)
-        .expect("decode index");
-    let last = index.last().expect("sample spans at least one block");
-    assert!(
-        last.last_key.starts_with("tombstone-"),
+    let index = sample_segment_index(&built);
+    let position = family_block_position(&built, &index, "tombstone-");
+    let entry = &index[position];
+    assert_eq!(
+        position,
+        index.len() - 1,
         "the tombstone family sorts last: {}",
-        last.last_key
+        entry.last_key
+    );
+    let block = loonfs_api::wire::sst_blocks::decode_data_block(
+        segment_section(&built.bytes, &entry.block),
+        &entry.block,
+    )
+    .expect("decode tombstone block");
+    assert_eq!(
+        rows_under_prefix(&block, "tombstone-"),
+        2,
+        "both tombstone rows belong to the block this pins: {:?}",
+        block.row_keys
     );
     assert_matches_golden(
         "sst_block_data_tombstones.v1.bin",
-        &unzstd(segment_section(&built.bytes, &last.block)),
+        &unzstd(segment_section(&built.bytes, &entry.block)),
     );
 }
 
 #[test]
 fn sst_block_data_tombstone_golden_decodes_to_sample_rows() {
-    use loonfs_api::wire::sst_blocks::{decode_data_block, BlockHandle};
-    let payload = read_golden("sst_block_data_tombstones.v1.bin");
-    let stored = rezstd(&payload);
-    let handle = BlockHandle {
-        offset: 0,
-        stored_len: stored.len() as u32,
-        decoded_len: payload.len() as u32,
-        crc32c: crc32c::crc32c(&stored),
-    };
-    let block = decode_data_block(&stored, &handle).expect("decode golden tombstone block");
+    let block = decode_golden_data_block("sst_block_data_tombstones.v1.bin");
     assert_eq!(
         block.rows,
         [sample_tombstone_set_row(), sample_tombstone_revoke_row()],
@@ -1795,7 +1939,8 @@ fn sst_block_data_tombstone_golden_decodes_to_sample_rows() {
 }
 
 // ---------------------------------------------------------------------------
-// Tombstone rows: the deleted binding is one value, or it is absent
+// Tombstone and active-deletion rows: the deleted binding is one value, or it
+// is absent
 // ---------------------------------------------------------------------------
 
 /// Re-encodes a row as the CBOR map another writer would have produced, so a
@@ -1891,6 +2036,34 @@ fn tombstone_rows_reject_the_pre_grouping_flat_encoding() {
         &with_flat_binding(row),
         "a `set` states its binding, even when it has none",
     );
+    assert!(
+        refusal.contains("missing field `deleted_direntry`"),
+        "unexpected refusal: {refusal}"
+    );
+}
+
+/// A listed row copies the binding from the tombstone it derives from, so the
+/// same two rules hold on this side: the binding is one value with three
+/// required parts, and a `listed` states the field even when the deletion
+/// recorded no name.
+#[test]
+fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
+    for missing in ["parent_inode_id", "name_key", "display_name"] {
+        let mut row = row_cbor(&sample_active_deletion_listed_row());
+        let direntry = cbor_entry(cbor_entry(&mut row, "action"), "deleted_direntry");
+        cbor_map_of(direntry).retain(|(key, _)| key.as_text() != Some(missing));
+        let refusal = assert_row_is_corrupt(&row, "two thirds of a binding is not a binding");
+        assert!(
+            refusal.contains(&format!("missing field `{missing}`")),
+            "unexpected refusal: {refusal}"
+        );
+    }
+
+    let mut row = row_cbor(&sample_active_deletion_listed_row());
+    cbor_map_of(cbor_entry(&mut row, "action"))
+        .retain(|(key, _)| key.as_text() != Some("deleted_direntry"));
+    let refusal =
+        assert_row_is_corrupt(&row, "a `listed` states its binding, even when it has none");
     assert!(
         refusal.contains("missing field `deleted_direntry`"),
         "unexpected refusal: {refusal}"
