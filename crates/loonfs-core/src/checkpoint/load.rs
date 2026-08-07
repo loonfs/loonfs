@@ -372,6 +372,25 @@ fn validate_manifest_table_descriptors(
                         });
                     }
                 }
+                // Keyed scans prune a segment by this key range: a segment
+                // whose max key sorts below the scan bound is skipped
+                // without a read. An empty or descending range hides every
+                // row the segment holds, so a manifest that carries one is
+                // rejected here rather than answering "not found".
+                if descriptor.row_count > 0
+                    && (descriptor.min_key.is_empty()
+                        || descriptor.max_key.is_empty()
+                        || descriptor.min_key > descriptor.max_key)
+                {
+                    return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                        object_key: descriptor.object_key.clone(),
+                        message: format!(
+                            "segment holds {} rows with key range `{}`..=`{}`; a segment with \
+                             rows must carry a non-empty ascending key range",
+                            descriptor.row_count, descriptor.min_key, descriptor.max_key
+                        ),
+                    });
+                }
                 match table.family {
                     MetadataTableFamily::DirentryBinds => {
                         direntry_bind_rows =

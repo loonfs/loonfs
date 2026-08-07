@@ -1119,6 +1119,17 @@ async fn multi_block_direntry_segment() -> (
     descriptor.index_block = built.index;
     descriptor.filter_block = built.filter;
     descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
+    // A one-byte target closes a block on every push, the last row
+    // included, so this fixture carries the shape that used to drop a
+    // segment's max key. Keyed scans prune on that key, so it has to name
+    // the last row here as it would at any block size.
+    assert_eq!(
+        descriptor.max_key,
+        rows.last()
+            .expect("the segment holds rows")
+            .row_key_for_family(descriptor.family),
+        "the rebuilt descriptor must carry the segment's last row key"
+    );
 
     let index = block_fetch::load_segment_index(
         &store,

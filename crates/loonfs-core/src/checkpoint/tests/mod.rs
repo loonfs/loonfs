@@ -69,7 +69,7 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::wire::sst_blocks::{
     decode_data_block, string_prefix_upper_bound, BlockHandle, DecodedDataBlock,
-    SegmentBlocksBuilder, SegmentIndexEntry,
+    SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,

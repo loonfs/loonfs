@@ -10,8 +10,9 @@ async fn rewrite_manifest_segment(
     family: ApiMetadataTableFamily,
     descriptor: &mut MetadataFileRef,
     rows: Vec<MetadataRow>,
+    target_block_bytes: NonZeroUsize,
 ) {
-    let mut builder = SegmentBlocksBuilder::default();
+    let mut builder = SegmentBlocksBuilder::new(target_block_bytes);
     for row in &rows {
         let row_key = row.row_key_for_family(family);
         let filter_key = row.filter_key_for_family(family);
@@ -92,8 +93,13 @@ async fn rewrite_revision_index_segment(
         ApiMetadataTableFamily::RevisionsByInodeDesc,
         descriptor,
         rows,
+        default_target_block_bytes(),
     )
     .await;
+}
+
+fn default_target_block_bytes() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).expect("the default target is positive")
 }
 
 async fn overwrite_manifest(
@@ -924,6 +930,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         ApiMetadataTableFamily::DirentryChildBinds,
         child_descriptor,
         child_index_rows,
+        default_target_block_bytes(),
     )
     .await;
 
@@ -1217,6 +1224,117 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
     ));
 }
 
+/// A data block closes from inside the builder's `push` as soon as it
+/// reaches its target size, so a segment's last row can be the row that
+/// closes its block. The descriptor's max key must still describe the rows
+/// the segment holds: a keyed scan prunes a segment whose max key sorts
+/// below the scan's lower bound, so an empty max key hides every row from
+/// every point and prefix lookup while reorganization, which scans from the
+/// empty bound, still reads them.
+#[tokio::test]
+async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 1..=6 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{index}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write file");
+    }
+    // Fold the L0 runs so every inode row lands in one base segment.
+    let manifest_id = checkpoint_then_reorganize(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
+    let materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
+            .await
+            .expect("load manifest before the rewrite");
+    let mut manifest = materialized.manifest;
+    let mut inode_rows =
+        manifest_rows_for_family(&materialized.metadata_state, ApiMetadataTableFamily::Inodes);
+    inode_rows.sort_by_key(|row| row.row_key_for_family(ApiMetadataTableFamily::Inodes));
+    assert!(
+        inode_rows.len() > 1,
+        "the namespace should hold several inodes"
+    );
+    let last_inode_key = inode_rows
+        .last()
+        .expect("inode rows")
+        .row_key_for_family(ApiMetadataTableFamily::Inodes);
+
+    let base_inode_segments = manifest
+        .payload
+        .metadata_files
+        .iter()
+        .filter(|metadata_file| {
+            metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
+                && metadata_file.family == ApiMetadataTableFamily::Inodes
+        })
+        .count();
+    assert_eq!(
+        base_inode_segments, 1,
+        "the folded base should hold one inode segment"
+    );
+    let descriptor = manifest
+        .payload
+        .metadata_files
+        .iter_mut()
+        .find(|metadata_file| {
+            metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
+                && metadata_file.family == ApiMetadataTableFamily::Inodes
+        })
+        .expect("base inode segment");
+    // A one-byte target closes a block on every push, the last row
+    // included. That is the shape a final row produces whenever it lands on
+    // the target crossing, which happens at any block size.
+    rewrite_manifest_segment(
+        &store,
+        &namespace_id,
+        manifest.payload.head_seq,
+        ApiMetadataTableFamily::Inodes,
+        descriptor,
+        inode_rows.clone(),
+        NonZeroUsize::MIN,
+    )
+    .await;
+    assert_eq!(
+        descriptor.max_key, last_inode_key,
+        "the descriptor must carry the segment's last row key"
+    );
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("the rewritten manifest should load");
+    for row in &inode_rows {
+        let key = row.row_key_for_family(ApiMetadataTableFamily::Inodes);
+        let found = tables
+            .get_for_lookup(ApiMetadataTableFamily::Inodes, &key, &key)
+            .await
+            .expect("inode lookup");
+        assert!(
+            found.is_some(),
+            "the keyed lookup lost inode row `{key}` in the rewritten segment"
+        );
+    }
+}
+
 #[tokio::test]
 async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1246,8 +1364,9 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     let payload = tables.manifest().payload.clone();
 
     // The read path assumes the filter block directly precedes the index
-    // block and that an inline copy matches its handle's length; loading a
-    // manifest that breaks either must fail instead of degrading.
+    // block, that an inline copy matches its handle's length, and that a
+    // segment holding rows reports the key range those rows span; loading a
+    // manifest that breaks any of them must fail instead of degrading.
     type Perturbation = fn(&mut MetadataFileRef);
     fn misalign_filter(descriptor: &mut MetadataFileRef) {
         descriptor.filter_block.offset -= 1;
@@ -1256,9 +1375,21 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         let inline = descriptor.filter_inline.as_mut().expect("inline filter");
         inline.truncate(inline.len() - 2);
     }
-    let perturbations: [(&str, Perturbation); 2] = [
+    // An empty max key sorts below every scan bound, so the segment would
+    // answer no keyed lookup while still holding its rows.
+    fn clear_max_key(descriptor: &mut MetadataFileRef) {
+        assert!(descriptor.row_count > 0, "the segment should hold rows");
+        descriptor.max_key.clear();
+    }
+    fn invert_key_range(descriptor: &mut MetadataFileRef) {
+        assert!(descriptor.row_count > 0, "the segment should hold rows");
+        std::mem::swap(&mut descriptor.min_key, &mut descriptor.max_key);
+    }
+    let perturbations: [(&str, Perturbation); 4] = [
         ("filter not adjacent to index", misalign_filter),
         ("inline length disagrees with handle", truncate_inline),
+        ("segment with rows has no max key", clear_max_key),
+        ("segment key range descends", invert_key_range),
     ];
     for (index, (label, perturb)) in perturbations.iter().enumerate() {
         let mut perturbed = payload.clone();
@@ -1267,8 +1398,12 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         let descriptor = perturbed
             .metadata_files
             .iter_mut()
-            .find(|descriptor| descriptor.filter_inline.is_some())
-            .expect("an inline-filtered descriptor");
+            // A segment spanning several keys, so swapping its bounds
+            // actually descends.
+            .find(|descriptor| {
+                descriptor.filter_inline.is_some() && descriptor.min_key != descriptor.max_key
+            })
+            .expect("an inline-filtered descriptor spanning several keys");
         perturb(descriptor);
         let perturbed_object_id = perturbed.manifest_object_id.clone();
         let envelope = NamespaceManifestEnvelope::from_payload(perturbed)
