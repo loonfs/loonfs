@@ -348,7 +348,7 @@ To prove the object store is reachable, run the probe from a CLI profile
 pointed at the same store:
 
 ```bash
-loonfs admin probe-store
+loonfs admin store-probe
 ```
 
 That command performs real store operations and reports what came back check
