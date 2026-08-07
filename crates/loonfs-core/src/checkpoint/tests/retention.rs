@@ -1538,3 +1538,438 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         super::MetadataReorganizeOutcome::UnitPublished { .. }
     ));
 }
+
+/// Runs the selector exactly as a step runs it — same family group, same
+/// policy — and returns the group beside what the selector chose.
+async fn select_reorganization_window<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    policy: MetadataLsmPolicy,
+) -> (
+    Vec<ApiMetadataTableFamily>,
+    super::reorganize::ReorganizationSelection,
+) {
+    let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
+    let tables = load_verified_manifest_tables(store, namespace_id, &manifest_object_id)
+        .await
+        .expect("load manifest tables");
+    let group = super::reorganize::select_family_group(&tables.manifest().payload)
+        .expect("a family group with L0 rows to fold");
+    let selection = super::reorganize::select_reorganization_input(&tables, group, policy)
+        .await
+        .expect("select a reorganization input");
+    (group.to_vec(), selection)
+}
+
+/// Rows one run holds in one family group: the quantity the per-step row
+/// budget is measured against.
+fn group_run_rows(run: &MetadataRunManifest, group: &[ApiMetadataTableFamily]) -> u64 {
+    run.tables
+        .iter()
+        .filter(|table| group.contains(&table.family))
+        .flat_map(|table| &table.segments)
+        .map(|descriptor| descriptor.row_count)
+        .sum()
+}
+
+fn group_segment_object_keys(
+    run: &MetadataRunManifest,
+    group: &[ApiMetadataTableFamily],
+) -> Vec<String> {
+    run.tables
+        .iter()
+        .filter(|table| group.contains(&table.family))
+        .flat_map(|table| &table.segments)
+        .map(|descriptor| descriptor.object_key.clone())
+        .collect()
+}
+
+/// A per-step row budget one row short of what the group's base run needs,
+/// with the trigger forced so a single delta run still folds.
+fn policy_that_cannot_fold_the_base(base_rows: u64) -> MetadataLsmPolicy {
+    let row_budget = usize::try_from(base_rows).expect("test row counts are small") - 1;
+    MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(row_budget)
+            .expect("test row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    }
+}
+
+/// A group whose base run alone busts the per-step row budget used to park
+/// forever: selection broke on the first candidate, chose nothing, and
+/// reported the group blocked on every step after that while delta runs
+/// piled up behind it with nothing saying why.
+///
+/// The budget paces the work instead of ending it. The step skips the base
+/// run it cannot read whole, merges the delta runs above it, and says out
+/// loud that the base has outgrown the budget.
+#[tokio::test]
+async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // A compacted base first, then delta runs stacked above it.
+    for index in 1..=4 {
+        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+    }
+    drain_reorganization(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
+    for index in 5..=8 {
+        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+    }
+
+    let before = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the parked manifest");
+    let (group, _) =
+        select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
+    let base = base_run(&before.manifest);
+    let base_rows = group_run_rows(&base, &group);
+    let base_segments = group_segment_object_keys(&base, &group);
+    assert!(base_rows > 1, "the base run must hold rows in this group");
+    let policy = policy_that_cannot_fold_the_base(base_rows);
+
+    let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
+    let input = selection
+        .input
+        .expect("a group must keep finding work above a base run it cannot fold");
+    assert!(
+        !input.starts_at_group_bottom,
+        "the window must start above the base run it cannot read whole"
+    );
+    assert!(
+        input
+            .runs
+            .iter()
+            .all(|run| run.level == CHECKPOINT_L0_RUN_LEVEL),
+        "skipping the base leaves a delta-only merge, got {:?}",
+        input
+            .runs
+            .iter()
+            .map(|run| (run.run_seq, run.level))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        input.runs.len() > 1,
+        "a merge must consume more than one run to reduce the count"
+    );
+    let bottom = selection
+        .group_bottom_over_budget
+        .expect("a base run over the budget must raise the alarm");
+    assert_eq!(bottom.run_seq, base.run_seq);
+    assert_eq!(bottom.level, CHECKPOINT_BASE_RUN_LEVEL);
+    assert_eq!(bottom.rows, base_rows);
+
+    // Repeated steps keep draining the group. The base run stays exactly
+    // where it is.
+    let mut published = 0usize;
+    let mut group_l0_runs = vec![l0_runs(&before.manifest).len()];
+    for _ in 0..64 {
+        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+            .await
+            .expect("reorganization step");
+        match report.outcome {
+            super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
+            super::MetadataReorganizeOutcome::Superseded => {
+                panic!("no concurrent publisher exists in this test")
+            }
+            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                panic!("the group parked instead of folding what fits")
+            }
+            super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+        }
+        let current = load_manifest_materialization_for_inspection(
+            &store,
+            &namespace_id,
+            current_manifest_id(&store, &namespace_id).await,
+        )
+        .await
+        .expect("load the folded manifest");
+        group_l0_runs.push(l0_runs(&current.manifest).len());
+    }
+    assert!(published > 0, "at least one unit must publish");
+
+    let after = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the drained manifest");
+    assert!(
+        l0_runs(&after.manifest).is_empty(),
+        "delta runs must drain even with the base frozen, ran {group_l0_runs:?}"
+    );
+    assert!(
+        runs_from_metadata_files(&after.manifest.payload).len()
+            < runs_from_metadata_files(&before.manifest.payload).len(),
+        "the group's run count must fall"
+    );
+    let remaining = run_segment_object_keys(&after.manifest);
+    for segment in &base_segments {
+        assert!(
+            remaining.contains(segment),
+            "the base run this step could not read must stay referenced untouched"
+        );
+    }
+    let projection = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    assert!(metadata_states_equivalent(
+        &projection.metadata_state,
+        &after.metadata_state
+    ));
+}
+
+/// A merge that skipped older runs must carry every row its inputs held.
+///
+/// The retention drop rules read across the merged rows: an unbind cancels
+/// the bind it names, and both have to leave together. A window that starts
+/// above the base cannot see the bind at all, so dropping the unbind there
+/// would put a deleted file back. The step merges without dropping instead.
+#[tokio::test]
+async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // The base run holds both bindings.
+    for name in ["keep", "gone"] {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/{name}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("seed file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the seed");
+    drain_reorganization(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
+
+    // One delta run cancels a binding the base holds, a second delta run
+    // lands above it, and the floor moves past the cancellation.
+    let deleted = delete_path(&store, &namespace_id, "/docs/gone.txt", &context, None)
+        .await
+        .expect("delete");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the delete");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/extra.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write extra");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the extra file");
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance the floor");
+    assert!(
+        read_floor_seq(&store, &namespace_id).await >= deleted.committed_seq,
+        "the floor must sit past the cancelling row for this test to mean anything"
+    );
+
+    let before = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the manifest before the fold");
+    let (group, _) =
+        select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
+    assert!(
+        group.contains(&ApiMetadataTableFamily::DirentryUnbinds),
+        "this test is about the binding families, got {group:?}"
+    );
+    let base_rows = group_run_rows(&base_run(&before.manifest), &group);
+    let policy = policy_that_cannot_fold_the_base(base_rows);
+
+    let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
+    let input = selection.input.expect("the delta runs must still merge");
+    assert!(!input.starts_at_group_bottom);
+    assert!(input.runs.len() > 1);
+
+    let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("reorganization step");
+    assert!(
+        matches!(
+            report.outcome,
+            super::MetadataReorganizeOutcome::UnitPublished { .. }
+        ),
+        "expected a published unit, got {:?}",
+        report.outcome
+    );
+
+    let after = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the manifest after the fold");
+    // A merge that skipped older runs drops nothing, so the row set is
+    // exactly what it was: the cancelling row still shadows the base's
+    // binding and the deleted file stays deleted.
+    assert!(
+        metadata_states_equivalent(&before.metadata_state, &after.metadata_state),
+        "a merge above the base must be a pure rewrite"
+    );
+    assert!(
+        !manifest_rows_for_family(
+            &after.metadata_state,
+            ApiMetadataTableFamily::DirentryUnbinds
+        )
+        .is_empty(),
+        "the cancelling row must survive the merge"
+    );
+    let projection = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    assert!(metadata_states_equivalent(
+        &projection.metadata_state,
+        &after.metadata_state
+    ));
+}
+
+/// Skipping is only ever legal at the recency bottom.
+///
+/// A run in the middle that busts the budget stops the window. The step
+/// refuses to reach past it for a newer run that would have fit, because a
+/// merge stamped at the manifest head lands above everything it left behind
+/// and would reorder the group.
+#[tokio::test]
+async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
+    drain_reorganization(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
+    // One wide delta run, then a narrow one above it.
+    for index in 2..=7 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{index}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the wide run");
+    write_file_and_checkpoint(&store, &namespace_id, &context, 8).await;
+
+    let before = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the manifest");
+    let (group, _) =
+        select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
+    let base_rows = group_run_rows(&base_run(&before.manifest), &group);
+    let mut delta_rows = l0_runs(&before.manifest)
+        .iter()
+        .map(|run| group_run_rows(run, &group))
+        .collect::<Vec<_>>();
+    delta_rows.sort_unstable();
+    let (narrow, wide) = (delta_rows[0], delta_rows[1]);
+
+    // The budget admits the base run together with the narrow delta run,
+    // and rules out the wide one that sits between them. Reaching past the
+    // wide run is the illegal move this pins.
+    let row_budget = base_rows + narrow;
+    assert!(
+        row_budget < base_rows + wide && row_budget < wide,
+        "budget {row_budget} must exclude the wide run ({wide}) alone and beside the base ({base_rows})"
+    );
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(
+            usize::try_from(row_budget).expect("test row counts are small"),
+        )
+        .expect("test row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+
+    let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
+    assert!(
+        selection.input.is_none(),
+        "no legal window exists; the selector must not assemble one across the wide run"
+    );
+    assert!(
+        selection.group_bottom_over_budget.is_none(),
+        "the base run fits here, so nothing should claim it does not"
+    );
+
+    let root_before = current_manifest_id(&store, &namespace_id).await;
+    let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("reorganization step");
+    assert!(
+        matches!(
+            report.outcome,
+            super::MetadataReorganizeOutcome::BudgetExhausted { .. }
+        ),
+        "expected a blocked step, got {:?}",
+        report.outcome
+    );
+    assert_eq!(
+        current_manifest_id(&store, &namespace_id).await,
+        root_before,
+        "a blocked step must not publish"
+    );
+}
