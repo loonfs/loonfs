@@ -1,0 +1,17 @@
+# BuildKit reads this file because it sits beside the Dockerfile it names, so
+# a build with the repository root as its context still ships only what this
+# image needs: the workspace manifests, the lock file, the toolchain file,
+# and the whole `crates/` tree.
+#
+# `*.md` excludes the Markdown files at the context root. A pattern without a
+# slash matches one path component, so the READMEs inside `crates/` stay.
+target/
+.git/
+.github/
+.claude/
+.codex/
+.lab/
+scripts/
+docs/
+assets/
+*.md
