@@ -56,8 +56,6 @@ loonfs use {namespace_id}
 
 Use a server when multiple clients need to write to the same LoonFS deployment. (Embedded clients talk directly to object storage and compete for the single-writer role; the server instead can provide one shared writer for remote clients.)
 
-### Local development
-
 Build the server and start it with the local filesystem example:
 
 ```bash
@@ -73,37 +71,9 @@ LOONFS_AUTH_TOKEN=dev-token loonfs init default --no-input \
   --server-url http://127.0.0.1:9400
 ```
 
-### Production
+A bind beyond localhost serves the network, and the server refuses one without an authentication token and either its own TLS or an explicit declaration that a trusted proxy terminates TLS. The rule exists because the wire carries the bearer token and the short-lived object-store URLs the upload routes hand back.
 
-Start with the example in [crates/loonfs-server/config/](crates/loonfs-server/config) for your object store: `aws-s3`, `gcp-gcs`, `cloudflare-r2`, or `azure-abs`. Each file documents the provider credentials and optional server settings. Remove the example `auth_token` and `content_token_secret` values and supply real ones through the environment:
-
-```bash
-export LOONFS_AUTH_TOKEN={auth_token}
-export LOONFS_CONTENT_TOKEN_SECRET={content_token_secret}
-```
-
-Protect non-loopback connections with authentication and TLS because requests carry the bearer token and may return short-lived object-store URLs. By default, the server refuses to bind beyond localhost without an authentication token and either native TLS or an explicit declaration that a trusted proxy terminates TLS.
-
-To terminate TLS in LoonFS, set the public bind address and add a `[tls]` table:
-
-```toml
-bind = "0.0.0.0:9400"
-
-[tls]
-cert_path = "/etc/loonfs/tls/server.crt"
-key_path = "/etc/loonfs/tls/server.key"
-```
-
-If a load balancer, ingress controller, or sidecar terminates TLS instead, leave `[tls]` out and acknowledge the trusted plaintext hop:
-
-```toml
-bind = "0.0.0.0:9400"
-allow_remote_without_tls = true
-```
-
-Connect remote clients with an `https://` server URL and the same `LOONFS_AUTH_TOKEN`. If a private CA issued the server certificate, pass its bundle with `--ca-cert-path`.
-
-If you are upgrading a deployment, flush any long WAL tail before you switch builds. This build reads how long a namespace's WAL tail is from the segment pointers its head carries, and heads written by earlier builds carried only the newest 32 of them. A namespace holding more unflushed segments than that answers the namespace status read with a head-coverage error, by design, until the tail is folded — so run `loonfs admin flush` against it (or recreate the namespace) with your current build first.
+[crates/loonfs-server/docs/self-hosting.md](crates/loonfs-server/docs/self-hosting.md) is the rest: the config, the published image and Helm chart, the probes, upgrades, and what this deployment does not do.
 
 ## Documentation
 

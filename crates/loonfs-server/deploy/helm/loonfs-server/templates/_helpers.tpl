@@ -30,6 +30,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 The image reference. A digest names one build and wins over the tag. Without
 either, the chart runs the server version it shipped with.
+
+A release tags that image `v<version>` and carries the same version in
+appVersion without the `v`, so the fallback adds it back. Without the prefix
+the default would name a tag no release publishes.
 */}}
 {{- define "loonfs-server.image" -}}
 {{- if .Values.image.digest -}}
@@ -37,7 +41,7 @@ either, the chart runs the server version it shipped with.
 {{- else if .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository .Values.image.tag -}}
 {{- else -}}
-{{- printf "%s:%s" .Values.image.repository .Chart.AppVersion -}}
+{{- printf "%s:v%s" .Values.image.repository .Chart.AppVersion -}}
 {{- end -}}
 {{- end -}}
 

@@ -10,7 +10,8 @@
 image:
   # The repository to pull the server image from.
   repository: ghcr.io/loonfs/loonfs-server
-  # The tag to run. Empty means the chart's appVersion.
+  # The tag to run. Empty means the tag a release publishes for the chart's
+  # appVersion, which is that version with a leading "v".
   tag: ""
   # A digest, written as "sha256:...". Setting it ignores the tag.
   digest: ""

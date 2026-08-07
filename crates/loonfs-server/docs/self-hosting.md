@@ -79,6 +79,26 @@ kind = "local-fs"
 root = "/var/lib/loonfs/store"
 ```
 
+To terminate TLS in the server itself, drop `allow_remote_without_tls` and
+name the certificate and the key:
+
+```toml
+bind = "0.0.0.0:9400"
+writer_id = "loonfs-server-1"
+
+[tls]
+cert_path = "/etc/loonfs/tls/server.crt"
+key_path = "/etc/loonfs/tls/server.key"
+
+[store]
+kind = "local-fs"
+root = "/var/lib/loonfs/store"
+```
+
+Remote clients then use an `https://` server URL and the same auth token. If
+a private CA issued the certificate, a client needs that CA's bundle as well.
+The CLI takes it as `--ca-cert-path`.
+
 Supply the two secrets through the environment:
 
 ```bash
@@ -95,12 +115,15 @@ settings this guide leaves out.
 
 ## Running it in a container
 
-The crate carries a [`Dockerfile`](../Dockerfile). Build it with the
-repository root as the context, because the build needs the whole workspace:
+Every release publishes the server image:
 
-```bash
-docker build -f crates/loonfs-server/Dockerfile -t loonfs-server:dev .
+```text
+ghcr.io/loonfs/loonfs-server:vX.Y.Z
 ```
+
+A release publishes one tag, and that tag names one manifest covering
+`linux/amd64` and `linux/arm64`. There is no floating tag, so every
+deployment names a version.
 
 The image holds the server binary and the public root certificates. It runs
 as uid 10001, and it reads `/etc/loonfs/config.toml` unless you pass another
@@ -113,7 +136,7 @@ docker run --rm \
   --volume /etc/loonfs/server.toml:/etc/loonfs/config.toml:ro \
   --volume /var/lib/loonfs/store:/var/lib/loonfs/store \
   --publish 9400:9400 \
-  loonfs-server:dev
+  ghcr.io/loonfs/loonfs-server:vX.Y.Z
 ```
 
 The second mount is the `local-fs` store from the config above, and it has to
@@ -138,7 +161,7 @@ validates a config without serving:
 ```bash
 docker run --rm \
   --volume /etc/loonfs/server.toml:/etc/loonfs/config.toml:ro \
-  loonfs-server:dev --config /etc/loonfs/config.toml --check-config
+  ghcr.io/loonfs/loonfs-server:vX.Y.Z --config /etc/loonfs/config.toml --check-config
 ```
 
 The server is PID 1 and shuts down on SIGTERM, which is what `docker stop`
@@ -151,13 +174,31 @@ from.
 
 [`scripts/test-image.sh`](../scripts/test-image.sh) builds the image and runs
 this whole path against it, down to the restart. CI runs the same script on
-every change.
+every change, and the release runs it against the image it has just pushed,
+so the published image is the tested one.
+
+### Building the image yourself
+
+The crate carries the [`Dockerfile`](../Dockerfile) that the release builds
+from. Build it with the repository root as the context, because the build
+needs the whole workspace:
+
+```bash
+docker build -f crates/loonfs-server/Dockerfile -t loonfs-server:dev .
+```
+
+Everything above then works the same against `loonfs-server:dev`.
 
 ## Running it on Kubernetes
 
-The crate carries a Helm chart at
-[`deploy/helm/loonfs-server`](../deploy/helm/loonfs-server). It renders a
-Deployment and a ClusterIP Service, and it renders nothing else.
+Every release publishes a Helm chart beside the image:
+
+```text
+oci://ghcr.io/loonfs/charts/loonfs-server
+```
+
+The chart renders a Deployment and a ClusterIP Service, and it renders
+nothing else.
 
 One pod serves the API. The chart fixes the replica count at 1 and sets the
 update strategy to `Recreate`, because LoonFS has one writer. An upgrade
@@ -165,8 +206,9 @@ stops the old pod before it starts the new one, so the API is offline for
 that gap. This is not a high-availability deployment, and a second replica
 would not make it one.
 
-The chart is not published to a registry yet. Install it from a checkout of
-this repository.
+The chart version and the server version are the same number, and the chart's
+default image is `ghcr.io/loonfs/loonfs-server` at that version. Installing
+chart 0.2.0 therefore runs server 0.2.0 without naming an image at all.
 
 Create the namespace:
 
@@ -194,17 +236,13 @@ kubectl --namespace loonfs create secret generic loonfs-server-secrets \
   --from-literal=LOONFS_CONTENT_TOKEN_SECRET={content_token_secret}
 ```
 
-Install the chart from the repository path. Point `image.repository` and
-`image.tag` at an image the cluster can pull: the build above produces one on
-your workstation, and a cluster needs it in a registry it reaches or loaded
-onto its nodes.
+Install the chart, naming the version you want:
 
 ```bash
-helm install loonfs-server crates/loonfs-server/deploy/helm/loonfs-server \
+helm install loonfs-server oci://ghcr.io/loonfs/charts/loonfs-server \
+  --version X.Y.Z \
   --namespace loonfs \
   --set config.existingSecret=loonfs-server-config \
-  --set image.repository=your-registry.example.com/loonfs-server \
-  --set image.tag=dev \
   --set 'extraEnvFrom[0].secretRef.name=loonfs-server-secrets'
 ```
 
@@ -228,6 +266,47 @@ have to name the same number.
 The chart's [README](../deploy/helm/loonfs-server/README.md) documents every
 value, the local cache's sizing rules, and the shutdown grace period.
 
+### Installing the chart from a checkout
+
+The chart lives at
+[`deploy/helm/loonfs-server`](../deploy/helm/loonfs-server), and that path is
+a chart reference like any other:
+
+```bash
+helm install loonfs-server crates/loonfs-server/deploy/helm/loonfs-server \
+  --namespace loonfs \
+  --set config.existingSecret=loonfs-server-config \
+  --set image.repository=your-registry.example.com/loonfs-server \
+  --set image.tag=dev \
+  --set 'extraEnvFrom[0].secretRef.name=loonfs-server-secrets'
+```
+
+A chart out of a checkout still defaults to the published image, so name the
+image you built yourself. The cluster needs that image in a registry it
+reaches, or loaded onto its nodes.
+
+## Verification
+
+[`scripts/smoke-test.sh`](../scripts/smoke-test.sh) checks an install from
+the outside. It waits for the rollout, calls both probes, probes the object
+store, and puts a file into a namespace of its own and reads the same bytes
+back:
+
+```bash
+export LOONFS_AUTH_TOKEN={auth_token}
+crates/loonfs-server/scripts/smoke-test.sh --namespace loonfs
+```
+
+It needs `kubectl`, `curl`, and `loonfs`, and it says which one is missing.
+`--release` names a Helm release other than `loonfs-server`, and
+`--server-url` skips the port-forward when you already have a route to the
+API.
+
+The run touches nothing you own: the CLI profile it builds lives in a
+temporary directory it removes, so the config file you use yourself is never
+read or written, and the namespace it created is deleted before it exits.
+Run it whenever you want, including after an upgrade.
+
 ## Probes and metrics
 
 Three routes report on the process. Each one answers a narrow question, and
@@ -247,6 +326,23 @@ a store-reachability check.
 bearer token, because a deployment's traffic shape is not public. When no
 `auth_token` is configured it answers anyone who asks, and on a non-loopback
 bind that is itself a sign the deployment is misconfigured.
+
+A scrape therefore carries the token, and a scrape configured without one
+collects nothing but 401s. Give Prometheus the token in a file and name that
+file in the job:
+
+```yaml
+scrape_configs:
+  - job_name: loonfs-server
+    authorization:
+      credentials_file: /etc/prometheus/loonfs-token
+    static_configs:
+      - targets: ["loonfs-server.loonfs.svc:9400"]
+```
+
+`bearer_token_file` is the older spelling of the same field. A collector that
+models neither sends the header itself, as
+`Authorization: Bearer {auth_token}`.
 
 To prove the object store is reachable, run the probe from a CLI profile
 pointed at the same store:
@@ -317,3 +413,75 @@ of them. A namespace holding more unflushed segments than that answers the
 namespace status read with a head-coverage error, by design, until the tail
 is folded. Run `loonfs admin flush` against such a namespace with your
 current build before you upgrade, or recreate the namespace.
+
+On Kubernetes, name the version you are moving to:
+
+```bash
+helm upgrade loonfs-server oci://ghcr.io/loonfs/charts/loonfs-server \
+  --version X.Y.Z \
+  --namespace loonfs \
+  --reuse-values
+```
+
+The chart's update strategy is `Recreate`, so the old pod stops before the
+new one starts and the API is offline for that gap. It lasts as long as a
+process start, and clients see refused connections rather than slow requests.
+Nothing durable rides on the gap: the object store holds the state, and the
+new pod rebuilds what it needs.
+
+Go back the same way:
+
+```bash
+helm rollback loonfs-server --namespace loonfs
+```
+
+What is running now:
+
+```bash
+helm list --namespace loonfs
+kubectl --namespace loonfs get deployment/loonfs-server \
+  --output jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+`helm list` reports the chart version and the app version of every release in
+the namespace. The jsonpath reports the image the Deployment asks for, which
+is a digest when `image.digest` is set and a tag otherwise. To read the digest
+the node actually pulled, whatever the Deployment asked for, ask the pod:
+
+```bash
+kubectl --namespace loonfs get pod \
+  --selector app.kubernetes.io/name=loonfs-server \
+  --output jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+```
+
+Check the upgrade the way you checked the install, with
+[`scripts/smoke-test.sh`](../scripts/smoke-test.sh).
+
+## Security checklist
+
+- The image runs as uid 10001, and the chart asks the kubelet to refuse a
+  root user, drop every capability, and forbid privilege escalation.
+- A non-loopback bind carries an auth token. `allow_unauthenticated_remote`
+  serves every endpoint to the network, and no deployment wants that.
+- TLS terminates in the server or in a proxy you declare with
+  `allow_remote_without_tls`. The wire carries the bearer token and the
+  presigned object-store URLs.
+- The config lives in a Secret, and the two secret values reach the process
+  from a Secret through the environment rather than sitting in the config
+  file.
+- The pod mounts no service-account token. The server never calls the
+  Kubernetes API.
+- The local cache is disposable. It holds copies of bytes the object store
+  already has, so deleting it costs nothing but the next few reads.
+
+## Limitations
+
+- One pod serves the API. The chart fixes the replica count at 1.
+- An upgrade takes the API offline briefly, because the old pod stops before
+  the new one starts.
+- There is no horizontal scaling. A second replica would take the writer
+  epoch from the first, not share the load with it.
+- There is no automatic failover. The Deployment restarts a pod that dies,
+  and the API is down until the new pod is up.
+- Multi-writer and high availability are not what this chart deploys. Nothing
+  here elects a leader or coordinates replicas.
