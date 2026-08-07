@@ -55,3 +55,6 @@ would report, so it belongs in a deployment pipeline ahead of the rollout.
 
 Read [docs/self-hosting.md](docs/self-hosting.md) for the topology, the
 minimal config, the probes, logging, and the local cache.
+
+[`deploy/helm/loonfs-server`](deploy/helm/loonfs-server) holds a Helm chart
+that runs the image on Kubernetes as one pod.

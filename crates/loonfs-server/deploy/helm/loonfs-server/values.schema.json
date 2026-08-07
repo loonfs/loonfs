@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "loonfs-server values",
+  "description": "The schema rejects value names it does not know, at every level the chart owns. A misspelled name fails the lint and the install instead of being ignored, which is the rule the server applies to its own TOML config.",
+  "type": "object",
+  "additionalProperties": false,
+  "$comment": "The required lists name what the templates read directly. Everything else is optional, because the templates skip it when it is absent.",
+  "required": [
+    "image",
+    "config",
+    "service",
+    "terminationGracePeriodSeconds",
+    "localCache"
+  ],
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "pullPolicy"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The repository to pull the server image from."
+        },
+        "tag": {
+          "type": "string",
+          "description": "The tag to run. Empty means the chart's appVersion."
+        },
+        "digest": {
+          "type": "string",
+          "description": "A digest, written as sha256:... . Setting it ignores the tag."
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "The container's imagePullPolicy. Kubernetes accepts these three."
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "description": "Pull secrets for a private registry.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingSecret", "key"],
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The name of an existing Secret holding the server config. The chart does not create it, so the install needs a name."
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The entry in that Secret holding the TOML config. The container reads /etc/loonfs/<key>."
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port"],
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The port the Service publishes and the probes call. The config's bind has to name the same number."
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How long the kubelet waits after SIGTERM before it sends SIGKILL."
+    },
+    "localCache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Mount an emptyDir at /var/cache/loonfs for the server's disk cache."
+        },
+        "sizeLimit": {
+          "type": "string",
+          "description": "The emptyDir's sizeLimit, as a quantity such as 100Gi. Empty means no limit."
+        }
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "description": "Environment variables for the container. Each entry is a Kubernetes EnvVar, and the chart passes it through as written.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "extraEnvFrom": {
+      "type": "array",
+      "description": "Environment sources for the container. Each entry is a Kubernetes EnvFromSource, and the chart passes it through as written.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "podLabels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "tolerations": {
+      "type": "array",
+      "description": "Passed through as written. Each entry is a Kubernetes Toleration.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "affinity": {
+      "type": "object",
+      "description": "Passed through as written, as a Kubernetes Affinity."
+    },
+    "resources": {
+      "type": "object",
+      "description": "Passed through as written, as a Kubernetes ResourceRequirements."
+    }
+  }
+}

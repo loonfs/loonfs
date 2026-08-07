@@ -144,13 +144,89 @@ docker run --rm \
 The server is PID 1 and shuts down on SIGTERM, which is what `docker stop`
 and a Kubernetes pod deletion send. It stops accepting, drains the requests
 in flight, settles its background work, and exits zero. Allow enough time for
-that: pass `--timeout 120` to `docker stop`, or set
-`terminationGracePeriodSeconds: 120` on the pod. A process killed before it
-settles may lose work it had already accepted.
+that: pass `--timeout 120` to `docker stop`. A process killed before it
+settles may lose work it had already accepted. The chart below gives the pod
+600 seconds for the same reason, and its README says where that number comes
+from.
 
 [`scripts/test-image.sh`](../scripts/test-image.sh) builds the image and runs
 this whole path against it, down to the restart. CI runs the same script on
 every change.
+
+## Running it on Kubernetes
+
+The crate carries a Helm chart at
+[`deploy/helm/loonfs-server`](../deploy/helm/loonfs-server). It renders a
+Deployment and a ClusterIP Service, and it renders nothing else.
+
+One pod serves the API. The chart fixes the replica count at 1 and sets the
+update strategy to `Recreate`, because LoonFS has one writer. An upgrade
+stops the old pod before it starts the new one, so the API is offline for
+that gap. This is not a high-availability deployment, and a second replica
+would not make it one.
+
+The chart is not published to a registry yet. Install it from a checkout of
+this repository.
+
+Create the namespace:
+
+```bash
+kubectl create namespace loonfs
+```
+
+Create the Secret holding the config. The chart does not create this Secret:
+
+```bash
+kubectl --namespace loonfs create secret generic loonfs-server-config \
+  --from-file=config.toml=/etc/loonfs/server.toml
+```
+
+The whole Secret mounts read-only at `/etc/loonfs`, so every entry in it
+lands at `/etc/loonfs/<entry>`. A service-account JSON, or a TLS certificate
+and key, go into that same Secret, and the config names them at those paths.
+
+Keep the two secret values in a Secret of their own, so the config file
+carries no credentials:
+
+```bash
+kubectl --namespace loonfs create secret generic loonfs-server-secrets \
+  --from-literal=LOONFS_AUTH_TOKEN={auth_token} \
+  --from-literal=LOONFS_CONTENT_TOKEN_SECRET={content_token_secret}
+```
+
+Install the chart from the repository path. Point `image.repository` and
+`image.tag` at an image the cluster can pull: the build above produces one on
+your workstation, and a cluster needs it in a registry it reaches or loaded
+onto its nodes.
+
+```bash
+helm install loonfs-server crates/loonfs-server/deploy/helm/loonfs-server \
+  --namespace loonfs \
+  --set config.existingSecret=loonfs-server-config \
+  --set image.repository=your-registry.example.com/loonfs-server \
+  --set image.tag=dev \
+  --set 'extraEnvFrom[0].secretRef.name=loonfs-server-secrets'
+```
+
+Watch the pod come up:
+
+```bash
+kubectl --namespace loonfs rollout status deployment/loonfs-server
+```
+
+Reach the API from your workstation and check the probe:
+
+```bash
+kubectl --namespace loonfs port-forward service/loonfs-server 9400:9400 &
+curl http://127.0.0.1:9400/health
+```
+
+`service.port` is the port the Service publishes and the port the probes
+call, and the config's `bind` decides the port the process listens on. Both
+have to name the same number.
+
+The chart's [README](../deploy/helm/loonfs-server/README.md) documents every
+value, the local cache's sizing rules, and the shutdown grace period.
 
 ## Probes and metrics
 
