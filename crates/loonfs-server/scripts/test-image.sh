@@ -94,8 +94,8 @@ first_log_line() {
 # already exited is never going to answer, so that is reported at once
 # instead of after the whole budget.
 wait_for_health() {
-  local container="$1" base="$2" attempt
-  for attempt in $(seq 1 60); do
+  local container="$1" base="$2"
+  for _ in $(seq 1 60); do
     if [[ "$(status_code "$base/health")" == "200" ]]; then
       return 0
     fi

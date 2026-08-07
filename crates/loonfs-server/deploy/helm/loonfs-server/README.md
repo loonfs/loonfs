@@ -3,8 +3,17 @@
 This chart runs the LoonFS server on Kubernetes. It renders a Deployment and
 a ClusterIP Service, and it renders nothing else.
 
-The chart is not published to a registry yet. Install it from a checkout of
-this repository:
+Every release publishes it, at the same version as the server it runs:
+
+```bash
+helm install loonfs-server oci://ghcr.io/loonfs/charts/loonfs-server \
+  --version X.Y.Z \
+  --namespace loonfs \
+  --set config.existingSecret=loonfs-server-config
+```
+
+The path in this repository is a chart reference as well. Use it to install a
+change no release has published yet:
 
 ```bash
 helm install loonfs-server crates/loonfs-server/deploy/helm/loonfs-server \
@@ -120,7 +129,7 @@ deletes it every time it stops.
 | Value | Default | What it does |
 | --- | --- | --- |
 | `image.repository` | `ghcr.io/loonfs/loonfs-server` | The repository to pull the server image from. |
-| `image.tag` | `""` | The tag to run. Empty means the chart's `appVersion`. |
+| `image.tag` | `""` | The tag to run. Empty means `v` and the chart's `appVersion`, which is the tag a release publishes. |
 | `image.digest` | `""` | A digest, written as `sha256:...`. Setting it ignores the tag. |
 | `image.pullPolicy` | `IfNotPresent` | The container's `imagePullPolicy`. |
 | `imagePullSecrets` | `[]` | Pull secrets for a private registry. Each entry is `{name: ...}`. |

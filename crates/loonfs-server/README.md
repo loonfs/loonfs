@@ -25,15 +25,19 @@ LOONFS_AUTH_TOKEN=dev-token loonfs init default --no-input \
 
 ## Run it in a container
 
+Every release publishes the image as `ghcr.io/loonfs/loonfs-server:vX.Y.Z`,
+one manifest covering `linux/amd64` and `linux/arm64`.
+
 ```bash
-docker build -f crates/loonfs-server/Dockerfile -t loonfs-server:dev .
 docker run --rm -p 9400:9400 \
-  -v /etc/loonfs/server.toml:/etc/loonfs/config.toml:ro loonfs-server:dev
+  -v /etc/loonfs/server.toml:/etc/loonfs/config.toml:ro \
+  ghcr.io/loonfs/loonfs-server:vX.Y.Z
 ```
 
 The image reads `/etc/loonfs/config.toml` and runs as uid 10001.
 [docs/self-hosting.md](docs/self-hosting.md#running-it-in-a-container)
-covers the secrets, the mounts, and the shutdown timeout.
+covers the secrets, the mounts, the shutdown timeout, and building the same
+image from this crate's `Dockerfile`.
 
 ## Configuration
 
@@ -54,7 +58,14 @@ would report, so it belongs in a deployment pipeline ahead of the rollout.
 ## Deploying it
 
 Read [docs/self-hosting.md](docs/self-hosting.md) for the topology, the
-minimal config, the probes, logging, and the local cache.
+minimal config, the probes, logging, the local cache, upgrades, and what a
+one-writer deployment does not do.
 
-[`deploy/helm/loonfs-server`](deploy/helm/loonfs-server) holds a Helm chart
-that runs the image on Kubernetes as one pod.
+Every release publishes the Helm chart as
+`oci://ghcr.io/loonfs/charts/loonfs-server`, at the same version as the
+server it runs. [`deploy/helm/loonfs-server`](deploy/helm/loonfs-server) is
+that chart's source: one pod, one Service, nothing else.
+
+[`scripts/smoke-test.sh`](scripts/smoke-test.sh) checks an install from the
+outside, and [`scripts/test-image.sh`](scripts/test-image.sh) checks the
+image.

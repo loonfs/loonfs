@@ -1,4 +1,4 @@
-name: Release LoonFS CLI
+name: Release LoonFS
 
 on:
   release:
@@ -14,6 +14,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  IMAGE_NAME: ghcr.io/loonfs/loonfs-server
+  CHART_PATH: crates/loonfs-server/deploy/helm/loonfs-server
+  CHART_REGISTRY: oci://ghcr.io/loonfs/charts
 
 jobs:
   prepare:
@@ -41,6 +44,26 @@ jobs:
           expected_tag="v$VERSION"
           if [ "$TAG_NAME" != "$expected_tag" ]; then
             echo "release tag $TAG_NAME does not match workspace version $expected_tag" >&2
+            exit 1
+          fi
+
+      # The chart ships in this release and names the server version it runs,
+      # so a chart that disagrees with the tag would publish a wrong default
+      # image. `sed` reads the two lines rather than a YAML tool, because the
+      # runner promises no such tool.
+      - name: Validate chart version matches workspace version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          chart="$CHART_PATH/Chart.yaml"
+          chart_version="$(sed -n 's/^version: *//p' "$chart" | tr -d '"')"
+          app_version="$(sed -n 's/^appVersion: *//p' "$chart" | tr -d '"')"
+          if [ "$chart_version" != "$VERSION" ]; then
+            echo "chart version $chart_version does not match workspace version $VERSION" >&2
+            exit 1
+          fi
+          if [ "$app_version" != "$VERSION" ]; then
+            echo "chart appVersion $app_version does not match workspace version $VERSION" >&2
             exit 1
           fi
 
@@ -110,11 +133,232 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # One image per architecture, each built on a runner of that architecture,
+  # so no emulation is involved. Each leg pushes its image by digest and
+  # carries no tag: the merge job below is what publishes the tag.
+  server-image:
+    name: Build server image ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux/arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The build carries no cache. A release image is built from the tag's
+      # own source every time.
+      #
+      # `provenance: false` keeps each push a plain single-platform image. An
+      # attestation manifest would make it an index instead, and the merged
+      # manifest would then carry `unknown/unknown` entries beside the two
+      # architectures the release claims.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/loonfs-server/Dockerfile
+          platforms: ${{ matrix.platform }}
+          tags: ${{ env.IMAGE_NAME }}
+          provenance: false
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+
+      # The released image is the tested image: this pulls the digest the step
+      # above pushed and runs the image test against those exact bytes. Both
+      # legs run it, because both images ship.
+      - name: Test the image this job pushed
+        env:
+          LOONFS_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker pull "$LOONFS_IMAGE"
+          crates/loonfs-server/scripts/test-image.sh
+
+      - name: Record the digest for the manifest
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          case "$DIGEST" in
+            sha256:*) ;;
+            *)
+              echo "the build reported no image digest: $DIGEST" >&2
+              exit 1
+              ;;
+          esac
+          mkdir -p digests
+          echo "$DIGEST" > "digests/$ARCH"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-image-digest-${{ matrix.arch }}
+          path: digests/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  server-image-manifest:
+    name: Publish server image
+    needs: [prepare, server-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.manifest.outputs.tag }}
+      digest: ${{ steps.manifest.outputs.digest }}
+      platforms: ${{ steps.manifest.outputs.platforms }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: digests
+          pattern: server-image-digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Both per-architecture images are already in the registry, addressed by
+      # digest and carrying no tag. This step publishes the release: it creates
+      # the one manifest the tag names, then reads that manifest back and
+      # proves it carries both architectures.
+      - name: Create the multi-platform manifest
+        id: manifest
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          tag="$IMAGE_NAME:v$VERSION"
+          docker buildx imagetools create --tag "$tag" \
+            "$IMAGE_NAME@$(cat digests/amd64)" \
+            "$IMAGE_NAME@$(cat digests/arm64)"
+
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{ .Manifest.Digest }}')"
+          case "$digest" in
+            sha256:*) ;;
+            *)
+              echo "the published manifest reported no digest: $digest" >&2
+              exit 1
+              ;;
+          esac
+
+          raw="$(docker buildx imagetools inspect "$tag" --raw)"
+          platforms="$(jq -r '[.manifests[] | "\(.platform.os)/\(.platform.architecture)"] | join(", ")' <<<"$raw")"
+          for required in linux/amd64 linux/arm64; do
+            case ", $platforms, " in
+              *", $required, "*) ;;
+              *)
+                echo "the published manifest does not carry $required: $platforms" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          {
+            echo "tag=$tag"
+            echo "digest=$digest"
+            echo "platforms=$platforms"
+          } >> "$GITHUB_OUTPUT"
+
+  helm-publish:
+    name: Publish Helm chart
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.push.outputs.version }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      # The runner ships helm, so this job installs nothing. `helm lint` runs
+      # the chart's strict values schema, and that schema requires a config
+      # Secret name. The chart creates no Secret and reads none while it
+      # renders, so any name works here.
+      - name: Lint the chart
+        run: helm lint "$CHART_PATH" --set config.existingSecret=release
+
+      # The chart's own Chart.yaml already carries this version, and prepare
+      # refused the release otherwise. Passing it again names the version this
+      # package claims in the one command that builds it.
+      - name: Package the chart
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          helm package "$CHART_PATH" \
+            --version "$VERSION" \
+            --app-version "$VERSION" \
+            --destination dist
+
+      - name: Log in to ghcr.io
+        shell: bash
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" \
+            | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
+
+      - name: Push the chart
+        id: push
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          package="dist/loonfs-server-$VERSION.tgz"
+          test -f "$package"
+          helm push "$package" "$CHART_REGISTRY" 2>&1 | tee push.log
+          digest="$(sed -n 's/^Digest: *//p' push.log | tr -d '[:space:]')"
+          case "$digest" in
+            sha256:*) ;;
+            *)
+              echo "helm push reported no chart digest" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "version=$VERSION"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
+
   publish:
     name: Publish release assets
     # Default needs-gating: publish only when every build leg succeeded, so a
-    # failed target can never ship a release with missing artifacts.
-    needs: [prepare, build]
+    # failed target can never ship a release with missing artifacts. The image
+    # and the chart are in that set, so the release names them only once they
+    # are in the registry.
+    needs: [prepare, build, server-image-manifest, helm-publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -125,9 +369,16 @@ jobs:
           pattern: loonfs-*
           merge-multiple: true
 
-      - name: Verify release artifacts and generate checksums
+      - name: Verify release artifacts and record what the release ships
         shell: bash
         working-directory: dist
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          IMAGE_TAG: ${{ needs.server-image-manifest.outputs.tag }}
+          IMAGE_DIGEST: ${{ needs.server-image-manifest.outputs.digest }}
+          IMAGE_PLATFORMS: ${{ needs.server-image-manifest.outputs.platforms }}
+          CHART_VERSION: ${{ needs.helm-publish.outputs.version }}
+          CHART_DIGEST: ${{ needs.helm-publish.outputs.digest }}
         run: |
           expected=(
             loonfs-aarch64-apple-darwin.tar.gz
@@ -151,6 +402,34 @@ jobs:
           fi
           sha256sum "${expected[@]}" > SHA256SUMS
 
+          # The image and the chart go to a registry rather than to the
+          # release page, so the same check covers them as coordinates. A
+          # release never names an artifact its own jobs did not report.
+          for name in IMAGE_TAG IMAGE_DIGEST IMAGE_PLATFORMS CHART_VERSION CHART_DIGEST; do
+            if [ -z "${!name}" ]; then
+              echo "the release records no $name" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "LoonFS v$VERSION"
+            echo
+            echo "CLI archives, with their checksums in SHA256SUMS:"
+            printf '  %s\n' "${expected[@]}"
+            echo
+            echo "Server image:"
+            echo "  tag:           $IMAGE_TAG"
+            echo "  digest:        $IMAGE_DIGEST"
+            echo "  architectures: $IMAGE_PLATFORMS"
+            echo
+            echo "Helm chart:"
+            echo "  chart:   $CHART_REGISTRY/loonfs-server"
+            echo "  version: $CHART_VERSION"
+            echo "  digest:  $CHART_DIGEST"
+          } > ARTIFACTS.txt
+          cat ARTIFACTS.txt
+
       - name: Upload assets to GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -158,4 +437,5 @@ jobs:
           files: |
             dist/loonfs-*.tar.gz
             dist/SHA256SUMS
+            dist/ARTIFACTS.txt
           fail_on_unmatched_files: true
