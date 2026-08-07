@@ -104,6 +104,53 @@ jobs:
         env:
           LOONFS_IMAGE: loonfs-server:ci
 
+  # Lints and renders the server's Helm chart. `helm lint` runs the chart's
+  # strict values schema, so a value name the chart does not know fails here
+  # rather than being ignored. The renders cover the combinations that take
+  # different template branches, and the last step greps one render for the
+  # three settings that make the chart correct for a single-writer server.
+  # Those three live in the template rather than in values, so this job is
+  # what stops an edit from turning them into something else.
+  #
+  # The runner ships helm, so the job installs nothing.
+  helm:
+    name: helm
+    runs-on: ubuntu-latest
+    env:
+      CHART: crates/loonfs-server/deploy/helm/loonfs-server
+      # The schema requires a config Secret name, so every command below
+      # supplies one. The chart creates no Secret and reads none while it
+      # renders, so any name works here.
+      SECRET: --set config.existingSecret=test
+    steps:
+      - uses: actions/checkout@v4
+      - run: helm version
+      - name: lint
+        run: helm lint "$CHART" $SECRET
+      - name: render every value combination
+        run: |
+          helm template rel "$CHART" $SECRET >/dev/null
+          helm template rel "$CHART" $SECRET \
+            --set localCache.enabled=true --set localCache.sizeLimit=100Gi >/dev/null
+          helm template rel "$CHART" $SECRET --set image.tag=0.2.0 >/dev/null
+          helm template rel "$CHART" $SECRET \
+            --set image.digest=sha256:1111111111111111111111111111111111111111111111111111111111111111 >/dev/null
+          helm template rel "$CHART" $SECRET \
+            --set 'extraEnvFrom[0].secretRef.name=loonfs-server-secrets' >/dev/null
+      - name: assert the single-writer settings
+        run: |
+          rendered="$(helm template rel "$CHART" $SECRET)"
+          assert_line() {
+            grep -qE "$1" <<<"$rendered" || {
+              echo "FAIL: the render has no line matching $1" >&2
+              exit 1
+            }
+            echo "ok: $1"
+          }
+          assert_line '^  replicas: 1$'
+          assert_line '^    type: Recreate$'
+          assert_line '^      automountServiceAccountToken: false$'
+
   dist:
     name: dist
     runs-on: ubuntu-latest

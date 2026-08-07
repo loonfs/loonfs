@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "loonfs-server.fullname" . }}
+  labels:
+    {{- include "loonfs-server.labels" . | nindent 4 }}
+spec:
+  # LoonFS has one writer. A second replica is not high availability: the
+  # newer process takes the writer epoch and the older process's writes are
+  # rejected from then on. The count is written here instead of being a
+  # value, because raising it does not make the deployment more available.
+  replicas: 1
+  # The old pod stops before the new one starts, for the same reason. An
+  # upgrade takes the API offline for that gap.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "loonfs-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "loonfs-server.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # The server never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The shutdown drains and settles with no timeout of its own, and one
+      # degraded object-store operation runs for about six minutes.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: loonfs-server
+          image: {{ include "loonfs-server.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The whole Secret mounts, so this names the entry to read. The
+          # default key asks for the path the image reads on its own.
+          args:
+            - --config
+            - /etc/loonfs/{{ .Values.config.key }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # /readiness answers 503 as soon as shutdown closes admission,
+          # which drains this pod from the Service before it stops.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: http
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loonfs
+              readOnly: true
+            {{- if .Values.localCache.enabled }}
+            - name: local-cache
+              mountPath: /var/cache/loonfs
+            {{- end }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "loonfs-server.configSecret" . }}
+        {{- if .Values.localCache.enabled }}
+        # The cache holds copies of bytes the object store already has, so
+        # it goes with the pod. The config's [local_cache] path has to name
+        # this mount point.
+        - name: local-cache
+          {{- if .Values.localCache.sizeLimit }}
+          emptyDir:
+            sizeLimit: {{ .Values.localCache.sizeLimit | quote }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

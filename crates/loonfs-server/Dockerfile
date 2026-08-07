@@ -43,7 +43,12 @@ RUN groupadd --system --gid 10001 loonfs \
 
 COPY --from=builder /src/target/release/loonfs-server /usr/local/bin/loonfs-server
 
-USER loonfs
+# Numeric, not the name. A kubelet running a pod with `runAsNonRoot: true`
+# reads this field to decide whether the user is root, and it cannot resolve
+# a name to an id without starting the container first. A named user there
+# fails the container with "cannot verify user is non-root", which also puts
+# the image outside the restricted Pod Security Standard.
+USER 10001:10001
 
 # A convention, not a server default. The config's `bind` decides the address
 # and the port; this line documents the port the examples use.

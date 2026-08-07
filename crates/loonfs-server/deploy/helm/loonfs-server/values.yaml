@@ -1,0 +1,80 @@
+# Values for the loonfs-server chart.
+#
+# The chart renders a Deployment and a ClusterIP Service. It renders nothing
+# else: no Secret, no ServiceAccount, no ingress, no autoscaler.
+#
+# Every name here is checked against values.schema.json, and the schema
+# rejects names it does not know. A misspelled value fails the install rather
+# than being ignored.
+
+image:
+  # The repository to pull the server image from.
+  repository: ghcr.io/loonfs/loonfs-server
+  # The tag to run. Empty means the chart's appVersion.
+  tag: ""
+  # A digest, written as "sha256:...". Setting it ignores the tag.
+  digest: ""
+  # The container's imagePullPolicy.
+  pullPolicy: IfNotPresent
+
+# Pull secrets for a private registry. Each entry is {name: my-secret}.
+imagePullSecrets: []
+
+config:
+  # The name of an existing Secret holding the server config. The chart does
+  # not create this Secret, and the install fails when the name is empty.
+  # The whole Secret mounts read-only at /etc/loonfs, so a service-account
+  # JSON or a TLS certificate and key ride along beside the config file and
+  # the config names them at /etc/loonfs/<entry>.
+  existingSecret: ""
+  # The entry in that Secret holding the TOML config. The container reads
+  # /etc/loonfs/<key>.
+  key: config.toml
+
+service:
+  # The port the Service publishes, the port the container declares, and the
+  # port the probes call. The config's `bind` decides the port the process
+  # listens on, so the two have to name the same number.
+  port: 9400
+  # Annotations for the Service.
+  annotations: {}
+
+# How long the kubelet waits after SIGTERM before it sends SIGKILL. The
+# server's shutdown has no timeout of its own and one degraded object-store
+# operation runs for about six minutes, so the default clears that case.
+terminationGracePeriodSeconds: 600
+
+localCache:
+  # Mount an emptyDir at /var/cache/loonfs for the server's disk cache. The
+  # chart writes nothing into the config: the config's [local_cache] table
+  # has to name /var/cache/loonfs as its `path`.
+  enabled: false
+  # The emptyDir's sizeLimit, as a quantity such as "100Gi". Set it to at
+  # least the config's `disk_bytes`, because the kubelet evicts a pod whose
+  # emptyDir grows past the limit. Empty means the chart sets no limit.
+  sizeLimit: ""
+
+# Environment variables for the container, passed through as written. Each
+# entry is a Kubernetes EnvVar. This is how LOONFS_AUTH_TOKEN and
+# LOONFS_CONTENT_TOKEN_SECRET reach the process from a Secret you already
+# have.
+extraEnv: []
+
+# Environment sources for the container, passed through as written. Each
+# entry is a Kubernetes EnvFromSource, so one entry turns a whole Secret into
+# environment variables.
+extraEnvFrom: []
+
+# Annotations for the pod.
+podAnnotations: {}
+
+# Labels for the pod, added beside the labels the chart sets.
+podLabels: {}
+
+# Scheduling for the pod, passed through as written.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Requests and limits for the container.
+resources: {}
