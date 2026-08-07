@@ -405,6 +405,18 @@ impl ServerConfig {
             })
     }
 
+    /// The line `loonfs-server --check-config` prints when the config loads.
+    ///
+    /// It names the two things an operator checks first: the address the
+    /// server would bind and the provider it would talk to.
+    pub fn check_summary(&self) -> String {
+        format!(
+            "config ok: bind {}, store {}",
+            self.bind.trim(),
+            self.store.kind().as_str()
+        )
+    }
+
     /// Parses the bind address; the one authority for that conversion, used
     /// by validation and by serving.
     pub(crate) fn bind_addr(&self) -> Result<SocketAddr, ServerConfigError> {
@@ -1912,14 +1924,14 @@ root = "/tmp/loonfs-server"
     /// (including under `deny_unknown_fields`) and passing field validation.
     #[test]
     fn server_example_configs_parse_and_validate() {
-        let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs");
+        let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
         let mut examples = 0usize;
-        for entry in fs::read_dir(configs_dir).expect("read configs directory") {
-            let path = entry.expect("read configs entry").path();
+        for entry in fs::read_dir(configs_dir).expect("read config directory") {
+            let path = entry.expect("read config entry").path();
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if !name.starts_with("loonfs-server.") || !name.ends_with(".example.toml") {
+            if !name.ends_with(".example.toml") {
                 continue;
             }
             let contents = fs::read_to_string(&path).expect("read example config");

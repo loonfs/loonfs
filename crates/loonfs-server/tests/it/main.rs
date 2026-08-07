@@ -2,6 +2,7 @@
 //! `tests/<name>.rs` file is a module here, so the suite links once and
 //! runs its tests as threads instead of as separate processes.
 
+mod check_config;
 mod common;
 mod direct_put_real_provider;
 mod grep_modes;

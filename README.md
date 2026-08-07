@@ -62,7 +62,7 @@ Build the server and start it with the local filesystem example:
 
 ```bash
 cargo build --release -p loonfs-server
-./target/release/loonfs-server --config configs/loonfs-server.local-fs.example.toml
+./target/release/loonfs-server --config crates/loonfs-server/config/local-fs.example.toml
 ```
 
 The example listens on `127.0.0.1:9400` and uses `dev-token`. Configure a remote CLI profile to connect to it:
@@ -75,7 +75,7 @@ LOONFS_AUTH_TOKEN=dev-token loonfs init default --no-input \
 
 ### Production
 
-Start with the example in [configs/](configs) for your object store: `aws-s3`, `gcp-gcs`, `cloudflare-r2`, or `azure-abs`. Each file documents the provider credentials and optional server settings. Remove the example `auth_token` and `content_token_secret` values and supply real ones through the environment:
+Start with the example in [crates/loonfs-server/config/](crates/loonfs-server/config) for your object store: `aws-s3`, `gcp-gcs`, `cloudflare-r2`, or `azure-abs`. Each file documents the provider credentials and optional server settings. Remove the example `auth_token` and `content_token_secret` values and supply real ones through the environment:
 
 ```bash
 export LOONFS_AUTH_TOKEN={auth_token}

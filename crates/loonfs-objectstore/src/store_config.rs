@@ -4,7 +4,8 @@
 //! (`[profiles.<name>.store]`) deserialize into [`StoreConfig`], validate it
 //! with [`StoreConfig::validate`], and construct the runtime store with
 //! [`StoreConfig::configured_object_store`]. The TOML shape is kind-tagged
-//! and kebab-case, documented by the examples in `configs/`.
+//! and kebab-case. Each binary ships the examples that document it, in the
+//! `config/` directory of its own crate.
 
 use crate::abs::AzureAbsStoreConfig;
 use crate::configured::{
@@ -542,7 +543,6 @@ mod tests {
     use super::{StoreConfig, StoreConfigError};
     use crate::secret::SecretString;
     use crate::ConfiguredObjectStoreKind;
-    use std::path::{Path, PathBuf};
 
     fn parse(contents: &str) -> StoreConfig {
         toml::from_str(contents).expect("parse store config")
@@ -927,69 +927,5 @@ key_prefix = "demo"
 
         let reparsed: StoreConfig = toml::from_str(&rendered).expect("reparse store config");
         assert_eq!(reparsed, config);
-    }
-
-    /// Every example config in `configs/*.example.toml` must keep parsing
-    /// into the shared [`StoreConfig`]: the examples document the frozen TOML
-    /// shape.
-    #[test]
-    fn example_configs_store_sections_parse() {
-        let configs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs");
-        let mut store_sections = 0usize;
-
-        for path in example_config_paths(&configs_dir) {
-            let contents = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-            let value: toml::Value = toml::from_str(&contents)
-                .unwrap_or_else(|err| panic!("parse {}: {err}", path.display()));
-
-            for store in store_tables(&value) {
-                let config: StoreConfig = store.clone().try_into().unwrap_or_else(|err| {
-                    panic!("store section in {} must parse: {err}", path.display())
-                });
-                config.validate().unwrap_or_else(|err| {
-                    panic!("store section in {} must validate: {err}", path.display())
-                });
-                store_sections += 1;
-            }
-        }
-
-        // Five server examples plus the embedded CLI example.
-        assert!(
-            store_sections >= 6,
-            "expected at least 6 store sections across configs/*.example.toml, found {store_sections}"
-        );
-    }
-
-    fn example_config_paths(configs_dir: &Path) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(configs_dir)
-            .expect("read configs directory")
-            .map(|entry| entry.expect("read configs entry").path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(".example.toml"))
-            })
-            .collect();
-        paths.sort();
-        assert!(!paths.is_empty(), "no example configs found");
-        paths
-    }
-
-    /// Collects `[store]` tables from server configs and
-    /// `[profiles.<name>.store]` tables from CLI configs.
-    fn store_tables(value: &toml::Value) -> Vec<&toml::Value> {
-        let mut sections = Vec::new();
-        if let Some(store) = value.get("store") {
-            sections.push(store);
-        }
-        if let Some(profiles) = value.get("profiles").and_then(toml::Value::as_table) {
-            for profile in profiles.values() {
-                if let Some(store) = profile.get("store") {
-                    sections.push(store);
-                }
-            }
-        }
-        sections
     }
 }
