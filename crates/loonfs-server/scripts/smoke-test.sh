@@ -26,7 +26,6 @@ WORK_DIR=""
 PORT_FORWARD_PID=""
 NAMESPACE=""
 NAMESPACE_LIVES="no"
-PROBE_SUBCOMMAND=""
 CHECKS=()
 
 usage() {
@@ -132,21 +131,6 @@ report_pod_events() {
     --sort-by=.lastTimestamp >&2 || true
 }
 
-# The admin subcommand that probes the object store is being renamed from
-# `probe-store` to `store-probe`. Ask the binary which spelling it has rather
-# than pinning one that changes underneath this script. Once the rename has
-# landed everywhere, the second branch goes.
-detect_probe_subcommand() {
-  local help
-  help="$(loonfs admin --help 2>&1)" || fail "loonfs admin --help failed"
-  if echo "$help" | grep -q 'store-probe'; then
-    PROBE_SUBCOMMAND="store-probe"
-  elif echo "$help" | grep -q 'probe-store'; then
-    PROBE_SUBCOMMAND="probe-store"
-  else
-    fail "loonfs admin --help names neither store-probe nor probe-store"
-  fi
-}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -255,10 +239,9 @@ pass "built a throwaway CLI profile for $BASE_URL"
 
 # 6. The object store. Readiness never touches it, so this is the check that
 #    catches a wrong bucket, a wrong region, or an expired credential.
-detect_probe_subcommand
-loonfs admin "$PROBE_SUBCOMMAND" \
-  || fail "loonfs admin $PROBE_SUBCOMMAND found the object store wanting"
-pass "loonfs admin $PROBE_SUBCOMMAND passed every check"
+loonfs admin store-probe \
+  || fail "loonfs admin store-probe found the object store wanting"
+pass "loonfs admin store-probe passed every check"
 
 # 7. A file through a namespace of this run's own, and the same bytes back.
 NAMESPACE="smoke-$(random_hex 4)"
