@@ -2,6 +2,7 @@
 //! operations into one commit's operations.
 
 use super::intent::{CommitRequest, FilesystemOperation};
+use super::plan_attributes::plan_publish_update_attributes;
 use super::plan_create::{
     plan_publish_create_directory, plan_publish_put_file_content_ref, plan_publish_undelete,
 };
@@ -173,6 +174,23 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             deleted_at_seq,
             path,
         } => plan_publish_undelete(*inode_id, *deleted_at_seq, path.as_ref(), view).await,
+        FilesystemOperation::UpdateAttributes {
+            path,
+            set,
+            remove,
+            expected_inode_id,
+            expected_attributes_revision_no,
+        } => {
+            plan_publish_update_attributes(
+                path,
+                set,
+                remove,
+                *expected_inode_id,
+                *expected_attributes_revision_no,
+                view,
+            )
+            .await
+        }
     }
 }
 
@@ -541,6 +559,76 @@ mod tests {
             .any(|precondition| matches!(
                 precondition,
                 CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key.as_str() == "copy.txt"
+            )));
+    }
+
+    /// The update's plan carries the binding the path resolved through and
+    /// the attribute revision it read, so a raced rebind and a raced update
+    /// are both rejected under the publish lock.
+    #[tokio::test]
+    async fn update_attributes_plan_carries_the_binding_and_revision_guards() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            &context,
+            Some(&CommitId::parse("seed-attributes").expect("valid commit id")),
+        )
+        .await
+        .expect("seed file");
+
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &request(FilesystemOperation::UpdateAttributes {
+                path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                set: std::collections::BTreeMap::from([(
+                    loonfs_api::AttributeKey::parse("owner").expect("valid attribute key"),
+                    loonfs_api::AttributeValue::String {
+                        value: "ada".to_owned(),
+                    },
+                )]),
+                remove: Vec::new(),
+                expected_inode_id: None,
+                expected_attributes_revision_no: None,
+            }),
+        )
+        .await;
+
+        assert!(matches!(
+            planned.ops.as_slice(),
+            [PlannedOp {
+                op: CommitOp::UpdateAttributes {
+                    base_attributes_revision_no: loonfs_api::AttributeRevisionNo(0),
+                    attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
+                    ..
+                },
+                ..
+            }]
+        ));
+        assert!(planned.ops[0]
+            .preconditions
+            .iter()
+            .any(|precondition| matches!(precondition, CommitPrecondition::BindingIs { .. })));
+        assert!(planned.ops[0]
+            .preconditions
+            .iter()
+            .any(|precondition| matches!(
+                precondition,
+                CommitPrecondition::InodeAttributesRevisionIs {
+                    attributes_revision_no: loonfs_api::AttributeRevisionNo(0),
+                    ..
+                }
+            )));
+        assert!(planned.ops[0]
+            .preconditions
+            .iter()
+            .any(|precondition| matches!(
+                precondition,
+                CommitPrecondition::AncestorsNotSubtreeDeleted { .. }
             )));
     }
 

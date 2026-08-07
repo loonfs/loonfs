@@ -26,7 +26,7 @@ use crate::metadata::{
     DirentryBindRecord, InodeRecord, MetadataState, MetadataView, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-use loonfs_api::{ChangeSeq, InodeId, NameKey, RevisionNo};
+use loonfs_api::{AttributeRevisionNo, Attributes, ChangeSeq, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 /// Seq-scoped metadata lookups the commit validator performs, implemented by
@@ -88,6 +88,14 @@ pub(crate) trait CommitValidationView {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
     ) -> Result<bool, Self::Error>;
+
+    /// The inode's attribute revision and complete map at the commit's
+    /// sequence. An inode that has never had attributes written answers
+    /// revision 0 with an empty map.
+    async fn attributes_at_seq(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<(AttributeRevisionNo, Attributes), Self::Error>;
 
     fn apply_validated_op_mut(
         &mut self,
@@ -236,6 +244,16 @@ impl CommitValidationView for InMemoryValidationView<'_> {
             .map_err(commit_validation_from_core)
     }
 
+    async fn attributes_at_seq(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<(AttributeRevisionNo, Attributes), Self::Error> {
+        self.view()
+            .attributes_at_visible_seq(inode_id)
+            .await
+            .map_err(commit_validation_from_core)
+    }
+
     fn apply_validated_op_mut(
         &mut self,
         committed_seq: ChangeSeq,
@@ -349,6 +367,13 @@ impl<S: ObjectStore + ?Sized> CommitValidationView for PublishValidationView<'_,
         self.view()
             .would_create_directory_cycle(inode_id, new_parent_inode_id)
             .await
+    }
+
+    async fn attributes_at_seq(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<(AttributeRevisionNo, Attributes), Self::Error> {
+        self.view().attributes_at_visible_seq(inode_id).await
     }
 
     fn apply_validated_op_mut(

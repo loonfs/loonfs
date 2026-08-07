@@ -6,8 +6,8 @@
 
 use crate::error::CoreError;
 use crate::metadata::{
-    ActiveDeletionAction, ActiveDeletionRecord, CommitReceiptRecord, DirentryBindRecord,
-    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneAction,
+    ActiveDeletionAction, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
+    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneAction,
     SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, TombstoneRowAction};
@@ -184,6 +184,27 @@ pub(crate) fn commit_receipt_from_manifest_row(
     }
 }
 
+pub(crate) fn attributes_revision_from_manifest_row(
+    row: MetadataRow,
+) -> Result<AttributesRevisionRecord, CoreError> {
+    match row {
+        MetadataRow::AttributesRevision {
+            inode_id,
+            attributes_revision_no,
+            committed_seq,
+            delta_index,
+            attributes,
+        } => Ok(AttributesRevisionRecord {
+            inode_id,
+            attributes_revision_no,
+            committed_seq,
+            delta_index,
+            attributes,
+        }),
+        other => Err(foreign_row("attributes_revision", &other)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +235,7 @@ mod tests {
         assert!(revision_from_manifest_row(foreign()).is_err());
         assert!(tombstone_from_manifest_row(foreign()).is_err());
         assert!(commit_receipt_from_manifest_row(foreign()).is_err());
+        assert!(attributes_revision_from_manifest_row(foreign()).is_err());
         let tombstone = MetadataRow::Tombstone {
             root_inode_id: InodeId(1),
             generation: TombstoneGeneration {

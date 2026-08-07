@@ -10,8 +10,9 @@ use crate::checkpoint::VerifiedMetadataTables;
 use crate::error::CoreError;
 use crate::metadata::{
     active_deletion_from_tombstone, unbind_matches_binding, ActiveDeletionRecord,
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
+    AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
+    InodeRecord, MetadataState, RecoverableDeletion, ResolvedVisiblePath, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
 #[cfg(test)]
 use async_trait::async_trait;
@@ -22,7 +23,10 @@ use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, RevisionNo};
+use loonfs_api::{
+    AbsolutePath, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, InodeId, InodeKind,
+    NameKey, RevisionNo,
+};
 use loonfs_objectstore::ObjectStore;
 #[cfg(test)]
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
@@ -442,6 +446,56 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
         revisions.truncate(limit);
         Ok(revisions)
+    }
+
+    /// The newest attribute revision record for `inode_id` at the visible
+    /// sequence, or `None` when the inode has never had attributes written.
+    ///
+    /// Both legs filter by `visible_seq`. The revision lookup this is modeled
+    /// on filters only its row-state leg, because a file's revision history
+    /// is append-only and a revision read at the head is the same answer at
+    /// any sequence at or above it. Attributes are not history: each record
+    /// replaces the one before it, so a checkpoint-basis or fork-basis read
+    /// that let a newer manifest row through would answer with a map that
+    /// sequence never saw.
+    pub(crate) async fn latest_attributes_revision(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<Option<AttributesRevisionRecord>, CoreError> {
+        let row_record = self
+            .row_states()
+            .flat_map(|state| state.attributes_revisions())
+            .filter(|record| {
+                record.inode_id == inode_id && record.committed_seq <= self.visible_seq()
+            })
+            .max_by_key(|record| attributes_order_key(record))
+            .cloned();
+        let manifest_record = if let Some(tables) = self.manifest_tables() {
+            manifest_index::attributes_for_inode(tables, inode_id, self.visible_seq()).await?
+        } else {
+            None
+        };
+        Ok(row_record
+            .into_iter()
+            .chain(manifest_record)
+            .max_by_key(attributes_order_key))
+    }
+
+    /// The inode's attribute state at the visible sequence: the revision
+    /// counter and the complete map.
+    ///
+    /// An inode with no record anywhere is at revision 0 with an empty map.
+    /// That state is concrete, not a missing answer, so nothing writes a
+    /// durable row to represent it.
+    pub(crate) async fn attributes_at_visible_seq(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<(AttributeRevisionNo, Attributes), CoreError> {
+        Ok(self
+            .latest_attributes_revision(inode_id)
+            .await?
+            .map(|record| (record.attributes_revision_no, record.attributes))
+            .unwrap_or_else(|| (AttributeRevisionNo(0), Attributes::default())))
     }
 
     pub(crate) async fn find_commit_receipt(
@@ -992,6 +1046,16 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
     ) -> Result<bool, Self::Error> {
         self.view.is_direntry_unbound(direntry).await
     }
+}
+
+fn attributes_order_key(
+    record: &AttributesRevisionRecord,
+) -> (AttributeRevisionNo, ChangeSeq, u32) {
+    (
+        record.attributes_revision_no,
+        record.committed_seq,
+        record.delta_index,
+    )
 }
 
 fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, loonfs_api::ChangeSeq, u32) {

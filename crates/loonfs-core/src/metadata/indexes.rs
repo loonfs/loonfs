@@ -3,8 +3,8 @@
 
 use super::visibility::unbind_matches_binding;
 use super::{
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneAction, SubtreeTombstoneRecord,
+    AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
+    InodeRecord, RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -40,6 +40,7 @@ impl Default for MetadataIndexes {
 }
 
 impl MetadataIndexes {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn rebuild(
         inodes: &[InodeRecord],
         binds: &[DirentryBindRecord],
@@ -47,6 +48,7 @@ impl MetadataIndexes {
         revisions: &[RevisionRecord],
         tombstones: &[SubtreeTombstoneRecord],
         receipts: &[CommitReceiptRecord],
+        attributes_revisions: &[AttributesRevisionRecord],
     ) -> Self {
         let mut indexes = Self::default();
 
@@ -99,6 +101,10 @@ impl MetadataIndexes {
 
         for receipt in receipts {
             indexes.record_commit_receipt(receipt);
+        }
+
+        for attributes_revision in attributes_revisions {
+            indexes.record_attributes_revision(attributes_revision);
         }
 
         indexes
@@ -255,6 +261,13 @@ impl MetadataIndexes {
             record.commit_id.clone(),
             record.clone(),
         );
+    }
+
+    /// Attribute revisions contribute only the seq watermark, like revisions:
+    /// attribute lookups scan the rows, which stay tail-sized in memory
+    /// because the manifest tables answer the bulk.
+    pub(super) fn record_attributes_revision(&mut self, record: &AttributesRevisionRecord) {
+        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }
 }
 

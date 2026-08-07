@@ -6,8 +6,8 @@ use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{required_option, DeletedDirentry, TombstoneGeneration};
 use crate::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
-    RevisionNo, WalSegmentId, WriterEpoch,
+    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
+    InodeKind, NameKey, NamespaceId, RevisionNo, WalSegmentId, WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -119,6 +119,23 @@ pub enum WalDelta {
         root_inode_id: InodeId,
         /// The exact tombstone generation this delta compensates.
         target: TombstoneGeneration,
+    },
+    /// Publishes the next attribute revision of one inode, as complete state.
+    ///
+    /// The delta carries the whole resulting map rather than the changes that
+    /// produced it, so replay never needs an earlier revision to answer what
+    /// an inode holds. An empty map is a real revision: it is the cleared
+    /// state, and it hides every earlier map.
+    AppendAttributesRevision {
+        /// Stable position of this attribute delta within its commit.
+        delta_index: u32,
+        /// Inode whose attributes this revision replaces.
+        inode_id: InodeId,
+        /// Monotonic per-inode attribute revision, exactly one past the
+        /// revision the update was validated against.
+        attributes_revision_no: AttributeRevisionNo,
+        /// The inode's complete attribute map after this update.
+        attributes: Attributes,
     },
 }
 

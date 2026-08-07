@@ -3,25 +3,48 @@
 use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    ChangeSeq, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, ContentId,
+    ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, SubtreeTombstoneAction as CoreTombstoneAction,
 };
 use loonfs_model::metadata::{
-    MetadataState as ModelMetadataState, SubtreeTombstoneAction as ModelTombstoneAction,
+    AttributeContent as ModelAttributeContent, MetadataState as ModelMetadataState,
+    SubtreeTombstoneAction as ModelTombstoneAction,
 };
 
 type NormalizedInodes = Vec<(u64, &'static str, u64)>;
 type NormalizedDirentryBinds = Vec<(u64, String, u64, u64, u32)>;
 type NormalizedRevisions = Vec<(u64, u64, u64, u32, ContentId)>;
 type NormalizedTombstones = Vec<NormalizedTombstone>;
+type NormalizedAttributes = Vec<NormalizedAttributeRevision>;
 type NormalizedMetadata = (
     NormalizedInodes,
     NormalizedDirentryBinds,
     NormalizedRevisions,
     NormalizedTombstones,
+    NormalizedAttributes,
 );
+
+/// One attribute revision, whole: the position, the counter, and every entry
+/// of the map. Comparing only the counter would let a dropped or mangled
+/// entry through, so both sides reduce every field, named rather than
+/// positional so a divergence prints which one differs.
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedAttributeRevision {
+    inode_id: u64,
+    revision: u64,
+    committed_seq: u64,
+    delta_index: u32,
+    entries: Vec<(String, NormalizedAttributeValue)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NormalizedAttributeValue {
+    Text(String),
+    TextList(Vec<String>),
+}
 
 /// One tombstone event, whole: the generation, what the event did, and the
 /// binding a delete recorded. Comparing only the generation would let a
@@ -166,6 +189,43 @@ fn tombstone_without_binding(delta_index: u32, root_inode_id: InodeId) -> Vec<Wa
         delta_index,
         root_inode_id,
         deleted_direntry: None,
+    }]
+}
+
+fn attribute_map(entries: &[(&str, &[&str])]) -> Attributes {
+    Attributes::new(
+        entries
+            .iter()
+            .map(|(key, values)| {
+                let key = AttributeKey::parse(key).expect("valid attribute key");
+                // A one-member list stays a list: the kind is part of the
+                // value, so the two sides must not collapse them.
+                let value = match values {
+                    [single] if !single.starts_with('[') => AttributeValue::String {
+                        value: (*single).to_owned(),
+                    },
+                    values => AttributeValue::StringList {
+                        values: values.iter().map(|value| (*value).to_owned()).collect(),
+                    },
+                };
+                (key, value)
+            })
+            .collect(),
+    )
+    .expect("valid attribute map")
+}
+
+fn update_attributes(
+    delta_index: u32,
+    inode_id: InodeId,
+    revision: u64,
+    attributes: Attributes,
+) -> Vec<WalDelta> {
+    vec![WalDelta::AppendAttributesRevision {
+        delta_index,
+        inode_id,
+        attributes_revision_no: AttributeRevisionNo(revision),
+        attributes,
     }]
 }
 
@@ -323,6 +383,117 @@ fn metadata_apply_matches_model_for_undelete() {
     ]);
 }
 
+#[test]
+fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
+    assert_states_match(&[
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
+        create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            content_ref("content-1"),
+        ),
+        // Set, then overwrite one key while adding another, then remove one:
+        // each delta carries the whole resulting map.
+        update_attributes(
+            0,
+            InodeId(3),
+            1,
+            attribute_map(&[("owner", &["ada"]), ("tags", &["draft", "review"])]),
+        ),
+        update_attributes(
+            0,
+            InodeId(3),
+            2,
+            attribute_map(&[
+                ("owner", &["grace"]),
+                ("tags", &["draft", "review"]),
+                ("stage", &["final"]),
+            ]),
+        ),
+        update_attributes(
+            0,
+            InodeId(3),
+            3,
+            attribute_map(&[("owner", &["grace"]), ("stage", &["final"])]),
+        ),
+        // A directory carries attributes too.
+        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", &["hopper"])])),
+    ]);
+}
+
+/// A clear is a real revision carrying the empty map, and both sides must
+/// record it rather than dropping the row.
+#[test]
+fn metadata_apply_matches_model_for_a_cleared_attribute_map() {
+    assert_states_match(&[
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
+        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", &["ada"])])),
+        update_attributes(0, InodeId(2), 2, Attributes::default()),
+    ]);
+}
+
+/// The copy path emits the create and the inherited attributes as two
+/// internal operations of one commit, so both sides see them at one sequence
+/// in delta order.
+#[test]
+fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
+    assert_states_match(&[
+        create_file(
+            0,
+            InodeId(2),
+            InodeId(1),
+            "source.txt",
+            content_ref("content-1"),
+        ),
+        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", &["ada"])])),
+        {
+            let mut deltas = create_file(
+                0,
+                InodeId(3),
+                InodeId(1),
+                "copy.txt",
+                content_ref("content-1"),
+            );
+            deltas.extend(update_attributes(
+                3,
+                InodeId(3),
+                1,
+                attribute_map(&[("owner", &["ada"])]),
+            ));
+            deltas
+        },
+    ]);
+}
+
+/// A delete keeps the attribute rows and an undelete reveals them again, so
+/// neither side may drop or rewrite a row for an inode that went away.
+#[test]
+fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
+    assert_states_match(&[
+        create_file(
+            0,
+            InodeId(2),
+            InodeId(1),
+            "Readme.TXT",
+            content_ref("content-1"),
+        ),
+        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", &["ada"])])),
+        tombstone(1, InodeId(2), InodeId(1), "Readme.TXT"),
+        undelete(
+            0,
+            InodeId(2),
+            InodeId(1),
+            "Readme.TXT",
+            TombstoneGeneration {
+                seq: ChangeSeq(3),
+                delta_index: 1,
+            },
+        ),
+    ]);
+}
+
 fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(0),
@@ -411,6 +582,33 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 },
             })
             .collect(),
+        state
+            .attributes_revisions()
+            .iter()
+            .map(|record| NormalizedAttributeRevision {
+                inode_id: record.inode_id.0,
+                revision: record.attributes_revision_no.0,
+                committed_seq: record.committed_seq.0,
+                delta_index: record.delta_index,
+                entries: record
+                    .attributes
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.as_str().to_owned(),
+                            match value {
+                                AttributeValue::String { value } => {
+                                    NormalizedAttributeValue::Text(value.clone())
+                                }
+                                AttributeValue::StringList { values } => {
+                                    NormalizedAttributeValue::TextList(values.clone())
+                                }
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
     )
 }
 
@@ -420,6 +618,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
         direntry_binds,
         revisions,
         subtree_tombstones,
+        attribute_revisions,
         ..
     } = state;
     (
@@ -474,6 +673,32 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                         target_delta_index: target.delta_index,
                     },
                 },
+            })
+            .collect(),
+        attribute_revisions
+            .iter()
+            .map(|record| NormalizedAttributeRevision {
+                inode_id: record.inode_id.0,
+                revision: record.revision,
+                committed_seq: record.committed_seq.0,
+                delta_index: record.delta_index,
+                entries: record
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.key.clone(),
+                            match &entry.value {
+                                ModelAttributeContent::Text(text) => {
+                                    NormalizedAttributeValue::Text(text.clone())
+                                }
+                                ModelAttributeContent::TextList(texts) => {
+                                    NormalizedAttributeValue::TextList(texts.clone())
+                                }
+                            },
+                        )
+                    })
+                    .collect(),
             })
             .collect(),
     )

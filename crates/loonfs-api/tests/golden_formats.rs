@@ -35,10 +35,10 @@ use loonfs_api::wire::wal::{
     WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
-    ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId,
-    MetadataTableId, NameKey, NamespaceId, RevisionNo, StorageChecksum, UploadId, WalSegmentId,
-    WriterEpoch,
+    sha256_digest, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
+    CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
+    ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
+    NamespaceId, RevisionNo, StorageChecksum, UploadId, WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -203,6 +203,29 @@ fn name_key(value: &str) -> NameKey {
     NameKey::parse(value).expect("valid name key")
 }
 
+fn attribute_key(value: &str) -> AttributeKey {
+    AttributeKey::parse(value).expect("valid attribute key")
+}
+
+/// One attribute map exercising both value kinds.
+fn sample_attributes() -> Attributes {
+    Attributes::new(std::collections::BTreeMap::from([
+        (
+            attribute_key("owner"),
+            AttributeValue::String {
+                value: "ada".to_owned(),
+            },
+        ),
+        (
+            attribute_key("tags"),
+            AttributeValue::StringList {
+                values: vec!["draft".to_owned(), "review".to_owned()],
+            },
+        ),
+    ]))
+    .expect("valid attribute map")
+}
+
 fn sample_wal_pointer() -> WalSegmentPointer {
     WalSegmentPointer {
         object_key: "namespaces/demo/wal/00000000000000000002-fedcba9876543210.wal.zst".to_owned(),
@@ -267,6 +290,15 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
                     display_name: loonfs_api::DisplayName::parse("Old.txt")
                         .expect("valid display name"),
                 }),
+            },
+        },
+        WalCommitDelta {
+            semantic_op_index: 4,
+            delta: WalDelta::AppendAttributesRevision {
+                delta_index: 5,
+                inode_id: InodeId(5),
+                attributes_revision_no: AttributeRevisionNo(2),
+                attributes: sample_attributes(),
             },
         },
     ];
@@ -1183,6 +1215,7 @@ fn metadata_table_family_wire_tags_are_pinned() {
         MetadataTableFamily::Tombstones,
         MetadataTableFamily::ActiveDeletions,
         MetadataTableFamily::CommitReceipts,
+        MetadataTableFamily::Attributes,
     ]
     .iter()
     .map(|family| serde_json::to_string(family).expect("family tag"))
@@ -1199,6 +1232,7 @@ fn metadata_table_family_wire_tags_are_pinned() {
             "\"tombstones\"",
             "\"active_deletions\"",
             "\"commit_receipts\"",
+            "\"attributes\"",
         ],
         "family tags are durable bytes in every manifest descriptor"
     );
@@ -1501,6 +1535,15 @@ fn wal_delta_wire_tags_match_spec_names() {
             }),
             "revoke_subtree_tombstone",
         ),
+        (
+            serde_json::to_value(WalDelta::AppendAttributesRevision {
+                delta_index: 0,
+                inode_id: InodeId(2),
+                attributes_revision_no: AttributeRevisionNo(1),
+                attributes: Attributes::default(),
+            }),
+            "append_attributes_revision",
+        ),
     ];
     for (value, expected_tag) in cases {
         let value = value.expect("serialize delta");
@@ -1558,6 +1601,25 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         std::num::NonZeroUsize::new(256).expect("target block size should be non-zero"),
     );
     let rows = [
+        // `attributes-` sorts ahead of `commit-receipt-`, so both attribute
+        // rows land in the first data block the fixture below pins. The
+        // cleared state goes on the lower inode so it is the smaller row that
+        // opens the block, which keeps both rows inside it; pinning the empty
+        // map's encoding is the point of carrying two.
+        MetadataRow::AttributesRevision {
+            inode_id: InodeId(2),
+            attributes_revision_no: AttributeRevisionNo(3),
+            committed_seq: ChangeSeq(7),
+            delta_index: 1,
+            attributes: Attributes::default(),
+        },
+        MetadataRow::AttributesRevision {
+            inode_id: InodeId(5),
+            attributes_revision_no: AttributeRevisionNo(2),
+            committed_seq: ChangeSeq(5),
+            delta_index: 0,
+            attributes: sample_attributes(),
+        },
         MetadataRow::CommitReceipt {
             commit_id: commit_id(),
             semantic_commit_fingerprint: "fp:golden".to_owned(),
@@ -1648,6 +1710,32 @@ fn sst_block_data_payload_matches_golden_bytes() {
     assert_matches_golden(
         "sst_block_data.v1.bin",
         &unzstd(segment_section(&built.bytes, &index[0].block)),
+    );
+}
+
+/// The attribute family sorts first, so both attribute rows — the populated
+/// map and the cleared one — sit inside the block the fixture above pins.
+/// This says so, the way the tombstone guard below says the same for the
+/// last block.
+#[test]
+fn sst_block_data_first_block_covers_the_attributes_prefix() {
+    use loonfs_api::wire::sst_blocks::{decode_data_block, decode_index_block};
+    let built = sample_segment_blocks();
+    let index = decode_index_block(segment_section(&built.bytes, &built.index), &built.index)
+        .expect("decode index");
+    let first = index.first().expect("sample spans at least one block");
+    let block = decode_data_block(segment_section(&built.bytes, &first.block), &first.block)
+        .expect("decode first block");
+    let attribute_keys: Vec<&String> = block
+        .row_keys
+        .iter()
+        .filter(|key| key.starts_with("attributes-"))
+        .collect();
+    assert_eq!(
+        attribute_keys.len(),
+        2,
+        "both attribute rows belong to the pinned first block: {:?}",
+        block.row_keys
     );
 }
 
@@ -1807,6 +1895,50 @@ fn tombstone_rows_reject_the_pre_grouping_flat_encoding() {
         refusal.contains("missing field `deleted_direntry`"),
         "unexpected refusal: {refusal}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Attribute rows: an unknown value kind is not a value
+// ---------------------------------------------------------------------------
+
+/// A stored attribute value states its kind, and a kind this format does not
+/// have is corruption rather than a value to read past. A decoder that
+/// defaulted here would turn a list written by a newer writer into a string.
+#[test]
+fn attribute_rows_reject_an_unknown_value_kind() {
+    let mut row = row_cbor(&MetadataRow::AttributesRevision {
+        inode_id: InodeId(2),
+        attributes_revision_no: AttributeRevisionNo(1),
+        committed_seq: ChangeSeq(5),
+        delta_index: 0,
+        attributes: sample_attributes(),
+    });
+    let owner = cbor_entry(cbor_entry(&mut row, "attributes"), "owner");
+    *cbor_entry(owner, "kind") = ciborium::Value::from("number");
+
+    let refusal = assert_row_is_corrupt(&row, "a kind this format does not have is not a value");
+    assert!(
+        refusal.contains("number") || refusal.contains("variant"),
+        "unexpected refusal: {refusal}"
+    );
+}
+
+/// The map's limits are enforced on the way in, so a stored row that breaks
+/// one fails to decode instead of decoding to something within the limits.
+#[test]
+fn attribute_rows_reject_a_map_over_its_limits() {
+    let mut row = row_cbor(&MetadataRow::AttributesRevision {
+        inode_id: InodeId(2),
+        attributes_revision_no: AttributeRevisionNo(1),
+        committed_seq: ChangeSeq(5),
+        delta_index: 0,
+        attributes: sample_attributes(),
+    });
+    let owner = cbor_entry(cbor_entry(&mut row, "attributes"), "owner");
+    *cbor_entry(owner, "value") =
+        ciborium::Value::from("v".repeat(loonfs_api::MAX_ATTRIBUTE_VALUE_BYTES + 1));
+
+    assert_row_is_corrupt(&row, "an oversized value is not a value this format stores");
 }
 
 /// The set row's binding, as the CBOR map another writer would have written.

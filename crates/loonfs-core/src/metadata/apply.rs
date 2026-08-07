@@ -2,8 +2,8 @@
 //! [`MetadataState`] rows.
 
 use super::{
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
+    AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
+    InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
@@ -138,6 +138,20 @@ impl MetadataState {
                     },
                     deleted_at_ms: committed_at_ms,
                     action: SubtreeTombstoneAction::Revoke { target: *target },
+                });
+            }
+            WalDelta::AppendAttributesRevision {
+                delta_index,
+                inode_id,
+                attributes_revision_no,
+                attributes,
+            } => {
+                self.push_attributes_revision_record(AttributesRevisionRecord {
+                    inode_id: *inode_id,
+                    attributes_revision_no: *attributes_revision_no,
+                    committed_seq,
+                    delta_index: *delta_index,
+                    attributes: attributes.clone(),
                 });
             }
         }

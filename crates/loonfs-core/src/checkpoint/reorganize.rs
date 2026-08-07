@@ -47,7 +47,9 @@ use loonfs_api::wire::manifest::{
     ActiveDeletionRowAction, MetadataFileRef, MetadataRow, MetadataTableFamily,
     NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{ChangeSeq, InodeId, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{
+    AttributeRevisionNo, ChangeSeq, InodeId, ManifestId, ManifestObjectId, NamespaceId,
+};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,7 +58,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// each other's rows to decide what to drop (see
 /// `drop_rows_below_retention_floor`) must compact together, and a secondary
 /// index always travels with its canonical family.
-const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 6] = [
+const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 7] = [
     &[
         MetadataTableFamily::DirentryBinds,
         MetadataTableFamily::DirentryChildBinds,
@@ -72,6 +74,10 @@ const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 6] = [
     // listed row it names, and both live in this family.
     &[MetadataTableFamily::ActiveDeletions],
     &[MetadataTableFamily::CommitReceipts],
+    // Attributes fold alone too: a revision supersedes the revisions of the
+    // same inode, and they all live in this family. The family has no
+    // secondary index to travel with.
+    &[MetadataTableFamily::Attributes],
 ];
 
 /// What one reorganization step did.
@@ -727,5 +733,75 @@ pub(super) fn drop_rows_below_retention_floor(
             _ => true,
         });
     }
+
+    drop_superseded_attribute_revisions(rows_by_family, retention_floor_seq)?;
+    Ok(())
+}
+
+/// Keeps every attribute revision above the retention floor, plus the newest
+/// revision at or below it per inode, and drops the rest.
+///
+/// An attribute revision is current state, not history: the newest one for an
+/// inode is what every read answers with, and no retained sequence can
+/// observe an older one once a newer one is at or below the floor. The
+/// newest-at-floor row is kept even when its map is empty, because an empty
+/// map is the cleared state — dropping it would let an older non-empty map
+/// become the newest row and resurrect attributes a caller cleared.
+///
+/// Attributes are never dropped for being unreachable. A deleted inode keeps
+/// its rows, the same posture inode and tombstone rows take, and that is what
+/// makes an undelete give back the map the inode had.
+fn drop_superseded_attribute_revisions(
+    rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
+    retention_floor_seq: ChangeSeq,
+) -> Result<()> {
+    let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::Attributes) else {
+        return Ok(());
+    };
+    // Writer invariant: one inode's attribute revisions are
+    // numbered without gaps or repeats, so "the newest at or below the floor"
+    // names exactly one row. Two rows sharing a number would make the choice
+    // arbitrary and the drop unsafe; refuse to compact state that violates
+    // it.
+    let mut newest_at_floor = BTreeMap::<InodeId, AttributeRevisionNo>::new();
+    let mut seen_at_floor = BTreeSet::<(InodeId, AttributeRevisionNo)>::new();
+    for row in rows.iter() {
+        let MetadataRow::AttributesRevision {
+            inode_id,
+            attributes_revision_no,
+            committed_seq,
+            ..
+        } = row
+        else {
+            continue;
+        };
+        if *committed_seq > retention_floor_seq {
+            continue;
+        }
+        if !seen_at_floor.insert((*inode_id, *attributes_revision_no)) {
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "inode `{inode_id}` has two attribute rows at revision `{attributes_revision_no}` at or below the retention floor; refusing to drop rows"
+            )));
+        }
+        let newest = newest_at_floor
+            .entry(*inode_id)
+            .or_insert(*attributes_revision_no);
+        if attributes_revision_no > newest {
+            *newest = *attributes_revision_no;
+        }
+    }
+
+    rows.retain(|row| match row {
+        MetadataRow::AttributesRevision {
+            inode_id,
+            attributes_revision_no,
+            committed_seq,
+            ..
+        } => {
+            *committed_seq > retention_floor_seq
+                || newest_at_floor.get(inode_id) == Some(attributes_revision_no)
+        }
+        _ => true,
+    });
     Ok(())
 }

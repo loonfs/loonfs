@@ -182,5 +182,6 @@ pub(crate) fn bootstrap_metadata_state() -> MetadataState {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     )
 }

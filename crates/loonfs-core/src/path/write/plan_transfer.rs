@@ -9,7 +9,7 @@ use super::planning_helpers::{
 use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
 use crate::path::helpers::{ensure_mutation_path, final_component};
-use loonfs_api::{AbsolutePath, DestinationBehavior, InodeKind};
+use loonfs_api::{AbsolutePath, AttributeRevisionNo, DestinationBehavior, InodeKind};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
@@ -164,6 +164,28 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
                 target_parent,
                 &target_name,
             ));
+            // A copy to a vacant destination is a new resource that stands
+            // for the source, so it starts with the source's attributes. The
+            // new inode is at revision 0 with an empty map, so carrying them
+            // over is a second internal operation with its own feed event.
+            // Copying over an existing file changes nothing about that
+            // file's attributes: the destination is a resource that already
+            // exists and keeps what it holds.
+            let (_, source_attributes) = view
+                .metadata_state
+                .attributes_at_visible_seq(source.inode_id)
+                .await?;
+            if !source_attributes.is_empty() {
+                // The create above is this operation's only inode
+                // allocation, so the commit plan hands it the request's next
+                // free id.
+                ops.push(ApiCommitOp::UpdateAttributes {
+                    inode_id: view.next_inode_id,
+                    base_attributes_revision_no: AttributeRevisionNo(0),
+                    attributes_revision_no: AttributeRevisionNo(1),
+                    attributes: source_attributes,
+                });
+            }
         }
     }
     preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {

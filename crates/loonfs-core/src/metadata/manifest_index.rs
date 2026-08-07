@@ -2,16 +2,17 @@
 //! scans.
 
 use super::row_decode::{
-    active_deletion_from_manifest_row, commit_receipt_from_manifest_row,
-    direntry_bind_from_manifest_row, direntry_unbind_from_manifest_row, inode_from_manifest_row,
-    revision_from_manifest_row, tombstone_from_manifest_row,
+    active_deletion_from_manifest_row, attributes_revision_from_manifest_row,
+    commit_receipt_from_manifest_row, direntry_bind_from_manifest_row,
+    direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
+    tombstone_from_manifest_row,
 };
 use crate::checkpoint::{ManifestLoadError, Readahead, VerifiedMetadataTables};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{
-    unbind_matches_binding, ActiveDeletionRecord, CommitReceiptRecord, DirentryBindRecord,
-    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
+    unbind_matches_binding, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
+    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::manifest::MetadataTableFamily;
@@ -342,6 +343,58 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     Ok(receipts
         .into_iter()
         .max_by_key(|receipt| receipt.committed_seq))
+}
+
+/// Rows one attribute lookup fetches per manifest round-trip. The answer is
+/// almost always the first row; the page exists for a read that sits below
+/// the head and has to walk past revisions committed after it.
+const ATTRIBUTES_RAW_SCAN_LIMIT: usize = 16;
+
+/// The newest attribute revision of `inode_id` at or below `visible_seq`.
+///
+/// The family's keys invert the revision, the sequence, and the delta index,
+/// so an ascending prefix scan reads one inode's revisions newest first and
+/// the first row at or below the sequence is the answer. Revisions advance
+/// with the sequences that publish them, so scanning past rows above the
+/// sequence never skips one below it.
+pub(super) async fn attributes_for_inode<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+    inode_id: InodeId,
+    visible_seq: ChangeSeq,
+) -> Result<Option<AttributesRevisionRecord>> {
+    let prefix = lookup_keys::attributes_prefix(inode_id);
+    let filter_probe = lookup_keys::attributes_probe(inode_id);
+    let upper_bound = string_prefix_upper_bound(&prefix);
+    let mut lower_bound = prefix;
+    loop {
+        let page = tables
+            .scan_range_page_for_lookup(
+                MetadataTableFamily::Attributes,
+                &lower_bound,
+                upper_bound.as_deref(),
+                ATTRIBUTES_RAW_SCAN_LIMIT,
+                &filter_probe,
+            )
+            .await
+            .map_err(manifest_error_to_core)?;
+        let page_len = page.len();
+        let last_row_key = page
+            .last()
+            .map(|row| row.row_key_for_family(MetadataTableFamily::Attributes));
+        for row in page {
+            let record = attributes_revision_from_manifest_row(row)?;
+            if record.committed_seq <= visible_seq {
+                return Ok(Some(record));
+            }
+        }
+        if page_len < ATTRIBUTES_RAW_SCAN_LIMIT {
+            return Ok(None);
+        }
+        let Some(last_row_key) = last_row_key else {
+            return Ok(None);
+        };
+        lower_bound = resume_after_row_key(&last_row_key);
+    }
 }
 
 fn resume_after_row_key(row_key: &str) -> String {

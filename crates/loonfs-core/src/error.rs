@@ -604,6 +604,23 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             active_deletion_seq: Some(*active_seq),
             ..ErrorDetails::default()
         }),
+        // The expected revision the guard carried is what a caller compares
+        // against, whether the caller stated it or the update supplied its
+        // own; the actual one is what to re-read from.
+        CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+            inode_id,
+            expected,
+            actual,
+        } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            expected_attributes_revision_no: Some(*expected),
+            actual_attributes_revision_no: Some(*actual),
+            ..ErrorDetails::default()
+        }),
+        CommitValidationError::UpdateAttributesInodeMissing { inode_id } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            ..ErrorDetails::default()
+        }),
         _ => None,
     }
 }
@@ -735,9 +752,20 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::DeleteFileCoveredByTombstone { .. }
         | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
         | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
-        | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. } => {
+        | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. }
+        | CommitValidationError::UpdateAttributesUnderSubtreeTombstone { .. } => {
             ErrorCode::NamespaceCorrupt
         }
+        // The revision guard every attribute update carries, whether or not
+        // the caller stated an expectation. Both raise the same conflict.
+        CommitValidationError::UpdateAttributesBaseRevisionMismatch { .. } => {
+            ErrorCode::StaleAttributes
+        }
+        CommitValidationError::UpdateAttributesInodeMissing { .. } => ErrorCode::PathNotFound,
+        // The planner numbers the attribute revision, so a plan that
+        // publishes anything else is a bug in this server.
+        CommitValidationError::UpdateAttributesRevisionNotSuccessive { .. }
+        | CommitValidationError::UpdateAttributesRevisionOverflow { .. } => ErrorCode::ServerError,
         CommitValidationError::CreateChildNameCollision { .. }
         | CommitValidationError::NamePreconditionParentNotDirectory { .. }
         | CommitValidationError::BindingPreconditionMissing { .. }

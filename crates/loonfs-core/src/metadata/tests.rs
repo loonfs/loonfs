@@ -5,7 +5,8 @@ use super::*;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::ContentId;
 use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
+    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
+    CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
 };
 
 fn name_key(value: &str) -> NameKey {
@@ -60,6 +61,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert!(metadata_state
@@ -109,6 +111,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 bind_delta_index: 0,
             },
         ],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -222,6 +225,7 @@ fn rebuilt_indexes_answer_current_head_queries_after_deserialize() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     let encoded = serde_json::to_string(&metadata_state).expect("encode metadata");
@@ -284,6 +288,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert_eq!(
@@ -325,6 +330,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     let resolved = metadata_state
@@ -352,6 +358,7 @@ fn metadata_state_serialized_shape_preserves_row_field_names() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     let encoded = serde_json::to_value(&metadata_state).expect("encode metadata state");
@@ -367,7 +374,8 @@ fn metadata_state_serialized_shape_preserves_row_field_names() {
             "direntry_unbinds": [],
             "revisions": [],
             "subtree_tombstones": [],
-            "commit_receipts": []
+            "commit_receipts": [],
+            "attributes_revisions": []
         })
     );
 }
@@ -380,6 +388,7 @@ fn metadata_state_accessors_expose_rows_read_only() {
             inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(0),
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -427,6 +436,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
                 message: Some("new message".to_owned()),
             },
         ],
+        Vec::new(),
     );
 
     let receipt = metadata_state
@@ -505,6 +515,177 @@ fn revisions_advance_watermark_and_receipt_index_round_trips() {
             .expect("receipt after decode")
             .semantic_commit_fingerprint,
         "fingerprint"
+    );
+}
+
+fn attribute_map(entries: &[(&str, &str)]) -> Attributes {
+    Attributes::new(
+        entries
+            .iter()
+            .map(|(key, value)| {
+                (
+                    AttributeKey::parse(key).expect("valid attribute key"),
+                    AttributeValue::String {
+                        value: (*value).to_owned(),
+                    },
+                )
+            })
+            .collect(),
+    )
+    .expect("valid attribute map")
+}
+
+fn append_attributes(
+    delta_index: u32,
+    inode_id: InodeId,
+    revision: u64,
+    attributes: Attributes,
+) -> WalDelta {
+    WalDelta::AppendAttributesRevision {
+        delta_index,
+        inode_id,
+        attributes_revision_no: AttributeRevisionNo(revision),
+        attributes,
+    }
+}
+
+/// Several attribute updates at one sequence replay in delta order, and a
+/// clear is a row like any other.
+#[test]
+fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
+    let mut metadata_state = MetadataState::default();
+    metadata_state.apply_committed_wal_deltas_mut(
+        ChangeSeq(4),
+        4_200,
+        &[
+            append_attributes(0, InodeId(7), 1, attribute_map(&[("owner", "ada")])),
+            append_attributes(1, InodeId(7), 2, attribute_map(&[("owner", "grace")])),
+            append_attributes(2, InodeId(7), 3, Attributes::default()),
+        ],
+    );
+
+    assert_eq!(
+        metadata_state
+            .attributes_revisions()
+            .iter()
+            .map(|record| (record.attributes_revision_no.0, record.delta_index))
+            .collect::<Vec<_>>(),
+        vec![(1, 0), (2, 1), (3, 2)]
+    );
+    let cleared = metadata_state
+        .attributes_revisions()
+        .last()
+        .expect("attribute rows");
+    assert!(cleared.attributes.is_empty());
+    assert_eq!(cleared.committed_seq, ChangeSeq(4));
+    assert_eq!(metadata_state.indexed_seq(), ChangeSeq(4));
+
+    // Round trip: the rows and the rebuilt watermark survive encoding.
+    let decoded: MetadataState =
+        serde_json::from_value(serde_json::to_value(&metadata_state).expect("encode"))
+            .expect("decode");
+    assert_eq!(
+        decoded.attributes_revisions(),
+        metadata_state.attributes_revisions()
+    );
+    assert_eq!(decoded.indexed_seq(), ChangeSeq(4));
+}
+
+/// A read at a sequence below the head answers with the map that sequence
+/// saw, not with the newest one. Attributes are current state rather than
+/// history, so a leg that let a later row through would answer with a map
+/// the reading sequence never had.
+#[tokio::test]
+async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
+    let mut state = MetadataState::default();
+    state.apply_committed_wal_deltas_mut(
+        ChangeSeq(2),
+        4_200,
+        &[append_attributes(
+            0,
+            InodeId(7),
+            1,
+            attribute_map(&[("owner", "ada")]),
+        )],
+    );
+    state.apply_committed_wal_deltas_mut(
+        ChangeSeq(5),
+        4_200,
+        &[append_attributes(
+            0,
+            InodeId(7),
+            2,
+            attribute_map(&[("owner", "grace")]),
+        )],
+    );
+
+    for (visible_seq, expected_revision, expected) in [
+        (5_u64, 2_u64, Some("grace")),
+        (4, 1, Some("ada")),
+        (2, 1, Some("ada")),
+        (1, 0, None),
+    ] {
+        let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(visible_seq));
+        let (revision, attributes) = view
+            .attributes_at_visible_seq(InodeId(7))
+            .await
+            .expect("read attributes");
+        assert_eq!(
+            revision,
+            AttributeRevisionNo(expected_revision),
+            "at seq {visible_seq}"
+        );
+        assert_eq!(
+            attributes,
+            expected
+                .map(|owner| attribute_map(&[("owner", owner)]))
+                .unwrap_or_default(),
+            "at seq {visible_seq}"
+        );
+    }
+
+    // An inode that never had attributes is at the concrete empty state.
+    let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(5));
+    assert_eq!(
+        view.attributes_at_visible_seq(InodeId(8))
+            .await
+            .expect("read attributes"),
+        (AttributeRevisionNo(0), Attributes::default())
+    );
+}
+
+/// The tail's row accounting counts an attribute map's key and value bytes,
+/// so a namespace that writes large maps is charged for them.
+#[test]
+fn attribute_row_accounting_counts_key_and_value_bytes() {
+    let small = MetadataState::default().apply_committed_wal_deltas(
+        ChangeSeq(1),
+        4_200,
+        &[append_attributes(
+            0,
+            InodeId(7),
+            1,
+            attribute_map(&[("k", "v")]),
+        )],
+    );
+    let large_value = "v".repeat(4_096);
+    let large = MetadataState::default().apply_committed_wal_deltas(
+        ChangeSeq(1),
+        4_200,
+        &[append_attributes(
+            0,
+            InodeId(7),
+            1,
+            attribute_map(&[("k", large_value.as_str())]),
+        )],
+    );
+
+    assert_eq!(small.row_count(), 1);
+    assert_eq!(large.row_count(), 1);
+    assert_eq!(
+        large.decoded_bytes() - small.decoded_bytes(),
+        large_value.len() - 1,
+        "the difference is exactly the extra value bytes"
     );
 }
 
@@ -625,6 +806,7 @@ fn churned_binding_state_rebuilt() -> MetadataState {
         incremental.revisions().to_vec(),
         incremental.subtree_tombstones().to_vec(),
         incremental.commit_receipts().to_vec(),
+        Vec::new(),
     )
 }
 
@@ -738,6 +920,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
     let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(2));
     assert!(
@@ -763,6 +946,7 @@ fn has_visible_children_sees_through_unbinds() {
             unbind_seq: ChangeSeq(3),
             unbind_delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

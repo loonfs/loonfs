@@ -337,5 +337,9 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
                 + semantic_commit_fingerprint.len()
                 + message.as_ref().map_or(0, String::len)
         }
+        // The map's key and value bytes are what an attribute row weighs.
+        MetadataRow::AttributesRevision { attributes, .. } => {
+            ALLOCATED_ROW_OVERHEAD + attributes.logical_bytes()
+        }
     }
 }
