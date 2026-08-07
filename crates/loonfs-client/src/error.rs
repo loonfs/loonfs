@@ -54,6 +54,13 @@ pub enum ClientError {
     Io(String),
     #[error("json error: {0}")]
     Json(String),
+    /// A well-formed response that breaks a shape rule the API spec states.
+    ///
+    /// Distinct from [`ClientError::Json`], which is a body that did not
+    /// decode: this one decoded and then said something the contract forbids,
+    /// so the client refuses it rather than passing a wrong answer along.
+    #[error("server response violates the API contract: {0}")]
+    Protocol(String),
 }
 
 impl ClientError {

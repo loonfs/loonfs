@@ -1,11 +1,25 @@
 //! Small validated-value constructors used throughout tests.
 
-use loonfs_api::{ContentId, ContentRef, EffectiveLimit, NamespaceId};
+use loonfs_api::{
+    AttributeKey, AttributeValue, ContentId, ContentRef, EffectiveLimit, NamespaceId,
+};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 /// Parses a namespace id that is expected to be valid test data.
 pub fn namespace_id(value: &str) -> NamespaceId {
     NamespaceId::parse(value).expect("valid namespace id")
+}
+
+/// Parses an attribute key that is expected to be valid test data.
+pub fn attribute_key(value: &str) -> AttributeKey {
+    AttributeKey::parse(value).expect("valid attribute key")
+}
+
+/// Builds a one-string attribute value.
+pub fn attribute_text(value: &str) -> AttributeValue {
+    AttributeValue::String {
+        value: value.to_owned(),
+    }
 }
 
 /// Parses a content id that is expected to be valid test data.

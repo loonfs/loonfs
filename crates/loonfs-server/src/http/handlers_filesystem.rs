@@ -12,7 +12,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
-use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
+use loonfs::{
+    payload_class, ErrorCode, ListChangesOptions, ListPathEntriesOptions, StatPathOptions,
+    TraceStoreKind,
+};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 // The wire commit request and the runtime's differ only by the content
@@ -30,6 +33,7 @@ use tracing::Instrument;
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct PathQuery {
     path: String,
+    include_attributes: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -37,6 +41,17 @@ pub(super) struct PathPageQuery {
     path: String,
     limit: Option<String>,
     cursor: Option<String>,
+}
+
+/// The directory listing's query. It repeats [`PathPageQuery`]'s fields
+/// rather than composing them because the query extractor deserializes with
+/// `serde_urlencoded`, which does not support `#[serde(flatten)]`.
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct ListPathPageQuery {
+    path: String,
+    limit: Option<String>,
+    cursor: Option<String>,
+    include_attributes: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -69,11 +84,12 @@ pub(super) struct ChangesQuery {
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
             ("limit" = Option<String>, Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor")
+            ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor"),
+            ("include_attributes" = Option<String>, Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.")
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_api::ListPathEntriesResponse),
-            (status = 400, description = "Invalid path, limit, or cursor", body = ApiError),
+            (status = 400, description = "Invalid path, limit, cursor, or include_attributes", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError)
@@ -84,21 +100,28 @@ pub(super) async fn list_path_entries(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-    query: AppQuery<PathPageQuery>,
+    query: AppQuery<ListPathPageQuery>,
 ) -> Result<Json<loonfs_api::ListPathEntriesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let path = query.path;
+    // An absent parameter leaves the option type's own default in place, so
+    // the HTTP surface and the in-process one cannot answer differently.
+    let mut options = ListPathEntriesOptions::default();
+    if let Some(value) = query.include_attributes.as_deref() {
+        options.include_attributes = parse_include_attributes(value)?;
+    }
     let listing = state
         .reader
-        .list_path_entries_page(
+        .list_path_entries_page_with_options(
             &namespace_id,
             &path,
             PageRequest {
                 limit: resolve_page_limit(query.limit)?,
                 cursor: decode_directory_page_cursor(query.cursor)?,
             },
+            options,
         )
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -112,14 +135,15 @@ pub(super) async fn list_path_entries(
         path = "/v0/namespaces/{namespace}/filesystem/stat",
         tag = "filesystem",
         summary = "Stat path",
-        description = "Returns the current metadata for a path, including inode identity, kind, display name, and file content metadata.",
+        description = "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
-            ("path" = String, Query, description = "Absolute filesystem path")
+            ("path" = String, Query, description = "Absolute filesystem path"),
+            ("include_attributes" = Option<String>, Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
         ),
         responses(
             (status = 200, description = "Authoritative path entry", body = loonfs_api::AuthoritativePathEntry),
-            (status = 400, description = "Invalid path", body = ApiError),
+            (status = 400, description = "Invalid path or include_attributes", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError)
@@ -136,9 +160,13 @@ pub(super) async fn stat_path(
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let path = query.path;
+    let mut options = StatPathOptions::default();
+    if let Some(value) = query.include_attributes.as_deref() {
+        options.include_attributes = parse_include_attributes(value)?;
+    }
     let entry = state
         .reader
-        .stat_path(&namespace_id, &path)
+        .stat_path_with_options(&namespace_id, &path, options)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entry))
@@ -453,6 +481,18 @@ pub(super) async fn list_changes(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
+}
+
+fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!("invalid include_attributes `{other}`: expected `true` or `false`"),
+        )),
+    }
 }
 
 fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {

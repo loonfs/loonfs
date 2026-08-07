@@ -17,6 +17,7 @@ use crate::protocol::CompletedUpload;
 use crate::storage::content::FileContentStream;
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use crate::time::current_time_ms;
+use loonfs_api::options::{ListPathEntriesOptions, StatPathOptions};
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, DirectMultipartUploadOptions,
@@ -212,10 +213,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn resolve_path(
         &self,
         path: impl AsRef<str>,
+        options: StatPathOptions,
         context: &RuntimeReadContext,
     ) -> Result<AuthoritativePathEntry> {
         let view = self.load_read_view(context).await?;
-        view.resolve_path(path.as_ref()).await
+        view.resolve_path(path.as_ref(), options.include_attributes.into())
+            .await
     }
 
     /// Lists one directory page against the pinned runtime read context.
@@ -223,10 +226,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
         context: &RuntimeReadContext,
     ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
         let view = self.load_read_view(context).await?;
-        view.list_path_page(path.as_ref(), request).await
+        view.list_path_page(path.as_ref(), request, options.include_attributes.into())
+            .await
     }
 
     /// Reads file content against the pinned runtime read context.

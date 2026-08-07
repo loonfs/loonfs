@@ -262,7 +262,7 @@ mod tests {
             )
             .await
             .expect("load view")
-            .resolve_path(path)
+            .resolve_path(path, crate::path::read::AttributeProjection::Omit)
             .await
             .expect("published file is visible");
         }
@@ -345,7 +345,10 @@ mod tests {
         )
         .await
         .expect("load view")
-        .resolve_path("/docs/doomed.txt")
+        .resolve_path(
+            "/docs/doomed.txt",
+            crate::path::read::AttributeProjection::Omit,
+        )
         .await
         .expect_err("deleted file is no longer visible");
     }

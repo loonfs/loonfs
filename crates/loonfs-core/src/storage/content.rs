@@ -1097,6 +1097,8 @@ mod tests {
             size_bytes: None,
             content_ref: None,
             committed_at_ms: None,
+            attributes: None,
+            attributes_revision_no: None,
         }
     }
 

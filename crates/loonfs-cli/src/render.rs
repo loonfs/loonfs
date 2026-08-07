@@ -6,7 +6,8 @@ use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
 use loonfs_api::{
-    CheckpointOwnerSummary, GcResponse, NamespaceId, ReorganizeStepOutcome, WalFlushStepOutcome,
+    AttributeValue, CheckpointOwnerSummary, GcResponse, NamespaceId, ReorganizeStepOutcome,
+    WalFlushStepOutcome,
 };
 use serde::Serialize;
 use std::io::{self, Write};
@@ -753,6 +754,14 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 lines.push(format!("content_id: {}", content_ref.content_id));
                 lines.push(format!("content_kind: {}", content_ref.kind));
             }
+            // One line per attribute, after the fields that say what the item
+            // is. An inode holding no attributes prints nothing extra: the
+            // header already answered the question that was asked.
+            if let Some(attributes) = &entry.attributes {
+                for (key, value) in attributes.iter() {
+                    lines.push(format!("attr.{key}: {}", render_attribute_value(value)));
+                }
+            }
             lines.join("\n")
         }
         CommandData::FileRevisions {
@@ -832,6 +841,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             CommandKind::FilesystemUndelete => {
                 format!("recovered {target} @ seq {committed_seq} (commit {commit_id})")
             }
+            CommandKind::FilesystemAnnotate => {
+                format!("annotated {target} @ seq {committed_seq} (commit {commit_id})")
+            }
             _ => format!("{target} @ seq {committed_seq} (commit {commit_id})"),
         },
         CommandData::DirectoryAlreadyExists { target, .. } => {
@@ -882,9 +894,45 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
     }
 }
 
+/// One attribute value on one line. A list joins on `, `, which is a display
+/// of the value rather than a spelling that round-trips; `--json` is what a
+/// script reads.
+fn render_attribute_value(value: &AttributeValue) -> String {
+    match value {
+        AttributeValue::String { value } => escape_control_characters(value),
+        AttributeValue::StringList { values } => values
+            .iter()
+            .map(|member| escape_control_characters(member))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+/// Escapes control characters and leaves every other character alone.
+///
+/// Attribute values are free-form UTF-8 and are the first text the CLI prints
+/// that a user wrote. Printed raw, a newline in a value forges an output line
+/// and an escape sequence drives the reader's terminal. Only control
+/// characters are rewritten, so ordinary text — accents, scripts, emoji —
+/// prints as itself. JSON output needs none of this, because serde escapes
+/// what it emits.
+fn escape_control_characters(value: &str) -> String {
+    if !value.chars().any(char::is_control) {
+        return value.to_owned();
+    }
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character.is_control() {
+            true => escaped.extend(character.escape_default()),
+            false => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{human_success, json_error, json_success};
+    use super::{human_success, json_error, json_success, AttributeValue};
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
     use crate::config::{ProfileConfig, StoreConfig};
@@ -909,6 +957,8 @@ mod tests {
             size_bytes: None,
             content_ref: None,
             committed_at_ms: None,
+            attributes: None,
+            attributes_revision_no: None,
         }
     }
 
@@ -931,6 +981,92 @@ mod tests {
             human_success(&named),
             "path: /docs\nname: docs\ninode: 2\nkind: dir\nseq: 3"
         );
+    }
+
+    /// Builds a stat answer carrying one attribute, so the value's rendering
+    /// can be read off the last line.
+    fn stat_with_attribute(value: AttributeValue) -> CommandOutput {
+        let mut entry = path_entry("/docs", Some("docs"));
+        entry.attributes = Some(
+            loonfs_api::Attributes::new(std::collections::BTreeMap::from([(
+                loonfs_api::AttributeKey::parse("note").expect("attribute key"),
+                value,
+            )]))
+            .expect("attribute map"),
+        );
+        entry.attributes_revision_no = Some(loonfs_api::AttributeRevisionNo(1));
+        stat_output(entry)
+    }
+
+    fn attribute_line(output: &CommandOutput) -> String {
+        human_success(output)
+            .lines()
+            .last()
+            .expect("stat output has lines")
+            .to_owned()
+    }
+
+    /// Attribute values are the first user-written text this CLI prints. A
+    /// newline in one must not forge an output line, and an escape sequence
+    /// must not reach the terminal as a command.
+    #[test]
+    fn human_stat_escapes_control_characters_in_attribute_values() {
+        let newline = stat_with_attribute(AttributeValue::String {
+            value: "first\nattr.inode: 99".to_owned(),
+        });
+        let rendered = human_success(&newline);
+        assert!(
+            rendered.ends_with("attr.note: first\\nattr.inode: 99"),
+            "the forged line should stay on one line: {rendered}"
+        );
+        assert_eq!(
+            rendered.lines().count(),
+            6,
+            "path, name, inode, kind, seq, and one attribute line: {rendered}"
+        );
+
+        let escape = stat_with_attribute(AttributeValue::String {
+            value: "\u{1b}[31mred".to_owned(),
+        });
+        assert_eq!(attribute_line(&escape), "attr.note: \\u{1b}[31mred");
+
+        let tabbed = stat_with_attribute(AttributeValue::String {
+            value: "a\tb\rc".to_owned(),
+        });
+        assert_eq!(attribute_line(&tabbed), "attr.note: a\\tb\\rc");
+    }
+
+    /// Only control characters are rewritten, so ordinary text prints as
+    /// itself.
+    #[test]
+    fn human_stat_leaves_ordinary_unicode_alone() {
+        let unicode = stat_with_attribute(AttributeValue::String {
+            value: "café ☃ 日本語 🙂".to_owned(),
+        });
+        assert_eq!(attribute_line(&unicode), "attr.note: café ☃ 日本語 🙂");
+    }
+
+    /// Each list member is escaped on its own, so one hostile member does not
+    /// change how its siblings print.
+    #[test]
+    fn human_stat_escapes_list_members_individually() {
+        let list = stat_with_attribute(AttributeValue::StringList {
+            values: vec!["red".to_owned(), "gr\nen".to_owned(), "blue".to_owned()],
+        });
+        assert_eq!(attribute_line(&list), "attr.note: red, gr\\nen, blue");
+    }
+
+    /// JSON output needs no escaping of its own: serde emits an escaped
+    /// string, and the value round-trips through a decode unchanged.
+    #[test]
+    fn json_stat_carries_attribute_values_verbatim() {
+        let newline = stat_with_attribute(AttributeValue::String {
+            value: "first\nsecond".to_owned(),
+        });
+        let json: serde_json::Value =
+            serde_json::from_str(&json_success(&newline).expect("JSON stat should render"))
+                .expect("rendered stat is JSON");
+        assert_eq!(json["data"]["attributes"]["note"]["value"], "first\nsecond");
     }
 
     #[test]

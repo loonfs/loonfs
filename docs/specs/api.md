@@ -78,6 +78,7 @@ profile nor its `query.*` keys — clients gate on the document either way.
     "core.namespaces.create": true,
     "core.namespaces.fork": true,
     "core.namespaces.delete": true,
+    "core.attributes": true,
     "core.uploads.direct_put": false,
     "core.uploads.direct_multipart": false,
     "core.downloads.direct_get": false,
@@ -150,6 +151,7 @@ hoc.
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
+| `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/stat` and `GET /filesystem/list`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the deployment's provider can sign a write that binds a whole-object checksum and a create-only precondition, on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `storage_checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
@@ -594,8 +596,8 @@ A representative v0 binding is shown below.
 | Read deployment capabilities | `GET /v0/capabilities` |
 | Create a namespace | `POST /v0/namespaces` |
 | Read one namespace's status | `GET /v0/namespaces/{ns}` |
-| Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
-| List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...` |
+| Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
+| List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
 | List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
@@ -1284,7 +1286,9 @@ the durable naming rules (`format.md`, "Durable naming conventions").
     "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
     "whole_file_sha256": "42d..."
   },
-  "committed_at_ms": 1752624000000
+  "committed_at_ms": 1752624000000,
+  "attributes": { "owner": { "kind": "string", "value": "platform" } },
+  "attributes_revision_no": 3
 }
 ```
 
@@ -1292,6 +1296,19 @@ File entries carry `committed_at_ms`: the wall-clock stamp of the commit that
 created the current revision, in Unix milliseconds. It is observational —
 sequences are the order, and no validity rule reads it. Directory entries
 carry no modification time in v0.
+
+`include_attributes` selects whether the entry carries the inode's attribute
+map. It accepts `true` or `false`; anything else is `invalid_request`. Stat
+defaults to `true`, because a stat answers for one path and a map is capped
+at 64 KiB.
+
+The two attribute fields are projected together or not at all. A read that
+included attributes carries both `attributes` and `attributes_revision_no`,
+including when the map is empty — `{}` at its current revision is a real
+answer, and an inode that has never had attributes written reads as `{}` at
+revision 0. A read that did not include them carries neither. Neither field
+is ever present without the other, so a client never has to read an absent
+map as "no attributes".
 
 The namespace root is nameless: its entry has `parent_inode_id: null` and
 omits `display_name` entirely. Every non-root entry carries a validated
@@ -1311,6 +1328,13 @@ not re-sort aggregated pages. The `path` query parameter is
 required on every page; the cursor carries the resume position, but the
 request path remains the authority for what is being listed. Responses
 include `next_cursor` only when another page is available.
+
+`include_attributes` works exactly as it does on stat, and obeys the same
+both-or-neither projection rule, but it defaults to `false`. That default is
+what bounds a listing: a page holds up to `pagination.max_limit` entries and
+each attribute map may be 64 KiB, and no request declares a byte budget, so a
+listing carries attributes only when the caller asks and sizes its pages for
+what comes back.
 
 A cursor is an ordering resume, not a snapshot pin. Every cursor in the API
 — directory listing, revision listing, grep, and the change feed alike —

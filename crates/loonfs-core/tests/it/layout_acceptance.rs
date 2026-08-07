@@ -118,7 +118,11 @@ async fn reads_commits_and_change_feed_never_list() {
 
     let ctx = read_context(&store, &namespace_id).await;
     engine
-        .resolve_path("/docs/hello.txt", &ctx)
+        .resolve_path(
+            "/docs/hello.txt",
+            loonfs_api::options::StatPathOptions::default(),
+            &ctx,
+        )
         .await
         .expect("stat");
     engine
@@ -128,6 +132,7 @@ async fn reads_commits_and_change_feed_never_list() {
                 limit: loonfs_test_support::ids::page_limit(1024),
                 cursor: None,
             },
+            loonfs_api::options::ListPathEntriesOptions::default(),
             &ctx,
         )
         .await

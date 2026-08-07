@@ -10,8 +10,8 @@ use crate::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse,
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, ContentRef, CoreError,
     CurrentFileState, FileContentStream, InodeId, ListChangesOptions, ListFileRevisionsResponse,
-    ListPathEntriesResponse, NamespaceId, ReadFileStreamOptions, RevisionNo, RuntimeError,
-    SharedObjectStore,
+    ListPathEntriesOptions, ListPathEntriesResponse, NamespaceId, ReadFileStreamOptions,
+    RevisionNo, RuntimeError, SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::{
     encode_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageRequest,
@@ -20,7 +20,18 @@ use loonfs_api::{
 
 impl FsReader {
     /// Resolves an absolute path to its authoritative entry at the current
-    /// head.
+    /// head, projecting the inode's attributes.
+    pub async fn stat_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<AuthoritativePathEntry> {
+        self.stat_path_with_options(namespace_id, absolute_path, StatPathOptions::default())
+            .await
+    }
+
+    /// Resolves an absolute path to its authoritative entry at the current
+    /// head, projecting what `options` asks for.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.stat",
@@ -33,15 +44,18 @@ impl FsReader {
             cache_path = tracing::field::Empty,
         )
     )]
-    pub async fn stat_path(
+    pub async fn stat_path_with_options(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
+        options: StatPathOptions,
     ) -> Result<AuthoritativePathEntry> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        let entry = engine.resolve_path(absolute_path, &read_context).await?;
+        let entry = engine
+            .resolve_path(absolute_path, options, &read_context)
+            .await?;
         tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_TABLES);
         self.core
             .inner
@@ -73,6 +87,7 @@ impl FsReader {
                     namespace_id,
                     absolute_path,
                     PageRequest { limit, cursor },
+                    ListPathEntriesOptions::default(),
                 )
                 .await?;
             let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
@@ -92,15 +107,37 @@ impl FsReader {
         }
     }
 
-    /// Lists one page of a directory together with the head the page was read from.
+    /// Lists one page of a directory together with the head the page was read
+    /// from. Entries carry no attributes.
     pub async fn list_path_entries_page(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
     ) -> Result<ListPathEntriesResponse> {
+        self.list_path_entries_page_with_options(
+            namespace_id,
+            absolute_path,
+            request,
+            ListPathEntriesOptions::default(),
+        )
+        .await
+    }
+
+    /// Lists one page of a directory, projecting what `options` asks for.
+    ///
+    /// Asking for attributes costs one lookup per entry and adds an unbounded
+    /// number of bytes to the page, so a caller that turns the projection on
+    /// should also size its page for the maps it expects back.
+    pub async fn list_path_entries_page_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
+    ) -> Result<ListPathEntriesResponse> {
         let (mut response, next_cursor) = self
-            .list_path_entries_page_typed(namespace_id, absolute_path, request)
+            .list_path_entries_page_typed(namespace_id, absolute_path, request, options)
             .await?;
         response.next_cursor = next_cursor
             .as_ref()
@@ -115,13 +152,14 @@ impl FsReader {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
     ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
         let page = engine
-            .list_path_page(listed_path.as_str(), request, &read_context)
+            .list_path_page(listed_path.as_str(), request, options, &read_context)
             .await?;
         self.core
             .inner

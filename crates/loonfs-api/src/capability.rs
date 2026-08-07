@@ -23,6 +23,10 @@ pub const FEATURE_NAMESPACES_CREATE: &str = "core.namespaces.create";
 pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
 /// Gates namespace deletion.
 pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
+/// Gates inode attributes: writing them, and projecting them onto reads.
+/// Attributes are part of the core plane, not a composed extension, so a
+/// deployment that serves the core profile serves them.
+pub const FEATURE_ATTRIBUTES: &str = "core.attributes";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 /// Starting presigned `direct_multipart` upload sessions. Independent of

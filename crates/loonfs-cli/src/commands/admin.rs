@@ -5,8 +5,8 @@ use super::context::{fail, fail_for, resolve_command_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs,
-    AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminProbeStoreArgs, AdminRunArgs,
-    AdminStepArgs, ChangesArgs, CommandKind, MaintenanceJobArg, RuntimeBehavior,
+    AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminRunArgs, AdminStepArgs,
+    AdminStoreProbeArgs, ChangesArgs, CommandKind, MaintenanceJobArg, RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::render::{format_utc_ms, write_stderr_progress};
@@ -45,7 +45,7 @@ pub(crate) async fn run_admin_command(
         AdminCommand::Run(args) => run_admin_run(kind, config_path, args).await,
         AdminCommand::Step(args) => run_admin_step(kind, config_path, args).await,
         AdminCommand::Gc(args) => run_admin_gc(kind, config_path, args, runtime).await,
-        AdminCommand::ProbeStore(args) => run_admin_probe_store(kind, config_path, args).await,
+        AdminCommand::StoreProbe(args) => run_admin_store_probe(kind, config_path, args).await,
         AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, config_path, args).await,
         AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, config_path, args).await,
         AdminCommand::IndexStatus(args) => run_admin_index_status(kind, config_path, args).await,
@@ -439,10 +439,10 @@ async fn run_admin_run(
 /// Proves the profile's object store honours the contract LoonFS depends
 /// on. Store-scoped like `admin run`: it names no namespace, because the
 /// store is the subject.
-async fn run_admin_probe_store(
+async fn run_admin_store_probe(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminProbeStoreArgs,
+    args: AdminStoreProbeArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
     let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)

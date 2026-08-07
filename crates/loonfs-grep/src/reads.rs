@@ -15,7 +15,7 @@
 use crate::{GrepError, Result};
 use loonfs::{
     CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState, FsReader,
-    ListChangesOptions, MAX_RESOLVE_CURRENT_FILES,
+    ListChangesOptions, StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
 };
 use loonfs_api::v0::{ChangesResponse, FilesystemChange};
 use loonfs_api::{
@@ -130,13 +130,24 @@ impl<'a> NamespaceReads<'a> {
     }
 
     /// Resolves one path to its authoritative entry at the current head.
+    ///
+    /// Attributes stay out of the projection: this resolution verifies a
+    /// candidate's kind and revision, and grep answers with matches rather
+    /// than with entries, so paying an attribute lookup per candidate would
+    /// buy nothing.
     pub async fn resolve_path(
         &self,
         absolute_path: &AbsolutePath,
     ) -> Result<AuthoritativePathEntry> {
         Ok(self
             .reader
-            .stat_path(self.namespace_id, absolute_path.as_str())
+            .stat_path_with_options(
+                self.namespace_id,
+                absolute_path.as_str(),
+                StatPathOptions {
+                    include_attributes: false,
+                },
+            )
             .await?)
     }
 

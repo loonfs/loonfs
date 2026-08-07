@@ -57,6 +57,7 @@ pub(crate) async fn run(
         Command::Current(args) => namespace::run_namespace_current(kind, config_path, args).await,
         Command::Ls(args) => fs::run_filesystem_ls(kind, config_path, args).await,
         Command::Stat(args) => fs::run_filesystem_stat(kind, config_path, args).await,
+        Command::Annotate(args) => fs::run_filesystem_annotate(kind, config_path, args).await,
         Command::Cat(args) => fs::run_filesystem_cat(kind, config_path, args).await,
         Command::Grep(args) => fs::run_filesystem_grep(kind, config_path, args).await,
         Command::Get(args) => fs::run_filesystem_get(kind, config_path, args, runtime).await,

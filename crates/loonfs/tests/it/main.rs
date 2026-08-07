@@ -5,6 +5,7 @@
 //! `tests/tracing_capture.rs` stays a binary of its own; the comment there
 //! explains why it cannot share a process.
 
+mod attributes;
 mod bulk_file_reads;
 mod cache_seeding;
 mod capability_conformance;

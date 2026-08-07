@@ -4196,11 +4196,11 @@ fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
 /// The store probe is store-scoped: it needs no namespace, prints one line
 /// per check, and exits zero only because every check passed.
 #[test]
-fn admin_probe_store_reports_every_check_against_the_profile_store() {
+fn admin_store_probe_reports_every_check_against_the_profile_store() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
 
-    let probe = harness.run(&["admin", "probe-store"]);
+    let probe = harness.run(&["admin", "store-probe"]);
     assert_success(&probe);
     let text = stdout_string(&probe);
     for check in [
@@ -4222,7 +4222,7 @@ fn admin_probe_store_reports_every_check_against_the_profile_store() {
     }
     assert!(text.contains("13 checks passed"), "{text}");
 
-    let json = harness.run(&["--json", "admin", "probe-store"]);
+    let json = harness.run(&["--json", "admin", "store-probe"]);
     assert_success(&json);
     let data = json_data(&json);
     assert_eq!(data["kind"], "store_probed");
@@ -4307,6 +4307,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["use"],
                 &["ls"],
                 &["stat"],
+                &["annotate"],
                 &["cat"],
                 &["get"],
                 &["put"],
@@ -4331,7 +4332,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["admin", "run"],
                 &["admin", "step"],
                 &["admin", "gc"],
-                &["admin", "probe-store"],
+                &["admin", "store-probe"],
                 &["admin", "index-enable"],
                 &["admin", "index-disable"],
                 &["admin", "index-status"],
@@ -4346,6 +4347,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
         ("core.namespaces.create", &["namespace", "create"]),
         ("core.namespaces.delete", &["namespace", "delete"]),
         ("core.namespaces.fork", &["namespace", "fork"]),
+        ("core.attributes", &["annotate"]),
         // Both direct transports are modes negotiated inside the same upload
         // staging flow `put` drives; neither needs a separate verb.
         ("core.uploads.direct_put", &["put"]),
@@ -4387,6 +4389,169 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
             });
         assert_cli_command_path_exists(&harness, command_path);
     }
+}
+
+/// `annotate` writes and removes attributes, and `stat` shows what the inode
+/// holds — over both transports, from the same command line.
+#[test]
+fn annotate_writes_and_removes_attributes_in_both_modes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "annotate"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+
+    let payload = harness.temp_dir.path().join("file.txt");
+    fs::write(&payload, b"bytes\n").expect("payload");
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            payload.to_str().expect("utf-8 path"),
+            "/docs/file.txt",
+        ]));
+
+        // A fresh inode holds an empty map at revision 0, and the human
+        // output says nothing extra about it.
+        let bare = harness.run(&["stat", "--profile", profile, "/docs/file.txt"]);
+        assert_success(&bare);
+        assert!(
+            !stdout_string(&bare).contains("attr."),
+            "an inode with no attributes printed attribute lines: {}",
+            stdout_string(&bare)
+        );
+        let bare_json = harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
+        assert_success(&bare_json);
+        let bare_entry = json_data(&bare_json);
+        assert_eq!(bare_entry["attributes"], serde_json::json!({}));
+        assert_eq!(bare_entry["attributes_revision_no"], 0);
+
+        let annotated = harness.run(&[
+            "--json",
+            "annotate",
+            "--profile",
+            profile,
+            "/docs/file.txt",
+            "--set",
+            "owner=platform",
+            "--set",
+            "note=has=equals",
+        ]);
+        assert_success(&annotated);
+        assert_eq!(json_data(&annotated)["kind"], "file_mutation");
+
+        let stat = harness.run(&["stat", "--profile", profile, "/docs/file.txt"]);
+        assert_success(&stat);
+        let text = stdout_string(&stat);
+        assert!(text.contains("attr.owner: platform"), "{text}");
+        // The key ends at the first `=`, so the rest is the value.
+        assert!(text.contains("attr.note: has=equals"), "{text}");
+
+        // A list value needs --attributes-json, and it round-trips as a
+        // joined line.
+        assert_success(&harness.run(&[
+            "annotate",
+            "--profile",
+            profile,
+            "/docs/file.txt",
+            "--attributes-json",
+            r#"{"set": {"tags": {"kind": "string_list", "values": ["red", "blue"]}}}"#,
+        ]));
+        let with_list = harness.run(&["stat", "--profile", profile, "/docs/file.txt"]);
+        assert_success(&with_list);
+        assert!(stdout_string(&with_list).contains("attr.tags: red, blue"));
+        let with_list_json =
+            harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
+        assert_success(&with_list_json);
+        assert_eq!(
+            json_data(&with_list_json)["attributes"]["tags"],
+            serde_json::json!({ "kind": "string_list", "values": ["red", "blue"] })
+        );
+
+        assert_success(&harness.run(&[
+            "annotate",
+            "--profile",
+            profile,
+            "/docs/file.txt",
+            "--remove",
+            "owner",
+        ]));
+        let removed = harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
+        assert_success(&removed);
+        let entry = json_data(&removed);
+        assert!(entry["attributes"]["owner"].is_null());
+        assert_eq!(entry["attributes"]["note"]["value"], "has=equals");
+        // Three effective updates, three revisions.
+        assert_eq!(entry["attributes_revision_no"], 3);
+
+        // Attributes belong to the inode, so a directory takes them too.
+        assert_success(&harness.run(&[
+            "annotate",
+            "--profile",
+            profile,
+            "/docs",
+            "--set",
+            "owner=docs-team",
+        ]));
+        let directory = harness.run(&["stat", "--profile", profile, "/docs"]);
+        assert_success(&directory);
+        assert!(stdout_string(&directory).contains("attr.owner: docs-team"));
+
+        // A listing does not carry attributes, and the CLI offers no flag.
+        let listing = harness.run(&["--json", "ls", "--profile", profile, "/docs"]);
+        assert_success(&listing);
+        let listed = json_data(&listing);
+        assert!(listed["entries"][0]["attributes"].is_null());
+        assert!(listed["entries"][0]["attributes_revision_no"].is_null());
+    }
+}
+
+/// The argument errors `annotate` reports about its own flags, before it
+/// commits anything.
+#[test]
+fn annotate_rejects_a_set_without_an_equals_and_a_document_beside_the_flags() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["mkdir", "/docs"]));
+
+    let no_equals = harness.run(&["--json", "annotate", "/docs", "--set", "owner"]);
+    assert_failure(&no_equals);
+    assert_eq!(json_error(&no_equals)["code"], "invalid_input");
+    assert!(json_error(&no_equals)["message"]
+        .as_str()
+        .expect("json string")
+        .contains("--set"));
+
+    // clap rejects the combination before the command runs.
+    let both = harness.run(&[
+        "--json",
+        "annotate",
+        "/docs",
+        "--set",
+        "owner=platform",
+        "--attributes-json",
+        r#"{"set": {}}"#,
+    ]);
+    assert_failure(&both);
+    assert_eq!(both.status.code(), Some(2));
+    assert_eq!(parse_json(&both.stderr)["error"]["code"], "invalid_usage");
 }
 
 /// `mkdir -p` on a directory that is already there succeeds, the way Unix
@@ -4974,7 +5139,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // The store probe is store-scoped, so it is the one admin command
         // that names no namespace in either mode; both modes still answer
         // with the same report shape.
-        let probe = harness.run(&["--json", "admin", "probe-store", "--profile", profile]);
+        let probe = harness.run(&["--json", "admin", "store-probe", "--profile", profile]);
         assert_success(&probe);
         let probe_data = json_data(&probe);
         assert_eq!(probe_data["kind"], "store_probed");
