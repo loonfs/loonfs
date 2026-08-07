@@ -178,6 +178,10 @@ pub struct SegmentBlocksBuilder {
     entries: Vec<u8>,
     restarts: Vec<u32>,
     entry_count: usize,
+    /// Last row key the builder accepted. It anchors prefix compression
+    /// inside a block, floors the ascending-order guard, and becomes the
+    /// segment's max key. A block's first entry stores its key in full
+    /// regardless, because a restart point always begins a block.
     previous_key: String,
     block_first_key: String,
     finished_blocks: Vec<(String, Vec<u8>)>,
@@ -273,8 +277,12 @@ impl SegmentBlocksBuilder {
         payload.extend_from_slice(&(self.restarts.len() as u32).to_le_bytes());
         self.restarts.clear();
         self.entry_count = 0;
+        // The block copies the last key it holds. Taking it would leave the
+        // builder without one, and the builder still needs it: as the prefix
+        // anchor inside the next block, as the order guard's floor across the
+        // boundary, and as the segment's max key once every row is in.
         self.finished_blocks
-            .push((std::mem::take(&mut self.previous_key), payload));
+            .push((self.previous_key.clone(), payload));
     }
 
     /// Encodes the remaining rows and assembles the object bytes.
@@ -282,7 +290,6 @@ impl SegmentBlocksBuilder {
         if self.row_count == 0 {
             return Err(SstBlockCodecError::EmptySegment);
         }
-        let max_key = self.previous_key.clone();
         self.finish_data_block();
 
         let mut bytes = Vec::new();
@@ -306,7 +313,7 @@ impl SegmentBlocksBuilder {
             filter,
             row_count: self.row_count,
             min_key: self.min_key,
-            max_key,
+            max_key: self.previous_key,
         })
     }
 }
@@ -749,6 +756,119 @@ mod tests {
             .finish()
             .expect_err("empty segment should be rejected");
         assert!(matches!(error, SstBlockCodecError::EmptySegment));
+    }
+
+    /// The builder closes a data block from inside `push` as soon as the
+    /// block reaches its target size, so the last row of a segment can be
+    /// the row that closes one. The segment's max key must survive that:
+    /// an empty max key sorts below every bound, so a keyed scan would
+    /// prune the whole segment away and report the rows missing.
+    #[test]
+    fn max_key_survives_a_last_row_that_closes_its_block() {
+        // Calibrate the target so the crossing lands on the final row.
+        // Building the same rows as one block reports how many entry bytes
+        // they occupy: a block payload is the entries, then one `u32` per
+        // restart point, then the restart count.
+        let rows = 100usize;
+        let single_block = build_segment(rows);
+        let calibration = decode_index_block(
+            section(&single_block.bytes, &single_block.index),
+            &single_block.index,
+        )
+        .expect("index");
+        assert_eq!(calibration.len(), 1, "the calibration segment is one block");
+        let restarts = rows.div_ceil(RESTART_INTERVAL);
+        let entry_bytes = calibration[0].block.decoded_len as usize - 4 * restarts - 4;
+
+        let mut builder =
+            SegmentBlocksBuilder::new(NonZeroUsize::new(entry_bytes).expect("positive target"));
+        for index in 0..rows {
+            let (key, filter_key, row) = inode_row(index as u64);
+            builder.push(&key, &filter_key, &row).expect("push row");
+        }
+        let built = builder.finish().expect("finish segment");
+
+        let expected_max = inode_row((rows - 1) as u64).0;
+        assert_eq!(built.min_key, inode_row(0).0);
+        assert_eq!(built.max_key, expected_max);
+        assert_eq!(built.row_count, rows as u64);
+        // The last push closed the block, so `finish` appended nothing. The
+        // object must still be the same bytes a larger target produces.
+        assert_eq!(built.bytes, single_block.bytes);
+        let index =
+            decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].last_key, expected_max);
+    }
+
+    /// A segment's key range describes its rows, not its block geometry, so
+    /// the same rows must report the same range at every target size.
+    #[test]
+    fn block_geometry_does_not_change_the_segment_key_range() {
+        let rows = 400usize;
+        let expected: Vec<String> = (0..rows).map(|index| inode_row(index as u64).0).collect();
+        for target in [1usize, 64, 257, 1_024, 4_096, 65_536] {
+            let mut builder =
+                SegmentBlocksBuilder::new(NonZeroUsize::new(target).expect("positive target"));
+            for index in 0..rows {
+                let (key, filter_key, row) = inode_row(index as u64);
+                builder.push(&key, &filter_key, &row).expect("push row");
+            }
+            let built = builder.finish().expect("finish segment");
+            assert_eq!(built.min_key, expected[0], "target {target}");
+            assert_eq!(
+                &built.max_key,
+                expected.last().expect("rows"),
+                "target {target}"
+            );
+            assert_eq!(built.row_count, rows as u64, "target {target}");
+
+            let index = decode_index_block(section(&built.bytes, &built.index), &built.index)
+                .expect("index");
+            let mut recovered = Vec::new();
+            for entry in &index {
+                let block = decode_data_block(section(&built.bytes, &entry.block), &entry.block)
+                    .expect("data block");
+                // Each block still names its own last key, so the index the
+                // reader binary-searches keeps its shape.
+                assert_eq!(
+                    block.row_keys.last().expect("blocks are never empty"),
+                    &entry.last_key,
+                    "target {target}"
+                );
+                recovered.extend(block.row_keys);
+            }
+            assert_eq!(recovered, expected, "target {target}");
+            assert_eq!(
+                index.last().expect("blocks").last_key,
+                built.max_key,
+                "target {target}"
+            );
+        }
+    }
+
+    /// Closing a block clears the prefix anchor, so the order guard has to
+    /// read the last accepted row key instead. Every push closes a block
+    /// here, which puts the offered row first in a fresh block.
+    #[test]
+    fn a_descending_row_after_a_block_boundary_is_rejected() {
+        let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::MIN);
+        let (key_high, filter_high, row_high) = inode_row(9);
+        builder
+            .push(&key_high, &filter_high, &row_high)
+            .expect("first row");
+        let (key_low, filter_low, row_low) = inode_row(3);
+        let error = builder
+            .push(&key_low, &filter_low, &row_low)
+            .expect_err("a descending key across a block boundary should be rejected");
+        assert!(
+            matches!(
+                &error,
+                SstBlockCodecError::RowKeysOutOfOrder { previous, offered }
+                    if previous == &key_high && offered == &key_low
+            ),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
