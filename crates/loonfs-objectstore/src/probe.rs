@@ -131,6 +131,10 @@ pub async fn run_store_contract_probe(store: &dyn ObjectStore, run_id: &str) -> 
             get_with_metadata_round_trip(store, &run).await,
         ),
         check(
+            "head_reports_last_modified",
+            head_reports_last_modified(store, &run).await,
+        ),
+        check(
             "visibility_after_write",
             visibility_after_write(store, &run).await,
         ),
@@ -437,6 +441,41 @@ async fn get_with_metadata_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -
         ));
     }
     Ok(())
+}
+
+/// Garbage collection measures its grace window against the object's own
+/// last-modified time, so a store that does not report one — or reports the
+/// unix epoch, which is what an S3-compatible endpoint that omits the header
+/// turns into — hands every object an infinite age and reclamation loses the
+/// window that protects in-flight publications and live readers.
+///
+/// The write's own result carries no timestamp, so the check heads the
+/// object the way the sweep does.
+async fn head_reports_last_modified(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
+    let key = run.key("last-modified");
+
+    ok(
+        "write",
+        store
+            .put_if_absent(&key, Bytes::from_static(br#"{"seq":1}"#))
+            .await,
+    )?;
+    let head = present(
+        "the written object's metadata",
+        ok("head", store.head(&key).await)?,
+    )?;
+    match head.last_modified_ms {
+        None => Err(wrong(
+            "the store reports no last-modified time, so nothing can age out of the grace window",
+        )),
+        // Nothing LoonFS writes predates the software, so a stamp at or near
+        // the epoch is a synthesized one rather than a real age.
+        Some(0) => Err(wrong(
+            "the store reports the unix epoch as an object's last-modified time, \
+             which reads as infinitely old and defeats the grace window",
+        )),
+        Some(_) => Ok(()),
+    }
 }
 
 /// A write must be listable immediately. Recovery and garbage collection
@@ -791,6 +830,7 @@ mod tests {
                 "compare_and_swap_missing_object_rejected",
                 "overwrite_updates_head_and_body",
                 "get_with_metadata_round_trip",
+                "head_reports_last_modified",
                 "visibility_after_write",
                 "visibility_after_delete",
                 "delete_missing_idempotent",
@@ -945,6 +985,60 @@ mod tests {
         fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, StoreResult<String>> {
             self.inner.list_prefix_stream(prefix)
         }
+    }
+
+    /// A store that stamps every object at the unix epoch — what an
+    /// S3-compatible endpoint that omits `Last-Modified` becomes once the
+    /// AWS client path synthesizes a time for it.
+    #[derive(Debug)]
+    struct EpochLastModifiedStore {
+        inner: LocalFsStore,
+    }
+
+    #[async_trait]
+    impl ObjectStore for EpochLastModifiedStore {
+        async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
+            Ok(self.inner.head(key).await?.map(|mut metadata| {
+                metadata.last_modified_ms = Some(0);
+                metadata
+            }))
+        }
+
+        async fn get_with_metadata(&self, key: &str) -> StoreResult<Option<ObjectBody>> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn get(&self, key: &str, range: Option<ByteRange>) -> StoreResult<Option<Bytes>> {
+            self.inner.get(key, range).await
+        }
+
+        async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> StoreResult<ObjectMetadata> {
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> StoreResult<()> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, StoreResult<String>> {
+            self.inner.list_prefix_stream(prefix)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_store_that_stamps_every_object_at_the_epoch_fails_loudly() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let store = EpochLastModifiedStore {
+            inner: LocalFsStore::new(temp_dir.path()).expect("create local object store"),
+        };
+
+        let report = run_store_contract_probe(&store, "probe_test_epoch_stamp").await;
+
+        assert!(!report.all_passed());
+        assert!(matches!(
+            outcome(&report, "head_reports_last_modified"),
+            StoreProbeOutcome::Failed { message } if message.contains("unix epoch")
+        ));
     }
 
     #[tokio::test]

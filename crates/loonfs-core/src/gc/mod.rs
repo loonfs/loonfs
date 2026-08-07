@@ -7,6 +7,12 @@
 //! publish or checkpoint creation. The grace window, delete-time
 //! re-verification, and retain-on-ambiguity defaults close those races. When
 //! in doubt, this module retains.
+//!
+//! Readers do not coordinate with it either. A read pins a head and the
+//! basis manifest under it and then keeps reading through that pair, so the
+//! grace window has to run from the moment an object stopped being
+//! referenced rather than from the moment it was written. The reference
+//! anchor in `live_set.rs` is what dates that moment.
 
 mod budget;
 mod config;

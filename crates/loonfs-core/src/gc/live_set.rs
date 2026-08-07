@@ -3,7 +3,7 @@
 
 use super::budget::PassBudget;
 use super::fork_checkpoints::fork_target_proven_gone;
-use super::reap::lease_expired;
+use super::reap::{lease_expired, manifest_object_id_of};
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -17,8 +17,10 @@ use loonfs_api::wire::control::{
     ControlObjectKind, NamespaceState,
 };
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{ContentId, ManifestObjectId, NamespaceId};
-use loonfs_objectstore::keys::{checkpoint_prefix, metadata_manifest_object};
+use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestObjectId, NamespaceId};
+use loonfs_objectstore::keys::{
+    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, wal_segment_id_from_key,
+};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -44,6 +46,106 @@ pub(super) struct LiveSet {
     pub(super) degraded: bool,
     /// The inspected namespace head is the terminal, absorbing tombstone.
     pub(super) namespace_deleted: bool,
+    /// What this pass knows about the references this namespace held when
+    /// the grace window opened.
+    pub(super) anchor: ReferenceAnchor,
+}
+
+impl LiveSet {
+    /// Whether anything still protects one WAL segment key.
+    ///
+    /// The current chain protects what a read at this instant replays; the
+    /// reference anchor protects what a read pinned earlier in the grace
+    /// window replays, which is every segment above the anchor's own head.
+    pub(super) fn protects_wal_segment(&self, key: &str) -> bool {
+        self.wal_segments.contains(key) || self.anchor.replays_wal_segment(key)
+    }
+}
+
+/// The reference manifest and what it named — the pass's evidence about
+/// which objects this namespace referenced a grace window ago.
+///
+/// The grace window exists to protect a reader that pinned an anchor (a head
+/// and the basis manifest under it) and is still reading through it. Aging an
+/// unreferenced object by its own write time protects the wrong thing: a
+/// table written yesterday and superseded by a fold one second ago has
+/// already outlived any window, so it is reaped while the reader that pinned
+/// the anchor just before the fold is still reading it. The window has to run
+/// from the moment an object stopped being referenced, and nothing durable
+/// records that moment.
+///
+/// Manifests record it collectively. Each one is a timestamped snapshot of
+/// what the namespace referenced when it was published, so the newest
+/// manifest published at least a grace window ago says what was referenced
+/// when the window opened. Call it R. An object is reaped only when the
+/// current live set, R, and the object's own write time all agree it is
+/// unreferenced:
+///
+/// 1. it is not reachable now,
+/// 2. R did not name it,
+/// 3. its provider write time is a grace window old.
+///
+/// **The theorem.** Take a reader that pinned a head at any instant T inside
+/// the last grace window. It can only reference what the namespace
+/// referenced at T. If the object was written after the window opened, arm 3
+/// keeps it. Otherwise it was written before, so the publication that first
+/// referenced it had already landed by T — publications self-enforce a
+/// budget below the grace floor (`limits::GC_MIN_GRACE_WINDOW_MS`) — and
+/// references only start at a publication. Its reference span is one
+/// interval: manifests are built on their immediate predecessor
+/// (`checkpoint/publish.rs`) and every id is freshly generated, so an object
+/// that leaves a file set never re-enters one. R's publication falls inside
+/// that span, because it is at or before the window's opening and the object
+/// was still referenced at T. So R named it, and arm 2 keeps it. Either way
+/// the reader's object survives the pass.
+///
+/// R protects itself, so the anchor cannot be swept out from under the
+/// namespace: it is in its own reference set, and it stops being the anchor
+/// only once a newer manifest has aged past the window in its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ReferenceAnchor {
+    /// R, with everything it named.
+    Manifest(Box<AnchoredManifest>),
+    /// This namespace has never published a manifest, so no publication has
+    /// ever stopped referencing anything: everything a reader could hold is
+    /// the WAL chain from the namespace's birth, which the floor cannot have
+    /// advanced past without a root. Or the namespace is the terminal
+    /// tombstone, which no read can reach at all. Aged candidates are debris
+    /// either way, and the pass reaps them.
+    NotNeeded,
+    /// Manifests exist but none has aged past the window, so nothing proves
+    /// an unreferenced object was already unreferenced when the window
+    /// opened. The pass keeps every aged candidate instead of guessing.
+    Missing,
+}
+
+/// One reference manifest, reduced to what a sweep decision asks of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AnchoredManifest {
+    manifest_object_id: ManifestObjectId,
+    /// Greatest sequence the anchor materialized. A read pinned on it
+    /// replays every segment above this, and a manifest always materializes
+    /// through the end of a committed segment, so nothing above it is reaped.
+    head_seq: ChangeSeq,
+    /// Object keys of the metadata tables the anchor named.
+    tables: BTreeSet<String>,
+}
+
+impl ReferenceAnchor {
+    /// Whether the pass may reap an aged, unreferenced candidate at all.
+    pub(super) fn proves_unreferencing(&self) -> bool {
+        !matches!(self, Self::Missing)
+    }
+
+    /// Whether a read pinned on the anchor still replays this segment.
+    fn replays_wal_segment(&self, key: &str) -> bool {
+        let Self::Manifest(anchor) = self else {
+            return false;
+        };
+        wal_segment_id_from_key(key)
+            .and_then(wal_segment_id_start_seq)
+            .is_some_and(|start_seq| start_seq > anchor.head_seq)
+    }
 }
 
 /// What one collection produced. Marking is all or nothing: a partial root
@@ -96,11 +198,27 @@ impl SweepVerifier {
         &mut self,
         store: &S,
         namespace_id: &NamespaceId,
+        grace_window_ms: u64,
         budget: &mut PassBudget,
         context: &MutationContext,
     ) -> Result<SweepStep> {
         if self.decided_since_collect >= self.reverify_chunk {
-            match recollect_live_set(store, namespace_id, budget, context).await? {
+            // The anchor is a fact about the past, so a re-collection reuses
+            // the one the pass opened with rather than paying for it again.
+            // Nothing inside a pass can change it: the pass's clock is
+            // fixed, a manifest published while it runs is young, and the
+            // anchor is protected from the pass's own sweep.
+            let anchor = self.live.anchor.clone();
+            match recollect_live_set(
+                store,
+                namespace_id,
+                grace_window_ms,
+                Some(anchor),
+                budget,
+                context,
+            )
+            .await?
+            {
                 LiveSetCollection::Complete(live) => {
                     self.live = Arc::new(live);
                     self.degraded |= self.live.degraded;
@@ -124,6 +242,8 @@ impl SweepVerifier {
 pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    grace_window_ms: u64,
+    anchor: Option<ReferenceAnchor>,
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<LiveSetCollection> {
@@ -133,7 +253,16 @@ pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     let loaded = read_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
-    collect_live_set(store, namespace_id, &loaded, budget, context).await
+    collect_live_set(
+        store,
+        namespace_id,
+        &loaded,
+        grace_window_ms,
+        anchor,
+        budget,
+        context,
+    )
+    .await
 }
 
 /// Collects from the head and basis the pass already read and charged for.
@@ -141,6 +270,8 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     loaded: &LoadedNamespaceBasis,
+    grace_window_ms: u64,
+    reused_anchor: Option<ReferenceAnchor>,
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<LiveSetCollection> {
@@ -177,6 +308,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         missing_basis_records: BTreeSet::new(),
         degraded: false,
         namespace_deleted,
+        anchor: ReferenceAnchor::NotNeeded,
     };
     // Terminal namespaces forget (format spec, rule 4): the tombstone pair
     // and the root/floor pointers survive as non-candidates, but nothing
@@ -314,6 +446,28 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         }
     }
 
+    // The second anchor: what this namespace referenced a grace window ago.
+    // A terminal namespace needs none — no read can reach a tombstone, and
+    // its whole tree is meant to age out.
+    let selected = match (namespace_deleted, reused_anchor) {
+        (true, _) => Some(ReferenceAnchor::NotNeeded),
+        (false, Some(anchor)) => Some(anchor),
+        (false, None) => {
+            select_reference_anchor(store, namespace_id, grace_window_ms, budget, context).await?
+        }
+    };
+    let Some(anchor) = selected else {
+        return Ok(LiveSetCollection::BudgetExhausted);
+    };
+    live.anchor = anchor;
+    // The anchor roots what it named exactly as the current root does. Its
+    // own key goes in too, so the pass cannot sweep away the evidence the
+    // next pass needs.
+    if let ReferenceAnchor::Manifest(anchor) = &live.anchor {
+        live.manifests.insert(anchor.manifest_object_id.clone());
+        live.tables.extend(anchor.tables.iter().cloned());
+    }
+
     // Keep every WAL segment needed to replay from the floor through the
     // head. The floor never passes the root's basis, so this also covers
     // root-to-head replay (rule 7). A terminal namespace has no replay
@@ -372,4 +526,97 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     }
 
     Ok(LiveSetCollection::Complete(live))
+}
+
+/// Finds the reference manifest R and reads what it named.
+///
+/// Manifest keys sort by logical manifest position, which is publication
+/// order, so the scan walks the listing from the oldest manifest and stops at
+/// the first one the window still covers. The last aged manifest before that
+/// is R. Stopping at the first young one rather than taking the newest aged
+/// timestamp is the conservative reading of a provider clock: one manifest
+/// reporting an early stamp cannot pull the anchor forward past a manifest
+/// that reads as young.
+///
+/// The age test is the sweep's own (`gc/reap.rs`), on the same provider
+/// timestamp, so a manifest with no timestamp reads as young here exactly as
+/// a candidate without one does there.
+///
+/// `None` reports that the budget ran out. A pass that cannot pay for this
+/// has no root set at all, the same as any other partial collection.
+async fn select_reference_anchor<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    grace_window_ms: u64,
+    budget: &mut PassBudget,
+    context: &MutationContext,
+) -> Result<Option<ReferenceAnchor>> {
+    let prefix = metadata_manifest_prefix(namespace_id.as_str());
+    let mut keys = store.list_prefix_stream(&prefix);
+    let mut published_any = false;
+    let mut aged = None;
+    while let Some(item) = keys.next().await {
+        let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
+        // Keys this collector does not recognize are never manifests of
+        // its own, so they neither anchor the pass nor end the scan.
+        let Some(Ok(manifest_object_id)) = manifest_object_id_of(&key) else {
+            continue;
+        };
+        published_any = true;
+        if !budget.try_charge() {
+            return Ok(None);
+        }
+        let Some(metadata) = store
+            .head(&key)
+            .await
+            .map_err(|error| CoreError::store(&key, &error))?
+        else {
+            continue;
+        };
+        let aged_out = metadata.last_modified_ms.is_some_and(|written_at_ms| {
+            context.now_ms.saturating_sub(written_at_ms) >= grace_window_ms
+        });
+        if !aged_out {
+            break;
+        }
+        aged = Some((manifest_object_id, key));
+    }
+
+    let Some((manifest_object_id, key)) = aged else {
+        // Nothing published, nothing unreferenced: a namespace with no
+        // manifest of its own has never taken an object out of a file set,
+        // and its floor cannot have advanced past its birth without a root.
+        return Ok(Some(match published_any {
+            true => ReferenceAnchor::Missing,
+            false => ReferenceAnchor::NotNeeded,
+        }));
+    };
+    if !budget.try_charge() {
+        return Ok(None);
+    }
+    // A manifest that will not load is no evidence. Retaining is what the
+    // pass does with every root it cannot resolve.
+    let Ok(Some(manifest)) =
+        load_namespace_manifest_envelope_if_present(store, namespace_id, &manifest_object_id, &key)
+            .await
+    else {
+        tracing::debug!(
+            namespace_id = %namespace_id,
+            object_key = key,
+            "the reference manifest did not load; retaining every aged candidate"
+        );
+        return Ok(Some(ReferenceAnchor::Missing));
+    };
+    Ok(Some(ReferenceAnchor::Manifest(Box::new(
+        AnchoredManifest {
+            manifest_object_id,
+            head_seq: manifest.payload.head_seq,
+            tables: manifest
+                .payload
+                .metadata_files
+                .iter()
+                .map(|file| file.object_key.clone())
+                .collect(),
+        },
+    ))))
 }

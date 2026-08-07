@@ -677,7 +677,8 @@ rather than configured (format spec, "Garbage collection", rule 11).
 `max_objects` bounds the whole pass, from its first read to its last, and
 not only the candidates it enumerates. Building the live root set spends it
 too: the head and metadata root together, the retention floor, each
-checkpoint record, each live manifest, and each retained WAL segment, read
+checkpoint record, each live manifest, each manifest the pass ages to find
+its reference manifest, and each retained WAL segment, read
 once, while marking. Deciding whether a completed session's content is still
 referenced then spends it again on each live manifest and the revision rows
 inside it. A pass that runs out partway through that scan skips
@@ -797,6 +798,7 @@ that reason, and the fields sum to the total:
 | `referenced` | Selected as unreachable, then found reachable by the re-verification that runs immediately before every deletion. A candidate the pass already knew was reachable is never examined, so this counts the namespace moving underneath the pass, not the size of its live set. |
 | `grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
+| `no_reference_manifest` | Unreachable and aged, but the namespace has published no manifest old enough to say what it referenced when the grace window opened. A reader that pinned its anchor inside the window may still be reading the object, so the pass keeps it until a manifest ages past the window. |
 | `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and table deletion was suppressed wholesale. `degraded_retention` is set too. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
 | `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork target not provably gone, a released record still inside its grace, or an active pin doing its job. |
@@ -806,6 +808,15 @@ that reason, and the fields sum to the total:
 
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
+
+An object that something once referenced is not collectable the moment it
+stops being referenced. Reads pin a head and the manifest under it and go on
+reading through that pair, so `grace_window_ms` runs from the unreferencing
+as well as from the write: a table a reorganization folds away today is
+collected a grace window from now, not on the next pass. A namespace too
+young to have any manifest older than the window has nothing that dates its
+unreferencing yet, and a pass over one collects nothing and reports every
+candidate under `no_reference_manifest`.
 
 #### Deleting, retaining, and reclaiming
 

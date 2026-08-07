@@ -292,14 +292,14 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
     let bounded = post_gc_with(
         &server_url,
         namespace.as_str(),
-        serde_json::json!({ "max_objects": 6 }),
+        serde_json::json!({ "max_objects": 7 }),
     )
     .expect("bounded gc pass");
     let cursor = bounded.next_cursor.expect("more candidate families remain");
     let resumed = post_gc_with(
         &server_url,
         namespace.as_str(),
-        serde_json::json!({ "max_objects": 6, "cursor": cursor }),
+        serde_json::json!({ "max_objects": 7, "cursor": cursor }),
     )
     .expect("resumed gc pass");
     assert!(resumed.next_cursor.is_some());
@@ -527,6 +527,7 @@ async fn http_admin_store_probe_reports_every_check_against_the_configured_store
             "compare_and_swap_missing_object_rejected",
             "overwrite_updates_head_and_body",
             "get_with_metadata_round_trip",
+            "head_reports_last_modified",
             "visibility_after_write",
             "visibility_after_delete",
             "delete_missing_idempotent",
@@ -585,7 +586,7 @@ async fn http_admin_store_probe_requires_a_token_and_accepts_a_bodyless_request(
     // the same request as `{}`.
     let bodyless: loonfs_api::v0::StoreProbeResponse =
         post_admin_json(&url, "test-token").expect("probe with no body");
-    assert_eq!(bodyless.checks.len(), 13);
+    assert_eq!(bodyless.checks.len(), 14);
 
     harness.server.abort();
 }

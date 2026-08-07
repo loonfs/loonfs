@@ -86,7 +86,7 @@ async fn marked<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> (LiveSet, u64) {
     let mut budget = PassBudget::new(None);
-    let live = recollect_live_set(store, namespace_id, &mut budget, context)
+    let live = recollect_live_set(store, namespace_id, GRACE_MS, None, &mut budget, context)
         .await
         .expect("collect live set")
         .complete()
@@ -1760,6 +1760,130 @@ async fn gc_retains_everything_inside_the_grace_window() {
     stat_root(&store, &namespace_id).await;
 }
 
+/// Every object under the namespace, as the keys stand right now.
+async fn namespace_key_set(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTreeSet<String> {
+    store
+        .list_prefix(&loonfs_objectstore::keys::namespace_prefix(namespace_id))
+        .await
+        .expect("list namespace")
+        .into_iter()
+        .collect()
+}
+
+/// Reports every object written before this point as ancient, leaving
+/// everything written after it with its real age.
+///
+/// Real filesystem stamps put a whole fixture inside the same millisecond,
+/// so a test that needs "written long ago" and "written just now" in one
+/// namespace has to say which is which itself.
+fn aged_before_now(
+    inner: LocalFsStore,
+    already_written: BTreeSet<String>,
+) -> MetadataMapStore<LocalFsStore> {
+    MetadataMapStore::aged(
+        inner,
+        KeyPredicate::new(move |key| already_written.contains(key)),
+    )
+}
+
+/// Folds the L0 runs into fresh base segments, which is what leaves the
+/// previous run tables unreferenced.
+async fn fold_metadata<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) {
+    let fold_policy = crate::checkpoint::MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        ..Default::default()
+    };
+    let mut folded = false;
+    for _ in 0..16 {
+        let report =
+            crate::checkpoint::reorganize_metadata_step(store, namespace_id, context, fold_policy)
+                .await
+                .expect("reorganize step");
+        if matches!(
+            report.outcome,
+            crate::checkpoint::MetadataReorganizeOutcome::NotNeeded { .. }
+        ) {
+            folded = true;
+            break;
+        }
+    }
+    assert!(folded, "the fold must reach a steady state");
+}
+
+/// The whole point of the reference anchor: a read that pinned its anchor
+/// before a fold is still reading through it afterwards, and the grace
+/// window is what that read is owed.
+///
+/// The tables here are old by write time and unreferenced by the fold, which
+/// is exactly the pair that used to make them collectable on the spot. They
+/// stay until a grace window has passed since the fold, and then they go —
+/// protecting a reader must not turn into never reclaiming.
+#[tokio::test]
+async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    for round in 0..3 {
+        write_test_file(
+            &inner,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            &format!("gc-anchor-{round}"),
+            &setup,
+        )
+        .await;
+        crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+            .await
+            .expect("flush wal");
+    }
+    // Everything the namespace holds at this point is a grace window old;
+    // the fold below writes the only young objects.
+    let before_fold = namespace_key_set(&inner, &namespace_id).await;
+    let store = aged_before_now(inner, before_fold);
+
+    let pinned = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+        .await
+        .expect("pin a read anchor");
+
+    fold_metadata(&store, &namespace_id, &setup).await;
+
+    let after_fold = context(now_after_newest_object(store.inner(), &namespace_id, 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &after_fold)
+        .await
+        .expect("gc pass right after the fold");
+
+    // The read is the assertion that matters: it reaches for its tables
+    // after the sweep has been over them.
+    pinned
+        .resolve_path("/docs/file-0.txt", AttributeProjection::Omit)
+        .await
+        .expect("the pinned anchor still resolves through its own tables");
+    assert_eq!(
+        report.deleted_metadata_tables, 0,
+        "the fold unreferenced these tables a moment ago, not a grace window ago"
+    );
+
+    // A grace window after the fold, the anchor moves on to the folded
+    // manifest and the superseded tables are collectable.
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("gc pass a grace window after the fold");
+    assert!(
+        report.deleted_metadata_tables > 0,
+        "folded-away tables must still be reclaimed, one window later"
+    );
+    stat_root(&store, &namespace_id).await;
+}
+
 /// Every reason's count, summed — what `retained_candidates` must equal.
 fn reason_total(report: &GcResponse) -> u64 {
     report
@@ -1768,6 +1892,173 @@ fn reason_total(report: &GcResponse) -> u64 {
         .into_iter()
         .map(|(_, count)| count)
         .sum()
+}
+
+/// The write-time arm is what covers an object the reference manifest
+/// predates: it was written after the anchor, so the anchor cannot be asked
+/// about it, and only its own age says anything. Once that age passes and
+/// neither anchor names it, it goes.
+#[tokio::test]
+async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&inner, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+        .await
+        .expect("flush wal");
+
+    // The namespace ages past the window; the orphan below is written after
+    // it, so no manifest can ever have named it.
+    let published = namespace_key_set(&inner, &namespace_id).await;
+    let store = aged_before_now(inner, published);
+    let orphan_key = metadata_table(
+        namespace_id.as_str(),
+        "tbl_0123456789abcdef0123456789abcdef",
+    );
+    store
+        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan table"))
+        .await
+        .expect("write an unreferenced table");
+
+    let young = context(now_after_newest_object(store.inner(), &namespace_id, 0).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &young)
+        .await
+        .expect("gc pass while the orphan is young");
+    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(
+        report.retained.grace_window, 1,
+        "the orphan is kept by its own write time, and the pass says so"
+    );
+    assert_eq!(report.retained.no_reference_manifest, 0);
+
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("gc pass once the orphan has aged");
+    assert_eq!(report.deleted_metadata_tables, 1);
+    assert!(store
+        .head(&orphan_key)
+        .await
+        .expect("head orphan")
+        .is_none());
+}
+
+/// A namespace whose manifests are all younger than the window has nothing
+/// that says what it referenced when the window opened. The pass keeps every
+/// aged candidate and names the reason, rather than reaping against evidence
+/// it does not have.
+#[tokio::test]
+async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&inner, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+        .await
+        .expect("flush wal");
+    let orphan_key = metadata_table(
+        namespace_id.as_str(),
+        "tbl_0123456789abcdef0123456789abcdef",
+    );
+    inner
+        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan table"))
+        .await
+        .expect("write an unreferenced table");
+
+    // Only the orphan is old: the manifests are all inside the window, so
+    // the pass has no anchor to reason from.
+    let store = aged_before_now(inner, BTreeSet::from([orphan_key.clone()]));
+    let young = context(now_after_newest_object(store.inner(), &namespace_id, 0).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &young)
+        .await
+        .expect("gc pass with no aged manifest");
+
+    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(report.deleted_wal_segments, 0);
+    assert_eq!(report.deleted_manifests, 0);
+    assert_eq!(
+        report.retained.no_reference_manifest, 1,
+        "the aged orphan is the one candidate the missing anchor spared"
+    );
+    assert_eq!(reason_total(&report), report.retained_candidates);
+    assert!(store
+        .head(&orphan_key)
+        .await
+        .expect("head orphan")
+        .is_some());
+
+    // Once a manifest ages past the window, the same orphan is collectable.
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("gc pass once a manifest anchors it");
+    assert_eq!(report.deleted_metadata_tables, 1);
+    assert_eq!(report.retained.no_reference_manifest, 0);
+}
+
+/// A budget that runs out while the anchor is still being established buys
+/// nothing at all. Reaping needs both anchors, and half a root set is not a
+/// smaller answer, it is no answer.
+#[tokio::test]
+async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
+    let orphan_key = wal_segment(
+        namespace_id.as_str(),
+        "00000000000000000000-0123456789abcdef",
+    );
+    inner
+        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan"))
+        .await
+        .expect("write an unreferenced segment");
+
+    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
+    let (live, marking) = marked(&inner, &namespace_id, &aged).await;
+    let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
+    // One unit short of reading the reference manifest, which is the last
+    // thing marking pays for before the chain.
+    let mut starved = config();
+    starved.max_objects = Some(marking - chain_units - 1);
+    let report = gc_namespace(&inner, &namespace_id, &starved, &aged)
+        .await
+        .expect("pass that could not finish its anchor");
+
+    assert!(report.budget_exhausted);
+    assert_eq!(report.next_cursor, None);
+    assert_eq!(report.retained_candidates, 0, "no candidate was examined");
+    assert_eq!(
+        (
+            report.deleted_wal_segments,
+            report.deleted_metadata_tables,
+            report.deleted_manifests,
+        ),
+        (0, 0, 0)
+    );
+    assert!(inner
+        .head(&orphan_key)
+        .await
+        .expect("head orphan")
+        .is_some());
+
+    // The same namespace, unbounded: the anchor is established and the
+    // orphan goes.
+    let report = gc_namespace(&inner, &namespace_id, &config(), &aged)
+        .await
+        .expect("unbounded rerun");
+    assert!(!report.budget_exhausted);
+    assert_eq!(report.deleted_wal_segments, 1);
 }
 
 /// A pass that keeps a checkpoint record says so as a checkpoint decision,

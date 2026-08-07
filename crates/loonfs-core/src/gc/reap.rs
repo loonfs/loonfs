@@ -4,6 +4,12 @@
 //! they were written. Checkpoint records do not: their lifecycle instants
 //! (`created_at_ms`, `expires_at_ms`, `released_at_ms`) live in the record,
 //! so no checkpoint state transition depends on object metadata.
+//!
+//! A write time is when an object appeared, not when it stopped being
+//! referenced, and those are the same instant only for an object nothing
+//! ever referenced. The namespace sweep therefore asks this module for the
+//! age and decides the rest itself, from the reference anchor in
+//! `gc/live_set.rs`.
 
 use crate::checkpoint::record::encode_checkpoint_record;
 use crate::context::MutationContext;
@@ -148,30 +154,74 @@ impl AgedSweep {
     }
 }
 
+/// Where one unreferenced candidate stands against the grace window, before
+/// anything acts on the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GraceAge {
+    /// The window has passed over the object.
+    Aged,
+    /// Younger than the window by its own provider timestamp.
+    Young,
+    /// The provider reported no last-modified time, so the object's age is
+    /// unknown and it is treated as young (rule 1).
+    Unknown,
+    /// The object is not there any more.
+    Gone,
+}
+
+/// Reads how one candidate stands against the grace window.
+///
+/// Store failures surface unmapped so each collector keeps its own error
+/// vocabulary; everything about the reading itself — which timestamp, what
+/// an absent one means, what the window is measured against — is the same
+/// wherever objects age out, so it is decided once here. What being aged
+/// entitles a candidate to is the caller's question: the namespace sweep
+/// wants durable evidence of when the object stopped being referenced as
+/// well (`gc/live_set.rs`, `ReferenceAnchor`).
+pub(super) async fn grace_age<S: ObjectStore + ?Sized>(
+    store: &S,
+    key: &str,
+    grace_window_ms: u64,
+    now_ms: u64,
+) -> std::result::Result<GraceAge, ObjectStoreError> {
+    let Some(metadata) = store.head(key).await? else {
+        return Ok(GraceAge::Gone);
+    };
+    let Some(last_modified_ms) = metadata.last_modified_ms else {
+        return Ok(GraceAge::Unknown);
+    };
+    Ok(
+        match now_ms.saturating_sub(last_modified_ms) < grace_window_ms {
+            true => GraceAge::Young,
+            false => GraceAge::Aged,
+        },
+    )
+}
+
 /// Deletes one unreferenced candidate if the grace window has passed over
 /// it, and says what it decided otherwise.
 ///
-/// Store failures surface unmapped so each collector keeps its own error
-/// vocabulary; everything about the decision itself — which timestamp, what
-/// an absent one means, what the window is measured against — is the same
-/// wherever objects age out, so it is decided once here.
+/// This is the whole decision where the window's only job is to cover a
+/// write that may still be publishing: install debris a repair proved
+/// non-completable, and the keyspaces extensions collect for themselves.
+/// Where an object can also stop being referenced while something is still
+/// reading it, the window has to run from that moment instead, and the
+/// namespace sweep is what works out when it was.
 pub async fn delete_if_aged<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     grace_window_ms: u64,
     now_ms: u64,
 ) -> std::result::Result<AgedSweep, ObjectStoreError> {
-    let Some(metadata) = store.head(key).await? else {
-        return Ok(AgedSweep::AlreadyGone);
-    };
-    let Some(last_modified_ms) = metadata.last_modified_ms else {
-        return Ok(AgedSweep::RetainedWithoutTimestamp);
-    };
-    if now_ms.saturating_sub(last_modified_ms) < grace_window_ms {
-        return Ok(AgedSweep::RetainedInGraceWindow);
+    match grace_age(store, key, grace_window_ms, now_ms).await? {
+        GraceAge::Gone => Ok(AgedSweep::AlreadyGone),
+        GraceAge::Unknown => Ok(AgedSweep::RetainedWithoutTimestamp),
+        GraceAge::Young => Ok(AgedSweep::RetainedInGraceWindow),
+        GraceAge::Aged => {
+            store.delete(key).await?;
+            Ok(AgedSweep::Deleted)
+        }
     }
-    store.delete(key).await?;
-    Ok(AgedSweep::Deleted)
 }
 
 pub(super) fn manifest_object_id_of(
