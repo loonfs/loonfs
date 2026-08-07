@@ -73,6 +73,37 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-msrv-
       - run: cargo +1.85 check --workspace --all-targets --all-features --locked
 
+  # Builds the server image and proves it works: the probes answer, the
+  # process is not root, the bearer token is enforced, durable state survives
+  # a restart, and SIGTERM exits zero. The script asserts all of that, so this
+  # job is the script's exit code.
+  #
+  # The job runs on every change, the way every other job here does. A path
+  # filter would be wrong for this one in any case: the image carries the
+  # whole workspace's code, so a change to any crate can change it.
+  container:
+    name: container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/loonfs-server/Dockerfile
+          tags: loonfs-server:ci
+          # Into the runner's own image store, so the test below runs the
+          # image this step built.
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # LOONFS_IMAGE is what tells the script to test an existing image
+      # instead of building its own, so the cached build above is the one
+      # under test.
+      - run: crates/loonfs-server/scripts/test-image.sh
+        env:
+          LOONFS_IMAGE: loonfs-server:ci
+
   dist:
     name: dist
     runs-on: ubuntu-latest

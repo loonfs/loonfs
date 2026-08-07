@@ -23,6 +23,18 @@ LOONFS_AUTH_TOKEN=dev-token loonfs init default --no-input \
   --server-url http://127.0.0.1:9400
 ```
 
+## Run it in a container
+
+```bash
+docker build -f crates/loonfs-server/Dockerfile -t loonfs-server:dev .
+docker run --rm -p 9400:9400 \
+  -v /etc/loonfs/server.toml:/etc/loonfs/config.toml:ro loonfs-server:dev
+```
+
+The image reads `/etc/loonfs/config.toml` and runs as uid 10001.
+[docs/self-hosting.md](docs/self-hosting.md#running-it-in-a-container)
+covers the secrets, the mounts, and the shutdown timeout.
+
 ## Configuration
 
 `config/` holds one example per object store: `local-fs`, `aws-s3`,

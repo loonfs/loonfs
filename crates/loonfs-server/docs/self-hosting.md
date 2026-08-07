@@ -93,6 +93,65 @@ The crate's [`config/`](../config) directory holds one worked example per
 object store, each documenting its provider credentials and the optional
 settings this guide leaves out.
 
+## Running it in a container
+
+The crate carries a [`Dockerfile`](../Dockerfile). Build it with the
+repository root as the context, because the build needs the whole workspace:
+
+```bash
+docker build -f crates/loonfs-server/Dockerfile -t loonfs-server:dev .
+```
+
+The image holds the server binary and the public root certificates. It runs
+as uid 10001, and it reads `/etc/loonfs/config.toml` unless you pass another
+`--config`. Mount your config at that path:
+
+```bash
+docker run --rm \
+  --env LOONFS_AUTH_TOKEN={auth_token} \
+  --env LOONFS_CONTENT_TOKEN_SECRET={content_token_secret} \
+  --volume /etc/loonfs/server.toml:/etc/loonfs/config.toml:ro \
+  --volume /var/lib/loonfs/store:/var/lib/loonfs/store \
+  --publish 9400:9400 \
+  loonfs-server:dev
+```
+
+The second mount is the `local-fs` store from the config above, and it has to
+be writable by uid 10001, because that is the user the process runs as. A
+cloud store needs no mount at all: the config names the bucket and the
+credentials arrive through the environment.
+
+The image declares port 9400, which is the port the examples use. The
+config's `bind` decides the port the process actually listens on, so a config
+that binds another port needs another `--publish`.
+
+The first log line reports that the config loaded and that the process holds
+the port:
+
+```json
+{"timestamp":"2026-08-07T01:32:23.285509Z","level":"INFO","fields":{"message":"loonfs-server is listening","bind":"0.0.0.0:9400","store":"local-fs"},"target":"loonfs_server::http::serve"}
+```
+
+Arguments after the image name replace the default command, so the same image
+validates a config without serving:
+
+```bash
+docker run --rm \
+  --volume /etc/loonfs/server.toml:/etc/loonfs/config.toml:ro \
+  loonfs-server:dev --config /etc/loonfs/config.toml --check-config
+```
+
+The server is PID 1 and shuts down on SIGTERM, which is what `docker stop`
+and a Kubernetes pod deletion send. It stops accepting, drains the requests
+in flight, settles its background work, and exits zero. Allow enough time for
+that: pass `--timeout 120` to `docker stop`, or set
+`terminationGracePeriodSeconds: 120` on the pod. A process killed before it
+settles may lose work it had already accepted.
+
+[`scripts/test-image.sh`](../scripts/test-image.sh) builds the image and runs
+this whole path against it, down to the restart. CI runs the same script on
+every change.
+
 ## Probes and metrics
 
 Three routes report on the process. Each one answers a narrow question, and

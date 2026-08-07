@@ -427,6 +427,15 @@ pub async fn serve_with_shutdown(
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| ServeError::Bind { addr: bind, source })?;
+    // The first line a deployment sees. An idle server logs nothing until
+    // a request arrives, so without this line a container that started
+    // correctly and a container that is stuck look the same. This one says
+    // the config loaded and the process holds the port.
+    tracing::info!(
+        bind = %bind,
+        store = config.store.kind().as_str(),
+        "loonfs-server is listening"
+    );
     match tls {
         Some(tls) => serve_on(TlsListener::new(listener, tls), config, shutdown).await,
         None => serve_on(listener, config, shutdown).await,
