@@ -743,14 +743,14 @@ secret_access_key = "secret"
     /// (including under `deny_unknown_fields`) and passing validation.
     #[test]
     fn cli_example_configs_parse_and_validate() {
-        let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs");
+        let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
         let mut examples = 0usize;
-        for entry in std::fs::read_dir(configs_dir).expect("read configs directory") {
-            let path = entry.expect("read configs entry").path();
+        for entry in std::fs::read_dir(configs_dir).expect("read config directory") {
+            let path = entry.expect("read config entry").path();
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if !name.starts_with("loonfs.") || !name.ends_with(".example.toml") {
+            if !name.ends_with(".example.toml") {
                 continue;
             }
             let contents = std::fs::read_to_string(&path).expect("read example config");

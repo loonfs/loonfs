@@ -1,4 +1,9 @@
 //! Tracing subscriber setup from environment variables.
+//!
+//! The server logs by default. `LOONFS_TRACE` selects the mode: unset or
+//! blank means JSON on stdout, `json` means the same thing spelled out, and
+//! `off` means no output at all. Any other value fails the process instead
+//! of guessing. `RUST_LOG` replaces the default filter when it is set.
 
 use std::env;
 
@@ -10,6 +15,10 @@ const TRACE_ENV: &str = "LOONFS_TRACE";
 const RUST_LOG_ENV: &str = "RUST_LOG";
 const DEFAULT_TRACE_FILTER: &str =
     "loonfs_server=info,loonfs_grep=info,loonfs=info,loonfs_core=info";
+/// The `LOONFS_TRACE` value that turns logging off.
+const TRACE_MODE_OFF: &str = "off";
+/// The `LOONFS_TRACE` value that names the default mode.
+const TRACE_MODE_JSON: &str = "json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TraceConfig {
@@ -18,7 +27,7 @@ struct TraceConfig {
 
 #[derive(Debug, Error)]
 pub enum TraceInitError {
-    #[error("unsupported LOONFS_TRACE value `{0}`; expected `json`")]
+    #[error("unsupported LOONFS_TRACE value `{0}`; expected `json` or `off`")]
     UnsupportedMode(String),
     #[error("invalid RUST_LOG filter: {0}")]
     Filter(String),
@@ -26,6 +35,7 @@ pub enum TraceInitError {
     Subscriber(String),
 }
 
+/// Installs the JSON subscriber unless `LOONFS_TRACE=off` asks for silence.
 pub fn init_tracing_from_env() -> Result<(), TraceInitError> {
     let Some(config) =
         trace_config_from_env(env::var(TRACE_ENV).ok(), env::var(RUST_LOG_ENV).ok())?
@@ -44,18 +54,20 @@ pub fn init_tracing_from_env() -> Result<(), TraceInitError> {
         .map_err(|err| TraceInitError::Subscriber(err.to_string()))
 }
 
+/// Resolves the two environment variables into the subscriber to install, or
+/// into `None` when the operator asked for no logging.
 fn trace_config_from_env(
     trace_env: Option<String>,
     rust_log_env: Option<String>,
 ) -> Result<Option<TraceConfig>, TraceInitError> {
-    let Some(trace_mode) = trace_env else {
-        return Ok(None);
-    };
-    if trace_mode.trim().is_empty() {
+    // An operator who sets nothing gets logs. Only `off` takes them away.
+    let trace_mode = trace_env.unwrap_or_default();
+    let trace_mode = trace_mode.trim();
+    if trace_mode == TRACE_MODE_OFF {
         return Ok(None);
     }
-    if trace_mode != "json" {
-        return Err(TraceInitError::UnsupportedMode(trace_mode));
+    if !trace_mode.is_empty() && trace_mode != TRACE_MODE_JSON {
+        return Err(TraceInitError::UnsupportedMode(trace_mode.to_owned()));
     }
     Ok(Some(TraceConfig {
         filter: rust_log_env
@@ -68,22 +80,47 @@ fn trace_config_from_env(
 mod tests {
     use super::{trace_config_from_env, DEFAULT_TRACE_FILTER};
 
+    /// An unset or blank `LOONFS_TRACE` logs, and logs exactly what `json`
+    /// logs.
     #[test]
-    fn tracing_is_disabled_without_env() {
-        assert!(trace_config_from_env(None, None)
+    fn tracing_is_enabled_without_env() {
+        let unset = trace_config_from_env(None, None)
             .expect("trace config parses")
-            .is_none());
-        assert!(trace_config_from_env(Some(String::new()), None)
+            .expect("enabled tracing config");
+        assert_eq!(unset.filter, DEFAULT_TRACE_FILTER);
+
+        let blank = trace_config_from_env(Some("  ".to_owned()), None)
             .expect("blank trace config parses")
-            .is_none());
+            .expect("enabled tracing config");
+        assert_eq!(blank, unset);
+
+        let explicit = trace_config_from_env(Some("json".to_owned()), None)
+            .expect("trace config parses")
+            .expect("enabled tracing config");
+        assert_eq!(explicit, unset);
     }
 
     #[test]
-    fn json_tracing_uses_default_filter_when_rust_log_missing() {
-        let config = trace_config_from_env(Some("json".to_owned()), None)
+    fn off_disables_tracing() {
+        assert!(trace_config_from_env(Some("off".to_owned()), None)
             .expect("trace config parses")
-            .expect("enabled tracing config");
-        assert_eq!(config.filter, DEFAULT_TRACE_FILTER);
+            .is_none());
+        assert!(trace_config_from_env(Some(" off ".to_owned()), None)
+            .expect("padded trace config parses")
+            .is_none());
+    }
+
+    /// `off` silences the output whatever `RUST_LOG` says, because the two
+    /// answer different questions: one turns logging off and the other picks
+    /// the filter.
+    #[test]
+    fn off_wins_over_rust_log() {
+        assert!(trace_config_from_env(
+            Some("off".to_owned()),
+            Some("loonfs_core=debug".to_owned())
+        )
+        .expect("trace config parses")
+        .is_none());
     }
 
     #[test]
@@ -94,6 +131,16 @@ mod tests {
         )
         .expect("trace config parses")
         .expect("enabled tracing config");
+        assert_eq!(config.filter, "loonfs_core=debug");
+    }
+
+    /// `RUST_LOG` still picks the filter when `LOONFS_TRACE` is unset, which
+    /// is the mode most deployments run in.
+    #[test]
+    fn default_tracing_uses_rust_log_when_present() {
+        let config = trace_config_from_env(None, Some("loonfs_core=debug".to_owned()))
+            .expect("trace config parses")
+            .expect("enabled tracing config");
         assert_eq!(config.filter, "loonfs_core=debug");
     }
 
