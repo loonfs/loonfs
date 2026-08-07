@@ -23,7 +23,8 @@ use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
     ContentStoreId, DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor,
-    InodeId, InodeKind, NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
+    InodeId, InodeKind, ManifestId, NamespaceId, Page, PageRequest, RevisionNo, TrashEntry,
+    TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -106,6 +107,25 @@ impl<'a> ReadLoadContext<'a> {
     }
 }
 
+/// The metadata anchor one read is pinned to.
+///
+/// Three numbers say where a read's answer came from: the head sequence it
+/// answers at, the manifest its verified tables were loaded from, and the
+/// head sequence that manifest was published at. A read that answers
+/// not-found for a path a writer had already committed is either anchored
+/// behind that write or reading tables that do not hold it, and the two
+/// cases are told apart by these three numbers alone.
+///
+/// They are the same three the WAL-tail projection cache keys a projection
+/// by, so a read span names its anchor with the words that cache already
+/// uses. All three are plain numbers, so recording them costs no allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadAnchor {
+    head_seq: ChangeSeq,
+    manifest_id: ManifestId,
+    manifest_head_seq: ChangeSeq,
+}
+
 pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
@@ -162,6 +182,7 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: HeadState,
     pub(super) tables: VerifiedMetadataTables<'a, S>,
     wal_tail_rows: Arc<MetadataState>,
+    anchor: ReadAnchor,
 }
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
@@ -190,6 +211,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .await?;
         let tables = loaded_basis.tables;
         let manifest_head = head_from_manifest(&head, tables.manifest());
+        let anchor = ReadAnchor {
+            head_seq: head.seq,
+            manifest_id,
+            manifest_head_seq: manifest_head.seq,
+        };
         let cache_key = match load_context.view {
             #[cfg(test)]
             ReadViewContext::Latest => None,
@@ -211,6 +237,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     head,
                     tables,
                     wal_tail_rows,
+                    anchor,
                 });
             }
         }
@@ -252,6 +279,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             head,
             tables,
             wal_tail_rows,
+            anchor,
         })
     }
 
@@ -260,7 +288,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         name = "loonfs.phase",
         err,
         skip_all,
-        fields(phase = "walk_path")
+        fields(
+            phase = "walk_path",
+            head_seq = self.anchor.head_seq.0,
+            manifest_id = self.anchor.manifest_id.0,
+            manifest_head_seq = self.anchor.manifest_head_seq.0,
+        )
     )]
     pub(crate) async fn resolve_path(
         &self,
@@ -311,11 +344,31 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 kind: entry.inode_kind,
             });
         }
-        let content_ref = entry
-            .content_ref
-            .clone()
-            .ok_or_else(|| CoreError::PathNotFound(absolute_path.to_owned()))?;
+        let Some(content_ref) = entry.content_ref.clone() else {
+            self.trace_entry_without_content_ref(entry.inode_id, entry.revision_no);
+            return Err(CoreError::PathNotFound(absolute_path.to_owned()));
+        };
         Ok((entry, content_ref))
+    }
+
+    /// Says that a path resolved to a visible file whose revision named no
+    /// content, at the point the read turns that into not-found.
+    ///
+    /// The answer on the wire is deliberately the same as for a path that
+    /// does not exist, and it stays that way. This record is the only thing
+    /// that tells the two apart, so it carries the read's anchor as well as
+    /// the entry: an operator reads one line instead of reconstructing a
+    /// chain. It fires only on the broken case, so the ordinary read pays
+    /// nothing for it.
+    fn trace_entry_without_content_ref(&self, inode_id: InodeId, revision_no: Option<RevisionNo>) {
+        tracing::debug!(
+            head_seq = self.anchor.head_seq.0,
+            manifest_id = self.anchor.manifest_id.0,
+            manifest_head_seq = self.anchor.manifest_head_seq.0,
+            inode_id = inode_id.0,
+            revision_no = revision_no.map(|revision_no| revision_no.0),
+            "entry visible without content_ref"
+        );
     }
 
     /// The content store this view's namespace is bound to.
@@ -352,11 +405,21 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 (revision.revision_no, revision.content_ref)
             }
             // A visible file carries both; a path that resolves without
-            // them is the same absence a proxied read reports.
-            None => match (entry.revision_no, entry.content_ref) {
-                (Some(revision_no), Some(content_ref)) => (revision_no, content_ref),
-                _ => return Err(CoreError::PathNotFound(absolute_path.to_owned())),
-            },
+            // them is the same absence a proxied read reports, and it says
+            // so in the same words.
+            None => {
+                // The ids are read out first, because the match moves the
+                // content reference out of the entry.
+                let inode_id = entry.inode_id;
+                let revision_no = entry.revision_no;
+                match (revision_no, entry.content_ref) {
+                    (Some(revision_no), Some(content_ref)) => (revision_no, content_ref),
+                    _ => {
+                        self.trace_entry_without_content_ref(inode_id, revision_no);
+                        return Err(CoreError::PathNotFound(absolute_path.to_owned()));
+                    }
+                }
+            }
         };
         let object_key = content_object_key_for_ref(&self.content_store_id, &content_ref)?;
 
@@ -577,7 +640,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         name = "loonfs.phase",
         err,
         skip_all,
-        fields(phase = "walk_path")
+        fields(
+            phase = "walk_path",
+            head_seq = self.anchor.head_seq.0,
+            manifest_id = self.anchor.manifest_id.0,
+            manifest_head_seq = self.anchor.manifest_head_seq.0,
+        )
     )]
     pub(crate) async fn list_path_page(
         &self,

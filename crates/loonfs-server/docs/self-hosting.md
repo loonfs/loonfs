@@ -368,6 +368,35 @@ all. Any other value fails the process rather than being guessed at.
 and leaves the rest alone. `LOONFS_TRACE=off` silences the output whatever
 `RUST_LOG` says.
 
+### Diagnosing a read that answers not-found for a path that should exist
+
+Set `LOONFS_TRACE=json` and `RUST_LOG=loonfs_server=info,loonfs_core=debug`,
+then repeat the read.
+
+Find the read's span. It is the `loonfs.phase` span whose `phase` is
+`walk_path`, and it names the anchor the read answered from. `head_seq` is
+the namespace head the read was pinned to. `manifest_id` and
+`manifest_head_seq` name the manifest its tables came from; a `manifest_id`
+of 0 means the namespace has published no manifest yet, so every row is
+still in the WAL. Compare `head_seq` against the sequence the write
+returned. A lower `head_seq` means the read was anchored behind the write,
+and nothing is missing.
+
+Then read the events inside that span. `visibility walk found no child`
+names the lookup that came back empty in its `leg` field.
+`binding_unbound` and `binding_superseded` mean the name was deleted or
+moved, which is an ordinary answer. `forward_binding`, `reverse_index`,
+`parent_inode`, and `child_inode` mean the durable families disagree about
+one name, which is a storage problem. `entry visible without content_ref`
+means the path resolved to a visible file whose revision named no content.
+That event carries the anchor and the inode id, and it is the only thing
+that tells the case apart from a path that never existed.
+
+The write path emits `visibility walk found no child` as well, under a
+`prepare_commit` or a `build_commit_plan` span, because a commit checks
+that a name is free before it binds one. Read only the events under
+`walk_path`.
+
 ## The optional local cache
 
 The server can keep encoded metadata blocks on this machine's disk, in front
