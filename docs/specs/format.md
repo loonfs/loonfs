@@ -2190,9 +2190,14 @@ publishing CAS) — under these rules:
    manifest protect nothing and age out. The head survives as the
    id-retiring tombstone, together with the root and floor objects if the
    namespace ever wrote them.
-5. Missing, corrupt, or ambiguous roots cause retention, not deletion — an
-   unreadable checkpoint record suppresses manifest and table deletion for
-   the whole pass.
+5. A root the pass cannot resolve causes retention, not deletion: a root
+   manifest that is absent, or that the store will not hand over,
+   suppresses manifest and table deletion for the whole pass. A root that
+   is corrupt is a different case, because retaining it would suppress
+   deletion on every later pass as well and nothing would ever say why. An
+   object under `checkpoints/` that does not decode as a checkpoint record,
+   and a referenced manifest that reads but fails validation, both fail the
+   pass and are reported with the object key.
 6. Only validated manifests are trusted to protect data.
 7. WAL needed to replay from the chosen metadata root to the head is never
    deleted.

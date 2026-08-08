@@ -39,8 +39,8 @@ use futures::stream::BoxStream;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
-    BlockingStore, CountingStore, KeyPredicate, MetadataMapStore, OperationClass, OperationContext,
-    OperationKind, RecordingStore,
+    BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
+    OperationClass, OperationContext, OperationKind, RecordingStore,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
@@ -3213,11 +3213,12 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         .expect("forked file readable");
 }
 
-/// Unreadable checkpoint records are ambiguous roots on their own,
-/// without any pin involved: the record is retained and the pass
-/// degrades.
+/// Only checkpoint records live under the checkpoints prefix, so bytes
+/// there that do not decode as one are corruption. The pass reports it and
+/// stops. It does not retain the object and suppress reclamation on every
+/// pass after this one.
 #[tokio::test]
-async fn gc_retains_unreadable_checkpoint_records_and_degrades() {
+async fn gc_fails_the_pass_on_a_corrupt_checkpoint_record() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -3230,32 +3231,179 @@ async fn gc_retains_unreadable_checkpoint_records_and_degrades() {
         .await
         .expect("checkpoint");
 
-    for key in store
+    let record_keys = store
         .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
         .await
-        .expect("list checkpoints")
-    {
+        .expect("list checkpoints");
+    let corrupt_key = record_keys
+        .first()
+        .expect("the checkpoint wrote a record")
+        .clone();
+    store
+        .put_overwrite(&corrupt_key, Bytes::from_static(b"not json"))
+        .await
+        .expect("corrupt record");
+
+    let before = namespace_keys(&store, &namespace_id).await;
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect_err("a corrupt record fails the pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(
+        error.message().contains(&corrupt_key),
+        "the error names the object: {error}"
+    );
+    assert_eq!(
+        namespace_keys(&store, &namespace_id).await,
+        before,
+        "a failed pass deletes nothing"
+    );
+}
+
+/// A record the store will not hand over is a different failure from a
+/// record whose bytes do not decode. The read is not part of the split,
+/// because it already failed the pass before this change. This test holds
+/// that behavior in place: the message names the key, and the code tells
+/// the caller to try again.
+#[tokio::test]
+async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(checkpoint_prefix(namespace_id.as_str())),
+        OperationClass::Read,
+        InjectedError::Transport("checkpoint record read timed out".to_owned()),
+    );
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+
+    let record_keys = store
+        .inner()
+        .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+        .await
+        .expect("list checkpoints");
+    let record_key = record_keys
+        .first()
+        .expect("the checkpoint wrote a record")
+        .clone();
+    let before = namespace_keys(store.inner(), &namespace_id).await;
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    store.fail_all();
+
+    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect_err("a record the store will not read fails the pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
+    assert!(
+        error.message().contains(&record_key),
+        "the error names the object: {error}"
+    );
+    assert_eq!(
+        namespace_keys(store.inner(), &namespace_id).await,
+        before,
+        "a failed pass deletes nothing"
+    );
+}
+
+/// The manifest arm of the same split: a rooted manifest that reads but
+/// does not decode is corruption, and the pass says so.
+#[tokio::test]
+async fn gc_fails_the_pass_on_a_corrupt_root_manifest() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+
+    let manifest_keys = store
+        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
+        .await
+        .expect("list manifests");
+    assert!(
+        !manifest_keys.is_empty(),
+        "the checkpoint published a manifest"
+    );
+    for key in &manifest_keys {
         store
-            .put_overwrite(&key, bytes::Bytes::from_static(b"not json"))
+            .put_overwrite(key, Bytes::from_static(b"not json"))
             .await
-            .expect("corrupt record");
+            .expect("corrupt manifest");
     }
 
+    let before = namespace_keys(&store, &namespace_id).await;
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect_err("a corrupt root manifest fails the pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(
+        manifest_keys
+            .iter()
+            .any(|key| error.message().contains(key)),
+        "the error names the object: {error}"
+    );
+    assert_eq!(
+        namespace_keys(&store, &namespace_id).await,
+        before,
+        "a failed pass deletes nothing"
+    );
+}
+
+/// The other half of the manifest arm: a rooted manifest the store will
+/// not hand over says nothing about the bytes, so the pass keeps its old
+/// behavior. It degrades, reclaims no manifests or tables, and counts what
+/// it kept under `degraded_roots`.
+#[tokio::test]
+async fn gc_degrades_when_a_root_manifest_does_not_read() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(namespace_id.as_str())),
+        OperationClass::Read,
+        InjectedError::Transport("manifest read timed out".to_owned()),
+    );
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+
+    let before = namespace_keys(store.inner(), &namespace_id).await;
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    store.fail_all();
+
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
-        .expect("gc pass");
+        .expect("a read failure degrades the pass instead of failing it");
     assert!(report.degraded_retention);
-    assert_eq!(report.deleted_checkpoint_records, 0);
+    assert!(
+        report.retained.degraded_roots > 0,
+        "the pass counts what the degraded roots made it keep: {report:?}"
+    );
     assert_eq!(report.deleted_manifests, 0);
     assert_eq!(report.deleted_metadata_tables, 0);
-    assert!(
-        !store
-            .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
-            .await
-            .expect("list checkpoints")
-            .is_empty(),
-        "unreadable record retained"
+    assert_eq!(
+        namespace_keys(store.inner(), &namespace_id).await,
+        before,
+        "a degraded pass reclaims nothing in the affected families"
     );
 }
 
@@ -3358,8 +3506,11 @@ async fn gc_of_an_absent_namespace_lists_and_deletes_nothing() {
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
 }
 
+/// The same rule with a fork pin in the way: a corrupt record is corrupt
+/// whoever owns it. The source's pass fails and the basis the target reads
+/// through is left exactly as it was.
 #[tokio::test]
-async fn gc_degrades_to_retention_when_a_pin_checkpoint_is_unreadable() {
+async fn gc_fails_the_pass_when_a_fork_pin_record_is_corrupt() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");
@@ -3373,27 +3524,31 @@ async fn gc_degrades_to_retention_when_a_pin_checkpoint_is_unreadable() {
         .await
         .expect("fork");
 
-    // Corrupt the pinned checkpoint: ambiguous roots must retain.
-    for key in store
-        .list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(
-            source.as_str(),
-        ))
+    let record_keys = store
+        .list_prefix(&checkpoint_prefix(source.as_str()))
         .await
-        .expect("list checkpoints")
-    {
-        store
-            .put_overwrite(&key, bytes::Bytes::from_static(b"not json"))
-            .await
-            .expect("corrupt record");
-    }
+        .expect("list checkpoints");
+    let corrupt_key = record_keys.first().expect("the fork pinned").clone();
+    store
+        .put_overwrite(&corrupt_key, Bytes::from_static(b"not json"))
+        .await
+        .expect("corrupt record");
 
+    let before = namespace_keys(&store, &source).await;
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &source, &config(), &aged)
+    let error = gc_namespace(&store, &source, &config(), &aged)
         .await
-        .expect("gc pass");
-    assert!(report.degraded_retention);
-    assert_eq!(report.deleted_manifests, 0);
-    assert_eq!(report.deleted_metadata_tables, 0);
+        .expect_err("a corrupt pin record fails the pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(
+        error.message().contains(&corrupt_key),
+        "the error names the object: {error}"
+    );
+    assert_eq!(
+        namespace_keys(&store, &source).await,
+        before,
+        "a failed pass deletes nothing"
+    );
 }
 
 async fn add_bounded_gc_fixture(

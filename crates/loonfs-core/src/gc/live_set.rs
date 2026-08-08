@@ -4,7 +4,7 @@
 use super::budget::PassBudget;
 use super::fork_checkpoints::fork_target_proven_gone;
 use super::reap::{lease_expired, manifest_object_id_of};
-use crate::checkpoint::load_namespace_manifest_envelope_if_present;
+use crate::checkpoint::{load_namespace_manifest_envelope_if_present, ManifestLoadFailureClass};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::{
@@ -41,8 +41,9 @@ pub(super) struct LiveSet {
     /// the crash window between record write and verification. The pass
     /// releases them; they never degrade sweeping.
     pub(super) missing_basis_records: BTreeSet<String>,
-    /// Record resolution failed somewhere: manifest/table deletion must not
-    /// proceed on this pass.
+    /// A root manifest did not resolve: it read as absent, or the read
+    /// failed. Manifest and table deletion must not proceed on this pass.
+    /// A corrupt root never lands here, because it fails the pass instead.
     pub(super) degraded: bool,
     /// The inspected namespace head is the terminal, absorbing tombstone.
     pub(super) namespace_deleted: bool,
@@ -397,11 +398,21 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
                     .push(key.clone());
                 live.checkpoint_keys.insert(key);
             }
-            // Unreadable records are ambiguous roots: retain them and keep
-            // sweeping conservative for manifests/tables.
-            Err(_) => {
-                live.checkpoint_keys.insert(key);
-                live.degraded = true;
+            // Nothing but checkpoint records lives under this prefix, so
+            // bytes that do not decode as one are corruption rather than an
+            // ambiguous root. `checkpoint/list.rs` reads the same prefix and
+            // reaches the same conclusion. The store read above already
+            // fails the pass, so every error left here is a decode error.
+            //
+            // Retaining instead would hide the damage permanently: the key
+            // would join `checkpoint_keys`, which is what keeps the sweep
+            // from deleting it, and the degraded flag would suppress
+            // manifest and table reclamation on this pass and on every pass
+            // after it, with nothing logged.
+            Err(error) => {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "`{key}` is not a checkpoint record: {error}"
+                )));
             }
         }
     }
@@ -440,9 +451,29 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
                         .extend(record_keys.iter().cloned());
                 }
             }
-            Err(_) => {
-                live.degraded = true;
-            }
+            // A manifest the store could not hand over is a transient
+            // obstacle: keep the pass conservative and let the next one try
+            // again. A manifest that was read but does not validate is
+            // corruption, and the pass reports it instead of degrading every
+            // future pass over this namespace. `failure_class` is the same
+            // split every other surface uses (`error.rs`), so this arm
+            // cannot drift from them.
+            Err(error) => match error.failure_class() {
+                ManifestLoadFailureClass::Store => {
+                    live.degraded = true;
+                    tracing::warn!(
+                        namespace_id = %namespace_id,
+                        object_key = manifest_key,
+                        error = %error,
+                        "a root manifest did not read; this pass reclaims no manifests or tables"
+                    );
+                }
+                ManifestLoadFailureClass::Corrupt => {
+                    return Err(CoreError::NamespaceCorrupt(format!(
+                        "a manifest this namespace still references does not load: {error}"
+                    )));
+                }
+            },
         }
     }
 
