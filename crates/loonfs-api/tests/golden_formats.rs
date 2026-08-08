@@ -659,6 +659,7 @@ fn control_objects_match_golden_bytes() {
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
                 staged_content: None,
+                staging_claimed_at_ms: None,
             },
         },
     );
@@ -682,6 +683,7 @@ fn control_objects_match_golden_bytes() {
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
                 staged_content: None,
+                staging_claimed_at_ms: None,
             },
         },
     );
@@ -700,6 +702,7 @@ fn control_objects_match_golden_bytes() {
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
                 staged_content: Some(sample_content_ref()),
+                staging_claimed_at_ms: None,
             },
         },
     );

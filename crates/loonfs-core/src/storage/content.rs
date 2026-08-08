@@ -655,13 +655,19 @@ pub(crate) struct StagedStream {
 /// The write is create-only, exactly like the buffered staging write. Past
 /// the store's multipart threshold the store cannot make that condition part
 /// of the write — a provider assembles a multipart object unconditionally —
-/// so it reads the key instead, immediately before the assembly.
-/// `already_present` is therefore authoritative about a key that was already
-/// occupied when this write started, and blind to a writer that lands inside
-/// that window. Only another request against the same upload session can be
-/// that writer, because the key is named by 128 random bits one session
-/// owns, and [`crate::protocol::complete_upload`] reads the object again
-/// before it freezes the reference.
+/// so it reads the key instead, immediately before the assembly. That read
+/// is not atomic with the assembly, so `already_present` answers for a key
+/// that was occupied before this write started and not for one occupied
+/// during it.
+///
+/// The only writer that could occupy the key during the write is another
+/// request against the same upload session, because the key is named by 128
+/// random bits one session owns. The staging claim in
+/// [`crate::protocol::upload_streamed_content`] is what keeps that writer
+/// away: exactly one request holds the claim, so `already_present` is exact
+/// for every caller that takes it. A caller that stages under a freshly
+/// minted identity nobody else holds — [`crate::protocol::stage_owned_stream`]
+/// — needs no claim for the same reason.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,

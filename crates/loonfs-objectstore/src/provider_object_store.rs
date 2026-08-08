@@ -598,8 +598,11 @@ impl MultipartWrite<'_> {
     ///   over the same stream: a refused write still leaves that caller a
     ///   digest over the complete payload.
     /// - It is not atomic with the completion. A key that was already
-    ///   occupied is refused; a writer that lands between this read and the
-    ///   completion is not, and this write assembles over it.
+    ///   occupied when this read ran is refused; a writer that lands between
+    ///   this read and the completion is not, and this write assembles over
+    ///   it. Callers that cannot tolerate that must keep concurrent writers
+    ///   off the key themselves, which is what the upload protocol's staging
+    ///   claim does.
     async fn precondition_holds(&self, mode: &PutMode) -> Result<()> {
         let refused = || {
             Err(ObjectStoreError::PreconditionFailed {
