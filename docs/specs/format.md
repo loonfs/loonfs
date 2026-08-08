@@ -15,9 +15,26 @@ a deployment exposes.
 
 Encoding conventions used by every durable and wire shape in this specification:
 field names and enum values are `snake_case`; fields holding typed identifiers
-are suffixed `_id`; tagged unions carry their discriminator in a `kind` field;
-HTTP wire shapes and immutable, never-rewritten families tolerate unknown
-fields, while mutable control-object envelopes and payloads reject them.
+are suffixed `_id`; tagged unions carry their discriminator in a `kind` field.
+
+Unknown fields are tolerated where a reader must accept what a newer writer
+added, and rejected where accepting one would lose information the sender
+meant to send:
+
+- **HTTP request bodies reject them.** Most request fields are optional, and
+  many of those are preconditions, so a misspelled field would decode to its
+  default and the server would carry out a different request than the caller
+  asked for — an unguarded write answering 200. Rejection is over the whole
+  request, at every level of nesting.
+- **HTTP response bodies tolerate them**, so a client keeps working against a
+  server newer than itself.
+- **Immutable, never-rewritten durable families tolerate them**, for the same
+  reason: nothing rewrites them, so nothing can erase a field it did not
+  understand.
+- **Mutable control-object envelopes and payloads reject them**, because a
+  reader that tolerated an unknown field would erase it on the next
+  read-modify-write and still report a successful guarded update
+  (section 1.7).
 
 ## 1. Object store contract
 
