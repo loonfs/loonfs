@@ -957,3 +957,29 @@ fn has_visible_children_sees_through_unbinds() {
             .expect("probe emptied directory")
     );
 }
+
+/// The leg names land in log records that operators grep for. They are fixed
+/// strings, and no two legs share one.
+#[test]
+fn every_absent_visibility_leg_has_its_own_stable_name() {
+    use visibility::AbsentVisibilityLeg;
+
+    let legs = [
+        (AbsentVisibilityLeg::ParentInode, "parent_inode"),
+        (
+            AbsentVisibilityLeg::ParentNotDirectory,
+            "parent_not_directory",
+        ),
+        (AbsentVisibilityLeg::ForwardBinding, "forward_binding"),
+        (AbsentVisibilityLeg::BindingUnbound, "binding_unbound"),
+        (AbsentVisibilityLeg::ReverseIndex, "reverse_index"),
+        (AbsentVisibilityLeg::BindingSuperseded, "binding_superseded"),
+        (AbsentVisibilityLeg::ChildInode, "child_inode"),
+    ];
+
+    for (leg, name) in legs {
+        assert_eq!(leg.name(), name, "{leg:?} was renamed");
+    }
+    let names: std::collections::BTreeSet<&str> = legs.iter().map(|(leg, _)| leg.name()).collect();
+    assert_eq!(names.len(), legs.len(), "two legs share one name");
+}

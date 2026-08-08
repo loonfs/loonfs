@@ -19,6 +19,9 @@
 //!   [`would_create_directory_cycle`], [`resolve_visible_path`]) are the
 //!   canonical rule bodies that both the provided trait methods and every
 //!   caching/gating override delegate to.
+//! - [`AbsentVisibilityLeg`] names the lookup a walk stopped on when it
+//!   answers "no child". The rules decide nothing differently for it; it
+//!   only makes an absence say which of the agreeing lookups was empty.
 //!
 //! The at-head indexes ([`super::MetadataState`]'s `indexes`) are a
 //! materialization of these same rules, maintained incrementally. The
@@ -187,6 +190,76 @@ pub(crate) trait MetadataVisibilityReads {
     }
 }
 
+/// Which leg of the child-visibility walk answered no.
+///
+/// A visible child needs three durable families to agree: the forward bind
+/// row under `(parent, name_key)`, the child's own latest parent binding,
+/// and the inode rows for the parent and the child. When any one of them
+/// comes back empty, the walk answers "no child", and from the outside every
+/// leg looks the same. This names the leg that stopped the walk, so a read
+/// that answers not-found says which lookup produced the absence instead of
+/// only that there was one.
+///
+/// Only absences are named. A visible child is the ordinary answer and says
+/// nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbsentVisibilityLeg {
+    /// The parent inode is not visible at the read seq.
+    ParentInode,
+    /// The parent inode is visible but is not a directory, so it binds no
+    /// children under any name.
+    ParentNotDirectory,
+    /// No bind row exists under `(parent, name_key)`.
+    ForwardBinding,
+    /// A bind row exists and an unbind revokes it.
+    BindingUnbound,
+    /// The bound child has no current parent binding of its own.
+    ReverseIndex,
+    /// The child's current parent binding is a different bind event: the
+    /// child was bound elsewhere and this name is the stale one.
+    BindingSuperseded,
+    /// The bound child's inode is not visible at the read seq.
+    ChildInode,
+}
+
+impl AbsentVisibilityLeg {
+    /// The leg's stable name for the `leg` field.
+    ///
+    /// Every name is a `&'static str`, so naming a leg allocates nothing.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ParentInode => "parent_inode",
+            Self::ParentNotDirectory => "parent_not_directory",
+            Self::ForwardBinding => "forward_binding",
+            Self::BindingUnbound => "binding_unbound",
+            Self::ReverseIndex => "reverse_index",
+            Self::BindingSuperseded => "binding_superseded",
+            Self::ChildInode => "child_inode",
+        }
+    }
+}
+
+/// Says which leg made `(parent, name_key)` absent, once per absence.
+///
+/// Ids only, no names. The events around this one log namespace ids, object
+/// keys, and content ids, and none of them logs a path or a display name; a
+/// name key is derived from user text, so it stays out of the record too.
+/// The child fields are absent when no bind row was found, because there was
+/// no child to name.
+fn trace_absent_leg(
+    leg: AbsentVisibilityLeg,
+    parent_inode_id: InodeId,
+    direntry: Option<&DirentryBindRecord>,
+) {
+    tracing::debug!(
+        leg = leg.name(),
+        parent_inode_id = parent_inode_id.0,
+        child_inode_id = direntry.map(|direntry| direntry.child_inode_id.0),
+        bind_seq = direntry.map(|direntry| direntry.bind_seq.0),
+        "visibility walk found no child"
+    );
+}
+
 /// The child's current parent binding: the latest binding for the child that
 /// has not been unbound. Returns `None` when the latest binding was revoked,
 /// even if an older un-revoked binding row still exists — bindings are
@@ -224,18 +297,34 @@ pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
         .find_latest_bound_child(parent_inode_id, name_key)
         .await?
     else {
+        trace_absent_leg(AbsentVisibilityLeg::ForwardBinding, parent_inode_id, None);
         return Ok(None);
     };
     if reads.is_binding_unbound(&direntry).await? {
+        trace_absent_leg(
+            AbsentVisibilityLeg::BindingUnbound,
+            parent_inode_id,
+            Some(&direntry),
+        );
         return Ok(None);
     }
     let Some(latest_binding) = reads
         .current_parent_binding_for_child(direntry.child_inode_id)
         .await?
     else {
+        trace_absent_leg(
+            AbsentVisibilityLeg::ReverseIndex,
+            parent_inode_id,
+            Some(&direntry),
+        );
         return Ok(None);
     };
     if !latest_binding.same_binding(&direntry) {
+        trace_absent_leg(
+            AbsentVisibilityLeg::BindingSuperseded,
+            parent_inode_id,
+            Some(&direntry),
+        );
         return Ok(None);
     }
     Ok(Some(direntry))
@@ -323,9 +412,15 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
     name_key: &NameKey,
 ) -> Result<Option<DirentryBindRecord>, R::Error> {
     let Some(parent) = reads.visible_inode(parent_inode_id).await? else {
+        trace_absent_leg(AbsentVisibilityLeg::ParentInode, parent_inode_id, None);
         return Ok(None);
     };
     if parent.inode_kind != InodeKind::Directory {
+        trace_absent_leg(
+            AbsentVisibilityLeg::ParentNotDirectory,
+            parent_inode_id,
+            None,
+        );
         return Ok(None);
     }
 
@@ -333,6 +428,8 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
         .active_child_binding(parent_inode_id, name_key)
         .await?
     else {
+        // No record here. The binding rule names its own leg, and one
+        // absence is one record.
         return Ok(None);
     };
     if reads
@@ -340,6 +437,11 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
         .await?
         .is_none()
     {
+        trace_absent_leg(
+            AbsentVisibilityLeg::ChildInode,
+            parent_inode_id,
+            Some(&direntry),
+        );
         return Ok(None);
     }
     Ok(Some(direntry))
