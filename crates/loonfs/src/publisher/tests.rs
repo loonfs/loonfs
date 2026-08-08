@@ -536,7 +536,10 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
         &namespace_id,
         CommitCandidate::rejected(
             request,
-            ContentPreparationError::ContentToken(ContentTokenError::Expired),
+            ContentPreparationError::ContentToken(vec![(
+                loonfs_api::ContentId::generate(),
+                ContentTokenError::Expired,
+            )]),
         ),
     )
     .expect("join rejected duplicate");
@@ -568,7 +571,10 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
         &namespace_id,
         CommitCandidate::rejected(
             request.clone(),
-            ContentPreparationError::ContentToken(ContentTokenError::Expired),
+            ContentPreparationError::ContentToken(vec![(
+                loonfs_api::ContentId::generate(),
+                ContentTokenError::Expired,
+            )]),
         ),
     )
     .expect("admit rejected primary");

@@ -22,7 +22,7 @@ use loonfs_api::{
         SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadSessionStatus,
         UploadStatusResponse, ValidatedContentToken,
     },
-    ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
 };
 use loonfs_objectstore::{
@@ -42,7 +42,9 @@ const MULTIPART_PART_URL_TTL: Duration = Duration::from_secs(60 * 60);
 pub(super) enum PutContentPreparation {
     Absent,
     Ready(Vec<PreparedContent>),
-    Rejected(ContentTokenError),
+    /// Every supplied token was rejected, each paired with the content ref
+    /// it was supplied for. Never empty.
+    Rejected(Vec<(ContentId, ContentTokenError)>),
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -327,6 +329,12 @@ pub(super) fn presign_time() -> SystemTime {
 /// Prepares the request's content proofs against the content refs its put
 /// operations name. One prepared proof covers every operation that names its
 /// ref; tokens covering a ref no operation puts are ignored.
+///
+/// A rejected token is reported whether or not a sibling token verified.
+/// Coverage is still decided per ref — a put whose ref no proof admits is
+/// refused by the commit engine — but a token this deployment did not mint,
+/// or minted for another namespace or content store, is worth saying out
+/// loud even when the request it arrived in went on to publish.
 pub(super) async fn content_preparation_for_puts(
     writer: &FsWriter,
     config: &ServerConfig,
@@ -336,7 +344,7 @@ pub(super) async fn content_preparation_for_puts(
     now_ms: u64,
 ) -> Result<PutContentPreparation, ApiResponseError> {
     let mut prepared_content = Vec::new();
-    let mut first_error = None;
+    let mut rejections = Vec::new();
     let matching_tokens = tokens
         .iter()
         .filter(|token| content_refs.contains(&&token.content_ref))
@@ -350,24 +358,51 @@ pub(super) async fn content_preparation_for_puts(
         {
             Ok(prepared) => prepared_content.push(prepared),
             Err(error) => {
-                tracing::debug!(
-                    namespace_id = %namespace_id,
-                    content_id = %token.content_ref.content_id,
-                    error = %error,
-                    "content token rejected during put preparation"
-                );
-                first_error.get_or_insert(error);
+                let content_id = token.content_ref.content_id.clone();
+                if is_forged_content_token(&error) {
+                    tracing::warn!(
+                        namespace_id = %namespace_id,
+                        content_id = %content_id,
+                        error = %error,
+                        "content token was not minted by this deployment for this namespace \
+                         and content store"
+                    );
+                } else {
+                    tracing::debug!(
+                        namespace_id = %namespace_id,
+                        content_id = %content_id,
+                        error = %error,
+                        "content token rejected during put preparation"
+                    );
+                }
+                rejections.push((content_id, error));
             }
         }
     }
 
     if !prepared_content.is_empty() {
         Ok(PutContentPreparation::Ready(prepared_content))
-    } else if let Some(error) = first_error {
-        Ok(PutContentPreparation::Rejected(error))
-    } else {
+    } else if rejections.is_empty() {
         Ok(PutContentPreparation::Absent)
+    } else {
+        Ok(PutContentPreparation::Rejected(rejections))
     }
+}
+
+/// Whether a rejection says the token was not this deployment's to accept.
+///
+/// These three are the only rejections no honest client can produce: the
+/// signature is this server's own HMAC, and the namespace and content store
+/// are the pair the completed session was for. Everything else — an expiry,
+/// a malformed body, a ref the payload does not cover — is a client that got
+/// something wrong or waited too long, so it stays at debug.
+fn is_forged_content_token(error: &ContentTokenError) -> bool {
+    matches!(
+        error,
+        ContentTokenError::BadSignature
+            | ContentTokenError::NamespaceMismatch
+            | ContentTokenError::ContentStoreMismatch
+    )
 }
 
 fn content_token_error(error: ContentTokenError) -> ApiResponseError {

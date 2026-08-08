@@ -896,11 +896,17 @@ mod tests {
 
     #[test]
     fn rejected_content_token_maps_to_content_not_prepared() {
-        let error = CoreError::from(ContentPreparationError::ContentToken(
+        let content_id = loonfs_api::ContentId::generate();
+        let error = CoreError::from(ContentPreparationError::ContentToken(vec![(
+            content_id.clone(),
             ContentTokenError::Expired,
-        ));
+        )]));
 
         assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
+        // The caller has to know which token to mint again, so the ref it
+        // was supplied for travels with the reason.
+        assert!(error.message().contains(content_id.as_str()));
+        assert!(error.message().contains("expired"));
     }
 
     #[test]

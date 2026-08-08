@@ -97,9 +97,14 @@ pub(super) async fn stored_block_section<T>(
     match decoded {
         Ok(decoded) => Some(decoded),
         Err(reason) => {
-            tracing::debug!(
+            // The read still succeeds from the store, but bytes this tier
+            // wrote and read back no longer decode: the local disk is
+            // returning something other than what it was given. That is a
+            // hardware or filesystem problem an operator has to know about,
+            // so it is a warning rather than a debug line.
+            tracing::warn!(
                 object_key = %descriptor.object_key,
-                "local block cache entry rejected, refetching from the store: {reason}"
+                "local block cache entry did not decode, refetching from the store: {reason}"
             );
             cache.invalidate(&key);
             None

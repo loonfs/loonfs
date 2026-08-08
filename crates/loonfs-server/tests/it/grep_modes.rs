@@ -12,9 +12,10 @@ use loonfs_api::v0::{
 };
 use loonfs_api::{
     ApiError, CapabilityDocument, ChangeSeq, GrepRequest, GrepResponse, NamespaceId,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
-    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, PROFILE_QUERY_V0,
+    FEATURE_ADMIN_GREP_INDEX, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    PROFILE_QUERY_V0,
 };
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
@@ -39,9 +40,9 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
         .await
         .expect("build app");
 
-    let capabilities: CapabilityDocument =
-        response_json(send(&router, Method::GET, "/v0/capabilities", None).await).await;
+    let capabilities = capabilities(&router).await;
     assert!(!capabilities.features.contains_key(FEATURE_QUERY_GREP));
+    assert!(!capabilities.features.contains_key(FEATURE_ADMIN_GREP_INDEX));
     assert!(
         !capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0),
         "a deployment that answers `not_supported` on every query route must not advertise \
@@ -52,15 +53,27 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     }
     assert!(!maintains_grep_index(&server));
 
-    for path in grep_paths(&namespace_id) {
-        let response = send(&router, Method::POST, &path, None).await;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-        let error: ApiError = response_json(response).await;
-        assert_eq!(error.code, "not_supported");
-        assert_eq!(error.feature.as_deref(), Some(FEATURE_QUERY_GREP));
+    // Searching and administering gate on their own keys, so a refusal names
+    // the key whose absence the client just read.
+    assert_not_supported(
+        &router,
+        Method::POST,
+        &query_path(&namespace_id),
+        None,
+        FEATURE_QUERY_GREP,
+    )
+    .await;
+    for path in admin_grep_paths(&namespace_id) {
+        assert_not_supported(&router, Method::POST, &path, None, FEATURE_ADMIN_GREP_INDEX).await;
     }
-    let status = send(&router, Method::GET, &status_path(&namespace_id), None).await;
-    assert_eq!(status.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_not_supported(
+        &router,
+        Method::GET,
+        &status_path(&namespace_id),
+        None,
+        FEATURE_ADMIN_GREP_INDEX,
+    )
+    .await;
     server.shutdown().await.expect("settle the server writer");
 }
 
@@ -151,9 +164,12 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
 
-    let capabilities: CapabilityDocument =
-        response_json(send(&router, Method::GET, "/v0/capabilities", None).await).await;
+    let capabilities = capabilities(&router).await;
     assert!(capabilities.supports(FEATURE_QUERY_GREP));
+    assert!(
+        capabilities.supports(FEATURE_ADMIN_GREP_INDEX),
+        "a deployment doing both jobs advertises both keys"
+    );
     assert!(capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0));
     for limit in grep_limits() {
         assert!(capabilities.limits.contains_key(limit));
@@ -343,13 +359,23 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
         .expect("build app");
     assert!(!maintains_grep_index(&server));
 
+    // The document says the same thing the routes do: searches yes,
+    // administration no.
+    let capabilities = capabilities(&router).await;
+    assert!(capabilities.supports(FEATURE_QUERY_GREP));
+    assert!(capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0));
+    assert!(
+        !capabilities.features.contains_key(FEATURE_ADMIN_GREP_INDEX),
+        "a deployment that refuses every index-admin route must not advertise that it \
+         administers one"
+    );
+
     // Every route that would mutate a grep root belongs where the index is
     // maintained, so this deployment refuses all three.
     for path in admin_grep_paths(&namespace_id) {
-        let response = send(&router, Method::POST, &path, None).await;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-        let error: ApiError = response_json(response).await;
-        assert_eq!(error.code, "not_supported");
+        let error =
+            assert_not_supported(&router, Method::POST, &path, None, FEATURE_ADMIN_GREP_INDEX)
+                .await;
         assert!(
             error.message.contains("does not maintain"),
             "{}",
@@ -358,9 +384,14 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
     }
     // Reading the index's lifecycle is administering it: a deployment that
     // maintains nothing has no authority over the state it would report.
-    let status = send(&router, Method::GET, &status_path(&namespace_id), None).await;
-    assert_eq!(status.status(), StatusCode::NOT_IMPLEMENTED);
-    let error: ApiError = response_json(status).await;
+    let error = assert_not_supported(
+        &router,
+        Method::GET,
+        &status_path(&namespace_id),
+        None,
+        FEATURE_ADMIN_GREP_INDEX,
+    )
+    .await;
     assert!(
         error.message.contains("does not maintain"),
         "{}",
@@ -401,21 +432,31 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .expect("build app");
     assert!(maintains_grep_index(&server));
 
-    let capabilities: CapabilityDocument =
-        response_json(send(&router, Method::GET, "/v0/capabilities", None).await).await;
+    let capabilities = capabilities(&router).await;
     assert!(
         !capabilities.features.contains_key(FEATURE_QUERY_GREP),
         "a deployment that answers no searches must not advertise that it does"
     );
-    let refused = send(
+    assert!(
+        capabilities.supports(FEATURE_ADMIN_GREP_INDEX),
+        "the index this deployment maintains is administered through these routes"
+    );
+    // The administration key is parented by the admin plane the runtime
+    // already advertises, which is why a deployment that serves no searches
+    // can still advertise it: a `query.` key here would name a plane this
+    // document does not carry.
+    assert!(
+        !capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0),
+        "maintaining an index is not serving one"
+    );
+    let error = assert_not_supported(
         &router,
         Method::POST,
-        &format!("/v0/namespaces/{namespace_id}/query/grep"),
+        &query_path(&namespace_id),
         Some(serde_json::to_vec(&grep_request("needle")).expect("serialize grep request")),
+        FEATURE_QUERY_GREP,
     )
     .await;
-    assert_eq!(refused.status(), StatusCode::NOT_IMPLEMENTED);
-    let error: ApiError = response_json(refused).await;
     assert!(
         error.message.contains("does not serve grep queries"),
         "{}",
@@ -591,10 +632,37 @@ async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
         .clone()
 }
 
-fn grep_paths(namespace_id: &NamespaceId) -> Vec<String> {
-    let mut paths = vec![format!("/v0/namespaces/{namespace_id}/query/grep")];
-    paths.extend(admin_grep_paths(namespace_id));
-    paths
+/// This deployment's capability document, checked for well-formedness on
+/// the way past: every advertised feature key has to be parented by an
+/// advertised profile, and each grep mode advertises a different set.
+async fn capabilities(router: &Router) -> CapabilityDocument {
+    let document: CapabilityDocument =
+        response_json(send(router, Method::GET, "/v0/capabilities", None).await).await;
+    document
+        .validate()
+        .expect("the advertised document must be well-formed");
+    document
+}
+
+/// Asserts one route answers `not_supported`, naming the capability key a
+/// client gates on, and hands the error back for any further check.
+async fn assert_not_supported(
+    router: &Router,
+    method: Method,
+    path: &str,
+    body: Option<Vec<u8>>,
+    feature: &str,
+) -> ApiError {
+    let response = send(router, method, path, body).await;
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED, "{path}");
+    let error: ApiError = response_json(response).await;
+    assert_eq!(error.code, "not_supported", "{path}");
+    assert_eq!(error.feature.as_deref(), Some(feature), "{path}");
+    error
+}
+
+fn query_path(namespace_id: &NamespaceId) -> String {
+    format!("/v0/namespaces/{namespace_id}/query/grep")
 }
 
 fn admin_grep_paths(namespace_id: &NamespaceId) -> Vec<String> {

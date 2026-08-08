@@ -85,6 +85,10 @@ pub trait StoredMetadataBlockCache: Send + Sync + Debug {
     fn insert(&self, key: StoredMetadataBlockKey, bytes: Bytes);
 
     /// Drops whatever is held for `key`.
+    ///
+    /// The one caller is a hit whose bytes did not decode, so an
+    /// implementation reports this as an entry it had to reject rather than
+    /// as an ordinary eviction.
     fn invalidate(&self, key: &StoredMetadataBlockKey);
 
     /// Flushes what the implementation wants to keep and makes the cache

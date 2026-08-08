@@ -310,7 +310,10 @@ impl StoredMetadataBlockCache for FoyerStoredMetadataBlockCache {
         if self.is_closed() {
             return;
         }
-        self.metrics.invalidations[kind_index(key.kind)].increment(1);
+        // The seam's one caller is a hit whose bytes did not decode, so this
+        // counts rejections rather than evictions. foyer evicts on its own
+        // and reports nothing here.
+        self.metrics.rejections[kind_index(key.kind)].increment(1);
         self.cache.remove(key);
     }
 
@@ -397,7 +400,7 @@ fn prepare_directory(directory: &Path, capacity: usize) -> Result<(), ServerConf
         block_bytes: DISK_BLOCK_BYTES,
         blocks: capacity / DISK_BLOCK_BYTES,
     };
-    let found = read_geometry(directory);
+    let found = read_geometry(directory)?;
     let keep = found.is_some_and(|found| {
         found.block_bytes == wanted.block_bytes && found.blocks <= wanted.blocks
     });
@@ -447,12 +450,29 @@ fn prepare_directory(directory: &Path, capacity: usize) -> Result<(), ServerConf
 /// The geometry the versioned directory records, or `None` when it records
 /// none this process can make sense of.
 ///
-/// A marker that cannot be read or cannot be parsed says nothing about the
-/// directory, and a directory that says nothing about itself is discarded.
-/// There is no repair path, because the marker is smaller than one write.
-fn read_geometry(directory: &Path) -> Option<DiskGeometry> {
-    let bytes = std::fs::read(directory.join(GEOMETRY_MARKER)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+/// A missing marker and an unparsable one both mean the directory says
+/// nothing about itself, and a directory that says nothing about itself is
+/// discarded. There is no repair path, because the marker is smaller than
+/// one write.
+///
+/// A marker that exists and cannot be read is neither of those. Permission
+/// and I/O errors fail startup for the same reason the write side does: the
+/// recovery is to delete a directory whose geometry is on the far side of
+/// the error, which would report "it records no geometry of its own" about
+/// a marker that may record exactly the right one.
+fn read_geometry(directory: &Path) -> Result<Option<DiskGeometry>, ServerConfigError> {
+    let path = directory.join(GEOMETRY_MARKER);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(invalid_local_cache(format!(
+                "failed to read `{}`: {error}",
+                display_path(&path)
+            )))
+        }
+    };
+    Ok(serde_json::from_slice(&bytes).ok())
 }
 
 /// Records the geometry this start claims.
@@ -567,7 +587,7 @@ struct LocalCacheMetrics {
     misses: PerKind,
     get_failures: PerKind,
     inserts: PerKind,
-    invalidations: PerKind,
+    rejections: PerKind,
     closes_clean: Arc<dyn CounterHandle>,
     closes_failed: Arc<dyn CounterHandle>,
 }
@@ -613,10 +633,11 @@ impl LocalCacheMetrics {
                     &[("kind", kind_label(kind))],
                 )
             }),
-            invalidations: BLOCK_KINDS.map(|kind| {
+            rejections: BLOCK_KINDS.map(|kind| {
                 recorder.register_counter(
-                    "loonfs.local_cache.invalidations",
-                    "Blocks dropped from the local block cache, by block kind",
+                    "loonfs.local_cache.rejections",
+                    "Local block cache entries dropped because their bytes did not decode, \
+                     by block kind",
                     &[("kind", kind_label(kind))],
                 )
             }),

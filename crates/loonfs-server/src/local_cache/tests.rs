@@ -352,6 +352,45 @@ async fn an_unreadable_geometry_marker_starts_over() {
     reopened.close().await.expect("close reopened cache");
 }
 
+/// A marker that exists and cannot be read fails startup.
+///
+/// The recovery for an unreadable marker is to delete the directory it
+/// describes, so the two cases have to stay apart: a marker that is not
+/// there says the directory is new, while one that is there and answers an
+/// error says nothing at all about how many block files are below it. The
+/// second is a permission or device problem, and deleting on the strength of
+/// it would discard a warm cache — or fail to — for a reason nobody could
+/// see. The path is made a directory here because that produces a real
+/// read error on every platform these tests run on, without depending on
+/// which user is running them.
+#[tokio::test]
+async fn an_unreadable_geometry_marker_fails_startup() {
+    let temp_dir = tempdir().expect("tempdir");
+    let cache = open(temp_dir.path()).await;
+    cache.insert(key(0), Bytes::from_static(b"encoded stored block"));
+    cache.close().await.expect("close local cache");
+    drop(cache);
+
+    let marker = temp_dir.path().join(CACHE_DIRECTORY).join(GEOMETRY_MARKER);
+    std::fs::remove_file(&marker).expect("remove the geometry marker");
+    std::fs::create_dir(&marker).expect("put something unreadable in its place");
+
+    match FoyerStoredMetadataBlockCache::open(&test_config(temp_dir.path()), &NoopMetricsRecorder)
+        .await
+    {
+        Err(ServerConfigError::InvalidField { field, reason }) => {
+            assert_eq!(field, "local_cache.path");
+            assert!(reason.contains("failed to read"), "{reason}");
+        }
+        Err(other) => panic!("expected an unreadable-marker error, got {other:?}"),
+        Ok(_) => panic!("a marker that cannot be read must not be taken for a fresh directory"),
+    }
+    assert!(
+        temp_dir.path().join(CACHE_DIRECTORY).is_dir(),
+        "a start that could not read the marker leaves the directory alone"
+    );
+}
+
 /// foyer's overflow counters reach this process's numbers.
 ///
 /// The bridge is one metric name and two label values agreed with foyer, and

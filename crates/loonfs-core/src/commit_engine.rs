@@ -46,12 +46,27 @@ pub enum ContentPreparation {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ContentPreparationError {
-    /// A supplied wire token was rejected before publication.
-    #[error("content token was rejected: {0}")]
-    ContentToken(#[from] ContentTokenError),
+    /// Every wire token the request supplied was rejected before
+    /// publication, each paired with the content ref it was supplied for.
+    ///
+    /// One request may carry one token per ref, so all of the rejections
+    /// travel together: a caller that has to mint new tokens needs to know
+    /// which refs failed and why, not just that one of them did. The list is
+    /// never empty — a rejection exists because a token was refused.
+    #[error("content tokens were rejected: {}", rejected_token_reasons(.0))]
+    ContentToken(Vec<(ContentId, ContentTokenError)>),
     /// No prepared proof covers the referenced content.
     #[error("content object `{content_id}` is not prepared for publication")]
     ContentNotPrepared { content_id: ContentId },
+}
+
+/// Every rejected token as one message: each content ref beside its reason.
+fn rejected_token_reasons(rejections: &[(ContentId, ContentTokenError)]) -> String {
+    rejections
+        .iter()
+        .map(|(content_id, error)| format!("`{content_id}`: {error}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl CommitCandidate {
@@ -616,7 +631,10 @@ mod tests {
         let ready = CommitCandidate::new(request.clone());
         let rejected = CommitCandidate::rejected(
             request,
-            ContentPreparationError::ContentToken(ContentTokenError::Expired),
+            ContentPreparationError::ContentToken(vec![(
+                ContentId::generate(),
+                ContentTokenError::Expired,
+            )]),
         );
 
         assert_eq!(

@@ -25,7 +25,7 @@ within a plane is expressed as **named features** (section 2).
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
-| `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Future maintenance triggers (index builds) arrive as features in this plane. | Optional |
+| `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
 | `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
@@ -68,13 +68,16 @@ therefore identical for both backends.
 The example below is the reference deployment: the runtime's own `core/v0`
 and `admin/v0` planes plus the `query/v0` plane the server composes from the
 grep extension. A host that composes no extension advertises neither that
-profile nor its `query.*` keys — clients gate on the document either way.
+profile nor the two grep feature keys: `query.grep` for searching an index
+and `admin.grep.index` for administering one. Clients gate on the document
+either way.
 
 ```json
 {
   "protocol_version": "v0",
   "profiles": ["core/v0", "admin/v0", "query/v0"],
   "features": {
+    "admin.grep.index": true,
     "core.namespaces.create": true,
     "core.namespaces.fork": true,
     "core.namespaces.delete": true,
@@ -148,6 +151,7 @@ hoc.
 
 | Feature key | Gates | Notes |
 | --- | --- | --- |
+| `admin.grep.index` | Administering a namespace's grep index: `GET /v0/admin/namespaces/{ns}/grep/index` and its `enable`, `disable`, and `gc` routes. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers all four routes `not_supported` with this key. |
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
@@ -158,8 +162,9 @@ hoc.
 | `core.downloads.direct_get` | Taking download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`). | The server returns a short-lived presigned GET capability for the content object behind one path and revision. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
-`admin/v0` currently has required ops only and no feature keys. `acl.*` keys
-are unregistered until that plane materializes.
+`admin/v0`'s only feature key is `admin.grep.index`; the rest of that plane
+is required ops. `acl.*` keys are unregistered until that plane
+materializes.
 
 Namespace listing is intentionally not supported in v0. Callers must address
 namespaces by id until LoonFS has a scalable namespace catalog/index design.
@@ -631,10 +636,10 @@ A representative v0 binding is shown below.
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
 | Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
-| Read the grep index's lifecycle | `GET /v0/admin/namespaces/{ns}/grep/index` (one grep root read, no side effects; requires a deployment that maintains the index) |
-| Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill and nudges the deployment's maintenance runner; requires a deployment that maintains the index; idempotent) |
-| Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
-| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; `max_objects` bounds the reads it spends and defaults to 1024 when omitted, returning a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
+| Read the grep index's lifecycle | `GET /v0/admin/namespaces/{ns}/grep/index` (feature `admin.grep.index`; one grep root read, no side effects) |
+| Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (feature `admin.grep.index`; CAS-publishes the independent grep root into checkpointed backfill and nudges the deployment's maintenance runner; idempotent) |
+| Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (feature `admin.grep.index`; CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
+| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (feature `admin.grep.index`; one explicit pass over only that namespace's grep extension; `max_objects` bounds the reads it spends and defaults to 1024 when omitted, returning a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
 | Probe the store contract | `POST /v0/admin/store/probe` (the one admin route whose subject is the store rather than a namespace; body carries no options today and `{}` is the request; see below) |
 | Scrape metrics | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 

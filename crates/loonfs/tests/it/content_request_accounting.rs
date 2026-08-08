@@ -12,7 +12,7 @@ use loonfs::{
     RevisionNo, RuntimeError, SharedObjectStore,
 };
 use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
-use loonfs_api::ContentStoreId;
+use loonfs_api::{ContentId, ContentStoreId};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -887,7 +887,10 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
             harness.namespace_id.clone(),
             CommitCandidate::rejected(
                 intent,
-                ContentPreparationError::ContentToken(ContentTokenError::Expired),
+                ContentPreparationError::ContentToken(vec![(
+                    ContentId::generate(),
+                    ContentTokenError::Expired,
+                )]),
             ),
         )
         .await
@@ -917,7 +920,10 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
             harness.namespace_id.clone(),
             CommitCandidate::rejected(
                 intent,
-                ContentPreparationError::ContentToken(ContentTokenError::Expired),
+                ContentPreparationError::ContentToken(vec![(
+                    ContentId::generate(),
+                    ContentTokenError::Expired,
+                )]),
             ),
         )
         .await
@@ -926,9 +932,8 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert!(matches!(
         error,
-        CoreError::ContentPreparation(ContentPreparationError::ContentToken(
-            ContentTokenError::Expired
-        ))
+        CoreError::ContentPreparation(ContentPreparationError::ContentToken(ref rejections))
+            if matches!(rejections[..], [(_, ContentTokenError::Expired)])
     ));
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
