@@ -257,8 +257,12 @@ pub struct CompletedUploadPart {
 }
 
 /// Stateless proof that a LoonFS server already validated a content ref.
+///
+/// This travels in a commit request, so it decodes under the request rule:
+/// unknown fields are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ValidatedContentToken {
     /// Content identity the server attests it already verified.
     pub content_ref: ContentRef,

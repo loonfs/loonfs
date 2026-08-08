@@ -3391,7 +3391,7 @@
       },
       "CommitRequest": {
         "type": "object",
-        "description": "One commit: an idempotency key, an optional annotation, and an ordered\nlist of path operations that commit together (API spec, section 5.1).\n\nA one-operation request is the one-element case of this shape, not a\ndifferent request: a convenience call and a batch produce the same commit\nand the same fingerprint.",
+        "description": "One commit: an idempotency key, an optional annotation, and an ordered\nlist of path operations that commit together (API spec, section 5.1).\n\nA one-operation request is the one-element case of this shape, not a\ndifferent request: a convenience call and a batch produce the same commit\nand the same fingerprint.\n\nUnknown fields are rejected here for the same reason they are on\n[`FilesystemOperation`]: the fields a typo can hide are the ones that\ndecide whether the commit is guarded at all.",
         "required": [
           "commit_id",
           "operations"
@@ -3422,7 +3422,8 @@
             },
             "description": "Ordered operations to apply. Must be non-empty; they commit all\ntogether or not at all."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CommitResponse": {
         "type": "object",
@@ -3664,7 +3665,8 @@
             "description": "Optional lifetime; the server computes the record's expiry from its\nown clock. Absent means the pin holds until explicitly released.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateCheckpointResponse": {
         "type": "object",
@@ -3725,7 +3727,8 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id to create."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "DeleteDirectoryBehavior": {
         "type": "string",
@@ -4664,7 +4667,7 @@
             }
           }
         ],
-        "description": "One path-oriented filesystem operation."
+        "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because every optimistic-concurrency guard\nbelow is an optional field. A misspelled `expected_revision_no` or\n`expected_inode_id` would otherwise decode to `None`, and the write would\napply unguarded and answer 200 — a lost update reported as a success. A\nguard the server never saw must fail the request, not the precondition.\n\nEvery variant here carries fields. A variant that carries none must still\nbe spelled with empty braces, because serde lets a *unit* variant of a\ntagged enum swallow whatever else the body held; `BeginUploadRequest` in\n[`super::uploads`] shows the same rule."
       },
       "ForkNamespaceRequest": {
         "type": "object",
@@ -4677,11 +4680,12 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id for the fork target."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "GcRequest": {
         "type": "object",
-        "description": "Optional overrides for one garbage-collection pass. Absent fields use\nthe server's conservative defaults.",
+        "description": "Optional overrides for one garbage-collection pass. Absent fields use\nthe server's conservative defaults.\n\nEvery field is optional, so a typo would take the default instead of the\noverride the caller asked for. Unknown fields are rejected so a misspelled\n`max_objects` fails loudly rather than running an unbounded pass.",
         "properties": {
           "cursor": {
             "type": [
@@ -4708,7 +4712,8 @@
             "description": "Maximum objects this invocation may read or decide. Omit to retain\nthe run-to-completion behavior.\n\nA completed upload session past its reclamation grace makes the pass\nread every live manifest and retained WAL segment to find out\nwhether anything still references its content, and that read is\ncharged here like any other. A budget too small to finish it does\nnot stall the pass: the session is retained, the response sets\n`content_reclamation_deferred`, and the sweep carries on through\neverything else. What a chronically small budget costs is content\nleft unreclaimed, not progress. Give a pass at least as many objects\nas the namespace has live manifests and retained segments for that\ncontent to come back.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "GcResponse": {
         "type": "object",
@@ -4842,7 +4847,8 @@
             "description": "Reads this pass may spend before returning with a `next_cursor`.\nOmit to take the same per-pass default the runtime's own collection\ntakes.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "GrepGcResponse": {
         "type": "object",
@@ -5055,7 +5061,7 @@
       },
       "GrepRequest": {
         "type": "object",
-        "description": "One content-search request.",
+        "description": "One content-search request.\n\nEvery field but `pattern` is optional, and each one selects results. A\nmisspelled `case_insensitive` or `path_prefix` would decode to the default\nand answer a different search than the caller asked for, with no sign that\nanything was dropped, so unknown fields are rejected.",
         "required": [
           "pattern"
         ],
@@ -5103,7 +5109,8 @@
             "type": "string",
             "description": "The pattern, in the Rust `regex` crate's dialect (no backreferences\nor lookaround). Patterns that require no literal bytes are rejected\nwith `query_unindexable` unless `allow_scan` is set."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "GrepResponse": {
         "type": "object",
@@ -5294,7 +5301,7 @@
       },
       "MaintenanceStepRequest": {
         "type": "object",
-        "description": "One explicit maintenance step: the actions it selects, and nothing more.\n\nSelection is presence. Each field names one independent action, and a\nstep runs exactly the ones the body carries — a request that selects\nnothing is rejected rather than quietly doing nothing.",
+        "description": "One explicit maintenance step: the actions it selects, and nothing more.\n\nSelection is presence. Each field names one independent action, and a\nstep runs exactly the ones the body carries — a request that selects\nnothing is rejected rather than quietly doing nothing. Unknown fields are\nrejected for the same reason: a misspelled selector would leave its action\nunrun, and the caller would read the empty report as \"there was nothing to\ndo\".",
         "properties": {
           "advance_retention": {
             "type": "boolean",
@@ -5322,7 +5329,8 @@
               }
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "MaintenanceStepResponse": {
         "type": "object",
@@ -5394,7 +5402,8 @@
             "description": "Flush the visible WAL tail once it reaches this many segments.\nAbsent uses the server's default threshold; zero, and any value above\nthe write-rejection threshold, are rejected as `invalid_request`.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "MetadataMaintenanceResponse": {
         "type": "object",
@@ -5810,7 +5819,8 @@
       },
       "StoreProbeRequest": {
         "type": "object",
-        "description": "Options for one store contract probe. Empty today; a body is still sent\nso later options do not change the shape of the request."
+        "description": "Options for one store contract probe. Empty today; a body is still sent\nso later options do not change the shape of the request. An option this\nbuild does not know is rejected rather than ignored, so a caller never\nbelieves it selected something.",
+        "additionalProperties": false
       },
       "StoreProbeResponse": {
         "type": "object",
@@ -6050,7 +6060,7 @@
       },
       "ValidatedContentToken": {
         "type": "object",
-        "description": "Stateless proof that a LoonFS server already validated a content ref.",
+        "description": "Stateless proof that a LoonFS server already validated a content ref.\n\nThis travels in a commit request, so it decodes under the request rule:\nunknown fields are rejected.",
         "required": [
           "content_ref",
           "token"
@@ -6064,7 +6074,8 @@
             "type": "string",
             "description": "Opaque, server-signed token. Clients must not parse it."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "WalFlushStepOutcome": {
         "oneOf": [

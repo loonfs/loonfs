@@ -128,6 +128,7 @@ pub struct ErrorDetails {
 /// Request to create a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CreateNamespaceRequest {
     /// Durable namespace id to create.
     pub namespace_id: NamespaceId,
@@ -136,6 +137,7 @@ pub struct CreateNamespaceRequest {
 /// Request to fork a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ForkNamespaceRequest {
     /// Durable namespace id for the fork target.
     pub new_namespace_id: NamespaceId,
@@ -206,9 +208,20 @@ pub enum DeleteDirectoryBehavior {
 }
 
 /// One path-oriented filesystem operation.
+///
+/// Unknown fields are rejected because every optimistic-concurrency guard
+/// below is an optional field. A misspelled `expected_revision_no` or
+/// `expected_inode_id` would otherwise decode to `None`, and the write would
+/// apply unguarded and answer 200 — a lost update reported as a success. A
+/// guard the server never saw must fail the request, not the precondition.
+///
+/// Every variant here carries fields. A variant that carries none must still
+/// be spelled with empty braces, because serde lets a *unit* variant of a
+/// tagged enum swallow whatever else the body held; `BeginUploadRequest` in
+/// [`super::uploads`] shows the same rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FilesystemOperation {
     /// Create one directory.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDirectory"))]
@@ -338,8 +351,13 @@ pub enum FilesystemOperation {
 /// A one-operation request is the one-element case of this shape, not a
 /// different request: a convenience call and a batch produce the same commit
 /// and the same fingerprint.
+///
+/// Unknown fields are rejected here for the same reason they are on
+/// [`FilesystemOperation`]: the fields a typo can hide are the ones that
+/// decide whether the commit is guarded at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CommitRequest {
     /// Caller-supplied idempotency key for the whole request.
     pub commit_id: CommitId,
@@ -411,6 +429,7 @@ pub struct ListFileRevisionsResponse {
 /// Request to create a durable checkpoint pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CreateCheckpointRequest {
     /// Label recorded on the checkpoint record. A label, not a key: several
     /// records may carry the same name over different bases.
@@ -549,8 +568,13 @@ pub struct FlushWalResponse {
 
 /// Optional overrides for one garbage-collection pass. Absent fields use
 /// the server's conservative defaults.
+///
+/// Every field is optional, so a typo would take the default instead of the
+/// override the caller asked for. Unknown fields are rejected so a misspelled
+/// `max_objects` fails loudly rather than running an unbounded pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct GcRequest {
     /// Objects younger than this are never deleted, reachable or not. The
     /// window has a derived safety floor (publication budgets plus provider
@@ -864,9 +888,13 @@ pub struct AdvanceRetentionResponse {
 ///
 /// Selection is presence. Each field names one independent action, and a
 /// step runs exactly the ones the body carries — a request that selects
-/// nothing is rejected rather than quietly doing nothing.
+/// nothing is rejected rather than quietly doing nothing. Unknown fields are
+/// rejected for the same reason: a misspelled selector would leave its action
+/// unrun, and the caller would read the empty report as "there was nothing to
+/// do".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceStepRequest {
     /// Fold the visible WAL tail into metadata tables and merge one bounded
     /// reorganization unit. The two travel together: folding a tail is what
@@ -886,6 +914,7 @@ pub struct MaintenanceStepRequest {
 /// Overrides for the metadata-upkeep action.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MetadataMaintenanceRequest {
     /// Flush the visible WAL tail once it reaches this many segments.
     /// Absent uses the server's default threshold; zero, and any value above
@@ -974,9 +1003,12 @@ pub struct MetadataMaintenanceResponse {
 }
 
 /// Options for one store contract probe. Empty today; a body is still sent
-/// so later options do not change the shape of the request.
+/// so later options do not change the shape of the request. An option this
+/// build does not know is rejected rather than ignored, so a caller never
+/// believes it selected something.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct StoreProbeRequest {}
 
 /// What one store contract probe observed, check by check.
@@ -1033,6 +1065,13 @@ mod tests {
 
     fn attribute_key(value: &str) -> AttributeKey {
         AttributeKey::parse(value).expect("valid test attribute key")
+    }
+
+    fn sample_content_ref() -> ContentRef {
+        ContentRef::blob_v1(
+            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id"),
+            b"hello",
+        )
     }
 
     #[test]
@@ -1403,5 +1442,154 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<FilesystemOperation>(encoded).is_err());
         }
+    }
+
+    /// A guard the server never saw must fail the request, not the
+    /// precondition. Every guard is optional, so a misspelled one used to
+    /// decode to `None` and let the write apply unguarded.
+    #[test]
+    fn a_misspelled_guard_does_not_decode() {
+        let put = |guard: &str| {
+            let mut operation = serde_json::json!({
+                "kind": "put_file",
+                "path": "/docs/a.txt",
+                "content_ref": sample_content_ref(),
+                "behavior": "replace"
+            });
+            operation[guard] = serde_json::json!(3);
+            serde_json::json!({
+                "commit_id": "guarded-put",
+                "operations": [operation]
+            })
+        };
+
+        let spelled: CommitRequest = serde_json::from_value(put("expected_revision_no"))
+            .expect("the guard spelled correctly decodes");
+        assert!(matches!(
+            spelled.operations.as_slice(),
+            [FilesystemOperation::PutFile {
+                expected_revision_no: Some(RevisionNo(3)),
+                ..
+            }]
+        ));
+
+        for misspelling in ["expected_revsion_no", "expectedRevisionNo"] {
+            assert!(
+                serde_json::from_value::<CommitRequest>(put(misspelling)).is_err(),
+                "`{misspelling}` decoded instead of failing the request"
+            );
+        }
+    }
+
+    /// The whole commit request tree is strict, not just its root: a typo one
+    /// level down hides the same guards.
+    #[test]
+    fn a_commit_request_rejects_unknown_fields_at_every_level() {
+        let valid = || {
+            serde_json::json!({
+                "commit_id": "strict-commit",
+                "content_tokens": [{
+                    "content_ref": sample_content_ref(),
+                    "token": "opaque-proof"
+                }],
+                "operations": [{
+                    "kind": "update_attributes",
+                    "path": "/docs/a.txt",
+                    "set": {"owner": {"kind": "string", "value": "ada"}},
+                    "expected_inode_id": 7
+                }]
+            })
+        };
+        serde_json::from_value::<CommitRequest>(valid())
+            .expect("the same body without a typo decodes");
+
+        let mut at_root = valid();
+        at_root["mesage"] = serde_json::json!("a note");
+
+        let mut in_operation = valid();
+        in_operation["operations"][0]["expectedAttributesRevisionNo"] = serde_json::json!(3);
+
+        let mut in_attribute_value = valid();
+        in_attribute_value["operations"][0]["set"]["owner"]["values"] =
+            serde_json::json!(["ada", "grace"]);
+
+        let mut in_content_token = valid();
+        in_content_token["content_tokens"][0]["expires_at_ms"] = serde_json::json!(1);
+
+        let mut in_content_ref = valid();
+        in_content_ref["content_tokens"][0]["content_ref"]["sizeBytes"] = serde_json::json!(5);
+
+        for (level, body) in [
+            ("the request root", at_root),
+            ("an operation variant", in_operation),
+            ("a nested attribute value", in_attribute_value),
+            ("a nested content token", in_content_token),
+            ("a content ref below that", in_content_ref),
+        ] {
+            assert!(
+                serde_json::from_value::<CommitRequest>(body).is_err(),
+                "an unknown field in {level} decoded instead of failing the request"
+            );
+        }
+    }
+
+    /// The maintenance bodies are optional selectors and overrides all the
+    /// way down, so a typo would run a different step than the caller asked
+    /// for and report the difference as "nothing to do".
+    #[test]
+    fn maintenance_request_bodies_reject_unknown_fields() {
+        serde_json::from_value::<MaintenanceStepRequest>(serde_json::json!({
+            "metadata": {"max_wal_tail_segments": 4},
+            "advance_retention": true,
+            "gc": {"grace_window_ms": 1_800_000, "max_objects": 32}
+        }))
+        .expect("the same body without a typo decodes");
+
+        for body in [
+            serde_json::json!({"advance_retenton": true}),
+            serde_json::json!({"metadata": {"maxWalTailSegments": 4}}),
+            serde_json::json!({"gc": {"max_object": 32}}),
+        ] {
+            assert!(
+                serde_json::from_value::<MaintenanceStepRequest>(body.clone()).is_err(),
+                "an unknown field decoded instead of failing the step: {body}"
+            );
+        }
+
+        serde_json::from_value::<CreateCheckpointRequest>(
+            serde_json::json!({"name": "nightly", "ttl_ms": 60_000}),
+        )
+        .expect("the same checkpoint body without a typo decodes");
+        assert!(serde_json::from_value::<CreateCheckpointRequest>(
+            serde_json::json!({"name": "nightly", "ttlMs": 60_000})
+        )
+        .is_err());
+
+        // The probe body carries no options yet, so an unknown one is the
+        // only thing it can be sent.
+        serde_json::from_value::<StoreProbeRequest>(serde_json::json!({}))
+            .expect("an empty probe body decodes");
+        assert!(
+            serde_json::from_value::<StoreProbeRequest>(serde_json::json!({"deep": true})).is_err()
+        );
+
+        serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+            "namespace_id": "demo"
+        }))
+        .expect("the same create body without a typo decodes");
+        assert!(
+            serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+                "namespace_id": "demo",
+                "fork_of": "other"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
+                "new_namespace_id": "demo",
+                "source_namespace_id": "other"
+            }))
+            .is_err()
+        );
     }
 }

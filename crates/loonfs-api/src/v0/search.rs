@@ -6,8 +6,14 @@ use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
 /// One content-search request.
+///
+/// Every field but `pattern` is optional, and each one selects results. A
+/// misspelled `case_insensitive` or `path_prefix` would decode to the default
+/// and answer a different search than the caller asked for, with no sign that
+/// anything was dropped, so unknown fields are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct GrepRequest {
     /// The pattern, in the Rust `regex` crate's dialect (no backreferences
     /// or lookaround). Patterns that require no literal bytes are rejected
@@ -212,6 +218,7 @@ pub struct DisableGrepIndexResponse {
 /// One explicit grep-index garbage-collection pass (admin plane).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct GrepGcRequest {
     /// Reads this pass may spend before returning with a `next_cursor`.
     /// Omit to take the same per-pass default the runtime's own collection
@@ -364,5 +371,39 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<GrepRequest>(encoded).is_err());
+    }
+
+    /// Every optional field on a search body selects results, so a typo would
+    /// answer a different question than the caller asked and say nothing
+    /// about it.
+    #[test]
+    fn search_request_bodies_reject_unknown_fields() {
+        serde_json::from_value::<GrepRequest>(serde_json::json!({
+            "pattern": "needle",
+            "case_insensitive": true,
+            "path_prefix": "/docs",
+            "limit": 10,
+            "allow_stale": true,
+            "allow_scan": true
+        }))
+        .expect("the same body without a typo decodes");
+
+        for body in [
+            serde_json::json!({"pattern": "needle", "case_insensitve": true}),
+            serde_json::json!({"pattern": "needle", "caseInsensitive": true}),
+            serde_json::json!({"pattern": "needle", "pathPrefix": "/docs"}),
+            serde_json::json!({"pattern": "needle", "allow_scans": true}),
+        ] {
+            assert!(
+                serde_json::from_value::<GrepRequest>(body.clone()).is_err(),
+                "an unknown field decoded instead of failing the search: {body}"
+            );
+        }
+
+        serde_json::from_value::<GrepGcRequest>(serde_json::json!({"max_objects": 8}))
+            .expect("the same collection body without a typo decodes");
+        assert!(
+            serde_json::from_value::<GrepGcRequest>(serde_json::json!({"maxObjects": 8})).is_err()
+        );
     }
 }

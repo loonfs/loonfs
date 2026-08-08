@@ -374,6 +374,10 @@ own cross-request guards on the operation itself where staleness matters:
 delete. A guard is evaluated against the state its own operation sees, which
 includes what earlier operations in the same request did.
 
+Every guard is an optional field, which is why a commit body rejects unknown
+fields (section 6). A misspelled `expected_revision_no` is `invalid_request`
+rather than a write that applies unguarded and answers 200.
+
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
 committed logical commit only after its WAL segment is durably written and the
@@ -581,6 +585,16 @@ are what a load balancer probes: `GET /health` and `GET /readiness`.
 Everything else, `GET /v0/capabilities` included, requires the token. The
 generated `openapi.json` states this as a global `bearer_auth` requirement
 with those two operations overriding it.
+
+Request bodies reject unknown fields, at every level of nesting, with 400
+`invalid_request`. Most request fields are optional and several of those are
+preconditions, so a field the server does not recognize cannot be ignored: a
+misspelled guard would decode to its default and the server would carry out
+a different request than the caller asked for. Response bodies are the other
+way round, because a client must keep working against a server newer than
+itself and so must tolerate fields it does not know (section 7.2). The
+encoding conventions in `format.md` state the same two rules and extend them
+to durable shapes.
 
 The token is a bearer credential and so is everything the upload routes hand
 back: a presigned direct-upload URL is a capability to write to the

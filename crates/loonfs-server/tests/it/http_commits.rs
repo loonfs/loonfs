@@ -7,8 +7,8 @@ use crate::common::start_server;
 use loonfs::publish::CommitRequest as CoreCommitRequest;
 use loonfs::{CreateNamespaceOptions, FsWriter, ListChangesOptions, StoreConfig};
 use loonfs_api::{
-    v0::CommittedChange, AbsolutePath, ChangeSeq, CommitId, CommitRequest, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, FilesystemOperation,
+    v0::CommittedChange, AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, FilesystemOperation, RevisionNo,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
@@ -716,6 +716,109 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         }
         other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
     }
+
+    harness.server.abort();
+}
+
+/// A misspelled guard fails the request rather than the precondition.
+///
+/// Every optimistic-concurrency guard on a commit is an optional field, so
+/// before the commit body rejected unknown fields a typo decoded to `None`
+/// and the write applied unguarded — a lost update reported as a 200. The two
+/// bodies below differ only in how `expected_revision_no` is spelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-strict-commit",
+        "http-strict-commit",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let first = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
+    let second = stage_uploaded_content(&harness.client, &namespace, SECOND_BYTES).await;
+
+    harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("guarded-create"),
+                message: None,
+                content_tokens: vec![validated_content_token(&first)],
+                operations: vec![FilesystemOperation::PutFile {
+                    path: absolute(FIRST_FILE),
+                    content_ref: first.content_ref.clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
+                }],
+            },
+        )
+        .await
+        .expect("the file is created at revision 1");
+
+    // One replace, spelled two ways. Both name the revision that is actually
+    // current, so the spelling of the guard is the only difference.
+    let replace = |commit: &str, guard: &str| {
+        let mut put = serde_json::json!({
+            "kind": "put_file",
+            "path": FIRST_FILE,
+            "content_ref": second.content_ref.clone(),
+            "behavior": "replace"
+        });
+        put[guard] = serde_json::json!(1);
+        serde_json::json!({
+            "commit_id": commit,
+            "content_tokens": [validated_content_token(&second)],
+            "operations": [put]
+        })
+    };
+
+    let ureq::Error::Status(status, response) = *send_commit_json(
+        &harness.server_url,
+        &namespace,
+        &replace("misspelled-guard", "expected_revsion_no"),
+    )
+    .expect_err("a misspelled guard is not a commit this API accepts") else {
+        unreachable!("a rejected commit body returns an HTTP status");
+    };
+    assert_eq!(status, 400);
+    let error: ApiError =
+        serde_json::from_reader(response.into_reader()).expect("API error envelope");
+    assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+
+    // The rejected body wrote nothing: the file is still the one the guarded
+    // create published.
+    let unchanged = harness
+        .client
+        .stat_path(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
+        .await
+        .expect("the file is still there");
+    assert_eq!(unchanged.revision_no, Some(RevisionNo(1)));
+    assert_eq!(unchanged.content_ref.as_ref(), Some(&first.content_ref));
+
+    // Spelled correctly the same body commits, which is what says the typo
+    // was the only thing wrong with it.
+    send_commit_json(
+        &harness.server_url,
+        &namespace,
+        &replace("spelled-guard", "expected_revision_no"),
+    )
+    .expect("the guard spelled correctly commits");
+    let replaced = harness
+        .client
+        .stat_path(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
+        .await
+        .expect("the replace landed");
+    assert_eq!(replaced.revision_no, Some(RevisionNo(2)));
+    assert_eq!(replaced.content_ref.as_ref(), Some(&second.content_ref));
 
     harness.server.abort();
 }
