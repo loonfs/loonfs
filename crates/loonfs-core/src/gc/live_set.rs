@@ -475,9 +475,9 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     if !namespace_deleted && head.seq > floor_seq {
         // The loader keeps no budget of its own, because foreground reads
         // and the changefeed share it. The pass caps the load at what it
-        // has left to spend instead. The loader then reads no more segment
-        // bodies than the pass can pay for, and the charge below can never
-        // go past the bound.
+        // has left to spend instead. The loader then issues no more
+        // requests than the pass can pay for, and the charge below can
+        // never go past the bound.
         let remaining = budget.remaining();
         if remaining == 0 {
             return Ok(LiveSetCollection::BudgetExhausted);
@@ -498,19 +498,27 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
         })?;
+        // Either way the pass pays for the requests the loader issued, not
+        // for the segments it came back with. The two differ when a request
+        // fails or a hint names an object the chain does not use, and the
+        // store was asked either way.
         let chain = match load {
-            WalChainLoad::Complete(chain) => chain,
-            // The load stopped where the budget did. The pass pays for the
-            // bodies it read and then stops, because a partial chain roots
-            // nothing.
-            WalChainLoad::LimitReached { segments_fetched } => {
-                budget.charge_block(u64::try_from(segments_fetched).unwrap_or(u64::MAX));
+            WalChainLoad::Complete {
+                chain,
+                requests_issued,
+            } => {
+                budget.charge_block(u64::try_from(requests_issued).unwrap_or(u64::MAX));
+                chain
+            }
+            // The load stopped where the budget did. The pass pays for what
+            // it spent getting there and then stops, because a partial
+            // chain roots nothing.
+            WalChainLoad::LimitReached { requests_issued } => {
+                budget.charge_block(u64::try_from(requests_issued).unwrap_or(u64::MAX));
                 return Ok(LiveSetCollection::BudgetExhausted);
             }
         };
-        let segments = chain.segments();
-        budget.charge_block(u64::try_from(segments.len()).unwrap_or(u64::MAX));
-        for segment in segments {
+        for segment in chain.segments() {
             live.wal_segments.insert(segment.object_key().to_owned());
             // The bodies are decoded and validated right here, so the
             // content these commits name is read off them now rather than

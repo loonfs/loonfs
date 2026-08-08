@@ -17,9 +17,10 @@ use super::config::GcConfig;
 /// * one manifest opened, whether to mark its tables or by the content
 ///   reference scan;
 /// * one page of revision rows read out of an opened manifest;
-/// * the retained WAL chain, charged as one block of one unit per segment
-///   body read. The pass caps that load at what it has left, so the chain
-///   cannot read past the bound either;
+/// * the retained WAL chain, charged as one block of one unit per request
+///   the load issued for a segment body — a failed request included, since
+///   the store was asked. The pass caps that load at what it has left, so
+///   the chain cannot read past the bound either;
 /// * one enumerated candidate key, decided — the original meaning of
 ///   `max_objects`.
 ///
@@ -92,8 +93,8 @@ impl PassBudget {
         true
     }
 
-    /// Charges `units` for one block of work already done — the segment
-    /// bodies one chain load read. The caller sizes that load by what
+    /// Charges `units` for one block of work already done — the requests
+    /// one chain load issued. The caller sizes that load by what
     /// [`PassBudget::remaining`] reports, so a block never charges more
     /// than the budget had left.
     pub(super) fn charge_block(&mut self, units: u64) {

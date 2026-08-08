@@ -6,7 +6,7 @@ use super::{ValidatedWalChain, ValidatedWalSegment, WalChainLoadError, WalChainL
 use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalSegmentEnvelope};
-use loonfs_api::ChangeSeq;
+use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
@@ -30,23 +30,49 @@ fn hints_in_gap(
 
 /// Fetches the hinted segments covering the replay gap concurrently.
 ///
-/// Failures and misses are silently dropped: the chain walk re-fetches
-/// anything the prefetch did not deliver, so hints can only save latency.
+/// Failures and misses do not stop the load: the chain walk fetches anything
+/// the prefetch did not deliver, and a real read error surfaces there as
+/// [`WalChainLoadError::ReadWal`]. Hints therefore change where the bytes
+/// come from, never what the load returns.
+///
+/// A failed request is still a request, so the caller counts it against the
+/// fetch budget and the walk's own fetch of that segment counts again. A
+/// flaky store then drains the budget faster than the chain is long, which
+/// an operator reads as a budget problem. The failures are reported here,
+/// once per load, so the store shows up as the cause.
 async fn prefetch_recent_segments<S: ObjectStore + ?Sized>(
     store: &S,
+    namespace_id: &NamespaceId,
     in_gap: &[String],
 ) -> HashMap<String, Bytes> {
     let mut prefetched = HashMap::new();
+    let mut failed_requests: usize = 0;
+    let mut first_error: Option<String> = None;
     for chunk in in_gap.chunks(RECENT_SEGMENT_PREFETCH_CONCURRENCY) {
-        let fetches = chunk.iter().map(|object_key| async move {
-            let bytes = store.get(object_key, None).await.ok().flatten()?;
-            Some((object_key.clone(), bytes))
-        });
-        prefetched.extend(
-            futures::future::join_all(fetches)
-                .await
-                .into_iter()
-                .flatten(),
+        let fetches = chunk
+            .iter()
+            .map(|object_key| async move { (object_key, store.get(object_key, None).await) });
+        for (object_key, result) in futures::future::join_all(fetches).await {
+            match result {
+                Ok(Some(bytes)) => {
+                    prefetched.insert(object_key.clone(), bytes);
+                }
+                // A miss is not an error here. The object may legitimately
+                // be gone, and the walk reports that on its own fetch.
+                Ok(None) => {}
+                Err(error) => {
+                    failed_requests += 1;
+                    first_error.get_or_insert_with(|| error.to_string());
+                }
+            }
+        }
+    }
+    if let Some(first_error) = first_error {
+        tracing::info!(
+            namespace_id = %namespace_id,
+            failed_requests,
+            %first_error,
+            "WAL segment prefetch requests failed; the walk fetches those segments again out of the same budget"
         );
     }
     prefetched
@@ -56,9 +82,11 @@ async fn prefetch_recent_segments<S: ObjectStore + ?Sized>(
 struct WalkedChain {
     /// The segments the walk found, oldest first.
     segments: Vec<ValidatedWalSegment>,
-    /// How many segment bodies the walk read from the store. Every read
-    /// counts, including a prefetch that missed and a hint the walk never
-    /// used.
+    /// How many `get` requests the load issued, prefetch included. A
+    /// request that failed or missed counts, because the round trip
+    /// happened; a segment the prefetch delivered is not counted a second
+    /// time when the walk consumes it. This is never more than the
+    /// `max_segment_fetches` the caller gave.
     fetches: usize,
     /// `true` when the walk stopped at its fetch limit instead of reaching
     /// the base. `segments` is then a partial chain. Nothing may replay
@@ -85,16 +113,26 @@ impl WalkedChain {
 }
 
 /// What a bounded chain load produced.
+///
+/// Both outcomes report `requests_issued`: how many `get` requests the load
+/// sent for segment bodies, prefetch included. A caller that meters its own
+/// reads charges for that number and nothing else, so its budget drains by
+/// what the store was actually asked for. It is never more than the limit
+/// the caller gave.
 pub(crate) enum WalChainLoad {
     /// The whole chain was read inside the fetch limit.
-    Complete(ValidatedWalChain),
-    /// The load stopped at the fetch limit. `segments_fetched` is how many
-    /// segment bodies it read before it stopped, and it is never more than
-    /// the limit the caller gave.
-    LimitReached { segments_fetched: usize },
+    Complete {
+        chain: ValidatedWalChain,
+        requests_issued: usize,
+    },
+    /// The load stopped at the fetch limit. The chain it walked is partial,
+    /// so it is dropped rather than returned, but the requests it spent
+    /// getting there are reported so the caller can charge for them.
+    LimitReached { requests_issued: usize },
 }
 
-/// Loads the chain, reading at most `max_segment_fetches` segment bodies.
+/// Loads the chain, issuing at most `max_segment_fetches` requests for
+/// segment bodies.
 ///
 /// A caller that meters its own reads uses this so that the loader cannot
 /// read past what the caller may pay for. The loader itself keeps no
@@ -114,13 +152,13 @@ pub(crate) async fn load_wal_chain_within<S: ObjectStore + ?Sized>(
     let walked = walk_chain(store, &request, max_segment_fetches).await?;
     if walked.stopped_at_limit {
         return Ok(WalChainLoad::LimitReached {
-            segments_fetched: walked.fetches,
+            requests_issued: walked.fetches,
         });
     }
-    Ok(WalChainLoad::Complete(finish_chain(
-        &request,
-        walked.segments,
-    )?))
+    Ok(WalChainLoad::Complete {
+        chain: finish_chain(&request, walked.segments)?,
+        requests_issued: walked.fetches,
+    })
 }
 
 #[tracing::instrument(
@@ -142,8 +180,8 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
     finish_chain(&request, walked.segments)
 }
 
-/// Walks the chain links from the visible tip down to the base, reading at
-/// most `max_segment_fetches` segment bodies.
+/// Walks the chain links from the visible tip down to the base, issuing at
+/// most `max_segment_fetches` requests for segment bodies.
 async fn walk_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: &WalChainLoadRequest<'_>,
@@ -175,17 +213,25 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
 
     let stop_after_seq = request.stop_after_seq.unwrap_or(request.chain_base_seq);
     let in_gap = hints_in_gap(request.recent_segments, stop_after_seq, request.head_seq);
-    // The prefetch issues one request per hint, and it issues them before
-    // the walk can decide it has read enough. The walk stops here instead,
-    // having read nothing at all.
-    if in_gap.len() > max_segment_fetches {
-        return Ok(WalkedChain::stopped_at_limit(0));
-    }
-    let mut fetches = in_gap.len();
-    let mut prefetched = if in_gap.is_empty() {
+    // The invariant this function maintains: `fetches` counts every `get`
+    // request issued for a segment body, prefetch included, and it never
+    // exceeds `max_segment_fetches`.
+    //
+    // The prefetch issues its requests before the walk can decide it has
+    // read enough, so it takes its share of the budget up front and the
+    // walk spends what is left. Hints are newest first and the walk starts
+    // at the tip, so the prefix the budget covers is the part of the gap
+    // the walk reaches first. A hint list longer than the budget is cut
+    // down to the budget rather than refused: the walk reads what the
+    // budget covers and reports what it spent, so a caller that meters its
+    // reads is told where its budget went instead of being handed an empty
+    // answer that claims to have cost nothing.
+    let prefetched_hints = in_gap.len().min(max_segment_fetches);
+    let mut fetches = prefetched_hints;
+    let mut prefetched = if prefetched_hints == 0 {
         HashMap::new()
     } else {
-        prefetch_recent_segments(store, &in_gap).await
+        prefetch_recent_segments(store, request.namespace_id, &in_gap[..prefetched_hints]).await
     };
     let mut reversed = Vec::new();
     loop {
@@ -195,6 +241,8 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
 
         let object_key = pointer.object_key.clone();
         let encoded_bytes = match prefetched.remove(&object_key) {
+            // The prefetch already paid for this body, so consuming it
+            // costs nothing further.
             Some(bytes) => bytes,
             None => {
                 if fetches >= max_segment_fetches {

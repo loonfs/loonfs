@@ -16,7 +16,8 @@ use loonfs_objectstore::keys::{wal_segment, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
-    ConcurrencyWatchStore, CountingStore, KeyPredicate, OperationClass, RecordingStore,
+    ConcurrencyWatchStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    RecordingStore,
 };
 use std::borrow::Cow;
 use tempfile::tempdir;
@@ -654,8 +655,8 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
     .await
     .expect("bounded chain load");
     match bounded {
-        WalChainLoad::Complete(_) => panic!("a five-segment chain does not fit in two fetches"),
-        WalChainLoad::LimitReached { segments_fetched } => assert_eq!(segments_fetched, 2),
+        WalChainLoad::Complete { .. } => panic!("a five-segment chain does not fit in two fetches"),
+        WalChainLoad::LimitReached { requests_issued } => assert_eq!(requests_issued, 2),
     }
     assert_eq!(
         store.count(OperationClass::Get),
@@ -663,8 +664,10 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
         "the walk reads no more bodies than the limit allows"
     );
 
-    // The hinted gap is known before the prefetch issues anything, so a
-    // hint list longer than the limit costs no read at all.
+    // A hint list longer than the limit is cut down to what the limit
+    // covers rather than refused. The prefetch takes the newest hints,
+    // which is where the walk starts, and the walk stops once the limit is
+    // spent — reporting what it spent, not zero.
     let mut newest_first = pointers.clone();
     newest_first.reverse();
     store.reset();
@@ -683,10 +686,14 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
     .await
     .expect("bounded hinted load");
     match hinted {
-        WalChainLoad::Complete(_) => panic!("five hints do not fit in two fetches"),
-        WalChainLoad::LimitReached { segments_fetched } => assert_eq!(segments_fetched, 0),
+        WalChainLoad::Complete { .. } => panic!("five hints do not fit in two fetches"),
+        WalChainLoad::LimitReached { requests_issued } => assert_eq!(requests_issued, 2),
     }
-    assert_eq!(store.count(OperationClass::Get), 0);
+    assert_eq!(
+        store.count(OperationClass::Get),
+        2,
+        "the prefetch issued the requests the limit allows, not none and not five"
+    );
 }
 
 /// A limit that covers the chain exactly does not truncate it. The load
@@ -718,12 +725,130 @@ async fn a_limit_that_covers_the_chain_loads_all_of_it() {
         .await
         .expect("bounded chain load");
     match bounded {
-        WalChainLoad::Complete(chain) => assert_eq!(chain.segments(), unbounded.segments()),
-        WalChainLoad::LimitReached { segments_fetched } => {
-            panic!("a five-segment chain fits in five fetches, not {segments_fetched}")
+        WalChainLoad::Complete {
+            chain,
+            requests_issued,
+        } => {
+            assert_eq!(chain.segments(), unbounded.segments());
+            assert_eq!(requests_issued, 5);
+        }
+        WalChainLoad::LimitReached { requests_issued } => {
+            panic!("a five-segment chain fits in five fetches, not {requests_issued}")
         }
     }
     assert_eq!(store.count(OperationClass::Get), 5);
+}
+
+/// A prefetch request that fails is a request the store answered, so it
+/// counts like any other. The walk fetches that segment itself and the
+/// chain still loads. The number the load reports is the number of requests
+/// it issued: one failed prefetch and one walk fetch for each of the three
+/// segments, which is what the counting wrapper saw.
+#[tokio::test]
+async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let pointers = write_linked_chain(&inner, &namespace_id, 3).await;
+    let tip = pointers.last().expect("a chain was written").clone();
+    let mut newest_first = pointers.clone();
+    newest_first.reverse();
+
+    // The prefetch completes before the walk fetches anything, so arming
+    // one failure per hint fails every prefetch request and leaves the
+    // walk's own fetches to succeed.
+    let failing = FailStore::new(
+        inner,
+        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        OperationClass::Get,
+        InjectedError::Transport("the store is flaky".to_owned()),
+    );
+    failing.fail_next(newest_first.len());
+    let store = CountingStore::new(failing, KeyPredicate::any());
+
+    let loaded = load_wal_chain_within(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(tip),
+            stop_after_seq: None,
+            recent_segments: &newest_first,
+        },
+        16,
+    )
+    .await
+    .expect("the walk fetches what the prefetch could not deliver");
+
+    let issued = store.count(OperationClass::Get);
+    assert_eq!(
+        issued, 6,
+        "three failed prefetch requests and three walk fetches"
+    );
+    match loaded {
+        WalChainLoad::Complete {
+            chain,
+            requests_issued,
+        } => {
+            assert_eq!(chain.segments().len(), 3);
+            assert_eq!(
+                requests_issued, issued,
+                "the load reports the requests it issued"
+            );
+        }
+        WalChainLoad::LimitReached { requests_issued } => {
+            panic!("three segments fit in sixteen requests, not {requests_issued}")
+        }
+    }
+}
+
+/// The limit bounds every request the load issues, prefetch included. A
+/// store that fails every prefetch cannot make the load exceed it: the walk
+/// stops once the failures have spent the limit.
+#[tokio::test]
+async fn failed_prefetch_requests_count_against_the_limit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let pointers = write_linked_chain(&inner, &namespace_id, 3).await;
+    let tip = pointers.last().expect("a chain was written").clone();
+    let mut newest_first = pointers.clone();
+    newest_first.reverse();
+
+    let failing = FailStore::new(
+        inner,
+        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        OperationClass::Get,
+        InjectedError::Transport("the store is flaky".to_owned()),
+    );
+    failing.fail_all();
+    let store = CountingStore::new(failing, KeyPredicate::any());
+
+    let loaded = load_wal_chain_within(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(tip),
+            stop_after_seq: None,
+            recent_segments: &newest_first,
+        },
+        3,
+    )
+    .await
+    .expect("a load whose limit the failures spent");
+
+    match loaded {
+        WalChainLoad::Complete { .. } => panic!("no body was ever delivered"),
+        WalChainLoad::LimitReached { requests_issued } => assert_eq!(requests_issued, 3),
+    }
+    assert_eq!(
+        store.count(OperationClass::Get),
+        3,
+        "the limit bounds prefetch requests exactly as it bounds walk fetches"
+    );
 }
 
 async fn write_create_directory_segment(
