@@ -652,13 +652,16 @@ pub(crate) struct StagedStream {
 /// — the LoonFS write path hashed the complete payload itself — and it is
 /// the constructor, not a convention, that guarantees it.
 ///
-/// The write is create-only, exactly like the buffered staging write, and
-/// degrades to an overwrite past the store's multipart threshold for the
-/// same reason that one does: a provider assembles a multipart object
-/// unconditionally. On a key named by 128 random bits the condition is a
-/// corruption tripwire rather than a concurrency control, so what it
-/// catches either way is a key occupied by something this session did not
-/// write.
+/// The write is create-only, exactly like the buffered staging write. Past
+/// the store's multipart threshold the store cannot make that condition part
+/// of the write — a provider assembles a multipart object unconditionally —
+/// so it reads the key instead, immediately before the assembly.
+/// `already_present` is therefore authoritative about a key that was already
+/// occupied when this write started, and blind to a writer that lands inside
+/// that window. Only another request against the same upload session can be
+/// that writer, because the key is named by 128 random bits one session
+/// owns, and [`crate::protocol::complete_upload`] reads the object again
+/// before it freezes the reference.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,

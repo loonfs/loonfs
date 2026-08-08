@@ -545,11 +545,16 @@ impl MultipartWrite<'_> {
     /// is: there is no payload left in memory to prove a landed write
     /// against. An ambiguous completion is a failure, and the caller abandons
     /// the upload.
+    ///
+    /// `mode` is evaluated by [`Self::precondition_holds`] once the stream
+    /// has been consumed and immediately before the completion, because the
+    /// completion itself cannot carry it.
     async fn upload_stream_and_complete(
         &self,
         upload_id: &provider_store::MultipartId,
         head: Bytes,
         mut parts_reader: PartReader,
+        mode: &PutMode,
     ) -> Result<u64> {
         let mut size_bytes = head.len() as u64;
         let mut parts = vec![self.upload_part(upload_id, 0, head).await?];
@@ -568,6 +573,8 @@ impl MultipartWrite<'_> {
             parts.push(self.upload_part(upload_id, parts.len(), payload).await?);
         }
 
+        self.precondition_holds(mode).await?;
+
         match self
             .multipart
             .complete_multipart(self.path, upload_id, parts)
@@ -575,6 +582,40 @@ impl MultipartWrite<'_> {
         {
             Ok(_) => Ok(size_bytes),
             Err(err) => Err(map_provider_error(self.key, err)),
+        }
+    }
+
+    /// Evaluates the caller's write mode against the object at the key, in
+    /// the last moment before the completion assembles over it.
+    ///
+    /// A provider assembles a multipart upload unconditionally, so this
+    /// separate read is the only way a streamed create-only or
+    /// compare-and-swap write can be refused at all. Two things follow, and
+    /// both are contract:
+    ///
+    /// - It runs after the stream has been consumed, which is what
+    ///   [`ObjectStore::put_streamed`] promises a caller that folds a digest
+    ///   over the same stream: a refused write still leaves that caller a
+    ///   digest over the complete payload.
+    /// - It is not atomic with the completion. A key that was already
+    ///   occupied is refused; a writer that lands between this read and the
+    ///   completion is not, and this write assembles over it.
+    async fn precondition_holds(&self, mode: &PutMode) -> Result<()> {
+        let refused = || {
+            Err(ObjectStoreError::PreconditionFailed {
+                object_key: self.key.to_owned(),
+            })
+        };
+        match mode {
+            PutMode::Overwrite => Ok(()),
+            PutMode::CreateIfAbsent => match self.store.head(self.key).await? {
+                None => Ok(()),
+                Some(_) => refused(),
+            },
+            PutMode::CompareAndSwap { expected_etag } => match self.store.head(self.key).await? {
+                Some(current) if current.etag.as_deref() == Some(expected_etag.as_str()) => Ok(()),
+                _ => refused(),
+            },
         }
     }
 
@@ -901,10 +942,13 @@ impl ObjectStore for ProviderObjectStore {
     ///
     /// The first part is cut before anything is decided. A payload that
     /// ends inside it is an ordinary [`ObjectStore::put`] with the caller's
-    /// mode intact — which is the same size line `put` itself draws, so a
-    /// small streamed write behaves exactly like a small buffered one.
-    /// Anything longer goes through the provider's multipart upload, whose
-    /// completion is an unconditional overwrite.
+    /// mode enforced by the provider — which is the same size line `put`
+    /// itself draws, so a small streamed write behaves exactly like a small
+    /// buffered one. Anything longer goes through the provider's multipart
+    /// upload. A provider assembles one unconditionally, so a conditional
+    /// mode is evaluated by [`MultipartWrite::precondition_holds`] against a
+    /// separate read of the key, taken after the payload is consumed and
+    /// immediately before the completion.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         let path = self.to_path(key)?;
         let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
@@ -940,7 +984,7 @@ impl ObjectStore for ProviderObjectStore {
             upload_id: upload_id.clone(),
         };
         let result = upload
-            .upload_stream_and_complete(&upload_id, head, reader)
+            .upload_stream_and_complete(&upload_id, head, reader, &mode)
             .await;
         abort_on_drop.disarm();
         match result {
@@ -2426,6 +2470,66 @@ mod tests {
             store.get(MULTIPART_KEY, None).await.expect("get"),
             Some(Bytes::from(payload))
         );
+    }
+
+    /// Create-only means the same thing past one part as it does inside
+    /// one. The provider assembles a multipart upload unconditionally, so
+    /// the store evaluates the condition itself, and the object already at
+    /// the key survives.
+    #[tokio::test]
+    async fn a_streamed_multipart_put_refuses_an_occupied_key() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let occupant = multipart_payload(7);
+        seed_scoped_object(&flaky, MULTIPART_KEY, Bytes::from(occupant.clone())).await;
+        let payload = multipart_payload(1300);
+
+        let error = store
+            .put_streamed(
+                MULTIPART_KEY,
+                streamed(&payload, 100),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect_err("the key is taken and create-only means it");
+
+        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
+        assert_eq!(
+            part_attempts(&flaky, 2),
+            1,
+            "the whole payload is consumed before the condition is evaluated",
+        );
+        assert_eq!(
+            flaky.gets.load(Ordering::SeqCst),
+            1,
+            "one read decides the condition",
+        );
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            flaky.multipart_aborts.load(Ordering::SeqCst),
+            1,
+            "the refused upload is aborted, not left holding parts",
+        );
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(occupant)),
+        );
+    }
+
+    /// An overwrite has no condition to evaluate, so it costs no read.
+    #[tokio::test]
+    async fn a_streamed_multipart_overwrite_reads_nothing() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let payload = multipart_payload(1300);
+
+        store
+            .put_streamed(MULTIPART_KEY, streamed(&payload, 100), PutMode::Overwrite)
+            .await
+            .expect("streamed multipart overwrite");
+
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 0);
     }
 
     /// An empty stream still writes an object, and still writes it the way
