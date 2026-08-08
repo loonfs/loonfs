@@ -173,12 +173,27 @@ impl MetadataIndexes {
 
     pub(super) fn record_bind(&mut self, record: &DirentryBindRecord) {
         self.indexed_seq = self.indexed_seq.max(record.bind_seq);
+        // A bind older than the child's active binding is already
+        // superseded: a child has one active parent, so the newer binding
+        // proves this one was replaced. It must mutate nothing at all —
+        // running the name-slot eviction below first would orphan whichever
+        // child currently holds the incoming record's name.
+        if let Some(previous_parent_for_child) =
+            self.active_parent_by_child.get(&record.child_inode_id)
+        {
+            if bind_order_key(record) < bind_order_key(previous_parent_for_child) {
+                return;
+            }
+        }
         let parent_name_key = (record.parent_inode_id, record.name_key.clone());
-        // The unconditional active-map install below is only correct because
-        // binds for one (parent, name) arrive in append order — WAL apply
-        // walks deltas in seq order and manifest projection pushes rows in
-        // row-key order, which is per-name seq order. Global seq order
-        // across names is NOT required or assumed.
+        // The active-map installs below require records to arrive in global
+        // seq order: the cross-name eviction removes whatever binding the
+        // child currently holds, so an older bind arriving after a newer one
+        // would replace the newer binding with the older. WAL apply supplies
+        // that order (commits in seq order, deltas in order within a
+        // commit). Manifest projection does not use this path; it rebuilds
+        // the indexes from scratch. The guard above keeps an out-of-order
+        // caller from corrupting the maps.
         debug_assert!(
             self.latest_bind_by_parent_name
                 .get(&parent_name_key)
@@ -383,4 +398,77 @@ fn bind_order_key(record: &DirentryBindRecord) -> (ChangeSeq, u32) {
 
 fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {
     (record.generation.seq, record.generation.delta_index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loonfs_api::{DisplayName, NameKey};
+
+    fn bind(parent: u64, name: &str, child: u64, seq: u64) -> DirentryBindRecord {
+        DirentryBindRecord {
+            parent_inode_id: InodeId(parent),
+            name_key: NameKey::parse(name).expect("valid name key"),
+            display_name: DisplayName::parse(name).expect("valid display name"),
+            child_inode_id: InodeId(child),
+            bind_seq: ChangeSeq(seq),
+            bind_delta_index: 0,
+        }
+    }
+
+    /// A bind that is older than the child's active binding must not evict
+    /// it. WAL apply never produces this order; the guard covers a future
+    /// caller that does.
+    #[test]
+    fn an_out_of_order_bind_does_not_evict_the_childs_newer_binding() {
+        let mut indexes = MetadataIndexes::default();
+        let newer = bind(2, "renamed", 7, 30);
+        let older = bind(1, "original", 7, 10);
+
+        indexes.record_bind(&newer);
+        indexes.record_bind(&older);
+
+        let parent = indexes
+            .active_parent_for_child(InodeId(7))
+            .expect("the child keeps its newer binding");
+        assert_eq!(parent.bind_seq, ChangeSeq(30));
+        assert!(indexes
+            .active_child(
+                InodeId(2),
+                &NameKey::parse("renamed").expect("valid name key")
+            )
+            .is_some());
+        assert!(indexes
+            .active_child(
+                InodeId(1),
+                &NameKey::parse("original").expect("valid name key")
+            )
+            .is_none());
+    }
+
+    /// A stale bind must mutate nothing: rejecting it after evicting the
+    /// name slot would orphan whichever child currently holds that name.
+    #[test]
+    fn a_stale_bind_does_not_orphan_the_name_slots_current_child() {
+        let mut indexes = MetadataIndexes::default();
+        indexes.record_bind(&bind(1, "original", 8, 20));
+        indexes.record_bind(&bind(1, "renamed", 7, 30));
+        indexes.record_bind(&bind(1, "original", 7, 10));
+
+        let seven = indexes
+            .active_parent_for_child(InodeId(7))
+            .expect("child 7 keeps its newer binding");
+        assert_eq!(seven.bind_seq, ChangeSeq(30));
+        let eight = indexes
+            .active_parent_for_child(InodeId(8))
+            .expect("child 8 keeps its binding");
+        assert_eq!(eight.bind_seq, ChangeSeq(20));
+        let original = indexes
+            .active_child(
+                InodeId(1),
+                &NameKey::parse("original").expect("valid name key"),
+            )
+            .expect("the name slot still holds child 8");
+        assert_eq!(original.child_inode_id, InodeId(8));
+    }
 }
