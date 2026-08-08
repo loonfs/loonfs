@@ -404,10 +404,11 @@ pub struct HeadState {
     /// Accepted tip of the visible WAL chain, or `None` before the first commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
-    /// Bounded newest-first accelerator over the visible chain, always
-    /// including the tip; rewritten by the commit CAS. Chain links remain
-    /// the only history authority — any disagreement resolves in favor of
-    /// the chain, and this array never protects anything from GC.
+    /// Bounded newest-first accelerator over the visible chain, whose first
+    /// entry is always `visible_wal_tip`; rewritten by the commit CAS and
+    /// checked at decode. Chain links remain the only history authority —
+    /// any disagreement resolves in favor of the chain, and this array never
+    /// protects anything from GC.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_segments: Vec<WalSegmentPointer>,
     /// Lifecycle state. Absent means active, on read and on write, so the
@@ -463,11 +464,38 @@ impl From<StrictWalSegmentPointer> for WalSegmentPointer {
 }
 
 impl<'de> Deserialize<'de> for HeadState {
+    /// Reads one head and proves the one relationship its shape cannot: that
+    /// the replay accelerator begins at the visible WAL tip.
+    ///
+    /// Every publisher writes `visible_wal_tip` and `recent_segments` in the
+    /// same compare-and-swap. A namespace before its first commit has
+    /// neither, and every namespace after it has the tip as the
+    /// accelerator's first entry. Readers count the visible WAL tail from a
+    /// hint run that starts at the tip, so a head that disagrees with itself
+    /// is refused at load like any other corruption.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let state = StrictHeadState::deserialize(deserializer)?;
+        let visible_wal_tip = state.visible_wal_tip.map(WalSegmentPointer::from);
+        let recent_segments: Vec<WalSegmentPointer> =
+            state.recent_segments.into_iter().map(Into::into).collect();
+        if recent_segments.first() != visible_wal_tip.as_ref() {
+            let tip = match &visible_wal_tip {
+                Some(pointer) => format!("is `{}`", pointer.segment_id),
+                None => "is absent".to_owned(),
+            };
+            let accelerator = match recent_segments.first() {
+                Some(pointer) => format!("begins at `{}`", pointer.segment_id),
+                None => "is empty".to_owned(),
+            };
+            return Err(serde::de::Error::custom(format!(
+                "head for namespace `{}` at seq `{}` must carry its visible WAL tip as the \
+                 first `recent_segments` entry: the tip {tip}, and the accelerator {accelerator}",
+                state.namespace_id, state.seq,
+            )));
+        }
         Ok(Self {
             namespace_id: state.namespace_id,
             content_store_id: state.content_store_id,
@@ -477,8 +505,8 @@ impl<'de> Deserialize<'de> for HeadState {
             writer_epoch: state.writer_epoch,
             writer: state.writer,
             next_inode_id: state.next_inode_id,
-            visible_wal_tip: state.visible_wal_tip.map(Into::into),
-            recent_segments: state.recent_segments.into_iter().map(Into::into).collect(),
+            visible_wal_tip,
+            recent_segments,
             state: state.state,
         })
     }
@@ -1096,6 +1124,94 @@ mod tests {
 
         serde_json::from_value::<HeadState>(missing)
             .expect_err("head without its immutable identity must be rejected");
+    }
+
+    /// One WAL pointer as it appears inside a durable head payload.
+    fn wal_pointer_json(segment_id: &str, start_seq: u64, end_seq: u64) -> serde_json::Value {
+        serde_json::json!({
+            "object_key": format!("namespaces/demo/wal/{segment_id}.wal.zst"),
+            "segment_id": segment_id,
+            "start_seq": start_seq,
+            "end_seq": end_seq,
+            "payload_checksum": format!("sha256:{}", "b".repeat(64)),
+        })
+    }
+
+    /// A decodable head payload carrying whatever tip and accelerator the
+    /// caller wants to present. Both fields are omitted when empty, exactly
+    /// as the encoder writes them.
+    fn head_json(
+        visible_wal_tip: Option<serde_json::Value>,
+        recent_segments: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut head = serde_json::json!({
+            "namespace_id": "demo",
+            "content_store_id": "cs_0123456789abcdef0123456789abcdef",
+            "seq": 2,
+            "head_commit_id": GENESIS_COMMIT_ID,
+            "writer_epoch": 0,
+            "next_inode_id": 2
+        });
+        if let Some(tip) = visible_wal_tip {
+            head["visible_wal_tip"] = tip;
+        }
+        if !recent_segments.is_empty() {
+            head["recent_segments"] = serde_json::Value::Array(recent_segments);
+        }
+        head
+    }
+
+    #[test]
+    fn head_with_a_tip_and_no_accelerator_is_rejected() {
+        // The commit that installs a tip writes it into the accelerator in
+        // the same compare-and-swap, so a head holding one without the other
+        // never landed as written.
+        let tip = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+
+        let error = serde_json::from_value::<HeadState>(head_json(Some(tip), Vec::new()))
+            .expect_err("a tip with no accelerator entry must be rejected");
+        assert!(
+            error.to_string().contains("recent_segments"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn head_whose_accelerator_does_not_begin_at_the_tip_is_rejected() {
+        let tip = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        let older = wal_pointer_json("00000000000000000001-0123456789abcdef", 1, 1);
+
+        serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), vec![older, tip]))
+            .expect_err("an accelerator that starts below the tip must be rejected");
+    }
+
+    #[test]
+    fn head_with_an_accelerator_and_no_tip_is_rejected() {
+        let tip = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        let older = wal_pointer_json("00000000000000000001-0123456789abcdef", 1, 1);
+
+        serde_json::from_value::<HeadState>(head_json(None, vec![tip, older]))
+            .expect_err("an accelerator naming segments no tip points at must be rejected");
+    }
+
+    #[test]
+    fn head_decodes_with_no_tip_at_all_or_with_the_tip_leading_its_accelerator() {
+        // A namespace before its first commit carries neither.
+        let genesis = serde_json::from_value::<HeadState>(head_json(None, Vec::new()))
+            .expect("a head with no visible tip decodes");
+        assert_eq!(genesis.visible_wal_tip, None);
+        assert!(genesis.recent_segments.is_empty());
+
+        let tip = wal_pointer_json("00000000000000000002-fedcba9876543210", 2, 2);
+        let older = wal_pointer_json("00000000000000000001-0123456789abcdef", 1, 1);
+        let committed =
+            serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), vec![tip, older]))
+                .expect("a head whose accelerator begins at its tip decodes");
+        assert_eq!(
+            committed.recent_segments.first(),
+            committed.visible_wal_tip.as_ref()
+        );
+        assert_eq!(committed.recent_segments.len(), 2);
     }
 
     #[test]

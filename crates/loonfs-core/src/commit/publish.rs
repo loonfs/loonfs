@@ -125,19 +125,16 @@ pub fn prepare_commit_head_publish(
 /// Rebuilds the head's replay accelerator: newest first, tip included,
 /// capped at [`RECENT_SEGMENTS_LIMIT`]. Readers reaching past it walk the
 /// chain links, which remain the only history authority.
+///
+/// Head decoding rejects a head whose accelerator does not begin at its own
+/// tip. Prepending the new tip to that list therefore keeps it gap-free.
 fn next_recent_segments(
     current_head: &HeadState,
     new_tip: WalSegmentPointer,
 ) -> Vec<WalSegmentPointer> {
     let mut recent = Vec::with_capacity(RECENT_SEGMENTS_LIMIT);
     recent.push(new_tip);
-    if current_head.recent_segments.is_empty() {
-        // Heads published before the accelerator existed carry only the tip
-        // pointer; seed from it so the hint list stays gap-free.
-        recent.extend(current_head.visible_wal_tip.iter().cloned());
-    } else {
-        recent.extend(current_head.recent_segments.iter().cloned());
-    }
+    recent.extend(current_head.recent_segments.iter().cloned());
     recent.truncate(RECENT_SEGMENTS_LIMIT);
     recent
 }
@@ -308,9 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn head_publish_seeds_recent_segments_from_the_prior_tip() {
-        // Upgrade path: a head that has only a tip pointer still produces a
-        // gap-free hint list.
+    fn head_publish_prepends_the_tip_to_the_prior_accelerator() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let mut current_head = head(namespace_id.clone(), ChangeSeq(7));
         let prior = wal_segment(
@@ -322,6 +317,7 @@ mod tests {
         );
         let prior_tip = prior.envelope.pointer(prior.object_key.clone());
         current_head.visible_wal_tip = Some(prior_tip.clone());
+        current_head.recent_segments = vec![prior_tip.clone()];
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(9), 2);
 
