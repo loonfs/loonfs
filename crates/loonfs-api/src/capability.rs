@@ -84,6 +84,17 @@ pub fn direct_put_checksum_feature(algorithm: ChecksumAlgorithm) -> &'static str
 /// the namespace's verified steady-state grep root is the data half.
 pub const FEATURE_QUERY_GREP: &str = "query.grep";
 
+/// Gates grep-index administration: enabling a namespace's grep root,
+/// disabling it, collecting its garbage, and reading its lifecycle.
+///
+/// The maintenance half of the same capability, and independent of
+/// [`FEATURE_QUERY_GREP`]: searching an index and keeping one built are
+/// separately deployable, so a deployment may advertise either alone. It is
+/// an `admin.` key because its routes are admin routes, and because a
+/// deployment that maintains an index it does not serve advertises no
+/// `query/v0` profile for a `query.` key to be parented by.
+pub const FEATURE_ADMIN_GREP_INDEX: &str = "admin.grep.index";
+
 /// Advisory limit: the largest request body accepted for service-proxied
 /// upload content requests. This is the proxy's cap, not the provider's.
 pub const LIMIT_UPLOAD_MAX_CONTENT_BYTES: &str = "upload.max_content_bytes";

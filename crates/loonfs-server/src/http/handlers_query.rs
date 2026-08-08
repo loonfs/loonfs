@@ -12,7 +12,7 @@ use loonfs_api::v0::{
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
-use loonfs_api::FEATURE_QUERY_GREP;
+use loonfs_api::{FEATURE_ADMIN_GREP_INDEX, FEATURE_QUERY_GREP};
 use loonfs_grep::{
     GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot, NamespaceReads,
 };
@@ -90,7 +90,7 @@ pub(super) async fn grep_index_not_maintained(
 ) -> Result<Json<serde_json::Value>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     Err(ApiResponseError::not_supported(
-        FEATURE_QUERY_GREP,
+        FEATURE_ADMIN_GREP_INDEX,
         "this deployment does not maintain the grep index; set `[grep].mode` to \
          `maintain_only` or `serve_and_maintain`, or administer the index where it is maintained",
     ))

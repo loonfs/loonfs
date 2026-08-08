@@ -412,9 +412,10 @@ pub(super) async fn apply_commit(
                 PutContentPreparation::Ready(prepared_content) => {
                     CommitCandidate::prepared(request, prepared_content)
                 }
-                PutContentPreparation::Rejected(error) => {
-                    CommitCandidate::rejected(request, ContentPreparationError::ContentToken(error))
-                }
+                PutContentPreparation::Rejected(rejections) => CommitCandidate::rejected(
+                    request,
+                    ContentPreparationError::ContentToken(rejections),
+                ),
             };
             state
                 .writer

@@ -118,6 +118,17 @@ impl RuntimeInstruments {
             .record(seconds_from_ms(queued_ms));
     }
 
+    /// Reports one reconciliation probe that could not say whether a job has
+    /// work.
+    ///
+    /// A probe takes no permit, so there is no queue wait to file beside it.
+    pub(crate) fn maintenance_probe_failed(&self, job: MaintenanceJobId) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.maintenance_job(job).probe_failures.increment(1);
+    }
+
     /// Reports the candidates a namespace has admitted but not yet taken.
     pub(crate) fn publisher_queue_depth(&self, queue_depth: usize) {
         let Some(installed) = &self.installed else {
@@ -355,6 +366,7 @@ struct MaintenanceJobInstruments {
     superseded: Arc<dyn CounterHandle>,
     not_enabled: Arc<dyn CounterHandle>,
     failures: Arc<dyn CounterHandle>,
+    probe_failures: Arc<dyn CounterHandle>,
     step_seconds: Arc<dyn HistogramHandle>,
     queue_wait_seconds: Arc<dyn HistogramHandle>,
 }
@@ -378,6 +390,11 @@ impl MaintenanceJobInstruments {
             failures: recorder.register_counter(
                 "loonfs.maintenance.step_failures",
                 "Maintenance steps that failed before concluding",
+                &[("job", job)],
+            ),
+            probe_failures: recorder.register_counter(
+                "loonfs.maintenance.probe_failures",
+                "Reconciliation probes that failed to say whether a job has work",
                 &[("job", job)],
             ),
             step_seconds: recorder.register_histogram(
@@ -773,6 +790,37 @@ mod tests {
                 ref other => panic!("expected a histogram, found {other:?}"),
             }
         }
+    }
+
+    /// A probe that cannot answer leaves the key admitted and says nothing
+    /// else, so this counter is the only standing record that a namespace's
+    /// reconciliation is stuck. It is counted per job, beside the step
+    /// failures, and it is not filed as one: a probe ran no step.
+    #[test]
+    fn a_failed_reconciliation_probe_counts_against_its_job() {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let instruments = RuntimeInstruments::new(Some(recorder.clone()));
+
+        instruments.maintenance_probe_failed(MaintenanceJobId::METADATA);
+        instruments.maintenance_probe_failed(MaintenanceJobId::METADATA);
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(
+            counter(
+                &snapshot,
+                "loonfs.maintenance.probe_failures",
+                &[("job", "metadata")],
+            ),
+            2
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "loonfs.maintenance.step_failures",
+                &[("job", "metadata")],
+            ),
+            0
+        );
     }
 
     #[test]

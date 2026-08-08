@@ -14,12 +14,12 @@ use loonfs_api::{
     CapabilityDocument, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, ErrorCode, ForkNamespaceRequest, ListCheckpointsResponse,
     MaintenanceStepRequest, MaintenanceStepResponse, ReleaseCheckpointResponse,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
-    UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES,
+    FEATURE_ADMIN_GREP_INDEX, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0, UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -123,6 +123,17 @@ pub(super) async fn capabilities(
     // The runtime handles describe the core and admin planes. Grep is a
     // composed extension, so this deployment — not the runtime — says
     // whether the query plane exists and what it costs.
+    //
+    // Serving searches and administering the index are separate jobs and
+    // separately deployable, so they are separately advertised. The
+    // administration key sits in the admin plane, which the runtime always
+    // advertises: a deployment that maintains an index it does not serve has
+    // no query plane for a `query.` key to be parented by.
+    set_feature(
+        &mut capabilities,
+        FEATURE_ADMIN_GREP_INDEX,
+        state.config.grep.mode.maintains_index(),
+    );
     if state.config.grep.mode.serves_grep() {
         capabilities.profiles.push(PROFILE_QUERY_V0.to_owned());
         capabilities

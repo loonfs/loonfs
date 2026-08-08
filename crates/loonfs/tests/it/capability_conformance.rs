@@ -3,11 +3,14 @@
 //! normative text in `docs/specs/api.md`. If any copy drifts, this fails.
 //!
 //! The registry describes the reference deployment, which serves one plane
-//! this crate does not implement: `query/v0` and its `query.grep` keys come
-//! from `loonfs-grep`, which a host composes on top of these handles. So
-//! the embedded document is the spec's example minus that plane, and
-//! `loonfs-server`'s `grep_modes` test pins the merged document a served
-//! deployment answers with.
+//! this crate does not implement: `query/v0` and every grep key come from
+//! `loonfs-grep`, which a host composes on top of these handles. Both grep
+//! keys are composed — `query.grep` for searching and `admin.grep.index`
+//! for administering the index — even though the second one is parented by
+//! a plane these handles do advertise. So the embedded document is the
+//! spec's example minus the grep extension, and `loonfs-server`'s
+//! `grep_modes` test pins the merged document a composed deployment answers
+//! with.
 #![allow(clippy::panic)]
 // Spec parsing panics with precise messages when a section is missing.
 
@@ -31,19 +34,22 @@ fn embedded_capabilities() -> CapabilityDocument {
     reader.capabilities()
 }
 
-/// The composed query plane, dropped from a document so what remains is
+/// The composed grep extension, dropped from a document so what remains is
 /// what this crate is responsible for.
-fn without_the_query_plane(mut document: CapabilityDocument) -> CapabilityDocument {
+fn without_the_grep_extension(mut document: CapabilityDocument) -> CapabilityDocument {
     document
         .profiles
         .retain(|profile| profile != PROFILE_QUERY_V0);
-    document.features.retain(|key, _| !is_query_key(key));
-    document.limits.retain(|key, _| !is_query_key(key));
+    document.features.retain(|key, _| !is_grep_key(key));
+    document.limits.retain(|key, _| !is_grep_key(key));
     document
 }
 
-fn is_query_key(key: &str) -> bool {
-    key.starts_with("query.")
+/// A key the composed grep extension owns: the whole query plane, plus the
+/// admin-plane key that gates index administration. A host that composes no
+/// extension advertises none of them, whatever planes it does advertise.
+fn is_grep_key(key: &str) -> bool {
+    key.starts_with("query.") || key.starts_with("admin.grep.")
 }
 
 /// A registry row whose key carries a `<placeholder>` documents a *family*
@@ -64,7 +70,7 @@ fn spec_section<'a>(spec: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 #[test]
-fn embedded_capability_document_is_the_spec_example_without_the_composed_query_plane() {
+fn embedded_capability_document_is_the_spec_example_without_the_composed_grep_extension() {
     let spec = std::fs::read_to_string(API_SPEC_PATH).expect("read docs/specs/api.md");
     let example = spec_section(&spec, "### 2.1", "### 2.2")
         .split("```json")
@@ -84,7 +90,7 @@ fn embedded_capability_document_is_the_spec_example_without_the_composed_query_p
     document.validate().expect("document is well-formed");
     assert_eq!(
         document,
-        without_the_query_plane(expected),
+        without_the_grep_extension(expected),
         "the advertised capability document drifted from the api.md section 2.1 example"
     );
 }
@@ -102,14 +108,16 @@ fn advertised_features_match_the_spec_feature_registry() {
         !registry.is_empty(),
         "no feature keys parsed from the api.md registry table"
     );
-    assert!(
-        registry.iter().any(|key| is_query_key(key)),
-        "the registry must keep the composed query keys the reference server serves"
-    );
+    for composed in ["query.grep", "admin.grep.index"] {
+        assert!(
+            registry.contains(composed),
+            "the registry must keep `{composed}`, which the reference server composes"
+        );
+    }
 
     let runtime_registry: BTreeSet<String> = registry
         .into_iter()
-        .filter(|key| !is_query_key(key) && !is_key_family(key))
+        .filter(|key| !is_grep_key(key) && !is_key_family(key))
         .collect();
     let advertised: BTreeSet<String> = embedded_capabilities().features.into_keys().collect();
     assert_eq!(

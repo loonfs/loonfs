@@ -58,6 +58,18 @@ fn missing_content_proof_message(request: &CommitRequest) -> String {
     )
 }
 
+/// The message a wholly rejected batch of content tokens answers with: one
+/// entry per content ref, naming the ref and why its token was refused.
+fn rejected_content_token_message(request: &CommitRequest, reason: &str) -> String {
+    let [FilesystemOperation::PutFile { content_ref, .. }] = &request.operations[..] else {
+        unreachable!("content preparation assertion requires a one-put request");
+    };
+    format!(
+        "content tokens were rejected: `{}`: {reason}",
+        content_ref.content_id
+    )
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn path_put_with_bad_content_token_fails_content_not_prepared() {
     let temp_dir = tempdir().expect("tempdir");
@@ -90,10 +102,12 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
             expected_revision_no: None,
         }],
     };
+    // The rejection names the ref the token was supplied for, so a caller
+    // holding several tokens knows which one to mint again.
     assert_content_not_prepared_response(
         send_commit(&harness.server_url, &namespace, &request),
         &request,
-        "content token was rejected: content token is malformed",
+        &rejected_content_token_message(&request, "content token is malformed"),
     );
 
     harness.server.abort();

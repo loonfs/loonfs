@@ -1005,14 +1005,20 @@ async fn reconcile(inner: &Arc<RunnerInner>) {
             // a lease-dated obligation outlives any number of quiet probes.
             Ok(MaintenanceProbe::Idle) => inner.lock_state().admission.forget_if_idle(&key),
             // An unreadable namespace stays admitted: the next sweep asks
-            // again rather than deciding on a failed read.
-            Err(error) => tracing::debug!(
-                job = %key.job,
-                namespace_id = %key.namespace_id,
-                result = "error",
-                error = %error,
-                "reconciliation probe failed"
-            ),
+            // again rather than deciding on a failed read. Staying admitted
+            // is not the same as being fine, and a quiescent namespace whose
+            // probe fails forever has nothing else to report it, so this is
+            // logged and counted exactly as a failed step is.
+            Err(error) => {
+                inner.instruments.maintenance_probe_failed(key.job);
+                tracing::info!(
+                    job = %key.job,
+                    namespace_id = %key.namespace_id,
+                    result = "error",
+                    error = %error,
+                    "reconciliation probe failed; the key stays admitted"
+                );
+            }
         }
     }
     // What one sweep cost, against the probe budget above: a sweep that
