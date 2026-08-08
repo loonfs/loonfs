@@ -174,7 +174,7 @@ impl RegistryShared {
         &self,
         namespace_id: &NamespaceId,
         weight: Option<PublishTailWeight>,
-        budget: ProjectionBudget,
+        budget: &RuntimeCacheConfig,
     ) -> RetainedProjectionTotals {
         let victims = {
             let mut state = self.lock_state();
@@ -215,25 +215,6 @@ impl RegistryShared {
         let mut state = self.lock_state();
         state.projections.forget(namespace_id);
         state.projections.totals()
-    }
-}
-
-/// The aggregate ceiling on retained publish-tail projections: the same
-/// three knobs, read the same way, as the read-side projection cache.
-#[derive(Debug, Clone, Copy)]
-struct ProjectionBudget {
-    max_namespaces: usize,
-    max_rows: usize,
-    max_decoded_bytes: usize,
-}
-
-impl ProjectionBudget {
-    fn of(config: &RuntimeCacheConfig) -> Self {
-        Self {
-            max_namespaces: config.max_cached_namespaces,
-            max_rows: config.max_cached_wal_tail_projection_rows,
-            max_decoded_bytes: config.max_cached_wal_tail_projection_decoded_bytes,
-        }
     }
 }
 
@@ -321,17 +302,18 @@ impl RetainedProjections {
     }
 
     /// The namespaces to drop, least-recently-published first, until what
-    /// remains fits the budget. Selection changes nothing: only an eviction
-    /// that actually took the engine does.
-    fn over_budget_victims(&self, budget: ProjectionBudget) -> Vec<RetainedProjection> {
+    /// remains fits the budget — the same three knobs, read the same way, as
+    /// the read-side projection cache. Selection changes nothing: only an
+    /// eviction that actually took the engine does.
+    fn over_budget_victims(&self, budget: &RuntimeCacheConfig) -> Vec<RetainedProjection> {
         let mut projections = self.entries.len();
         let mut rows = self.rows;
         let mut decoded_bytes = self.decoded_bytes;
         let mut victims = Vec::new();
         for entry in &self.entries {
-            if projections <= budget.max_namespaces
-                && rows <= budget.max_rows
-                && decoded_bytes <= budget.max_decoded_bytes
+            if projections <= budget.max_cached_namespaces
+                && rows <= budget.max_cached_wal_tail_projection_rows
+                && decoded_bytes <= budget.max_cached_wal_tail_projection_decoded_bytes
             {
                 break;
             }
@@ -722,7 +704,7 @@ impl NamespacePublisher {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
-        let budget = ProjectionBudget::of(self.read_core.runtime_cache_config());
+        let budget = self.read_core.runtime_cache_config();
         let totals = shared.settle_projection(&self.namespace_id, weight, budget);
         self.report_retained_projections(totals);
     }

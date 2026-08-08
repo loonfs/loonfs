@@ -372,29 +372,11 @@ pub struct WalTailProjectionCacheKey {
     pub head_etag: String,
 }
 
-#[derive(Debug, Clone)]
-struct CachedWalTailProjection {
-    rows: Arc<MetadataState>,
-    row_count: usize,
-    decoded_bytes: usize,
-}
-
-impl CachedWalTailProjection {
-    fn new(rows: Arc<MetadataState>) -> Self {
-        Self {
-            row_count: rows.row_count(),
-            decoded_bytes: rows.decoded_bytes(),
-            rows,
-        }
-    }
-
-    fn rows(&self) -> Arc<MetadataState> {
-        Arc::clone(&self.rows)
-    }
-
-    fn weight(&self) -> (usize, usize) {
-        (self.row_count, self.decoded_bytes)
-    }
+/// What one entry counts against the row and byte budgets. The projection
+/// carries both totals, and a projection in the cache is immutable, so the
+/// cache reads them rather than keeping its own copies.
+fn projection_weight(rows: &MetadataState) -> (usize, usize) {
+    (rows.row_count(), rows.decoded_bytes())
 }
 
 #[derive(Debug)]
@@ -406,7 +388,7 @@ pub struct WalTailProjectionCache {
 
 #[derive(Debug, Default)]
 struct WalTailProjectionCacheInner {
-    entries: HashMap<WalTailProjectionCacheKey, CachedWalTailProjection>,
+    entries: HashMap<WalTailProjectionCacheKey, Arc<MetadataState>>,
     order: VecDeque<WalTailProjectionCacheKey>,
     cached_rows: usize,
     cached_decoded_bytes: usize,
@@ -462,7 +444,7 @@ impl WalTailProjectionCache {
             .inner
             .lock()
             .expect("wal tail projection cache lock should not be poisoned");
-        let Some(rows) = inner.entries.get(key).map(CachedWalTailProjection::rows) else {
+        let Some(rows) = inner.entries.get(key).map(Arc::clone) else {
             self.stats.misses.fetch_add(1, Ordering::SeqCst);
             return None;
         };
@@ -475,8 +457,7 @@ impl WalTailProjectionCache {
         if self.config.max_entries == 0 {
             return;
         }
-        let cached = CachedWalTailProjection::new(rows);
-        let (row_count, decoded_bytes) = cached.weight();
+        let (row_count, decoded_bytes) = projection_weight(&rows);
         if row_count > self.config.max_rows || decoded_bytes > self.config.max_decoded_bytes {
             self.stats.uncacheable_count.fetch_add(1, Ordering::SeqCst);
             self.stats
@@ -492,10 +473,10 @@ impl WalTailProjectionCache {
             .inner
             .lock()
             .expect("wal tail projection cache lock should not be poisoned");
-        if let Some(previous) = inner.entries.insert(key.clone(), cached) {
-            let (rows, bytes) = previous.weight();
-            inner.cached_rows = inner.cached_rows.saturating_sub(rows);
-            inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_sub(bytes);
+        if let Some(previous) = inner.entries.insert(key.clone(), rows) {
+            let (previous_rows, previous_bytes) = projection_weight(&previous);
+            inner.cached_rows = inner.cached_rows.saturating_sub(previous_rows);
+            inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_sub(previous_bytes);
         }
         inner.cached_rows = inner.cached_rows.saturating_add(row_count);
         inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_add(decoded_bytes);
@@ -510,7 +491,7 @@ impl WalTailProjectionCache {
                 break;
             };
             if let Some(previous) = inner.entries.remove(&evicted) {
-                let (rows, bytes) = previous.weight();
+                let (rows, bytes) = projection_weight(&previous);
                 inner.cached_rows = inner.cached_rows.saturating_sub(rows);
                 inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_sub(bytes);
                 self.stats.evictions.fetch_add(1, Ordering::SeqCst);
@@ -535,7 +516,7 @@ impl WalTailProjectionCache {
             .collect::<Vec<_>>();
         for key in keys {
             if let Some(previous) = inner.entries.remove(&key) {
-                let (rows, bytes) = previous.weight();
+                let (rows, bytes) = projection_weight(&previous);
                 inner.cached_rows = inner.cached_rows.saturating_sub(rows);
                 inner.cached_decoded_bytes = inner.cached_decoded_bytes.saturating_sub(bytes);
                 self.stats.evictions.fetch_add(1, Ordering::SeqCst);

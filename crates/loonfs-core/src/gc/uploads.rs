@@ -245,33 +245,28 @@ enum ContentReference {
     Unknown,
     /// The set did not fit in the budget the pass had left, so content
     /// reclamation is skipped for the rest of this invocation. It is not an
-    /// answer of any kind — see [`ScanOutcome::BudgetExhausted`].
+    /// answer of any kind — see [`CollectedReferences::Deferred`].
     Deferred,
 }
 
+/// What the reference scan has produced for this invocation.
 enum CollectedReferences {
+    /// The scan has not run yet. Only the memo starts here.
     NotYet,
+    /// A root could not be read, so this pass has no reference set at all
+    /// (format spec, "Garbage collection", rule 5).
     Unavailable,
     /// The scan ran out of budget once, which settles it for the whole
     /// invocation: a later candidate must not pay to start the same scan
     /// over, and being skipped is a property of the invocation rather than
-    /// of the session that happened to ask first.
+    /// of the session that happened to ask first. The ids gathered before
+    /// the budget ran out are dropped, because a partial set is not a
+    /// smaller answer, it is no answer: every id it is missing looks
+    /// unreferenced, so deciding a deletion from one would delete live
+    /// content.
     Deferred,
-    Referenced(BTreeSet<ContentId>),
-}
-
-/// What one attempt at the reference scan produced.
-enum ScanOutcome {
     /// Every root was read. The set is complete and may decide deletions.
-    Complete(BTreeSet<ContentId>),
-    /// A root could not be read, so this pass has no reference set at all
-    /// (format spec, "Garbage collection", rule 5).
-    Unavailable,
-    /// The pass budget ran out before the last root was read. The ids
-    /// gathered so far are dropped: a partial set is not a smaller answer,
-    /// it is no answer. Every id it is missing looks unreferenced, so
-    /// deciding a deletion from one would delete live content.
-    BudgetExhausted,
+    Referenced(BTreeSet<ContentId>),
 }
 
 /// Every content id the namespace's live metadata references, collected at
@@ -309,24 +304,11 @@ impl<'a> ContentReferences<'a> {
         budget: &mut PassBudget,
     ) -> Result<ContentReference> {
         if matches!(self.collected, CollectedReferences::NotYet) {
-            if self.live.degraded {
-                self.collected = CollectedReferences::Unavailable;
+            self.collected = if self.live.degraded {
+                CollectedReferences::Unavailable
             } else {
-                match collect_referenced_content(store, namespace_id, self.live, budget).await? {
-                    ScanOutcome::Complete(referenced) => {
-                        self.collected = CollectedReferences::Referenced(referenced);
-                    }
-                    ScanOutcome::Unavailable => {
-                        self.collected = CollectedReferences::Unavailable;
-                    }
-                    // The partial set is dropped, not remembered — but the
-                    // fact that it did not fit is, so the rest of the
-                    // invocation stops asking.
-                    ScanOutcome::BudgetExhausted => {
-                        self.collected = CollectedReferences::Deferred;
-                    }
-                }
-            }
+                collect_referenced_content(store, namespace_id, self.live, budget).await?
+            };
         }
         Ok(match &self.collected {
             CollectedReferences::NotYet | CollectedReferences::Unavailable => {
@@ -361,34 +343,37 @@ impl<'a> ContentReferences<'a> {
 /// Every manifest root read costs a budget unit — one per manifest opened,
 /// one per page of revision rows — so this scan is part of the pass's bound
 /// rather than an exception to it. Running out stops the scan where it
-/// stands and reports [`ScanOutcome::BudgetExhausted`]; the caller retains
+/// stands and reports [`CollectedReferences::Deferred`]; the caller retains
 /// the session that triggered it, marks the pass as having deferred content
 /// reclamation, and carries on. A namespace whose scan never fits therefore
 /// keeps its completed content — `max_objects` has to be at least the
 /// scan's size for content reclamation to happen at all — but the sweep
 /// around it still advances, which is the difference between leaking
 /// content for a while and not collecting anything ever.
+///
+/// Every return is a verdict the memo can hold: an attempt that has run
+/// never comes back as [`CollectedReferences::NotYet`].
 async fn collect_referenced_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     live: &LiveSet,
     budget: &mut PassBudget,
-) -> Result<ScanOutcome> {
+) -> Result<CollectedReferences> {
     let mut referenced = BTreeSet::new();
     for manifest_object_id in &live.manifests {
         if !budget.try_charge() {
-            return Ok(ScanOutcome::BudgetExhausted);
+            return Ok(CollectedReferences::Deferred);
         }
         let Ok(tables) =
             load_verified_manifest_tables(store, namespace_id, manifest_object_id).await
         else {
-            return Ok(ScanOutcome::Unavailable);
+            return Ok(CollectedReferences::Unavailable);
         };
         let mut lower_bound = lookup_keys::REVISION_ROW_PREFIX.to_owned();
         let upper_bound = string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX);
         loop {
             if !budget.try_charge() {
-                return Ok(ScanOutcome::BudgetExhausted);
+                return Ok(CollectedReferences::Deferred);
             }
             let Ok(rows) = tables
                 .scan_range_page_with_keys(
@@ -399,7 +384,7 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
                 )
                 .await
             else {
-                return Ok(ScanOutcome::Unavailable);
+                return Ok(CollectedReferences::Unavailable);
             };
             let exhausted = rows.len() < REVISION_SCAN_WAVE_ROWS;
             match rows.last() {
@@ -422,5 +407,5 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
     // in one pass.
     referenced.extend(live.wal_content_ids.iter().cloned());
 
-    Ok(ScanOutcome::Complete(referenced))
+    Ok(CollectedReferences::Referenced(referenced))
 }

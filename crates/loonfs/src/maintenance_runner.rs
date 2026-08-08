@@ -317,8 +317,15 @@ impl Default for SystemMaintenanceClock {
 impl MaintenanceClock for SystemMaintenanceClock {
     fn now_ms(&self) -> u64 {
         // A clock before the unix epoch reads as the epoch here rather than
-        // failing: it can only make a scheduling decision early, and every
-        // durable path already refuses such a clock outright.
+        // failing. Every eligibility test is `at_ms <= now_ms`, so the
+        // epoch is the reading under which nothing timed comes due: work
+        // that answers to a durable deadline parks until something nudges
+        // it. That is the safe end to fall off. The opposite fallback would
+        // make every deadline due at once, and since the timer's sleep is
+        // floored at one millisecond it would drive reconciliation sweeps
+        // at that floor for as long as the clock stayed wrong. A pre-epoch
+        // clock is also a condition every durable path refuses outright, so
+        // there is no useful maintenance to run through it either way.
         loonfs_core::time::current_time_ms().unwrap_or(0)
     }
 

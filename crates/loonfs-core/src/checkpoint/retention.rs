@@ -14,10 +14,8 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, WalFloorEnvelope, WalFloorState,
 };
-use loonfs_api::{AdvanceRetentionResponse, ChangeSeq, NamespaceId};
+use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-
-const MAX_RETENTION_PROBE_IO: usize = 8;
 
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
@@ -29,6 +27,14 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     // `wal/floor.json`. The WAL head is never touched — it changes only when
     // commits land. Root monotonicity keeps a mid-flight root swap benign:
     // any replacement covers at least this basis's coverage above the floor.
+    //
+    // Nothing here probes the basis manifest's segments before the floor
+    // moves. Advancing surrenders the WAL replay promise below the target,
+    // and what keeps that safe is the deleter: GC must never remove an
+    // object reachable from the current manifest or a retained checkpoint or
+    // pin (format spec, "Garbage collection"). Corruption that slips past it
+    // is caught by read-path checksums, which an existence probe here could
+    // not have caught anyway.
     let head = read_head_object(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
@@ -61,43 +67,10 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::load_head)?;
     if current_floor >= target_floor {
-        // Already advanced; skip the existence probes on the idempotent
-        // re-invocation path.
+        // Already advanced, so the idempotent re-invocation writes nothing.
         return Ok(AdvanceRetentionResponse {
             retention_floor_seq: current_floor,
         });
-    }
-
-    // Advancing the floor surrenders the WAL replay promise below the
-    // target, so every metadata segment the basis manifest references must
-    // still exist before that promise is given up. This probe is advisory
-    // defense-in-depth: the atomic guarantee belongs to the deleter — GC
-    // must never remove an object reachable from the current manifest or a
-    // retained checkpoint or pin (format spec, "Garbage collection").
-    // Corruption discovered later is caught by read-path checksums.
-    let segment_keys = manifest_tables
-        .manifest()
-        .payload
-        .metadata_files
-        .iter()
-        .map(|metadata_file| metadata_file.object_key.as_str())
-        .collect::<Vec<_>>();
-    for segment_keys in segment_keys.chunks(MAX_RETENTION_PROBE_IO) {
-        let probes = segment_keys.iter().copied().map(|object_key| async move {
-            let present = store
-                .head(object_key)
-                .await
-                .map_err(|error| CoreError::store(object_key, &error))?
-                .is_some();
-            if present {
-                Ok(())
-            } else {
-                Err(CoreError::CheckpointUnavailable(format!(
-                    "retention floor cannot advance: missing metadata segment `{object_key}`"
-                )))
-            }
-        });
-        futures::future::try_join_all(probes).await?;
     }
 
     // Monotonic floor publication: never decrease. The first advance
@@ -108,13 +81,12 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             Err(ControlObjectLoadError::MissingObject { .. }) => None,
             Err(error) => return Err(CoreError::load_head(error)),
         };
-        if loaded
+        let published_floor = loaded
             .as_ref()
-            .is_some_and(|loaded| loaded.envelope.state.floor_seq >= target_floor)
-        {
+            .map(|loaded| loaded.envelope.state.floor_seq);
+        if let Some(floor_seq) = published_floor.filter(|floor_seq| *floor_seq >= target_floor) {
             return Ok(AdvanceRetentionResponse {
-                retention_floor_seq: loaded
-                    .map_or(ChangeSeq(0), |loaded| loaded.envelope.state.floor_seq),
+                retention_floor_seq: floor_seq,
             });
         }
         let next = WalFloorState {

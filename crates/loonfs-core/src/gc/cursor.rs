@@ -30,14 +30,12 @@ impl CandidateFamily {
         Self::UploadSessions,
     ];
 
+    /// This family's position in [`Self::ALL`], which is the sweep order.
     pub(super) fn index(self) -> usize {
-        match self {
-            Self::WalSegments => 0,
-            Self::MetadataTables => 1,
-            Self::Manifests => 2,
-            Self::Checkpoints => 3,
-            Self::UploadSessions => 4,
-        }
+        Self::ALL
+            .iter()
+            .position(|family| *family == self)
+            .expect("every family is listed in ALL")
     }
 
     pub(super) fn prefix(self, namespace_id: &NamespaceId) -> String {

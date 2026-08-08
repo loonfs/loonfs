@@ -325,7 +325,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                 matching_descriptors[next_descriptor_index..chunk_end]
                     .iter()
                     .map(|descriptor| {
-                        self.segment_rows(family, descriptor, lower_bound, upper_bound, readahead)
+                        self.segment_rows(descriptor, lower_bound, upper_bound, readahead)
                     }),
             )
             .await?;
@@ -385,7 +385,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
 
     async fn segment_rows(
         &self,
-        family: MetadataTableFamily,
         descriptor: &MetadataFileRef,
         lower_bound: &str,
         upper_bound: Option<&str>,
@@ -395,7 +394,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             self.store,
             self.table_cache,
             &self.block_memo,
-            family,
             descriptor,
             lower_bound,
             upper_bound,
