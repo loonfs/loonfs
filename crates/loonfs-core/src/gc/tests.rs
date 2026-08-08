@@ -1358,9 +1358,10 @@ async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
 }
 
 /// The chain can be longer than the budget has room for. The pass caps the
-/// load at what it has left, so the loader reads no more segment bodies
-/// than the pass may pay for. The pass then decides nothing and reports
-/// that it ran out.
+/// load at what it has left, so the loader issues no more requests than the
+/// pass may pay for, and it issues all of them: the head names the whole
+/// tail, and a hint list longer than the cap is cut down to the cap rather
+/// than refused. The pass then decides nothing and reports that it ran out.
 #[tokio::test]
 async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1387,10 +1388,10 @@ async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
         .await
         .expect("pass over a chain it cannot afford");
 
-    let fetched = store.take_get_keys().len();
-    assert!(
-        u64::try_from(fetched).expect("fetch count fits") <= at_the_gate,
-        "the pass read {fetched} segment bodies with {at_the_gate} units left"
+    let fetched = u64::try_from(store.take_get_keys().len()).expect("fetch count fits");
+    assert_eq!(
+        fetched, at_the_gate,
+        "the pass had {at_the_gate} units left at the chain and spent them"
     );
     assert!(report.budget_exhausted);
     assert_eq!(
@@ -1408,6 +1409,65 @@ async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
             report.deleted_content_objects,
         ),
         (0, 0, 0, 0, 0, 0)
+    );
+}
+
+/// A collection that reaches the chain with less budget than the chain
+/// costs used to charge nothing for it. The head names every segment of the
+/// retained tail, that hint list was longer than the cap the pass handed
+/// the loader, and the loader refused up front rather than reading the part
+/// the cap covered. The pass then reported that it ran out while its budget
+/// still showed unspent units, which is the wrong account of where the
+/// budget went.
+///
+/// Now every unit the collection has left at the chain is spent on the
+/// chain, at every budget from one unit up to the whole chain, and a budget
+/// that covers the chain collects it.
+#[tokio::test]
+async fn a_chain_the_budget_cannot_cover_still_spends_what_the_budget_had_left() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let (live, marking) = marked(&store, &namespace_id, &aged).await;
+    let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
+    assert!(
+        chain_units > 1,
+        "the fixture must retain a chain a budget can fall short of"
+    );
+    // What the collection charges before it reaches the chain.
+    let roots = marking - chain_units;
+
+    for at_the_chain in 1..chain_units {
+        let mut budget = PassBudget::new(Some(roots + at_the_chain));
+        let collection =
+            recollect_live_set(&store, &namespace_id, GRACE_MS, None, &mut budget, &aged)
+                .await
+                .expect("bounded collection");
+        assert!(
+            collection.complete().is_none(),
+            "{at_the_chain} of {chain_units} segments is a partial chain and roots nothing"
+        );
+        assert_eq!(
+            budget.spent(),
+            roots + at_the_chain,
+            "the collection had {at_the_chain} units left at the chain and must spend them"
+        );
+    }
+
+    let mut budget = PassBudget::new(Some(marking));
+    let collected = recollect_live_set(&store, &namespace_id, GRACE_MS, None, &mut budget, &aged)
+        .await
+        .expect("bounded collection")
+        .complete()
+        .expect("a budget that covers the chain collects it");
+    assert_eq!(collected.wal_segments, live.wal_segments);
+    assert_eq!(
+        budget.spent(),
+        marking,
+        "the collection charges the requests the load issued, no more"
     );
 }
 
