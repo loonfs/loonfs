@@ -89,6 +89,26 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Maps a manifest write failure onto a core error.
+///
+/// Callers write each manifest under a freshly generated object id, and
+/// every generated id ends in 16 random hex characters, so no other writer
+/// proposes the same key. [`write_namespace_manifest`] already accepts a
+/// byte-identical rewrite of a key it wrote, which covers a retried request.
+/// A different payload under the key is therefore corruption rather than
+/// contention, and it is reported as such.
+pub(super) fn manifest_write_failure(error: MetadataProjectionLoadError) -> CoreError {
+    match error {
+        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
+            object_key,
+            ..
+        }) => CoreError::NamespaceCorrupt(format!(
+            "namespace manifest `{object_key}` already exists with a different payload"
+        )),
+        error => CoreError::MetadataProjection(error),
+    }
+}
+
 #[tracing::instrument(
     level = "info",
     name = "loonfs.phase",

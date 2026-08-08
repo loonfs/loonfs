@@ -488,7 +488,7 @@ async fn retention_advance_aborts_when_current_manifest_changes() {
 }
 
 #[tokio::test]
-async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
+async fn create_checkpoint_fails_when_its_manifest_key_holds_a_different_payload() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
@@ -507,6 +507,10 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
     .await
     .expect("write hello");
 
+    // Every manifest object id ends in 16 random hex characters, so only this
+    // publication proposes the key it writes. The store puts a different
+    // payload there anyway, which is corruption, and the checkpoint must say
+    // so rather than generate another id.
     let store = ConflictOnManifestCreateStore::mutate_next_inode(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         format!(
@@ -516,30 +520,24 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         ),
     );
 
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let error = create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint should retry allocation");
+        .expect_err("a conflicting manifest payload must fail the checkpoint");
 
-    assert_eq!(checkpoint.manifest_id, ManifestId(2));
-    let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
-        .await
-        .expect("read checkpoint record")
-        .expect("record exists")
-        .state;
-    assert_eq!(record.manifest_id, ManifestId(2));
-    let manifest_objects = store
-        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
-        .await
-        .expect("list manifest objects");
-    assert_eq!(
-        manifest_objects.len(),
-        3,
-        "first-flush, injected conflict, and retried checkpoint manifests should all be immutable"
-    );
+    match error {
+        CoreError::NamespaceCorrupt(message) => {
+            assert!(
+                message.contains(&metadata_manifest_prefix(namespace_id.as_str())),
+                "the error must name the manifest key, got {message}"
+            );
+        }
+        other => panic!("expected a namespace corruption error, got {other:?}"),
+    }
+
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization_after.root.manifest_id, ManifestId(2));
+    assert_eq!(materialization_after.root.manifest_id, ManifestId(1));
 }
 
 #[tokio::test]

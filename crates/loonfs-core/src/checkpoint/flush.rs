@@ -8,11 +8,11 @@
 //! [`create`](super::create).
 
 use super::build::{build_manifest_l0_run_tables, build_manifest_tables};
-use super::error::ManifestLoadError;
-use super::load::{
-    head_from_manifest, load_basis_metadata_tables, load_namespace_manifest_envelope_if_present,
+use super::load::{head_from_manifest, load_basis_metadata_tables};
+use super::publish::{
+    manifest_write_failure, publish_metadata_root, write_namespace_manifest,
+    ManifestPublicationOutcome,
 };
-use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::runs::{flatten_manifest_tables, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
 use super::scan::VerifiedMetadataTables;
 use crate::commit::CommitHeadPublishError;
@@ -34,7 +34,6 @@ use loonfs_api::{
     ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestId, ManifestObjectId,
     NamespaceId,
 };
-use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use tracing::Instrument;
 
@@ -154,61 +153,21 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         })));
     }
 
+    // One generated object id, one write. The generated id ends in 16 random
+    // hex characters, so the key is this attempt's alone and a conflict under
+    // it is corruption rather than contention.
     let manifest_id = next_manifest_id_after(basis_manifest_id)?;
-    let mut written_manifest = None;
-    for _allocation_attempt in 0..CONTENTION_RETRY_LIMIT {
-        let manifest_object_id = ManifestObjectId::generate(manifest_id);
-        let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
-        match load_namespace_manifest_envelope_if_present(
-            store,
-            namespace_id,
-            &manifest_object_id,
-            &manifest_key,
-        )
+    let manifest = build_namespace_manifest_for_projection(
+        store,
+        namespace_id,
+        &projection,
+        manifest_id,
+        ManifestObjectId::generate(manifest_id),
+    )
+    .await?;
+    write_namespace_manifest(store, &manifest)
         .await
-        {
-            Ok(Some(_existing)) => {
-                // Physical-id collision or retry; keep the logical slot and
-                // generate another object id.
-                continue;
-            }
-            Ok(None) => {
-                let manifest = build_namespace_manifest_for_projection(
-                    store,
-                    namespace_id,
-                    &projection,
-                    manifest_id,
-                    manifest_object_id,
-                )
-                .await?;
-                // `write_namespace_manifest` owns the idempotent "manifest
-                // already exists" path. A same-id/different-payload conflict
-                // means another writer won this slot, so try the next
-                // manifest id.
-                match write_namespace_manifest(store, &manifest).await {
-                    Ok(()) => {}
-                    Err(MetadataProjectionLoadError::ManifestLoad(
-                        ManifestLoadError::ManifestConflict { .. },
-                    )) => {
-                        continue;
-                    }
-                    Err(error) => return Err(CoreError::MetadataProjection(error)),
-                }
-                written_manifest = Some(manifest);
-                break;
-            }
-            Err(error) => {
-                return Err(CoreError::MetadataProjection(
-                    MetadataProjectionLoadError::ManifestLoad(error),
-                ))
-            }
-        }
-    }
-    let Some(manifest) = written_manifest else {
-        return Err(CoreError::Internal(
-            "manifest id allocation retry exhausted".to_owned(),
-        ));
-    };
+        .map_err(manifest_write_failure)?;
     // The publication budget gates the root compare-and-swap: past it, the
     // written tables and manifest may have aged into the GC grace window,
     // so this attempt must abort without publishing (format spec, "Garbage
