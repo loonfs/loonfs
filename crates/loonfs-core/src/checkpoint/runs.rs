@@ -32,6 +32,37 @@ pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
     MetadataTableFamily::Attributes,
 ];
 
+/// Families whose rows merge in one reorganization unit. Families that read
+/// each other's rows to decide what to drop (see
+/// `reorganize::drop_rows_below_retention_floor`) must compact together, and
+/// a secondary index always travels with its canonical family.
+///
+/// The table lives here beside the rest of the layout policy because both the
+/// reorganizer and the manifest loader read it: a partial fold names its
+/// group in the manifest, and the loader checks that the name is one of these
+/// entries.
+pub(super) const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 7] = [
+    &[
+        MetadataTableFamily::DirentryBinds,
+        MetadataTableFamily::DirentryChildBinds,
+        MetadataTableFamily::DirentryUnbinds,
+    ],
+    &[
+        MetadataTableFamily::Revisions,
+        MetadataTableFamily::RevisionsByInodeDesc,
+    ],
+    &[MetadataTableFamily::Inodes],
+    &[MetadataTableFamily::Tombstones],
+    // Active deletions fold alone: a removal marker is cancelled by the
+    // listed row it names, and both live in this family.
+    &[MetadataTableFamily::ActiveDeletions],
+    &[MetadataTableFamily::CommitReceipts],
+    // Attributes fold alone too: a revision supersedes the revisions of the
+    // same inode, and they all live in this family. The family has no
+    // secondary index to travel with.
+    &[MetadataTableFamily::Attributes],
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataTableManifest {
     pub(super) family: MetadataTableFamily,

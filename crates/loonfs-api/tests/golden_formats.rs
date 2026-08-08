@@ -27,8 +27,9 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
-    DeletedDirentry, MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
-    NamespaceManifestPayload, TombstoneGeneration, TombstoneRowAction,
+    DeletedDirentry, MetadataFileRef, MetadataReorganizeProgress, MetadataRow, MetadataRunId,
+    MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload, TombstoneGeneration,
+    TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
@@ -366,8 +367,65 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             filter_inline: None,
             payload_checksum: sha256_digest(b"sst payload"),
         }],
+        reorganize: None,
     })
     .expect("manifest envelope")
+}
+
+/// A manifest published with a partial fold in flight: one family group is
+/// being folded a slice at a time, so the manifest carries the runs it is
+/// merging, the run it is building, the floor it froze, how far it has got,
+/// and the output segments written so far. Readers see none of it — the
+/// input runs are still in `metadata_files` and the outputs stay invisible
+/// until the swap.
+fn sample_reorganizing_manifest_envelope() -> NamespaceManifestEnvelope {
+    let mut payload = sample_manifest_envelope().payload;
+    payload.manifest_id = ManifestId(3);
+    payload.manifest_object_id = manifest_object_id(3, "0123456789abcdef");
+    payload.reorganize = Some(MetadataReorganizeProgress {
+        families: vec![
+            MetadataTableFamily::Revisions,
+            MetadataTableFamily::RevisionsByInodeDesc,
+        ],
+        input_runs: vec![MetadataRunId {
+            run_seq: ChangeSeq(2),
+            level: 0,
+        }],
+        output_run_seq: ChangeSeq(2),
+        output_level: 1,
+        frozen_floor_seq: ChangeSeq(0),
+        cursor: "revision-00000000000000000042".to_owned(),
+        output_segments: vec![MetadataFileRef {
+            owner_namespace_id: namespace_id(),
+            table_id: MetadataTableId::parse("tbl_fedcba9876543210fedcba9876543210")
+                .expect("valid table id"),
+            object_key:
+                "namespaces/demo/metadata/tables/tbl_fedcba9876543210fedcba9876543210.sst.zst"
+                    .to_owned(),
+            run_seq: ChangeSeq(2),
+            level: 1,
+            family: MetadataTableFamily::Revisions,
+            segment_index: 0,
+            row_count: 3,
+            min_key: "revision-00000000000000000005".to_owned(),
+            max_key: "revision-00000000000000000041".to_owned(),
+            index_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                offset: 2_000,
+                stored_len: 120,
+                decoded_len: 240,
+                crc32c: 0x2233_4455,
+            },
+            filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                offset: 1_940,
+                stored_len: 60,
+                decoded_len: 60,
+                crc32c: 0x6677_8899,
+            },
+            filter_inline: None,
+            payload_checksum: sha256_digest(b"partial fold output"),
+        }],
+    });
+    NamespaceManifestEnvelope::from_payload(payload).expect("reorganizing manifest envelope")
 }
 
 fn sample_head_state() -> HeadState {
@@ -439,6 +497,9 @@ fn namespace_manifest_matches_golden_bytes() {
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
     assert!(!payload.contains_key("features"));
+    // A manifest with no partial fold in flight states nothing about one, so
+    // its bytes are the bytes it had before the field existed.
+    assert!(!payload.contains_key("reorganize"));
 }
 
 #[test]
@@ -446,6 +507,33 @@ fn namespace_manifest_golden_decodes_to_sample() {
     let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
+    assert_eq!(decoded.payload.reorganize, None);
+}
+
+#[test]
+fn reorganizing_namespace_manifest_matches_golden_bytes() {
+    let encoded =
+        encode_namespace_manifest_json(&sample_reorganizing_manifest_envelope()).expect("encode");
+    assert_matches_golden("namespace_manifest.reorganizing.v1.json", &encoded);
+}
+
+#[test]
+fn reorganizing_namespace_manifest_golden_decodes_to_sample() {
+    let decoded =
+        decode_namespace_manifest_json(&read_golden("namespace_manifest.reorganizing.v1.json"))
+            .expect("decode golden reorganizing manifest");
+    assert_eq!(decoded, sample_reorganizing_manifest_envelope());
+    let progress = decoded.payload.reorganize.expect("progress state");
+    assert_eq!(progress.output_segments.len(), 1);
+    assert_eq!(progress.output_segments[0].run_seq, progress.output_run_seq);
+    assert_eq!(progress.output_segments[0].level, progress.output_level);
+    // The outputs are not part of the file set readers materialize; only the
+    // swap moves them there.
+    assert!(!decoded
+        .payload
+        .metadata_files
+        .iter()
+        .any(|file| file.object_key == progress.output_segments[0].object_key));
 }
 
 fn check_control_golden<T>(fixture: &str, kind: ControlObjectKind, state: T)

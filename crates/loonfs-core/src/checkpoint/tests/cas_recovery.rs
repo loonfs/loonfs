@@ -678,6 +678,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         next_inode_id: materialization_before.head.next_inode_id,
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
         metadata_files: flatten_manifest_tables(tables),
+        reorganize: None,
     })
     .expect("build manifest");
     write_namespace_manifest(&store, &manifest)

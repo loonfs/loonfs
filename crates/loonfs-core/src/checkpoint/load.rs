@@ -10,7 +10,7 @@ use super::cache::{
     DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheKey,
 };
 use super::error::ManifestLoadError;
-use super::runs::{runs_in_materialization_order, runs_in_scan_order};
+use super::runs::{runs_in_materialization_order, runs_in_scan_order, REORGANIZE_FAMILY_GROUPS};
 use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
 use super::validate::{validate_manifest_materialization_ranges, validate_namespace_manifest};
 use crate::error::{CoreError, MetadataProjectionLoadError};
@@ -19,13 +19,14 @@ use crate::namespace::basis::{genesis_next_inode_id, MetadataBasis};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use loonfs_api::wire::control::{genesis_commit_id, HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, MetadataFileRef, MetadataTableFamily,
+    decode_namespace_manifest_json, MetadataFileRef, MetadataRunId, MetadataTableFamily,
     NamespaceManifestEnvelope, NamespaceManifestKind, NamespaceManifestPayload,
     NAMESPACE_MANIFEST_FORMAT_VERSION,
 };
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId, WriterEpoch};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
 use loonfs_objectstore::ObjectStore;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -85,6 +86,7 @@ fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceManifestEnvelo
             next_inode_id: genesis_next_inode_id(),
             retention_floor_seq: ChangeSeq(0),
             metadata_files: Vec::new(),
+            reorganize: None,
         },
     }
 }
@@ -219,6 +221,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         )?;
         validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
         validate_manifest_table_descriptors(&manifest_key, &manifest)?;
+        validate_manifest_reorganize_progress(&manifest_key, &manifest.payload)?;
         let scan_runs = Arc::new(runs_in_scan_order(&manifest.payload));
         Ok(DecodedMetadataTableBlock::Manifest {
             manifest: Arc::new(manifest),
@@ -372,25 +375,7 @@ fn validate_manifest_table_descriptors(
                         });
                     }
                 }
-                // Keyed scans prune a segment by this key range: a segment
-                // whose max key sorts below the scan bound is skipped
-                // without a read. An empty or descending range hides every
-                // row the segment holds, so a manifest that carries one is
-                // rejected here rather than answering "not found".
-                if descriptor.row_count > 0
-                    && (descriptor.min_key.is_empty()
-                        || descriptor.max_key.is_empty()
-                        || descriptor.min_key > descriptor.max_key)
-                {
-                    return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                        object_key: descriptor.object_key.clone(),
-                        message: format!(
-                            "segment holds {} rows with key range `{}`..=`{}`; a segment with \
-                             rows must carry a non-empty ascending key range",
-                            descriptor.row_count, descriptor.min_key, descriptor.max_key
-                        ),
-                    });
-                }
+                validate_segment_key_range(descriptor)?;
                 match table.family {
                     MetadataTableFamily::DirentryBinds => {
                         direntry_bind_rows =
@@ -429,6 +414,150 @@ fn validate_manifest_table_descriptors(
                     run.run_seq
                 ),
             });
+        }
+    }
+
+    Ok(())
+}
+
+/// Keyed scans prune a segment by this key range: a segment whose max key
+/// sorts below the scan bound is skipped without a read. An empty or
+/// descending range hides every row the segment holds, so a manifest that
+/// carries one is rejected here rather than answering "not found".
+///
+/// A partial fold's output segments go through this too: they become run
+/// segments at the swap, and a range that hides rows is no more acceptable
+/// for having been written by a fold in progress.
+fn validate_segment_key_range(descriptor: &MetadataFileRef) -> Result<(), ManifestLoadError> {
+    if descriptor.row_count > 0
+        && (descriptor.min_key.is_empty()
+            || descriptor.max_key.is_empty()
+            || descriptor.min_key > descriptor.max_key)
+    {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
+            object_key: descriptor.object_key.clone(),
+            message: format!(
+                "segment holds {} rows with key range `{}`..=`{}`; a segment with \
+                 rows must carry a non-empty ascending key range",
+                descriptor.row_count, descriptor.min_key, descriptor.max_key
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Checks the partial fold a manifest carries, if it carries one.
+///
+/// The builder's invariants are the loader's checks: a fold that resumes
+/// from a manifest trusts every field below, so a manifest that disagrees
+/// with itself is refused rather than resumed. See the design doc,
+/// `docs/design/metadata-partial-fold.md`.
+fn validate_manifest_reorganize_progress(
+    manifest_object_key: &str,
+    payload: &NamespaceManifestPayload,
+) -> Result<(), ManifestLoadError> {
+    let Some(progress) = &payload.reorganize else {
+        return Ok(());
+    };
+    let invalid = |message: String| ManifestLoadError::RunManifestMismatch {
+        object_key: manifest_object_key.to_owned(),
+        message,
+    };
+
+    // The group is what makes the fold's drop rules legal, so it must be one
+    // of the groups the reorganizer folds, spelled exactly.
+    if !REORGANIZE_FAMILY_GROUPS.contains(&progress.families.as_slice()) {
+        return Err(invalid(format!(
+            "reorganize progress names families {:?}, which is not a reorganization family group",
+            progress.families
+        )));
+    }
+
+    // The input runs stay in `metadata_files` and serve reads until the
+    // swap, so a name with no run behind it means the fold has already lost
+    // its input.
+    let runs: BTreeSet<MetadataRunId> = payload
+        .metadata_files
+        .iter()
+        .map(|descriptor| MetadataRunId {
+            run_seq: descriptor.run_seq,
+            level: descriptor.level,
+        })
+        .collect();
+    for input in &progress.input_runs {
+        if !runs.contains(input) {
+            return Err(invalid(format!(
+                "reorganize progress names input run seq `{}` level {}, which the manifest does \
+                 not reference",
+                input.run_seq, input.level
+            )));
+        }
+    }
+
+    // The frozen floor is what every step and every resumption decides
+    // drops against. A floor above the manifest's own would drop rows the
+    // manifest still promises to retain.
+    if progress.frozen_floor_seq > payload.retention_floor_seq {
+        return Err(invalid(format!(
+            "reorganize progress froze the retention floor at `{}`, which is above the manifest's \
+             floor `{}`",
+            progress.frozen_floor_seq, payload.retention_floor_seq
+        )));
+    }
+
+    // PR 2 brings the per-group partition grammar, and with it the check
+    // that the cursor parses as a partition key for this group and that
+    // every output range lies below the cursor's bound for its family. Until
+    // then the loader can only say that the fold has a position at all.
+    if progress.cursor.is_empty() {
+        return Err(invalid(
+            "reorganize progress carries an empty cursor, so the fold has no position".to_owned(),
+        ));
+    }
+
+    let mut previous_by_family: BTreeMap<MetadataTableFamily, &MetadataFileRef> = BTreeMap::new();
+    for segment in &progress.output_segments {
+        validate_segment_key_range(segment)?;
+        // Every output segment belongs to the run the fold is building. One
+        // stamped otherwise would land in some other run at the swap.
+        if segment.run_seq != progress.output_run_seq || segment.level != progress.output_level {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                object_key: segment.object_key.clone(),
+                message: format!(
+                    "reorganize output segment carries run seq `{}` level {}, but the fold builds \
+                     run seq `{}` level {}",
+                    segment.run_seq, segment.level, progress.output_run_seq, progress.output_level
+                ),
+            });
+        }
+        if !progress.families.contains(&segment.family) {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                object_key: segment.object_key.clone(),
+                message: format!(
+                    "reorganize output segment holds family `{:?}`, which is outside the folded \
+                     group {:?}",
+                    segment.family, progress.families
+                ),
+            });
+        }
+        // A fold writes one family's outputs in ascending key order and
+        // never revisits a partition, so two output segments of one family
+        // can neither overlap nor descend. Only segments holding rows carry
+        // a range to compare.
+        if segment.row_count == 0 {
+            continue;
+        }
+        if let Some(previous) = previous_by_family.insert(segment.family, segment) {
+            if segment.min_key <= previous.max_key {
+                return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                    object_key: segment.object_key.clone(),
+                    message: format!(
+                        "reorganize output segment starts at `{}`, at or below the preceding \
+                         segment's last key `{}` in family `{:?}`",
+                        segment.min_key, previous.max_key, segment.family
+                    ),
+                });
+            }
         }
     }
 

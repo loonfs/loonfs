@@ -832,6 +832,65 @@ pub mod lookup_keys {
     }
 }
 
+/// Names one metadata run inside the manifest that carries it: the run
+/// sequence and the compaction tier, which together identify a run the way
+/// [`MetadataFileRef::run_seq`] and [`MetadataFileRef::level`] do.
+///
+/// See [partial folds](../../../docs/specs/format.md#621-partial-folds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MetadataRunId {
+    /// Namespace sequence at which the run was produced.
+    pub run_seq: ChangeSeq,
+    /// Compaction tier the run sits in.
+    pub level: u32,
+}
+
+/// One partial fold of a family group, recorded so it survives a crash.
+///
+/// A fold whose input no longer fits one reorganization step runs a slice of
+/// the group's keyspace at a time. This state records the runs it is
+/// merging, the identity of the run it is building, the retention floor it
+/// froze at the start, and how far it has got. Each step writes fresh output
+/// segments and publishes a manifest carrying the outputs accumulated so far
+/// and the cursor advanced.
+///
+/// Readers never consult it. The input runs stay in `metadata_files` and
+/// serve reads unchanged; the outputs stay here, invisible to scans, until
+/// the completing step replaces the input runs with the finished output run
+/// and clears this field in one manifest publication. Metadata rows must
+/// appear exactly once — scans concatenate runs without deduplicating — so a
+/// manifest that showed both sets to a scan would show duplicates.
+///
+/// See [partial folds](../../../docs/specs/format.md#621-partial-folds).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataReorganizeProgress {
+    /// The family group being folded. Equals one entry of the reorganization
+    /// family-group table exactly, which is what makes the drop rules legal:
+    /// families that read each other's rows fold together.
+    pub families: Vec<MetadataTableFamily>,
+    /// Every run being merged, fixed when the fold started. Each entry names
+    /// a run still present in `metadata_files`. Runs that arrive while the
+    /// fold runs stay out of this set and survive it.
+    pub input_runs: Vec<MetadataRunId>,
+    /// Sequence stamped on every output segment, fixed at the start so the
+    /// finished run lands where the input runs sat.
+    pub output_run_seq: ChangeSeq,
+    /// Compaction tier stamped on every output segment: the base level.
+    pub output_level: u32,
+    /// The retention floor as it stood when the fold started. Drop rules are
+    /// decided against this rather than the live floor, so every step and
+    /// every resumption decides identically.
+    pub frozen_floor_seq: ChangeSeq,
+    /// The next unprocessed partition key. The fold advances in whole
+    /// partitions of the group's keyspace, so this is always a boundary
+    /// between two partitions and never splits one.
+    pub cursor: String,
+    /// The output segments written so far, each carrying its own family,
+    /// `output_run_seq`, and `output_level`. Nothing else references these
+    /// objects, so garbage collection roots them through this field.
+    pub output_segments: Vec<MetadataFileRef>,
+}
+
 /// Carries one complete namespace file-set description inside a manifest envelope.
 ///
 /// See [manifest publication](../../../docs/specs/format.md#61-manifest-publication-and-checkpoint-verification).
@@ -857,6 +916,12 @@ pub struct NamespaceManifestPayload {
     pub retention_floor_seq: ChangeSeq,
     /// Complete ordered set of metadata segments required to reconstruct the snapshot.
     pub metadata_files: Vec<MetadataFileRef>,
+    /// The partial fold in flight, when there is one. The field is skipped
+    /// entirely when absent, so a manifest with no fold in flight encodes
+    /// exactly as it did before the field existed. See
+    /// [partial folds](../../../docs/specs/format.md#621-partial-folds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reorganize: Option<MetadataReorganizeProgress>,
 }
 
 /// In-memory view of a namespace manifest envelope.
@@ -1007,6 +1072,7 @@ mod tests {
                 1,
                 "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000001.sst.zst",
             )],
+            reorganize: None,
         })
         .expect("manifest");
 
@@ -1055,6 +1121,7 @@ mod tests {
                         "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000002.sst.zst",
                     ),
                 ],
+                reorganize: None,
             },
         )
         .expect("manifest");

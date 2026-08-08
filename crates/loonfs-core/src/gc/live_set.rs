@@ -16,6 +16,7 @@ use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, NamespaceState,
 };
+use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
@@ -434,9 +435,8 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         .await
         {
             Ok(Some(manifest)) => {
-                for file in &manifest.payload.metadata_files {
-                    live.tables.insert(file.object_key.clone());
-                }
+                live.tables
+                    .extend(manifest_table_keys(&manifest.payload).map(str::to_owned));
             }
             // Absent is not ambiguous. The root's manifest missing is real
             // corruption and degrades the pass; a record-rooted basis that
@@ -650,12 +650,29 @@ async fn select_reference_anchor<S: ObjectStore + ?Sized>(
         AnchoredManifest {
             manifest_object_id,
             head_seq: manifest.payload.head_seq,
-            tables: manifest
-                .payload
-                .metadata_files
-                .iter()
-                .map(|file| file.object_key.clone())
+            tables: manifest_table_keys(&manifest.payload)
+                .map(str::to_owned)
                 .collect(),
         },
     ))))
+}
+
+/// Every metadata-table object key one manifest names.
+///
+/// A manifest names tables in two places: the file set readers materialize,
+/// and the output segments of a partial fold in progress, which nothing else
+/// references at all. Both roots go through here — the current root set and
+/// the reference anchor alike — so a fold's outputs cannot be reaped out
+/// from under the fold that is writing them.
+fn manifest_table_keys(payload: &NamespaceManifestPayload) -> impl Iterator<Item = &str> {
+    payload
+        .metadata_files
+        .iter()
+        .chain(
+            payload
+                .reorganize
+                .iter()
+                .flat_map(|progress| &progress.output_segments),
+        )
+        .map(|file| file.object_key.as_str())
 }

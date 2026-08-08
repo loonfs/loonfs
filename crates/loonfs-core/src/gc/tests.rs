@@ -17,8 +17,13 @@ use crate::limits::{
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-    ControlObjectKind, UploadSessionLifecycle, UploadSessionState,
+    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
+    CheckpointRecordState, ControlObjectEnvelope, ControlObjectKind, MetadataRootState,
+    UploadSessionLifecycle, UploadSessionState,
+};
+use loonfs_api::wire::manifest::{
+    decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef,
+    MetadataReorganizeProgress, MetadataRunId, MetadataTableFamily, NamespaceManifestEnvelope,
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
@@ -1879,6 +1884,178 @@ async fn fold_metadata<S: ObjectStore + ?Sized>(
         }
     }
     assert!(folded, "the fold must reach a steady state");
+}
+
+/// A partial fold's output segments are named by the progress state and by
+/// nothing else — they are not in `metadata_files` until the swap. Both roots
+/// that enumerate a manifest's tables have to see them, or a pass reaps the
+/// outputs of a fold that is still running.
+///
+/// The two manifests here exercise one root each: the current root protects
+/// its own progress outputs, and the reference manifest protects the ones it
+/// named a grace window ago.
+#[tokio::test]
+async fn a_partial_folds_output_segments_are_rooted_by_the_manifest_that_names_them() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(
+        &inner,
+        &namespace_id,
+        "/docs/one.txt",
+        "gc-fold-one",
+        &setup,
+    )
+    .await;
+    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+        .await
+        .expect("first manifest");
+    let anchor_manifest = current_manifest_object_id(&inner, &namespace_id).await;
+
+    // Everything published so far ages past the window; the second manifest
+    // below is the only young one, which makes the first one the anchor.
+    let published = namespace_key_set(&inner, &namespace_id).await;
+    let store = aged_before_now(inner, published);
+    write_test_file(
+        &store,
+        &namespace_id,
+        "/docs/two.txt",
+        "gc-fold-two",
+        &setup,
+    )
+    .await;
+    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+        .await
+        .expect("second manifest");
+    let root_manifest = current_manifest_object_id(&store, &namespace_id).await;
+    assert_ne!(root_manifest, anchor_manifest);
+
+    let anchor_output = add_reorganize_progress(
+        &store,
+        &namespace_id,
+        &anchor_manifest,
+        "tbl_11111111111111111111111111111111",
+    )
+    .await;
+    let root_output = add_reorganize_progress(
+        &store,
+        &namespace_id,
+        &root_manifest,
+        "tbl_22222222222222222222222222222222",
+    )
+    .await;
+
+    let now = context(now_after_newest_object(store.inner(), &namespace_id, 1).await);
+    let live = live_set(&store, &namespace_id, &now).await;
+
+    assert!(
+        live.tables.contains(&root_output),
+        "the current root must protect the outputs of the fold it carries"
+    );
+    assert!(
+        live.tables.contains(&anchor_output),
+        "the reference manifest must protect the outputs it named a window ago"
+    );
+}
+
+/// Gives a manifest already on the store a partial fold to carry, and returns
+/// the object key of the output segment it now names. The manifest keeps its
+/// id and its key, so `metadata/root.json` only has to learn the new payload
+/// checksum when the manifest it points at is the one rewritten.
+async fn add_reorganize_progress<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_object_id: &loonfs_api::ManifestObjectId,
+    output_table_id: &str,
+) -> String {
+    let manifest_key = metadata_manifest_object(namespace_id.as_str(), manifest_object_id);
+    let bytes = store
+        .get(&manifest_key, None)
+        .await
+        .expect("read manifest")
+        .expect("manifest exists");
+    let mut payload = decode_namespace_manifest_json(&bytes)
+        .expect("decode manifest")
+        .payload;
+    let output_key = metadata_table(namespace_id.as_str(), output_table_id);
+    let modelled_on = payload
+        .metadata_files
+        .iter()
+        .find(|file| file.family == MetadataTableFamily::Inodes)
+        .expect("an inode segment")
+        .clone();
+    let output_run_seq = payload.head_seq;
+    payload.reorganize = Some(MetadataReorganizeProgress {
+        families: vec![MetadataTableFamily::Inodes],
+        input_runs: vec![MetadataRunId {
+            run_seq: modelled_on.run_seq,
+            level: modelled_on.level,
+        }],
+        output_run_seq,
+        output_level: modelled_on.level + 1,
+        frozen_floor_seq: payload.retention_floor_seq,
+        cursor: "inode-00000000000000000009".to_owned(),
+        output_segments: vec![MetadataFileRef {
+            table_id: loonfs_api::MetadataTableId::parse(output_table_id).expect("valid table id"),
+            object_key: output_key.clone(),
+            run_seq: output_run_seq,
+            level: modelled_on.level + 1,
+            ..modelled_on
+        }],
+    });
+    let envelope =
+        NamespaceManifestEnvelope::from_payload(payload).expect("manifest carrying a partial fold");
+    store
+        .put_overwrite(
+            &manifest_key,
+            Bytes::from(encode_namespace_manifest_json(&envelope).expect("encode manifest")),
+        )
+        .await
+        .expect("rewrite manifest");
+
+    // The root binds the manifest bytes by checksum; keep the two in
+    // agreement so the fixture stays a state the namespace could be in.
+    let root_key = metadata_root(namespace_id.as_str());
+    let root_bytes = store
+        .get(&root_key, None)
+        .await
+        .expect("read metadata root")
+        .expect("metadata root exists");
+    let mut root =
+        decode_control_object::<MetadataRootState>(&root_bytes, ControlObjectKind::MetadataRoot)
+            .expect("decode metadata root")
+            .state;
+    if root.manifest_object_id == *manifest_object_id {
+        root.manifest_payload_checksum = envelope.payload_checksum.clone();
+        let root_envelope =
+            ControlObjectEnvelope::from_state(ControlObjectKind::MetadataRoot, root)
+                .expect("metadata root envelope");
+        store
+            .put_overwrite(
+                &root_key,
+                Bytes::from(encode_control_object(&root_envelope).expect("encode metadata root")),
+            )
+            .await
+            .expect("rewrite metadata root");
+    }
+    output_key
+}
+
+/// The manifest object id `metadata/root.json` currently points at.
+async fn current_manifest_object_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> loonfs_api::ManifestObjectId {
+    crate::namespace::control::read_metadata_root_object(store, namespace_id)
+        .await
+        .expect("read metadata root")
+        .envelope
+        .state
+        .manifest_object_id
 }
 
 /// The whole point of the reference anchor: a read that pinned its anchor

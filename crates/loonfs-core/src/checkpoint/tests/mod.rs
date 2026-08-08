@@ -31,7 +31,7 @@ use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_tables, runs_from_metadata_files, runs_in_scan_order, MetadataLsmPolicy,
     MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
-    CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_L0_RUNS,
+    CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_L0_RUNS, REORGANIZE_FAMILY_GROUPS,
 };
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
@@ -64,7 +64,8 @@ use futures::stream::BoxStream;
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataFileRef,
-    MetadataRow, MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
+    MetadataReorganizeProgress, MetadataRow, MetadataRunId,
+    MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
 };
 use loonfs_api::wire::sst_blocks::{
@@ -574,6 +575,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         next_inode_id: head.next_inode_id,
         retention_floor_seq: source.retention_floor_seq,
         metadata_files,
+        reorganize: None,
     })
     .map_err(|err| {
         CoreError::Internal(format!(

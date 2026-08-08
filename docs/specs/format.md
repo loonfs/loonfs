@@ -76,7 +76,7 @@ The required durable object families and standard key patterns are:
 | --- | --- | --- | --- |
 | **WAL head** | Mutable | The namespace itself. Carries its immutable identity — content store, name policy, and fork provenance — together with the hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. A manifest may additionally carry the state of a partial fold in progress (section 6.2.1), which readers ignore. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The lifecycle is monotonic: a record is created active under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The lifecycle is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
@@ -2104,6 +2104,9 @@ Invariants:
   path; readers never observe a partially compacted state.
 - Compacted inputs MUST remain available until no retained manifest version
   or checkpoint record references them.
+- A rebuild in progress MUST NOT be visible to reads: its output segments are
+  reachable only through the `reorganize` state (section 6.2.1), until the
+  publication that swaps them in.
 
 Checkpoint records are standalone files under `checkpoints/`. Maintenance
 never creates one: automatic root advancement leaves superseded manifests and
@@ -2111,6 +2114,63 @@ folded-away tables unpinned, and garbage collection reaps them under the
 grace-window and delete-time re-verification rules ("Garbage collection").
 A checkpoint record is a deliberate pin — fork sources and explicit admin
 checkpoints — and roots its basis for as long as the record exists.
+
+#### 6.2.1 Partial folds
+
+A group whose oldest run has outgrown one step's budget can still be rebuilt,
+one slice of its keyspace at a time. The manifest carries the state of such a
+rebuild in an optional `reorganize` object, and readers ignore it entirely.
+A manifest with no rebuild in flight omits the field.
+
+The state holds:
+
+- `families`: the family group being rebuilt. It equals one of the family
+  groups compaction folds together, exactly.
+- `input_runs`: the runs being merged, as `run_seq` and `level` pairs, fixed
+  when the rebuild started. Every entry names a run the manifest still
+  references. Runs published while the rebuild runs stay out of this set and
+  survive it untouched.
+- `output_run_seq` and `output_level`: the identity of the single run being
+  built. It is fixed at the start and is the base level, so the finished run
+  lands where the input runs sat, below every run that arrived meanwhile.
+- `frozen_floor_seq`: the retention floor as it stood at the start. Drop
+  rules are evaluated against it rather than the live floor, so every step
+  and every resumption decides identically.
+- `cursor`: the next unprocessed partition key. A rebuild advances in whole
+  partitions of the group's keyspace and never splits one, so the cursor is
+  always a boundary between two partitions.
+- `output_segments`: the segment descriptors written so far, each carrying
+  the declared `output_run_seq` and `output_level` and a family inside the
+  group.
+
+Each step merges one bounded slice into fresh segments and publishes a
+manifest carrying the outputs accumulated so far and the cursor advanced. A
+step interrupted anywhere resumes from the cursor in the last published
+manifest, because every segment it wrote is named by that manifest.
+
+**Rows appear exactly once.** Output segments are not part of the file set,
+and no reader consults them: the input runs stay in `metadata_files` and
+serve reads unchanged until the completing step replaces them with the
+finished output run and clears `reorganize`, all in one manifest
+publication. A scan concatenates runs without deduplicating, so a manifest
+that showed both the inputs and the outputs would show every rebuilt row
+twice.
+
+**Rooting.** Nothing but the progress state names an output segment, so a
+manifest roots its `output_segments` exactly as it roots its
+`metadata_files` — from the current root and from the reference manifest R
+alike ("Garbage collection", rule 1). An abandoned rebuild therefore leaks
+nothing: the manifest that survives the crash names every segment written so
+far, and the next step resumes from it.
+
+**Validation at load.** A manifest carrying the state is rejected unless
+`families` is one of the family groups, every `input_runs` entry names a run
+the manifest references, `frozen_floor_seq` is at or below the manifest's own
+`retention_floor_seq`, the cursor parses as a partition key for the group,
+and every output segment carries the declared run and level, a family inside
+the group, and a non-empty ascending key range that lies below the cursor's
+bound for its family and neither overlaps nor precedes another output segment
+of the same family.
 
 ### 6.3 Retention management
 
@@ -2139,7 +2199,8 @@ does not exist, so there is nothing to collect and nothing to ignore.
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
 `metadata/tables/`, `checkpoints/`, and `wal/segments/` collections. A live
-manifest roots every object key its `metadata_files` list names. The pass also
+manifest roots every object key its `metadata_files` list names, and the
+output segments of a partial fold it carries (section 6.2.1). The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
 halves are split at the completed line and described in rule 11.
 Core GC never recognizes, lists specifically, or deletes any object below a
@@ -2190,7 +2251,8 @@ publishing CAS) — under these rules:
    the namespace's own prefix whose provider timestamp is at least `T` old:
    it is a durable snapshot of what the namespace referenced when the window
    opened. R roots what it names exactly as `metadata/root.json` does — its
-   own key, its `metadata_files`, its content references, and every WAL
+   own key, its `metadata_files`, the output segments of any partial fold it
+   carries, its content references, and every WAL
    segment above its `head_seq` — so an unreferenced object is deleted only
    when the current root set, R, and the object's own age all agree. A
    namespace that has published no manifest needs no R: nothing has ever

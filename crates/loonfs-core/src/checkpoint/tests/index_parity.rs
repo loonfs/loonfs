@@ -1423,3 +1423,217 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         );
     }
 }
+
+/// The invariants a partial fold's builder maintains are the invariants the
+/// loader checks (`docs/design/metadata-partial-fold.md`). A fold that
+/// resumes from a manifest trusts every field of the progress state, so a
+/// manifest that disagrees with itself is refused rather than resumed.
+#[tokio::test]
+async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manifest() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    checkpoint_then_reorganize(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let payload = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("load tables")
+        .manifest()
+        .payload
+        .clone();
+
+    // A partial fold of the revisions group: it merges the base run above
+    // produced, builds one fresh base run stamped at the manifest head, and
+    // has written one output segment so far.
+    let group = REORGANIZE_FAMILY_GROUPS
+        .iter()
+        .find(|group| group.contains(&ApiMetadataTableFamily::Revisions))
+        .expect("the revisions group");
+    let input = payload
+        .metadata_files
+        .iter()
+        .find(|descriptor| {
+            descriptor.family == ApiMetadataTableFamily::Revisions
+                && descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
+        })
+        .expect("a folded revisions segment");
+    let output_run_seq = payload.head_seq;
+    let progress = MetadataReorganizeProgress {
+        families: group.to_vec(),
+        input_runs: vec![MetadataRunId {
+            run_seq: input.run_seq,
+            level: input.level,
+        }],
+        output_run_seq,
+        output_level: CHECKPOINT_BASE_RUN_LEVEL,
+        frozen_floor_seq: payload.retention_floor_seq,
+        cursor: lookup_keys::inode_key(InodeId(9)),
+        output_segments: vec![reorganize_output_segment(
+            input,
+            &namespace_id,
+            output_run_seq,
+            CHECKPOINT_BASE_RUN_LEVEL,
+        )],
+    };
+
+    // The state above is the one every rejection below is a single edit away
+    // from, so each case fails for its own rule and nothing else.
+    let mut valid = payload.clone();
+    valid.reorganize = Some(progress.clone());
+    load_perturbed_manifest(&store, &namespace_id, valid, 1)
+        .await
+        .expect("a manifest whose reorganize state agrees with itself must load");
+
+    type Perturbation = fn(&mut MetadataReorganizeProgress);
+    fn families_are_not_a_group(progress: &mut MetadataReorganizeProgress) {
+        progress.families = vec![
+            ApiMetadataTableFamily::Inodes,
+            ApiMetadataTableFamily::Tombstones,
+        ];
+    }
+    fn input_run_is_not_in_the_manifest(progress: &mut MetadataReorganizeProgress) {
+        progress.input_runs[0].run_seq = ChangeSeq(progress.input_runs[0].run_seq.0 + 1_000);
+    }
+    fn frozen_floor_is_above_the_manifest_floor(progress: &mut MetadataReorganizeProgress) {
+        progress.frozen_floor_seq = ChangeSeq(progress.frozen_floor_seq.0 + 1);
+    }
+    fn cursor_is_empty(progress: &mut MetadataReorganizeProgress) {
+        progress.cursor.clear();
+    }
+    let state_perturbations: [(&str, Perturbation); 4] = [
+        ("families are not a family group", families_are_not_a_group),
+        (
+            "input run is not in the manifest",
+            input_run_is_not_in_the_manifest,
+        ),
+        (
+            "frozen floor is above the manifest floor",
+            frozen_floor_is_above_the_manifest_floor,
+        ),
+        ("cursor is empty", cursor_is_empty),
+    ];
+    for (index, (label, perturb)) in state_perturbations.iter().enumerate() {
+        let mut perturbed = progress.clone();
+        perturb(&mut perturbed);
+        let mut candidate = payload.clone();
+        candidate.reorganize = Some(perturbed);
+        let error = load_perturbed_manifest(&store, &namespace_id, candidate, 10 + index as u64)
+            .await
+            .expect_err(label);
+        assert!(
+            matches!(error, ManifestLoadError::RunManifestMismatch { .. }),
+            "{label}: unexpected error {error:?}"
+        );
+    }
+
+    fn output_range_is_empty(progress: &mut MetadataReorganizeProgress) {
+        progress.output_segments[0].max_key.clear();
+    }
+    fn output_run_seq_is_not_the_folds(progress: &mut MetadataReorganizeProgress) {
+        progress.output_segments[0].run_seq = ChangeSeq(progress.output_run_seq.0 + 1);
+    }
+    fn output_level_is_not_the_folds(progress: &mut MetadataReorganizeProgress) {
+        progress.output_segments[0].level = progress.output_level + 1;
+    }
+    fn output_family_is_outside_the_group(progress: &mut MetadataReorganizeProgress) {
+        progress.output_segments[0].family = ApiMetadataTableFamily::Inodes;
+    }
+    // A second segment of the same family whose range reaches back into the
+    // first: the fold never revisits a partition, so this cannot happen.
+    fn output_ranges_overlap(progress: &mut MetadataReorganizeProgress) {
+        let mut second = progress.output_segments[0].clone();
+        second.segment_index = 1;
+        second.min_key = progress.output_segments[0].min_key.clone();
+        progress.output_segments.push(second);
+    }
+    let segment_perturbations: [(&str, Perturbation); 5] = [
+        ("output segment range is empty", output_range_is_empty),
+        (
+            "output segment carries another run seq",
+            output_run_seq_is_not_the_folds,
+        ),
+        (
+            "output segment carries another level",
+            output_level_is_not_the_folds,
+        ),
+        (
+            "output segment holds a family outside the group",
+            output_family_is_outside_the_group,
+        ),
+        ("output segment ranges overlap", output_ranges_overlap),
+    ];
+    for (index, (label, perturb)) in segment_perturbations.iter().enumerate() {
+        let mut perturbed = progress.clone();
+        perturb(&mut perturbed);
+        let mut candidate = payload.clone();
+        candidate.reorganize = Some(perturbed);
+        let error = load_perturbed_manifest(&store, &namespace_id, candidate, 20 + index as u64)
+            .await
+            .expect_err(label);
+        assert!(
+            matches!(error, ManifestLoadError::SegmentDescriptorMismatch { .. }),
+            "{label}: unexpected error {error:?}"
+        );
+    }
+}
+
+/// One output segment of a partial fold, modelled on a segment the manifest
+/// already holds: a fresh table id and object key, stamped with the run the
+/// fold is building.
+fn reorganize_output_segment(
+    modelled_on: &MetadataFileRef,
+    namespace_id: &NamespaceId,
+    output_run_seq: ChangeSeq,
+    output_level: u32,
+) -> MetadataFileRef {
+    let table_id = loonfs_api::MetadataTableId::generate();
+    MetadataFileRef {
+        object_key: metadata_table(namespace_id.as_str(), table_id.as_str()),
+        table_id,
+        run_seq: output_run_seq,
+        level: output_level,
+        segment_index: 0,
+        ..modelled_on.clone()
+    }
+}
+
+/// Republishes a payload under a fresh manifest id and loads it back, so a
+/// caller can assert on what validation makes of an edited manifest.
+async fn load_perturbed_manifest(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    mut payload: NamespaceManifestPayload,
+    id_offset: u64,
+) -> Result<(), ManifestLoadError> {
+    payload.manifest_id = ManifestId(payload.manifest_id.0 + id_offset);
+    payload.manifest_object_id = ManifestObjectId::generate(payload.manifest_id);
+    let manifest_object_id = payload.manifest_object_id.clone();
+    let envelope =
+        NamespaceManifestEnvelope::from_payload(payload).expect("perturbed manifest envelope");
+    write_namespace_manifest(store, &envelope)
+        .await
+        .expect("write perturbed manifest");
+    load_verified_manifest_tables(store, namespace_id, &manifest_object_id)
+        .await
+        .map(|_| ())
+}

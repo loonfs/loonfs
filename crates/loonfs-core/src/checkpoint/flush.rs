@@ -409,6 +409,9 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         next_inode_id: projection.head.next_inode_id,
         retention_floor_seq: projection.floor_seq,
         metadata_files,
+        // A flush carries any partial fold forward untouched: it appends an
+        // L0 run and touches neither the fold's input runs nor its outputs.
+        reorganize: previous_manifest.payload.reorganize.clone(),
     })
     .map_err(|err| {
         CoreError::Internal(format!(

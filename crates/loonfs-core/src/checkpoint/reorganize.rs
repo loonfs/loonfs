@@ -37,7 +37,7 @@ use super::publish::{
 };
 use super::runs::{
     flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, MetadataRunManifest,
-    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
+    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
 };
 use super::scan::VerifiedMetadataTables;
 use crate::context::MutationContext;
@@ -54,32 +54,6 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
-
-/// Families whose rows merge in one reorganization unit. Families that read
-/// each other's rows to decide what to drop (see
-/// `drop_rows_below_retention_floor`) must compact together, and a secondary
-/// index always travels with its canonical family.
-const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 7] = [
-    &[
-        MetadataTableFamily::DirentryBinds,
-        MetadataTableFamily::DirentryChildBinds,
-        MetadataTableFamily::DirentryUnbinds,
-    ],
-    &[
-        MetadataTableFamily::Revisions,
-        MetadataTableFamily::RevisionsByInodeDesc,
-    ],
-    &[MetadataTableFamily::Inodes],
-    &[MetadataTableFamily::Tombstones],
-    // Active deletions fold alone: a removal marker is cancelled by the
-    // listed row it names, and both live in this family.
-    &[MetadataTableFamily::ActiveDeletions],
-    &[MetadataTableFamily::CommitReceipts],
-    // Attributes fold alone too: a revision supersedes the revisions of the
-    // same inode, and they all live in this family. The family has no
-    // secondary index to travel with.
-    &[MetadataTableFamily::Attributes],
-];
 
 /// What one reorganization step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -671,6 +645,9 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
         next_inode_id: previous.payload.next_inode_id,
         retention_floor_seq,
         metadata_files,
+        // Nothing produces a partial fold yet; a whole-group fold clears
+        // the field it never set.
+        reorganize: None,
     })
     .map_err(|err| CoreError::Internal(format!("failed to build reorganized manifest: {err}")))?;
     write_namespace_manifest(store, &manifest)

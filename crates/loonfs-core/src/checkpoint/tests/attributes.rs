@@ -293,6 +293,7 @@ async fn publish_manifest_with_tables<S: ObjectStore + ?Sized>(
         next_inode_id: InodeId(64),
         retention_floor_seq: ChangeSeq(0),
         metadata_files,
+        reorganize: None,
     })
     .expect("manifest envelope");
     write_namespace_manifest(store, &manifest)
