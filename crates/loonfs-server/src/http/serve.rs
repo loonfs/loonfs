@@ -184,12 +184,7 @@ pub(super) async fn app_with_store_and_direct_transfers(
     // Opened before the handles, because the handles are what it is
     // installed on: a directory that cannot be owned fails startup here
     // rather than after a runtime is already running on it.
-    let local_cache = match &config.local_cache {
-        Some(local_cache) => Some(Arc::new(
-            FoyerStoredMetadataBlockCache::open(local_cache, metrics.recorder().as_ref()).await?,
-        )),
-        None => None,
-    };
+    let local_cache = open_local_cache(&config, &metrics).await?;
     // Grep reads and checkpoints through the same handles the HTTP planes
     // use, so it is composed after them. Nothing has to be wired back into
     // the writer for its publications to reach the index: the job says on
@@ -279,6 +274,25 @@ pub(super) async fn app_with_store_and_direct_transfers(
         local_cache,
     };
     Ok((router(state.clone()), state))
+}
+
+/// Opens the node-local block cache the config asks for, or answers `None`
+/// where it asks for none.
+///
+/// The one place the cache is opened, so [`check_config`] takes the
+/// configured directory exactly the way a start takes it: the root is
+/// created if it is missing, the lock is claimed, and the disk tier is
+/// allocated.
+async fn open_local_cache(
+    config: &ServerConfig,
+    metrics: &ServerMetrics,
+) -> Result<Option<Arc<FoyerStoredMetadataBlockCache>>, ServerConfigError> {
+    match &config.local_cache {
+        Some(local_cache) => Ok(Some(Arc::new(
+            FoyerStoredMetadataBlockCache::open(local_cache, metrics.recorder().as_ref()).await?,
+        ))),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +415,48 @@ pub enum ServeError {
     LocalCacheClose(#[source] StoredMetadataBlockCacheCloseError),
 }
 
+/// Builds the rustls configuration this deployment terminates with, or
+/// answers `None` where TLS terminates in front of the process.
+///
+/// The one place the identity is loaded, so [`check_config`] reads the files
+/// a start reads and reports what a start reports.
+fn tls_server_config(
+    config: &ServerConfig,
+) -> Result<Option<rustls::ServerConfig>, TlsConfigError> {
+    config.tls.as_ref().map(tls::server_config).transpose()
+}
+
+/// Runs the startup work that reads more than the config file, then releases
+/// what it took.
+///
+/// `loonfs-server --check-config` calls this once the config has loaded, so
+/// the flag also fails on the two things that load correctly and start
+/// incorrectly: a TLS identity this process cannot use, and a local cache
+/// directory it cannot own. Both go through the functions [`app`] and
+/// [`serve_with_shutdown`] call, so what this accepts is what a start
+/// accepts.
+///
+/// Two startup failures stay outside it. It does not bind the configured
+/// address, because a check that held the port could not run beside the
+/// server it is checking, and it performs no object-store operation, because
+/// a reachability check belongs to `loonfs admin store-probe`. Constructing
+/// the store still creates a `local-fs` root, as a start does.
+pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
+    config.validate()?;
+    config.object_store()?;
+    // Building the identity is the whole check; nothing here serves with it.
+    let _identity = tls_server_config(config).map_err(ServeError::Tls)?;
+    if let Some(local_cache) = open_local_cache(config, &ServerMetrics::new()).await? {
+        // Closing is what releases the directory lock, so a check leaves the
+        // directory in the state the start that follows it needs to find.
+        local_cache
+            .close()
+            .await
+            .map_err(ServeError::LocalCacheClose)?;
+    }
+    Ok(())
+}
+
 /// Serves until ctrl-c or SIGTERM, then shuts down gracefully: the listener
 /// stops accepting, in-flight requests drain, publisher work finishes, and
 /// writer maintenance — the runtime's steps and grep's alike — settles
@@ -418,12 +474,7 @@ pub async fn serve_with_shutdown(
     let bind = config.bind_addr()?;
     // The identity is loaded before the bind, so a deployment with an
     // unreadable certificate fails without ever having held the port.
-    let tls = config
-        .tls
-        .as_ref()
-        .map(tls::server_config)
-        .transpose()
-        .map_err(ServeError::Tls)?;
+    let tls = tls_server_config(&config).map_err(ServeError::Tls)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| ServeError::Bind { addr: bind, source })?;

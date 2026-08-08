@@ -14,7 +14,7 @@ pub use config::{
     load_server_config, GrepConfig, GrepMode, LocalCacheConfig, MaintenanceMode,
     RuntimeCacheConfigOverrides, ServerConfig, ServerConfigError, StoreConfig, TlsServerConfig,
 };
-pub use http::{app, serve, serve_with_shutdown, ServeError, TlsConfigError};
+pub use http::{app, check_config, serve, serve_with_shutdown, ServeError, TlsConfigError};
 #[cfg(feature = "openapi")]
 pub use http::{openapi_document, openapi_json_pretty};
 pub use local_cache::FoyerStoredMetadataBlockCache;

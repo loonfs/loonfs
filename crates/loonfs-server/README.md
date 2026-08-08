@@ -52,8 +52,12 @@ Validate a config without starting the server:
 loonfs-server --config /etc/loonfs/server.toml --check-config
 ```
 
-The command prints one line and exits. It reports the same errors a start
-would report, so it belongs in a deployment pipeline ahead of the rollout.
+The command prints one line and exits. It runs the checks a start runs
+before it serves: the config fields, the TLS certificate and key, and the
+local block cache directory. It does not bind the configured address and it
+performs no object-store operation, so it belongs in a deployment pipeline
+ahead of the rollout. Opening the cache takes the directory lock a start
+takes, so run the check where the server is not already running.
 
 ## Deploying it
 
