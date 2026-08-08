@@ -266,14 +266,6 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         base_attributes_revision_no: AttributeRevisionNo,
     },
-    #[error(
-        "attribute update of inode `{inode_id}` publishes revision `{attributes_revision_no}`, which is not one past base revision `{base_attributes_revision_no}`"
-    )]
-    UpdateAttributesRevisionNotSuccessive {
-        inode_id: InodeId,
-        base_attributes_revision_no: AttributeRevisionNo,
-        attributes_revision_no: AttributeRevisionNo,
-    },
     #[error("stale writer epoch: requested `{requested}` but active is `{active}`")]
     StaleWriterEpoch {
         active: WriterEpoch,

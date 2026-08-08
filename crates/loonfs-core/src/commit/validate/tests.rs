@@ -9,9 +9,7 @@
 
 use super::super::{CommitIr, CommitOp, CommitValidationContext, PlannedOp};
 use super::build_commit_plan;
-use crate::commit::{
-    materialize_commit, CommitFingerprint, CommitOpResult, CommitValidationError, PreparedCommit,
-};
+use crate::commit::{materialize_commit, CommitFingerprint, CommitValidationError, PreparedCommit};
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::{HeadState, WriterBlock};
@@ -215,7 +213,6 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() 
         ops: planned(vec![CommitOp::UpdateAttributes {
             inode_id: InodeId(2),
             base_attributes_revision_no: AttributeRevisionNo(1),
-            attributes_revision_no: AttributeRevisionNo(2),
             attributes: test_attributes(&[("owner", "hopper")]),
         }]),
         message: None,
@@ -253,23 +250,22 @@ async fn a_first_attribute_write_states_revision_zero() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = |base: u64, revision: u64| CommitIr {
+    let request = |base: u64| CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("first-attributes").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![CommitOp::UpdateAttributes {
             inode_id: InodeId(2),
             base_attributes_revision_no: AttributeRevisionNo(base),
-            attributes_revision_no: AttributeRevisionNo(revision),
             attributes: test_attributes(&[("owner", "ada")]),
         }]),
         message: None,
     };
 
-    build_commit_plan(&request(0, 1), 4_200, &context)
+    build_commit_plan(&request(0), 4_200, &context)
         .await
         .expect("a first write states revision zero");
-    let error = build_commit_plan(&request(1, 2), 4_200, &context)
+    let error = build_commit_plan(&request(1), 4_200, &context)
         .await
         .expect_err("nothing has written revision 1 yet");
     assert!(
@@ -280,42 +276,6 @@ async fn a_first_attribute_write_states_revision_zero() {
                 actual: AttributeRevisionNo(0),
                 ..
             }
-        ),
-        "{error:?}"
-    );
-}
-
-/// The planner numbers the revision, so a plan that publishes anything but
-/// the successor is a bug in this server and must not reach durable state.
-#[tokio::test]
-async fn an_attribute_revision_that_skips_a_number_is_rejected() {
-    let metadata_state = metadata_state_after(&[wal_create_directory(
-        0,
-        InodeId(2),
-        InodeId(1),
-        "docs".to_owned(),
-    )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("skipped-attributes").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![CommitOp::UpdateAttributes {
-            inode_id: InodeId(2),
-            base_attributes_revision_no: AttributeRevisionNo(0),
-            attributes_revision_no: AttributeRevisionNo(7),
-            attributes: test_attributes(&[("owner", "ada")]),
-        }]),
-        message: None,
-    };
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("the revision is not one past the base");
-    assert!(
-        matches!(
-            error,
-            CommitValidationError::UpdateAttributesRevisionNotSuccessive { .. }
         ),
         "{error:?}"
     );
@@ -334,7 +294,6 @@ async fn an_attribute_update_of_a_missing_inode_is_rejected() {
         ops: planned(vec![CommitOp::UpdateAttributes {
             inode_id: InodeId(9),
             base_attributes_revision_no: AttributeRevisionNo(0),
-            attributes_revision_no: AttributeRevisionNo(1),
             attributes: test_attributes(&[("owner", "ada")]),
         }]),
         message: None,
@@ -693,8 +652,8 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
         4_200,
     );
     assert!(matches!(
-        &materialized.results[1],
-        CommitOpResult::RestoreRevision {
+        &materialized.deltas[1].wal_delta,
+        WalDelta::AppendFileRevision {
             content_ref,
             ..
         } if *content_ref == expected
@@ -745,15 +704,15 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
         4_200,
     );
     assert!(matches!(
-        &materialized.results[0],
-        CommitOpResult::RestoreRevision {
+        &materialized.deltas[0].wal_delta,
+        WalDelta::AppendFileRevision {
             content_ref,
             ..
         } if *content_ref == expected
     ));
     assert!(matches!(
-        &materialized.results[1],
-        CommitOpResult::RestoreRevision {
+        &materialized.deltas[1].wal_delta,
+        WalDelta::AppendFileRevision {
             content_ref,
             ..
         } if *content_ref == expected

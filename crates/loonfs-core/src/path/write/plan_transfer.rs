@@ -182,7 +182,6 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
                 ops.push(ApiCommitOp::UpdateAttributes {
                     inode_id: view.next_inode_id,
                     base_attributes_revision_no: AttributeRevisionNo(0),
-                    attributes_revision_no: AttributeRevisionNo(1),
                     attributes: source_attributes,
                 });
             }

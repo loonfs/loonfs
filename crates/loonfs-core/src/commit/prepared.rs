@@ -51,7 +51,7 @@ impl PreparedCommit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{materialize_commit, CommitOpResult, PlannedOp, ValidatedOp};
+    use crate::commit::{materialize_commit, PlannedOp, ValidatedOp};
     use crate::commit::{CommitFingerprint, CommitOp};
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::NameKey;
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_commit_outputs_wal_ops_and_results_once() {
+    fn materialize_commit_outputs_wal_deltas_once() {
         let materialized = materialize_commit(
             PreparedCommit::new(request(), plan(), fingerprint()).expect("prepare commit"),
             4_200,
@@ -146,10 +146,6 @@ mod tests {
         assert!(matches!(
             materialized.deltas[1].wal_delta,
             WalDelta::BindDirentry { .. }
-        ));
-        assert!(matches!(
-            materialized.results[0],
-            CommitOpResult::CreateDirectory { .. }
         ));
     }
 }

@@ -562,9 +562,9 @@ mod tests {
             )));
     }
 
-    /// The update's plan carries the binding the path resolved through and
-    /// the attribute revision it read, so a raced rebind and a raced update
-    /// are both rejected under the publish lock.
+    /// The update's plan carries the binding the path resolved through, and
+    /// the op states the attribute revision the planner read, so a raced
+    /// rebind and a raced update are both rejected under the publish lock.
     #[tokio::test]
     async fn update_attributes_plan_carries_the_binding_and_revision_guards() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
@@ -603,7 +603,6 @@ mod tests {
             [PlannedOp {
                 op: CommitOp::UpdateAttributes {
                     base_attributes_revision_no: loonfs_api::AttributeRevisionNo(0),
-                    attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
                     ..
                 },
                 ..
@@ -613,16 +612,6 @@ mod tests {
             .preconditions
             .iter()
             .any(|precondition| matches!(precondition, CommitPrecondition::BindingIs { .. })));
-        assert!(planned.ops[0]
-            .preconditions
-            .iter()
-            .any(|precondition| matches!(
-                precondition,
-                CommitPrecondition::InodeAttributesRevisionIs {
-                    attributes_revision_no: loonfs_api::AttributeRevisionNo(0),
-                    ..
-                }
-            )));
         assert!(planned.ops[0]
             .preconditions
             .iter()

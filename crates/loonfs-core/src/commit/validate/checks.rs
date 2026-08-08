@@ -344,7 +344,6 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
             CommitOp::UpdateAttributes {
                 inode_id,
                 base_attributes_revision_no,
-                attributes_revision_no,
                 attributes,
             } => {
                 // The target is any visible inode, file or directory: an
@@ -361,21 +360,10 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                     *base_attributes_revision_no,
                 )
                 .await?;
-                let successor =
+                // The base is what the guard above just confirmed is current,
+                // so the revision this update publishes is one past it.
+                let attributes_revision_no =
                     next_attributes_revision_no(*inode_id, *base_attributes_revision_no)?;
-                // The planner numbers the revision, so a plan that publishes
-                // anything but the successor is a planner bug rather than a
-                // race, and it must not reach durable state.
-                if *attributes_revision_no != successor {
-                    return Err(
-                        CommitValidationError::UpdateAttributesRevisionNotSuccessive {
-                            inode_id: *inode_id,
-                            base_attributes_revision_no: *base_attributes_revision_no,
-                            attributes_revision_no: *attributes_revision_no,
-                        }
-                        .into(),
-                    );
-                }
                 validate_not_covered_by_tombstone(metadata_state, *inode_id, |tombstone| {
                     CommitValidationError::UpdateAttributesUnderSubtreeTombstone {
                         inode_id: *inode_id,
@@ -387,7 +375,7 @@ pub(crate) async fn validate_ops<V: CommitValidationView>(
                 ValidatedOp::UpdateAttributes {
                     op_index,
                     inode_id: *inode_id,
-                    attributes_revision_no: *attributes_revision_no,
+                    attributes_revision_no,
                     attributes: attributes.clone(),
                     attributes_delta_index: reserve_delta_index(next_delta_index)?,
                 }
@@ -442,17 +430,6 @@ async fn validate_explicit_preconditions<V: CommitValidationView>(
             CommitPrecondition::DirectoryEmpty { inode_id } => {
                 validate_directory_empty_precondition(metadata_state, *inode_id).await?;
             }
-            CommitPrecondition::InodeAttributesRevisionIs {
-                inode_id,
-                attributes_revision_no,
-            } => {
-                validate_inode_attributes_revision_is(
-                    metadata_state,
-                    *inode_id,
-                    *attributes_revision_no,
-                )
-                .await?;
-            }
         }
     }
 
@@ -500,8 +477,8 @@ fn next_attributes_revision_no(
         })
 }
 
-/// Shared by the `UpdateAttributes` op and the `InodeAttributesRevisionIs`
-/// explicit precondition, both of which report the stale-attributes error.
+/// The base-revision guard every `UpdateAttributes` op carries, whether or
+/// not the caller stated an expectation of its own.
 ///
 /// The inode's own attribute revision is the whole check: an inode that has
 /// never had attributes written is at revision 0, so a first write states

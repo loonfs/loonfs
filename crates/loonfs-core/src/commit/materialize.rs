@@ -1,10 +1,9 @@
-//! Materializes a prepared commit into ordered WAL deltas plus per-op
-//! results.
+//! Materializes a prepared commit into ordered WAL deltas.
 
 use super::{PreparedCommit, ResolvedBinding, ValidatedOp};
 use loonfs_api::wire::manifest::DeletedDirentry;
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{AttributeRevisionNo, ContentRef, InodeId, InodeKind, RevisionNo};
+use loonfs_api::{InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,56 +22,6 @@ pub(crate) struct MaterializedCommit {
     /// different clocks share a fingerprint.
     pub committed_at_ms: u64,
     pub deltas: Vec<MaterializedCommitDelta>,
-    pub results: Vec<CommitOpResult>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CommitOpResult {
-    CreateDirectory {
-        op_index: u32,
-        inode_id: InodeId,
-    },
-    CreateFile {
-        op_index: u32,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        content_ref: ContentRef,
-    },
-    ReplaceFile {
-        op_index: u32,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        content_ref: ContentRef,
-    },
-    RestoreRevision {
-        op_index: u32,
-        inode_id: InodeId,
-        source_revision_no: RevisionNo,
-        revision_no: RevisionNo,
-        content_ref: ContentRef,
-    },
-    DeleteFile {
-        op_index: u32,
-        inode_id: InodeId,
-    },
-    Rename {
-        op_index: u32,
-        inode_id: InodeId,
-    },
-    DeleteSubtree {
-        op_index: u32,
-        root_inode_id: InodeId,
-    },
-    Undelete {
-        op_index: u32,
-        inode_id: InodeId,
-    },
-    UpdateAttributes {
-        op_index: u32,
-        inode_id: InodeId,
-        attributes_revision_no: AttributeRevisionNo,
-    },
 }
 
 pub(crate) fn materialize_commit(
@@ -80,26 +29,20 @@ pub(crate) fn materialize_commit(
     committed_at_ms: u64,
 ) -> MaterializedCommit {
     let mut deltas = Vec::new();
-    let mut results = Vec::with_capacity(prepared.plan.validated_ops.len());
     for op in &prepared.plan.validated_ops {
-        let (mut op_deltas, result) = materialize_validated_op(op);
-        deltas.append(&mut op_deltas);
-        results.push(result);
+        deltas.append(&mut materialize_validated_op(op));
     }
 
     MaterializedCommit {
         prepared,
         committed_at_ms,
         deltas,
-        results,
     }
 }
 
-pub(super) fn materialize_validated_op(
-    op: &ValidatedOp,
-) -> (Vec<MaterializedCommitDelta>, CommitOpResult) {
+pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedCommitDelta> {
     let mut deltas = Vec::new();
-    let result = match op {
+    match op {
         ValidatedOp::CreateDir {
             op_index,
             parent_inode_id,
@@ -129,10 +72,6 @@ pub(super) fn materialize_validated_op(
                     child_inode_id: *child_inode_id,
                 },
             );
-            CommitOpResult::CreateDirectory {
-                op_index: *op_index,
-                inode_id: *child_inode_id,
-            }
         }
         ValidatedOp::CreateFile {
             op_index,
@@ -175,12 +114,6 @@ pub(super) fn materialize_validated_op(
                     content_ref: content_ref.clone(),
                 },
             );
-            CommitOpResult::CreateFile {
-                op_index: *op_index,
-                inode_id: *child_inode_id,
-                revision_no: RevisionNo(1),
-                content_ref: content_ref.clone(),
-            }
         }
         ValidatedOp::ReplaceFile {
             op_index,
@@ -199,17 +132,13 @@ pub(super) fn materialize_validated_op(
                     content_ref: content_ref.clone(),
                 },
             );
-            CommitOpResult::ReplaceFile {
-                op_index: *op_index,
-                inode_id: *inode_id,
-                revision_no: *revision_no,
-                content_ref: content_ref.clone(),
-            }
         }
         ValidatedOp::RestoreRevision {
             op_index,
             inode_id,
-            source_revision_no,
+            // The source is what validation resolved the content from; the
+            // delta records only the revision this op appends.
+            source_revision_no: _,
             revision_no,
             content_ref,
             revision_delta_index,
@@ -224,13 +153,6 @@ pub(super) fn materialize_validated_op(
                     content_ref: content_ref.clone(),
                 },
             );
-            CommitOpResult::RestoreRevision {
-                op_index: *op_index,
-                inode_id: *inode_id,
-                source_revision_no: *source_revision_no,
-                revision_no: *revision_no,
-                content_ref: content_ref.clone(),
-            }
         }
         ValidatedOp::DeleteFile {
             op_index,
@@ -249,10 +171,6 @@ pub(super) fn materialize_validated_op(
                     deleted_direntry: Some(deleted_direntry(source_binding)),
                 },
             );
-            CommitOpResult::DeleteFile {
-                op_index: *op_index,
-                inode_id: *inode_id,
-            }
         }
         ValidatedOp::Rename {
             op_index,
@@ -276,10 +194,6 @@ pub(super) fn materialize_validated_op(
                     child_inode_id: *inode_id,
                 },
             );
-            CommitOpResult::Rename {
-                op_index: *op_index,
-                inode_id: *inode_id,
-            }
         }
         ValidatedOp::DeleteSubtree {
             op_index,
@@ -298,10 +212,6 @@ pub(super) fn materialize_validated_op(
                     deleted_direntry: Some(deleted_direntry(source_binding)),
                 },
             );
-            CommitOpResult::DeleteSubtree {
-                op_index: *op_index,
-                root_inode_id: *root_inode_id,
-            }
         }
         ValidatedOp::Undelete {
             op_index,
@@ -336,10 +246,6 @@ pub(super) fn materialize_validated_op(
                     child_inode_id: *inode_id,
                 },
             );
-            CommitOpResult::Undelete {
-                op_index: *op_index,
-                inode_id: *inode_id,
-            }
         }
         ValidatedOp::UpdateAttributes {
             op_index,
@@ -358,15 +264,10 @@ pub(super) fn materialize_validated_op(
                     attributes: attributes.clone(),
                 },
             );
-            CommitOpResult::UpdateAttributes {
-                op_index: *op_index,
-                inode_id: *inode_id,
-                attributes_revision_no: *attributes_revision_no,
-            }
         }
-    };
+    }
 
-    (deltas, result)
+    deltas
 }
 
 /// The binding a delete retires, as the tombstone records it: the same

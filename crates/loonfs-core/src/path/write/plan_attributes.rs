@@ -59,9 +59,9 @@ pub(super) async fn plan_publish_update_attributes<S: ObjectStore + ?Sized>(
         .metadata_state
         .attributes_at_visible_seq(target.inode_id)
         .await?;
-    // A caller-supplied guard replaces the freshly-read revision in both the
-    // op and the precondition, so commit validation rejects a raced update
-    // with the stale-attributes error and its expected/actual details.
+    // A caller-supplied guard replaces the freshly-read revision in the op,
+    // so commit validation rejects a raced update with the stale-attributes
+    // error and its expected/actual details.
     let base_attributes_revision_no =
         expected_attributes_revision_no.unwrap_or(current_revision_no);
 
@@ -86,30 +86,14 @@ pub(super) async fn plan_publish_update_attributes<S: ObjectStore + ?Sized>(
     let attributes = Attributes::new(updated).map_err(|error| {
         CoreError::InvalidCommitRequest(format!("the resulting attribute map is invalid: {error}"))
     })?;
-    let attributes_revision_no = base_attributes_revision_no
-        .0
-        .checked_add(1)
-        .map(AttributeRevisionNo)
-        .ok_or_else(|| {
-            CoreError::Internal(format!(
-                "attribute revision counter overflow for inode {}",
-                target.inode_id
-            ))
-        })?;
-
     Ok(PlannedOperation::new(
         vec![ApiCommitOp::UpdateAttributes {
             inode_id: target.inode_id,
             base_attributes_revision_no,
-            attributes_revision_no,
             attributes,
         }],
         vec![
             publish_binding_is_precondition(view, &target).await?,
-            ApiCommitPrecondition::InodeAttributesRevisionIs {
-                inode_id: target.inode_id,
-                attributes_revision_no: base_attributes_revision_no,
-            },
             ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: target.inode_id,
             },
