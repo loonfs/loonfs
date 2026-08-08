@@ -1004,7 +1004,10 @@ provider enforcement is real but not uniform across S3-compatible providers,
 and a random object id says nothing about its bytes, so the comparison is the
 load-bearing check rather than a formality. A mismatch fails the completion and
 deletes the object — safe because the id was never published, so nothing
-references it. Nothing is read back through the server either way.
+references it. A metadata request the provider does not answer is a different
+outcome: nothing was compared, so the completion reports `server_error`, leaves
+the object and the session as they were, and the client repeats it. Nothing is
+read back through the server either way.
 
 #### Direct multipart upload
 
@@ -1113,6 +1116,13 @@ retry against and the session can never produce the content it promised. The
 session goes to `aborted`, the object it assembled is deleted, and the
 failure is reported. The client starts a new session; there is no
 completion retry that could succeed.
+
+**A completion that could not be verified is not terminal.** Terminal means
+the read-back ran and disagreed. When the assembly call or the read-back
+fails at the transport instead, nothing was established about the object, so
+the completion reports `server_error` and changes nothing: the session stays
+`open` and any object the provider did assemble is left alone. The client
+repeats the completion, which resolves from durable state as below.
 
 **A lost completion response is not a failure.** Replaying the provider's
 completion is useless — one provider replays a success carrying no checksum,

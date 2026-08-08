@@ -11,7 +11,7 @@ use loonfs::{
     CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions,
     RuntimeCacheConfig, SharedObjectStore,
 };
-use loonfs_api::v0::DirectPutContentClaim;
+use loonfs_api::v0::{DirectPutContentClaim, UploadSessionStatus};
 use loonfs_api::StorageChecksum;
 use loonfs_objectstore::keys::wal_head;
 
@@ -52,6 +52,15 @@ fn fail_content_blob_puts_store(root: &Path) -> FailStore<LocalFsStore> {
         KeyPredicate::content_blob(),
         OperationClass::Put,
         InjectedError::Transport("injected content write failure".to_owned()),
+    )
+}
+
+fn fail_content_blob_heads_store(root: &Path) -> FailStore<LocalFsStore> {
+    FailStore::new(
+        LocalFsStore::new(root).expect("create local-fs store"),
+        KeyPredicate::content_blob(),
+        OperationClass::Head,
+        InjectedError::Transport("injected checksum head failure".to_owned()),
     )
 }
 #[test]
@@ -236,6 +245,11 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
             &CompleteUploadRequest::for_content_ref(content_ref),
         )
         .expect_err("mismatched bytes must fail completion");
+    assert_eq!(
+        error.code(),
+        ErrorCode::InvalidRequest,
+        "a read-back that ran and disagreed is reported against the content: {error}"
+    );
     assert!(
         error.to_string().contains("content checksum mismatch"),
         "completion names the checksum mismatch: {error}"
@@ -246,6 +260,57 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
             .is_none(),
         "a rejected completion leaves no orphan behind"
     );
+}
+
+/// A read-back that could not run is not evidence about the bytes. The
+/// completion reports the store failure it hit, keeps the object the client
+/// uploaded and the session that owns it, and the retry completes.
+#[test]
+fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(fail_content_blob_heads_store(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = open_runtime(object_store, "direct-put-read-back-failure-test");
+    let bytes = b"direct put bytes the store would not vouch for";
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, direct_put_claim(bytes)))
+        .expect("begin direct put");
+    let content_ref = begin.target.content_ref.clone();
+    let request = CompleteUploadRequest::for_content_ref(content_ref.clone());
+
+    let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
+    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
+        .expect("write direct object");
+
+    raw_store.fail_next(1);
+    let error = fs
+        .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
+        .expect_err("a verification that cannot run does not complete the upload");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert_eq!(raw_store.attempts(), 1, "the checksum head is what failed");
+    assert!(
+        block_on(direct_store.head(&begin.target.object_key))
+            .expect("head the uploaded object")
+            .is_some(),
+        "a store failure must not delete the client's object"
+    );
+    let (status, _) = block_on(
+        fs.writer
+            .read_upload_status(&namespace_id, &begin.upload_id),
+    )
+    .expect("read upload status");
+    assert!(
+        matches!(status.status, UploadSessionStatus::Open { .. }),
+        "a store failure must not end the session"
+    );
+
+    let completed = fs
+        .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
+        .expect("the retried completion verifies and completes");
+    assert_eq!(completed.content_ref, content_ref);
 }
 
 #[test]

@@ -35,7 +35,7 @@ use crate::namespace::control::load_namespace_head_control;
 use crate::storage::content::{
     abort_unpublished_multipart_upload, delete_unpublished_content_object,
     identify_streamed_payload, stage_bytes_under_content_id, stage_streamed_under_content_id,
-    verify_durable_content_checksum,
+    verify_durable_content_checksum, DurableContentValidationError,
 };
 use crate::storage::content_admission::{
     CompletedUploadReceipt, ContentAdmission, PreparedContent,
@@ -1379,6 +1379,7 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
             match verify_durable_content_checksum(store, content_store_id, promised).await {
                 Ok(()) => Ok(CompletionOutcome::Verified(promised.clone())),
                 Err(err) => {
+                    let reason = content_failure_reason(err)?;
                     // The id is random and still open, so the object nothing
                     // can name is safe to remove and would otherwise leak.
                     delete_unpublished_content_object(
@@ -1387,7 +1388,7 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
                         &requested.content_id,
                     )
                     .await;
-                    Err(CoreError::InvalidUploadContent(err.to_string()))
+                    Err(CoreError::InvalidUploadContent(reason))
                 }
             }
         }
@@ -1446,20 +1447,38 @@ async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
         // same read of the object, so neither needs its own path.
         Ok(MultipartCompletion::Assembled | MultipartCompletion::UnknownUpload) => {}
         Err(err) => {
-            // The provider refused to assemble. On AWS S3 that includes a
-            // whole-object checksum that does not match the parts, which is
-            // a wrong upload and not a transient one, so this is where the
-            // session stops.
-            return Ok(CompletionOutcome::Unusable(format!(
-                "multipart completion failed: {}",
-                err.message()
-            )));
+            // The object was not assembled on this call. The provider may
+            // have refused the parts, or the call may not have completed at
+            // all: a refusal arrives as the same transport failure as a lost
+            // response, so this cannot tell them apart and does not guess.
+            // Reporting the store failure leaves the session open and the
+            // object, if the provider did assemble one, in place — which is
+            // what a repeated completion reconciles from.
+            return Err(CoreError::store(&object_key, &err));
         }
     }
 
     match verify_durable_content_checksum(store, content_store_id, expected).await {
         Ok(()) => Ok(CompletionOutcome::Verified(expected.clone())),
-        Err(err) => Ok(CompletionOutcome::Unusable(err.to_string())),
+        Err(err) => Ok(CompletionOutcome::Unusable(content_failure_reason(err)?)),
+    }
+}
+
+/// Reports what a failed verification proves about the content.
+///
+/// A verification that ran and disagreed is evidence about the bytes: the
+/// object is absent, the wrong length, or hashes to something else. Nothing
+/// the session can do changes that, so the reason is returned for the caller
+/// to end the session with.
+///
+/// A verification that could not run is evidence about nothing. The store
+/// refused the read or did not answer it, and the object it was asked about
+/// is untouched, so the store failure is propagated as itself: the session
+/// stays open, the object stays, and the completion can be retried.
+fn content_failure_reason(error: DurableContentValidationError) -> Result<String> {
+    match error {
+        DurableContentValidationError::Store { .. } => Err(CoreError::DurableContent(error)),
+        error => Ok(error.to_string()),
     }
 }
 

@@ -501,6 +501,7 @@ mod direct_multipart {
     use loonfs_core::{gc_namespace, GcConfig};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_test_support::stores::{MultipartChecksumEnforcement, MultipartStore};
+    use std::sync::Arc;
 
     const PART: &[u8] = b"a part's worth of bytes, repeated enough to be a part\n";
 
@@ -517,8 +518,8 @@ mod direct_multipart {
         payload: Vec<u8>,
     }
 
-    async fn open_session(
-        store: &MultipartStore<LocalFsStore>,
+    async fn open_session<S: ObjectStore>(
+        store: &MultipartStore<S>,
         context: &MutationContext,
     ) -> Session {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -581,8 +582,8 @@ mod direct_multipart {
 
     /// Uploads every part, the way a client would after asking for the
     /// signed URLs, and returns the bookkeeping it carries to completion.
-    fn upload_every_part(
-        store: &MultipartStore<LocalFsStore>,
+    fn upload_every_part<S: ObjectStore>(
+        store: &MultipartStore<S>,
         session: &Session,
     ) -> Vec<CompletedUploadPart> {
         let mut parts = Vec::new();
@@ -812,10 +813,14 @@ mod direct_multipart {
     }
 
     /// A provider that treats the whole-object checksum as a precondition
-    /// refuses the assembly outright. The session still ends terminally:
-    /// the upload is spent either way.
+    /// refuses the assembly outright. A refusal and a completion whose
+    /// response was lost arrive as the same transport failure, so the first
+    /// attempt reports the store failure and leaves the session open. The
+    /// object ends the session instead: the retry finds the upload consumed
+    /// and nothing at the key, and the completion contract already calls
+    /// that terminal.
     #[tokio::test]
-    async fn a_refused_assembly_is_terminal_too() {
+    async fn a_refused_assembly_is_a_store_failure_and_the_retry_is_terminal() {
         let temp_dir = tempdir().expect("tempdir");
         let store = MultipartStore::with_enforcement(
             LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -832,16 +837,37 @@ mod direct_multipart {
             etag,
             crc64nvme: StorageChecksum::crc64nvme(short).value,
         };
+        let request = complete_request(&session, parts);
 
         let error = complete_upload(
             &store,
             &session.namespace_id,
             &session.upload_id,
-            &complete_request(&session, parts),
+            &request,
             &context,
         )
         .await
         .expect_err("a refused assembly cannot complete");
+        assert_eq!(error.code(), ErrorCode::ServerError);
+        assert!(
+            matches!(
+                session_state(&store, &session.namespace_id, &session.upload_id)
+                    .await
+                    .state,
+                UploadSessionLifecycle::Open { .. }
+            ),
+            "a provider failure the server cannot read is not proof about content"
+        );
+
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &request,
+            &context,
+        )
+        .await
+        .expect_err("neither an upload nor an object is left to complete");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
         assert!(matches!(
             session_state(&store, &session.namespace_id, &session.upload_id)
@@ -854,6 +880,71 @@ mod direct_multipart {
             .await
             .expect("head")
             .is_none());
+    }
+
+    /// A read-back the store refuses to answer says nothing about the object
+    /// the provider assembled. The completion reports the store failure, and
+    /// the object and the session survive it. The retry then completes from
+    /// the object: the provider reports an upload it no longer knows, and
+    /// the read-back settles the rest.
+    #[tokio::test]
+    async fn a_verification_the_store_refuses_leaves_the_completion_retryable() {
+        let temp_dir = tempdir().expect("tempdir");
+        let failing = Arc::new(FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::content_blob(),
+            OperationClass::Read,
+            InjectedError::Transport("injected content read failure".to_owned()),
+        ));
+        let store = MultipartStore::new(Arc::clone(&failing));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+        let parts = upload_every_part(&store, &session);
+        let request = complete_request(&session, parts);
+
+        failing.fail_next(1);
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &request,
+            &context,
+        )
+        .await
+        .expect_err("a verification that cannot run does not complete the upload");
+        assert_eq!(error.code(), ErrorCode::ServerError);
+        assert_eq!(failing.attempts(), 1, "the read-back is what failed");
+        assert!(
+            matches!(
+                session_state(&store, &session.namespace_id, &session.upload_id)
+                    .await
+                    .state,
+                UploadSessionLifecycle::Open { .. }
+            ),
+            "a store failure must not end the session"
+        );
+        assert_eq!(
+            store
+                .get(&session.object_key, None)
+                .await
+                .expect("read object")
+                .expect("the assembled object survives a failed read-back"),
+            Bytes::from(session.payload.clone())
+        );
+
+        let completed = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &request,
+            &context,
+        )
+        .await
+        .expect("the retried completion verifies the assembled object");
+        assert_eq!(
+            completed.content_ref.storage_checksum,
+            StorageChecksum::crc64nvme(&session.payload)
+        );
     }
 
     /// A session abandoned mid-upload leaves parts sitting at the provider.
