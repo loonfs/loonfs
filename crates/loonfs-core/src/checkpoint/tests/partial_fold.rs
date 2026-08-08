@@ -1,6 +1,6 @@
 //! Folding a family group one slice at a time: the partition grammar, the
-//! walk executor, and the oracle that says a walk and a whole-group fold
-//! reach the same place.
+//! walk executor, the oracle that says a walk and a whole-group fold reach
+//! the same place, and the whole arc through the maintenance step.
 
 use super::super::partial_fold::{
     MetadataFoldSliceDrops, MetadataFoldSliceReport, MetadataFoldWalk, MetadataFoldWalkOutcome,
@@ -9,6 +9,9 @@ use super::super::partition::{GroupPartitioning, PartitionCursor, PartitionKey};
 use super::super::row::manifest_row_commit_seq;
 use super::super::scan::VerifiedMetadataTables;
 use super::*;
+use crate::path::read::{
+    load_metadata_view, resolve_current_files, CurrentFileState, ReadLoadContext,
+};
 use crate::timing::StdMonotonicTimer;
 use loonfs_api::wire::manifest::{
     ActiveDeletionRowAction, TombstoneGeneration, TombstoneRowAction,
@@ -1088,4 +1091,593 @@ async fn the_completing_step_swaps_the_snapshot_for_the_run_it_built() {
             .expect("the manifest names files"),
         "the swap must restate the manifest's oldest run"
     );
+}
+
+// -------------------------------------------------------------------------
+// Through the maintenance step
+// -------------------------------------------------------------------------
+
+async fn write_seed_file(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    directory: u64,
+    file: u64,
+) {
+    write_file_bytes(
+        store,
+        namespace_id,
+        &format!("/d{directory}/f{file}.txt"),
+        format!("body {directory}/{file}\n").as_bytes(),
+        &test_context(),
+        None,
+    )
+    .await
+    .expect("write file");
+}
+
+/// A namespace whose bindings group cannot be folded in one step.
+///
+/// Three things have to line up for the whole arc to be visible. The base
+/// run must be larger than the budget, or nothing starts a partial fold.
+/// Delta runs must sit above it, or there is nothing left to merge normally
+/// afterwards. And most of the group's rows must be churn below the
+/// retention floor, so that folding the group shrinks it back under the
+/// budget and the condition that started the fold stops holding.
+///
+/// The base is cut into small segments on purpose: a slice stops at a
+/// partition boundary the planner can see in a segment index, so many small
+/// segments give it many places to stop.
+async fn seed_over_budget_bindings_group(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> MetadataLsmPolicy {
+    let context = test_context();
+    bootstrap_namespace(store, namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    for directory in 0..7u64 {
+        for file in 0..4u64 {
+            write_seed_file(store, namespace_id, directory, file).await;
+        }
+        create_checkpoint(store, namespace_id, &context)
+            .await
+            .expect("checkpoint");
+    }
+    let seed_policy = MetadataLsmPolicy {
+        max_rows_per_segment: NonZeroUsize::new(8).expect("nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+    drain_reorganization(store, namespace_id, &context, seed_policy).await;
+
+    for directory in 7..10u64 {
+        for file in 0..4u64 {
+            write_seed_file(store, namespace_id, directory, file).await;
+        }
+        create_checkpoint(store, namespace_id, &context)
+            .await
+            .expect("checkpoint");
+    }
+    for directory in 0..10u64 {
+        for file in 0..3u64 {
+            delete_path(
+                store,
+                namespace_id,
+                &format!("/d{directory}/f{file}.txt"),
+                &context,
+                None,
+            )
+            .await
+            .expect("delete file");
+        }
+        create_checkpoint(store, namespace_id, &context)
+            .await
+            .expect("checkpoint the deletions");
+    }
+    advance_retention_floor(store, namespace_id, &context)
+        .await
+        .expect("advance the floor past the deletions");
+
+    // One last delta run, written above the floor, so the fold has rows it
+    // must carry through untouched as well as rows it may drop.
+    for file in 0..2u64 {
+        write_seed_file(store, namespace_id, 10, file).await;
+    }
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint the late writes");
+    seed_policy
+}
+
+/// A budget one row short of what the group's base run needs, which is the
+/// condition that starts a partial fold.
+async fn policy_that_cannot_fold_the_group_base(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    group: &[ApiMetadataTableFamily],
+    seed_policy: MetadataLsmPolicy,
+) -> MetadataLsmPolicy {
+    let tables = load_current_manifest_tables(store, namespace_id).await;
+    let base_rows: u64 = tables
+        .manifest()
+        .payload
+        .metadata_files
+        .iter()
+        .filter(|descriptor| {
+            descriptor.level == CHECKPOINT_BASE_RUN_LEVEL && group.contains(&descriptor.family)
+        })
+        .map(|descriptor| descriptor.row_count)
+        .sum();
+    assert!(base_rows > 1, "the base run must hold rows in this group");
+    MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(
+            usize::try_from(base_rows).expect("test row counts are small") - 1,
+        )
+        .expect("nonzero"),
+        ..seed_policy
+    }
+}
+
+/// Whether the step would warn about this group's oldest run.
+///
+/// The step logs one line when the selector reports an over-budget bottom,
+/// and the selector's record is what that line reads from, so asserting on
+/// the record is how these tests pin the warning.
+async fn group_bottom_is_over_budget(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    group: &[ApiMetadataTableFamily],
+    policy: MetadataLsmPolicy,
+) -> bool {
+    let tables = load_current_manifest_tables(store, namespace_id).await;
+    reorganize::select_reorganization_input(&tables, group, policy)
+        .await
+        .expect("select a reorganization input")
+        .group_bottom_over_budget
+        .is_some()
+}
+
+/// The group's segment keys that a fold in flight is not merging: the runs
+/// that arrived above its snapshot after it started.
+async fn group_segment_keys_outside_the_fold(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    group: &[ApiMetadataTableFamily],
+) -> BTreeSet<String> {
+    let tables = load_current_manifest_tables(store, namespace_id).await;
+    let payload = &tables.manifest().payload;
+    let progress = payload
+        .reorganize
+        .clone()
+        .expect("a fold must be in flight to have anything outside it");
+    payload
+        .metadata_files
+        .iter()
+        .filter(|descriptor| group.contains(&descriptor.family))
+        .filter(|descriptor| {
+            !progress
+                .input_runs
+                .iter()
+                .any(|run| run.run_seq == descriptor.run_seq && run.level == descriptor.level)
+        })
+        .map(|descriptor| descriptor.object_key.clone())
+        .collect()
+}
+
+async fn manifest_segment_keys(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> BTreeSet<String> {
+    let tables = load_current_manifest_tables(store, namespace_id).await;
+    tables
+        .manifest()
+        .payload
+        .metadata_files
+        .iter()
+        .map(|descriptor| descriptor.object_key.clone())
+        .collect()
+}
+
+/// What a reader sees right now: every inode the namespace knows, resolved
+/// the way a read resolves it — visible or not, at what path, at what
+/// revision.
+///
+/// This is the answer that must not move while a fold runs. Comparing rows
+/// would say the opposite of what is wanted: a fold drops rows precisely
+/// because no read can observe them, so the row set is meant to change and
+/// this is not.
+async fn visible_namespace(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> Vec<CurrentFileState> {
+    let inode_ids: Vec<InodeId> = current_metadata_state(store, namespace_id)
+        .await
+        .inodes()
+        .iter()
+        .map(|inode| inode.inode_id)
+        .collect();
+    let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest())
+        .await
+        .expect("load the read view");
+    resolve_current_files(&view, &inode_ids)
+        .await
+        .expect("resolve every inode the namespace knows")
+}
+
+/// The binding one row names: what an unbind retires, and what a bind is.
+fn binding_generation(row: &MetadataRow) -> Option<(InodeId, NameKey, ChangeSeq, u32)> {
+    match row {
+        MetadataRow::DirentryUnbind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        }
+        | MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } => Some((
+            *parent_inode_id,
+            name_key.clone(),
+            *bind_seq,
+            *bind_delta_index,
+        )),
+        _ => None,
+    }
+}
+
+/// The whole arc, driven through the entry point the maintenance runner
+/// calls rather than through the executor.
+///
+/// A group whose oldest run no longer fits one step is warned about once,
+/// folded a slice at a time over the steps that follow, and left in one run
+/// that the delta runs arriving meanwhile then merge with normally. Nothing
+/// a reader can see moves anywhere along the way, the other groups keep
+/// folding while it runs, and the warning stops once the group fits again.
+#[tokio::test]
+async fn an_over_budget_group_folds_through_repeated_maintenance_steps() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let seed_policy = seed_over_budget_bindings_group(&store, &namespace_id).await;
+    let group = group_containing(ApiMetadataTableFamily::DirentryUnbinds);
+    let policy =
+        policy_that_cannot_fold_the_group_base(&store, &namespace_id, group, seed_policy).await;
+
+    assert!(
+        group_bottom_is_over_budget(&store, &namespace_id, group, policy).await,
+        "the warning must fire before anything folds this group"
+    );
+    let rows_before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    let mut visible = visible_namespace(&store, &namespace_id).await;
+    assert!(
+        visible.iter().any(|state| state.visible),
+        "the seed must leave something to read"
+    );
+
+    let mut slices = 0usize;
+    let mut written_rows = 0u64;
+    let mut cursors = Vec::new();
+    let mut completed = false;
+    let mut other_groups_folded_during_the_fold = 0usize;
+    let mut group_merged_after_the_fold = 0usize;
+    let mut arrived_segment_keys = BTreeSet::new();
+
+    for _step in 0..256 {
+        let report = reorganize_metadata_step(&store, &namespace_id, &context, policy)
+            .await
+            .expect("reorganization step");
+        match report.outcome {
+            MetadataReorganizeOutcome::PartialFoldAdvanced {
+                ref families,
+                partitions,
+                decoded_input_rows,
+                output_rows,
+                ref cursor,
+                drops,
+                ..
+            } => {
+                assert_eq!(families, group, "only this group folds in slices here");
+                assert!(partitions > 0, "a slice must cover at least one partition");
+                assert!(
+                    decoded_input_rows > 0,
+                    "a slice must read the rows it covers"
+                );
+                // A slice may keep nothing: every row in its partitions can
+                // be churn the frozen floor lets go.
+                written_rows += output_rows;
+                assert_eq!(
+                    drops,
+                    MetadataFoldSliceDrops::Applied,
+                    "this budget leaves room for the unbind set"
+                );
+                cursors.push(cursor.clone());
+                slices += 1;
+                if slices == 1 {
+                    // A delta run arrives while the fold is running, under
+                    // the root inode, which is a partition the fold has
+                    // already passed. It is not in the fold's snapshot, so
+                    // the fold never reads it and the swap must land
+                    // underneath it.
+                    write_file_bytes(
+                        &store,
+                        &namespace_id,
+                        "/arrived-mid-fold.txt",
+                        b"arrived mid-fold\n",
+                        &context,
+                        None,
+                    )
+                    .await
+                    .expect("write a file while the fold runs");
+                    create_checkpoint(&store, &namespace_id, &context)
+                        .await
+                        .expect("checkpoint it");
+                    arrived_segment_keys =
+                        group_segment_keys_outside_the_fold(&store, &namespace_id, group).await;
+                    assert!(
+                        !arrived_segment_keys.is_empty(),
+                        "the arriving run must sit outside the fold's input"
+                    );
+                    visible = visible_namespace(&store, &namespace_id).await;
+                }
+            }
+            MetadataReorganizeOutcome::PartialFoldCompleted {
+                ref families,
+                output_segments,
+                output_rows,
+                ..
+            } => {
+                assert_eq!(families, group);
+                assert!(!completed, "the fold must finish exactly once");
+                assert!(output_segments > 0);
+                assert_eq!(
+                    output_rows, written_rows,
+                    "the finished run must hold what every slice wrote and nothing else"
+                );
+                completed = true;
+                let referenced = manifest_segment_keys(&store, &namespace_id).await;
+                assert!(
+                    arrived_segment_keys.is_subset(&referenced),
+                    "runs that arrived while the fold ran must survive the swap"
+                );
+            }
+            MetadataReorganizeOutcome::UnitPublished { ref families, .. } => {
+                if families == group {
+                    assert!(
+                        completed,
+                        "this group folds no other way while its fold is in flight"
+                    );
+                    group_merged_after_the_fold += 1;
+                } else if !completed {
+                    other_groups_folded_during_the_fold += 1;
+                }
+            }
+            MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                panic!("the group parked instead of folding a slice at a time")
+            }
+            MetadataReorganizeOutcome::Superseded => {
+                panic!("no concurrent publisher exists in this test")
+            }
+        }
+        assert_eq!(
+            visible_namespace(&store, &namespace_id).await,
+            visible,
+            "a step changed what a read answers"
+        );
+    }
+
+    assert!(
+        slices > 1,
+        "the fold must take several slices, got {slices}"
+    );
+    assert!(completed, "the fold must finish");
+    let mut ascending = cursors.clone();
+    ascending.sort();
+    ascending.dedup();
+    assert_eq!(
+        cursors, ascending,
+        "every slice must leave the fold further along than it found it"
+    );
+    assert!(
+        other_groups_folded_during_the_fold > 0,
+        "the other groups must keep folding while one group folds in slices"
+    );
+    assert!(
+        group_merged_after_the_fold > 0,
+        "the runs that arrived during the fold must merge normally once it finishes"
+    );
+
+    // The base is folded: the group is left in the one run the fold built.
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let after_payload = tables.manifest().payload.clone();
+    drop(tables);
+    assert!(after_payload.reorganize.is_none());
+    let group_runs: BTreeSet<(ChangeSeq, u32)> = after_payload
+        .metadata_files
+        .iter()
+        .filter(|descriptor| group.contains(&descriptor.family))
+        .map(|descriptor| (descriptor.run_seq, descriptor.level))
+        .collect();
+    assert_eq!(
+        group_runs.len(),
+        1,
+        "the group must end in one run, got {group_runs:?}"
+    );
+
+    // Retention reclaimed the churn: every spent unbind marker went, and so
+    // did the binding each one retired.
+    let rows_after = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    let retired: BTreeSet<_> = rows_before[&ApiMetadataTableFamily::DirentryUnbinds]
+        .iter()
+        .filter_map(binding_generation)
+        .collect();
+    assert!(
+        !retired.is_empty(),
+        "the seed must delete files for this to mean anything"
+    );
+    assert!(
+        rows_after[&ApiMetadataTableFamily::DirentryUnbinds].is_empty(),
+        "every unbind marker sat at or below the floor and must have gone"
+    );
+    for family in [
+        ApiMetadataTableFamily::DirentryBinds,
+        ApiMetadataTableFamily::DirentryChildBinds,
+    ] {
+        for row in &rows_after[&family] {
+            assert!(
+                binding_generation(row).is_none_or(|generation| !retired.contains(&generation)),
+                "a retired binding survived the fold in {family:?}"
+            );
+        }
+    }
+
+    // And the condition that started the fold no longer holds: the group
+    // fits one step again, so nothing warns about it.
+    write_seed_file(&store, &namespace_id, 11, 0).await;
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint one more delta run");
+    assert!(
+        !group_bottom_is_over_budget(&store, &namespace_id, group, policy).await,
+        "the folded group fits one step again, so the warning must stop"
+    );
+}
+
+/// One step's tally, and whether the namespace has gone quiet.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DriveTally {
+    slices: usize,
+    completions: usize,
+    units: usize,
+}
+
+impl DriveTally {
+    fn record(&mut self, outcome: &MetadataReorganizeOutcome) -> bool {
+        match outcome {
+            MetadataReorganizeOutcome::PartialFoldAdvanced { .. } => self.slices += 1,
+            MetadataReorganizeOutcome::PartialFoldCompleted { .. } => self.completions += 1,
+            MetadataReorganizeOutcome::UnitPublished { .. } => self.units += 1,
+            MetadataReorganizeOutcome::NotNeeded { .. } => return true,
+            other => panic!("unexpected reorganization outcome {other:?}"),
+        }
+        false
+    }
+}
+
+async fn drive_reorganization_to_quiescence(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+) -> DriveTally {
+    let mut tally = DriveTally::default();
+    for _step in 0..256 {
+        let report = reorganize_metadata_step(store, namespace_id, context, policy)
+            .await
+            .expect("reorganization step");
+        if tally.record(&report.outcome) {
+            return tally;
+        }
+    }
+    panic!("reorganization did not go quiet in a bounded number of steps")
+}
+
+/// The same arc with nothing carried between steps but the store.
+///
+/// A step already rebuilds everything it needs from durable state, so the
+/// harsher version of a crash is to throw the store handle away as well and
+/// build a new one over the same directory before every step. The fold must
+/// land where an uninterrupted one lands.
+#[tokio::test]
+async fn a_fold_through_maintenance_steps_resumes_from_the_store_alone() {
+    let straight_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(straight_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let seed_policy = seed_over_budget_bindings_group(&store, &namespace_id).await;
+    let group = group_containing(ApiMetadataTableFamily::DirentryUnbinds);
+    let policy =
+        policy_that_cannot_fold_the_group_base(&store, &namespace_id, group, seed_policy).await;
+
+    let resumed_dir = tempdir().expect("tempdir");
+    copy_store_tree(straight_dir.path(), resumed_dir.path());
+
+    let straight =
+        drive_reorganization_to_quiescence(&store, &namespace_id, &context, policy).await;
+    let mut resumed = DriveTally::default();
+    let mut quiet = false;
+    for _step in 0..256 {
+        // Everything a step could have remembered dies here: the handle,
+        // its caches, and the fold it was running.
+        let rebuilt = LocalFsStore::new(resumed_dir.path()).expect("rebuild the store handle");
+        let report = reorganize_metadata_step(&rebuilt, &namespace_id, &context, policy)
+            .await
+            .expect("reorganization step");
+        if resumed.record(&report.outcome) {
+            quiet = true;
+            break;
+        }
+    }
+    assert!(quiet, "the rebuilt run must go quiet too");
+
+    assert!(straight.slices > 1);
+    assert_eq!(
+        straight, resumed,
+        "a fold rebuilt at every step must take the same steps"
+    );
+    let resumed_store = LocalFsStore::new(resumed_dir.path()).expect("store");
+    assert_eq!(
+        group_rows_of_current_manifest(&store, &namespace_id, group).await,
+        group_rows_of_current_manifest(&resumed_store, &namespace_id, group).await,
+        "a fold rebuilt at every step must keep the same rows"
+    );
+    assert_eq!(
+        visible_namespace(&store, &namespace_id).await,
+        visible_namespace(&resumed_store, &namespace_id).await,
+        "and must answer reads the same way"
+    );
+}
+
+/// The drops mode reaches the step's report, including the one that says the
+/// fold is only rebuilding the run.
+///
+/// An operator watching a fold needs to tell a fold that is reclaiming rows
+/// from one that is not, and the executor keeps a distinct answer for the
+/// case that produces the second: an unbind set too large to hold.
+#[tokio::test]
+async fn a_step_reports_a_fold_that_is_only_rewriting_the_run() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_bindings_workload(&store, &namespace_id).await;
+
+    // A byte budget too small for even one unbind entry, which is also too
+    // small for any run, so the group folds a slice at a time.
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
+        ..MetadataLsmPolicy::default()
+    };
+    let report = reorganize_metadata_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("reorganization step");
+    let MetadataReorganizeOutcome::PartialFoldAdvanced {
+        families, drops, ..
+    } = report.outcome
+    else {
+        panic!("a group no run of which fits one step must fold in slices")
+    };
+    assert_eq!(
+        families,
+        group_containing(ApiMetadataTableFamily::DirentryUnbinds)
+    );
+    assert_eq!(drops, MetadataFoldSliceDrops::UnbindSetOverBound);
 }

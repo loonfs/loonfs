@@ -19,6 +19,13 @@
 //! concurrent checkpoint racing a unit wins at the root compare-and-swap;
 //! the unit's segments are left unreferenced for garbage collection and the
 //! next step retries against the fresh manifest.
+//!
+//! A group whose oldest run no longer fits one step folds a slice at a time
+//! instead ([`super::partial_fold`]). That fold does keep a progress record,
+//! in the manifest, because its output arrives in pieces. While it is in
+//! flight its group folds no other way: a step that selects the group
+//! advances the fold and does nothing else for it. Group selection still
+//! runs per step, so the other groups keep folding on the steps they win.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::build::{
@@ -31,6 +38,7 @@ use super::load::{
     load_verified_manifest_tables, validate_direntry_child_bind_index,
     validate_revision_by_inode_desc_index,
 };
+use super::partial_fold::{MetadataFoldSliceDrops, MetadataFoldWalk, MetadataFoldWalkOutcome};
 use super::publish::{
     manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
@@ -46,7 +54,7 @@ use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{read_head_object, read_metadata_root_object_if_present};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
-    ActiveDeletionRowAction, MetadataFileRef, MetadataRow, MetadataTableFamily,
+    ActiveDeletionRowAction, MetadataFileRef, MetadataRow, MetadataRunId, MetadataTableFamily,
     NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{
@@ -69,6 +77,33 @@ pub enum MetadataReorganizeOutcome {
         input_runs: usize,
         decoded_input_rows: u64,
         decoded_input_bytes: u64,
+        manifest_id: ManifestId,
+    },
+    /// One slice of a partial fold merged and published. The group's oldest
+    /// run does not fit one step, so the group is being folded a partition
+    /// at a time and this step moved that fold along.
+    PartialFoldAdvanced {
+        families: Vec<MetadataTableFamily>,
+        /// Partitions of the group's keyspace this slice covered.
+        partitions: u64,
+        decoded_input_rows: u64,
+        decoded_input_bytes: u64,
+        /// Rows this slice wrote into the run the fold is building.
+        output_rows: u64,
+        /// Where the fold now stands: the next partition it has not
+        /// processed.
+        cursor: String,
+        /// Whether this slice dropped what the frozen floor allows.
+        drops: MetadataFoldSliceDrops,
+        manifest_id: ManifestId,
+    },
+    /// A partial fold's last publication: the runs it merged left the
+    /// manifest, the run it built took their place, and its progress state
+    /// cleared.
+    PartialFoldCompleted {
+        families: Vec<MetadataTableFamily>,
+        output_segments: usize,
+        output_rows: u64,
         manifest_id: ManifestId,
     },
     /// The trigger fired, but no oldest-first subset that would make
@@ -141,7 +176,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let previous = tables.manifest();
 
     let l0_runs = l0_run_count(&previous.payload);
+    // A partial fold in flight keeps stepping whatever the trigger says.
+    // Its state is durable and only its own steps clear it, so a step that
+    // returned here would leave the fold's outputs unfinished and its group
+    // unfoldable for as long as the trigger stayed quiet.
     if l0_runs < policy.max_l0_runs.get()
+        && previous.payload.reorganize.is_none()
         && !manifest_has_partial_reorganization(tables.scan_runs.as_ref())
     {
         return Ok(MetadataReorganizeReport {
@@ -149,20 +189,37 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
         });
     }
-    let Some(group) = select_family_group(&previous.payload) else {
+    let folding_group = manifest_partial_fold_group(&previous.payload);
+    // Group selection runs once per step, so a fold in flight takes its
+    // turn like anything else rather than holding the namespace. The runs
+    // it is already merging do not count as work waiting for its group (see
+    // `select_family_group`), so a group with a fold in flight only wins a
+    // step when runs have arrived above the fold — and when no group has
+    // work waiting at all, the fold is what the step does.
+    let Some(group) = select_family_group(&previous.payload).or(folding_group) else {
         // L0 runs exist but hold no rows (empty families); nothing to fold.
         return Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
         });
     };
+    // A group with a fold in flight folds no other way: no delta merge for
+    // it, no second fold, until the fold finishes and swaps its output in.
+    if folding_group == Some(group) {
+        return advance_partial_fold(store, namespace_id, &tables, policy, context, timer).await;
+    }
     let selection = select_reorganization_input(&tables, group, policy)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
     if let Some(bottom) = selection.group_bottom_over_budget {
+        // The group's oldest run no longer fits one step. Say so once, then
+        // start folding the group a slice at a time; from the next step on
+        // the fold's progress is what this group reports.
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
+        return start_partial_fold(store, namespace_id, &tables, group, policy, context, timer)
+            .await;
     }
     let Some(input) = selection.input else {
         return Ok(MetadataReorganizeReport {
@@ -309,6 +366,128 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     }
 }
 
+/// The family group a manifest's partial fold names, or `None` when it
+/// carries no fold.
+///
+/// Manifest load already refused a state naming anything but a
+/// reorganization family group, so this only turns the stored list back into
+/// the static entry the rest of the module is written against.
+fn manifest_partial_fold_group(
+    payload: &NamespaceManifestPayload,
+) -> Option<&'static [MetadataTableFamily]> {
+    let progress = payload.reorganize.as_ref()?;
+    REORGANIZE_FAMILY_GROUPS
+        .into_iter()
+        .find(|candidate| *candidate == progress.families.as_slice())
+}
+
+/// Advances the partial fold a manifest carries by one slice, or publishes
+/// the swap that finishes it.
+async fn advance_partial_fold<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    tables: &VerifiedMetadataTables<'_, S>,
+    policy: MetadataLsmPolicy,
+    context: &MutationContext,
+    timer: &dyn MonotonicTimer,
+) -> Result<MetadataReorganizeReport> {
+    let Some(mut walk) = MetadataFoldWalk::resume_from_manifest(tables, policy).await? else {
+        return Err(CoreError::Internal(
+            "a partial fold was selected against a manifest that carries none".to_owned(),
+        ));
+    };
+    let outcome = walk
+        .advance(store, namespace_id, tables, policy, context, timer)
+        .await?;
+    Ok(partial_fold_report(namespace_id, &walk, outcome))
+}
+
+/// Starts a partial fold of `group` and runs its first slice.
+///
+/// Starting is not a step of its own. The executor publishes nothing until a
+/// slice is written, so one step both starts the fold and folds its first
+/// slice, and the manifest that step publishes carries the state a resume
+/// reads back. The budgets still hold across the pair: the start scans the
+/// group's unbind rows to freeze the set its drops read, and
+/// `MetadataFoldWalk` charges those rows against this step's row budget
+/// before it plans the slice.
+///
+/// The input is every run of the manifest that holds rows of the group.
+/// Dropping rows is only visibility-preserving over a merge that starts at
+/// the group's oldest run, and taking the whole group is also what leaves it
+/// in one run when the fold finishes.
+async fn start_partial_fold<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    tables: &VerifiedMetadataTables<'_, S>,
+    group: &'static [MetadataTableFamily],
+    policy: MetadataLsmPolicy,
+    context: &MutationContext,
+    timer: &dyn MonotonicTimer,
+) -> Result<MetadataReorganizeReport> {
+    let head = read_head_object(store, namespace_id)
+        .await
+        .map_err(CoreError::load_head)?
+        .envelope
+        .state;
+    let frozen_floor_seq = resolve_retention_floor_seq(store, &head)
+        .await
+        .map_err(CoreError::load_head)?;
+    let snapshot = tables
+        .scan_runs
+        .iter()
+        .filter(|run| run_has_group_rows(run, group))
+        .cloned()
+        .collect();
+    let mut walk =
+        MetadataFoldWalk::start(tables, group, snapshot, frozen_floor_seq, policy).await?;
+    let outcome = walk
+        .advance(store, namespace_id, tables, policy, context, timer)
+        .await?;
+    Ok(partial_fold_report(namespace_id, &walk, outcome))
+}
+
+/// Reads one partial-fold step as a reorganization report.
+fn partial_fold_report(
+    namespace_id: &NamespaceId,
+    walk: &MetadataFoldWalk,
+    outcome: MetadataFoldWalkOutcome,
+) -> MetadataReorganizeReport {
+    let families = walk.group().to_vec();
+    let outcome = match outcome {
+        MetadataFoldWalkOutcome::SlicePublished(slice) => {
+            MetadataReorganizeOutcome::PartialFoldAdvanced {
+                families,
+                partitions: slice.partitions,
+                decoded_input_rows: slice.decoded_input_rows,
+                decoded_input_bytes: slice.decoded_input_bytes,
+                output_rows: slice.output_rows,
+                // Read back from the fold rather than from the slice: this
+                // is the position the manifest now carries, which is where
+                // the next step resumes.
+                cursor: walk.progress().cursor.clone(),
+                drops: slice.drops,
+                manifest_id: slice.manifest_id,
+            }
+        }
+        MetadataFoldWalkOutcome::Completed {
+            manifest_id,
+            output_segments,
+            output_rows,
+        } => MetadataReorganizeOutcome::PartialFoldCompleted {
+            families,
+            output_segments,
+            output_rows,
+            manifest_id,
+        },
+        MetadataFoldWalkOutcome::Superseded => MetadataReorganizeOutcome::Superseded,
+    };
+    MetadataReorganizeReport {
+        namespace_id: namespace_id.clone(),
+        outcome,
+    }
+}
+
 pub(super) struct ReorganizationInput {
     pub(super) runs: Vec<MetadataRunManifest>,
     run_ids: BTreeSet<(ChangeSeq, u32)>,
@@ -329,10 +508,11 @@ pub(super) struct ReorganizationInput {
 
 /// What one selection attempt found.
 ///
-/// The saturation record travels beside the input because the caller
-/// reports it on both paths: a group whose oldest run has outgrown one
-/// step's budget still folds its newer runs, and that is exactly when an
-/// operator needs to hear that the run underneath them is frozen.
+/// The saturation record travels beside the input rather than replacing it.
+/// A group whose oldest run has outgrown one step's budget is folded a slice
+/// at a time instead of whole, which is the caller's decision to make; the
+/// delta-only window this search still finds is what the group would have
+/// merged before partial folds existed.
 pub(super) struct ReorganizationSelection {
     pub(super) input: Option<ReorganizationInput>,
     pub(super) group_bottom_over_budget: Option<OverBudgetRun>,
@@ -375,9 +555,12 @@ pub(super) struct OverBudgetRun {
 ///
 /// **The budgets pace the work; they never end it.** When no window starting
 /// at the group's oldest run can fit the budgets, the start moves past the
-/// base-tier runs that block it and the step merges the L0 runs above them
-/// on their own. The group keeps shedding runs even while the run at its
-/// bottom stays too large to fold.
+/// base-tier runs that block it and the window merges the L0 runs above them
+/// on their own, so the group keeps shedding runs. The caller has a better
+/// answer for that case now and takes it — it folds the group a slice at a
+/// time instead ([`super::partial_fold`]) — but the window is still what
+/// this search reports, and it is still the one the group would merge if the
+/// oldest run fit.
 ///
 /// Index sections are read before row payloads so the decoded-byte budget is
 /// known exactly from each data block's durable `decoded_len`; a run that
@@ -503,15 +686,16 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
 /// Says out loud that a family group's oldest run no longer fits one
 /// reorganization step.
 ///
-/// Nothing is broken when this fires and nothing stalls: folds keep merging
-/// the newer runs above the run named here. What stops is reclamation of
-/// that run's rows, because no step can rewrite a run it cannot read whole.
-/// The group's run count therefore drifts up over time. Raising
+/// Nothing is broken when this fires and nothing stalls. The step that logs
+/// this line starts a partial fold of the group, which rebuilds it a
+/// partition at a time over the steps that follow; those steps report their
+/// progress instead of repeating this line. Raising
 /// `max_decoded_input_rows_per_step` and `max_decoded_input_bytes_per_step`
-/// past the numbers in this line is the operator's lever.
+/// past the numbers here is what makes a fold like that finish in fewer
+/// steps.
 ///
-/// One line per step: a step is already the unit maintenance schedules, so
-/// the cadence of the warning is the cadence of maintenance.
+/// One line per fold: the step after this one has a fold in flight, and a
+/// group with a fold in flight never reaches the selection that logs this.
 fn report_group_bottom_over_budget(
     namespace_id: &NamespaceId,
     group: &[MetadataTableFamily],
@@ -528,8 +712,7 @@ fn report_group_bottom_over_budget(
         max_decoded_input_rows_per_step = policy.max_decoded_input_rows_per_step.get(),
         max_decoded_input_bytes_per_step = policy.max_decoded_input_bytes_per_step.get(),
         "the oldest metadata run in this family group no longer fits one reorganization step; \
-         folds skip it and merge the newer runs, so its rows are never reclaimed and the \
-         group's run count grows",
+         the group folds a slice at a time from here, over as many steps as that takes",
     );
 }
 
@@ -585,14 +768,23 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
     Ok(decoded_bytes)
 }
 
-/// The family group with the most L0 rows to fold; ties resolve in group
-/// order. `None` when no group has L0 rows.
+/// The family group with the most L0 rows still waiting to be folded; ties
+/// resolve in group order. `None` when no group has any.
+///
+/// The L0 rows a partial fold has already taken into its input do not count
+/// for the group that fold belongs to. They are work in progress, not work
+/// waiting, and counting them would let a fold in flight win every step for
+/// as long as it ran: its input is frozen, so its count would never fall,
+/// while every other group's falls to zero the moment it folds. Leaving them
+/// out is what makes a fold share the maintenance cadence — it takes the
+/// steps no other group has work for, plus one for every run that arrives
+/// above it while it runs.
 pub(super) fn select_family_group(
     payload: &NamespaceManifestPayload,
 ) -> Option<&'static [MetadataTableFamily]> {
     REORGANIZE_FAMILY_GROUPS
         .into_iter()
-        .map(|group| (group_l0_rows(payload, group), group))
+        .map(|group| (group_unfolded_l0_rows(payload, group), group))
         .filter(|(rows, _)| *rows > 0)
         .max_by(|(left_rows, left), (right_rows, right)| {
             left_rows.cmp(right_rows).then_with(|| {
@@ -611,12 +803,24 @@ fn position_of(group: &[MetadataTableFamily]) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn group_l0_rows(payload: &NamespaceManifestPayload, group: &[MetadataTableFamily]) -> u64 {
+fn group_unfolded_l0_rows(
+    payload: &NamespaceManifestPayload,
+    group: &[MetadataTableFamily],
+) -> u64 {
+    let in_flight: &[MetadataRunId] = match &payload.reorganize {
+        Some(progress) if progress.families == group => &progress.input_runs,
+        _ => &[],
+    };
     payload
         .metadata_files
         .iter()
         .filter(|descriptor| {
             descriptor.level == CHECKPOINT_L0_RUN_LEVEL && group.contains(&descriptor.family)
+        })
+        .filter(|descriptor| {
+            !in_flight
+                .iter()
+                .any(|run| run.run_seq == descriptor.run_seq && run.level == descriptor.level)
         })
         .map(|descriptor| descriptor.row_count)
         .sum()
@@ -645,9 +849,11 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
         next_inode_id: previous.payload.next_inode_id,
         retention_floor_seq,
         metadata_files,
-        // Nothing produces a partial fold yet; a whole-group fold clears
-        // the field it never set.
-        reorganize: None,
+        // A whole-group fold only ever runs for a group with no partial
+        // fold in flight, so any fold the manifest carries belongs to some
+        // other group and travels forward untouched. Dropping it here would
+        // strand that group's outputs and leave its base frozen.
+        reorganize: previous.payload.reorganize.clone(),
     })
     .map_err(|err| CoreError::Internal(format!("failed to build reorganized manifest: {err}")))?;
     write_namespace_manifest(store, &manifest)

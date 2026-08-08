@@ -225,8 +225,11 @@ async fn checkpoint_then_reorganize<S: ObjectStore + ?Sized>(
     drain_reorganization(store, namespace_id, context, policy).await
 }
 
-/// Runs reorganization units until nothing is left to fold, with the
+/// Runs reorganization steps until nothing is left to fold, with the
 /// trigger forced so even one L0 run folds.
+///
+/// Whether a group folds whole or a slice at a time is the step's decision,
+/// so both count as work here and the loop just keeps going.
 async fn drain_reorganization<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -243,6 +246,8 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
             .expect("reorganization step");
         match report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { .. }
+            | super::MetadataReorganizeOutcome::PartialFoldAdvanced { .. }
+            | super::MetadataReorganizeOutcome::PartialFoldCompleted { .. }
             | super::MetadataReorganizeOutcome::Superseded => continue,
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
             super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {

@@ -17,10 +17,9 @@
 //! runs without deduplicating — so a manifest showing both would show every
 //! rebuilt row twice.
 //!
-//! Nothing calls this from the maintenance path yet: the selector picks it
-//! up in the next change, and until then every path below is driven by
-//! tests.
-#![allow(dead_code)]
+//! The reorganization step reaches this ([`super::reorganize`]): it starts a
+//! walk when a group's oldest run no longer fits one step, and advances the
+//! walk a manifest carries before it selects anything else for that group.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::build::{
@@ -88,8 +87,12 @@ pub(super) struct MetadataFoldSliceReport {
 
 /// Whether a slice dropped what the frozen floor allows, and why not when
 /// it did not.
+///
+/// Public because a reorganization step reports it: an operator watching a
+/// walk needs to know whether it is reclaiming rows or only rebuilding the
+/// run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MetadataFoldSliceDrops {
+pub enum MetadataFoldSliceDrops {
     /// The slice dropped every row the frozen floor allows.
     Applied,
     /// The unbind set the bind drop reads did not fit its bound, so the

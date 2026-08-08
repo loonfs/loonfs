@@ -196,7 +196,13 @@ impl FsAdmin {
             loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
                 ReorganizeStepOutcome::NotNeeded
             }
-            loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {
+            loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. }
+            // A partial fold's steps each publish a manifest and each move
+            // the group along, so they read as published units at the
+            // coarseness this outcome carries. What they did in detail is in
+            // the log line `run_reorganization` writes.
+            | loonfs_core::MetadataReorganizeOutcome::PartialFoldAdvanced { .. }
+            | loonfs_core::MetadataReorganizeOutcome::PartialFoldCompleted { .. } => {
                 ReorganizeStepOutcome::UnitPublished
             }
             loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
@@ -215,6 +221,10 @@ impl FsAdmin {
     /// `loonfs-core`'s `reorganize_metadata`). Explicit steps stay bounded at
     /// one unit per call; the returned outcome lets writer-scheduled
     /// background work keep folding until nothing is left.
+    ///
+    /// A family group whose oldest run no longer fits one step folds a slice
+    /// at a time instead, over as many steps as that takes. Those steps
+    /// publish a manifest each and report their progress here.
     async fn run_reorganization(
         &self,
         namespace_id: &NamespaceId,
@@ -242,6 +252,42 @@ impl FsAdmin {
                     decoded_input_rows,
                     decoded_input_bytes,
                     "metadata reorganization unit published"
+                );
+            }
+            loonfs_core::MetadataReorganizeOutcome::PartialFoldAdvanced {
+                families,
+                partitions,
+                decoded_input_rows,
+                decoded_input_bytes,
+                output_rows,
+                cursor,
+                drops,
+                ..
+            } => {
+                self.invalidate_namespace(namespace_id);
+                tracing::info!(
+                    families = ?families,
+                    partitions,
+                    decoded_input_rows,
+                    decoded_input_bytes,
+                    output_rows,
+                    cursor = cursor.as_str(),
+                    drops = ?drops,
+                    "metadata partial fold advanced"
+                );
+            }
+            loonfs_core::MetadataReorganizeOutcome::PartialFoldCompleted {
+                families,
+                output_segments,
+                output_rows,
+                ..
+            } => {
+                self.invalidate_namespace(namespace_id);
+                tracing::info!(
+                    families = ?families,
+                    output_segments,
+                    output_rows,
+                    "metadata partial fold completed"
                 );
             }
             loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { families, .. } => {

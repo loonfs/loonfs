@@ -63,6 +63,7 @@ pub use self::cache::{
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
+pub use self::partial_fold::MetadataFoldSliceDrops;
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
 pub use self::stored_block_cache::{

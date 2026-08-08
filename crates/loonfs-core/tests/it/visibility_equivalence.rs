@@ -896,6 +896,10 @@ async fn drain_reorganization(
             MetadataReorganizeOutcome::BudgetExhausted { .. } => {
                 panic!("default budget must admit the visibility scenario")
             }
+            MetadataReorganizeOutcome::PartialFoldAdvanced { .. }
+            | MetadataReorganizeOutcome::PartialFoldCompleted { .. } => {
+                panic!("default budget must admit every group whole in this scenario")
+            }
         }
     }
     panic!("reorganization did not drain within the family-group bound");

@@ -150,6 +150,10 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
             super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
                 panic!("test budget must admit a progress-making subset")
             }
+            super::MetadataReorganizeOutcome::PartialFoldAdvanced { .. }
+            | super::MetadataReorganizeOutcome::PartialFoldCompleted { .. } => {
+                panic!("this budget admits every group whole; no partial fold should start")
+            }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => {
                 return (current_manifest_id(store, namespace_id).await, published);
             }
@@ -808,6 +812,10 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
             super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
                 panic!("test reorganization budget should admit a progress-making subset")
             }
+            super::MetadataReorganizeOutcome::PartialFoldAdvanced { .. }
+            | super::MetadataReorganizeOutcome::PartialFoldCompleted { .. } => {
+                panic!("this budget admits every group whole; no partial fold should start")
+            }
         }
     }
     assert!(units >= 2, "several family groups should fold, got {units}");
@@ -855,27 +863,31 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
             .expect("create checkpoint");
     }
 
-    let root_before = current_manifest_id(&store, &namespace_id).await;
     let tiny_byte_policy = MetadataLsmPolicy {
         max_l0_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
+    // Selection, not a step: one byte admits no run whole, and what a step
+    // does about that is the partial fold's business, tested with the fold.
+    // What is pinned here is the price of finding out.
     store.reset();
-    let blocked =
-        super::reorganize_metadata_step(&store, &namespace_id, &context, tiny_byte_policy)
-            .await
-            .expect("budgeted step");
-    let super::MetadataReorganizeOutcome::BudgetExhausted { families, .. } = blocked.outcome else {
-        panic!("one byte must not admit an SST run");
-    };
-    assert_eq!(
-        current_manifest_id(&store, &namespace_id).await,
-        root_before,
-        "a budget-blocked step must not publish"
+    let (families, selection) =
+        select_reorganization_window(&store, &namespace_id, tiny_byte_policy).await;
+    assert!(
+        selection.input.is_none(),
+        "one byte must not admit an SST run"
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert!(
+        selection.group_bottom_over_budget.is_some(),
+        "the group's oldest run must be reported as over budget"
+    );
+    assert_eq!(
+        store.count(OperationClass::Put),
+        0,
+        "selection writes nothing"
+    );
     assert!(
         store.count(OperationClass::Read) <= families.len(),
         "byte preflight should read only the oldest candidate's index sections"
@@ -1279,6 +1291,10 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
             super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
                 panic!("test reorganization budget should admit a progress-making subset")
             }
+            super::MetadataReorganizeOutcome::PartialFoldAdvanced { .. }
+            | super::MetadataReorganizeOutcome::PartialFoldCompleted { .. } => {
+                panic!("this budget admits every group whole; no partial fold should start")
+            }
         }
     }
     assert!(folded_groups.len() >= 2);
@@ -1550,16 +1566,35 @@ fn policy_that_cannot_fold_the_base(base_rows: u64) -> MetadataLsmPolicy {
     }
 }
 
+/// A per-step row budget that admits the group's base run on its own but
+/// nothing above it, so the only window that makes progress starts above the
+/// base. The base still fits one step, so nothing here starts a partial
+/// fold.
+fn policy_that_folds_only_above_the_base(base_rows: u64) -> MetadataLsmPolicy {
+    let row_budget = usize::try_from(base_rows).expect("test row counts are small");
+    MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(row_budget)
+            .expect("test row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    }
+}
+
 /// A group whose base run alone busts the per-step row budget used to park
 /// forever: selection broke on the first candidate, chose nothing, and
 /// reported the group blocked on every step after that while delta runs
 /// piled up behind it with nothing saying why.
 ///
-/// The budget paces the work instead of ending it. The step skips the base
-/// run it cannot read whole, merges the delta runs above it, and says out
-/// loud that the base has outgrown the budget.
+/// The budget paces the work instead of ending it. The step says out loud
+/// that the base has outgrown the budget and then folds the group a slice at
+/// a time, so the base is rebuilt rather than skipped and the group ends up
+/// in one run.
+///
+/// The window that skips the base is still what the selector reports — that
+/// part of the search has not changed — but the step has a better answer for
+/// it now and takes that instead.
 #[tokio::test]
-async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
+async fn a_base_run_over_the_step_budget_folds_the_group_a_slice_at_a_time() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1589,7 +1624,7 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
         current_manifest_id(&store, &namespace_id).await,
     )
     .await
-    .expect("load the parked manifest");
+    .expect("load the manifest the group starts from");
     let (group, _) =
         select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
     let base = base_run(&before.manifest);
@@ -1598,6 +1633,9 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
     assert!(base_rows > 1, "the base run must hold rows in this group");
     let policy = policy_that_cannot_fold_the_base(base_rows);
 
+    // The selector is unchanged: it still reports the over-budget bottom —
+    // which is what the step warns about — and still finds the delta-only
+    // window the group used to merge instead.
     let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
     let input = selection
         .input
@@ -1629,16 +1667,33 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
     assert_eq!(bottom.level, CHECKPOINT_BASE_RUN_LEVEL);
     assert_eq!(bottom.rows, base_rows);
 
-    // Repeated steps keep draining the group. The base run stays exactly
-    // where it is.
-    let mut published = 0usize;
+    // Repeated steps keep the group moving. Nothing parks, and the fold of
+    // the group runs a slice at a time until it swaps its finished run in.
+    let mut slices = 0usize;
+    let mut completions = 0usize;
+    let mut units = 0usize;
+    let mut cursors = Vec::new();
     let mut group_l0_runs = vec![l0_runs(&before.manifest).len()];
     for _ in 0..64 {
         let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
             .await
             .expect("reorganization step");
         match report.outcome {
-            super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
+            super::MetadataReorganizeOutcome::UnitPublished { .. } => units += 1,
+            super::MetadataReorganizeOutcome::PartialFoldAdvanced {
+                families, cursor, ..
+            } => {
+                assert_eq!(
+                    families, group,
+                    "only the over-budget group folds in slices"
+                );
+                slices += 1;
+                cursors.push(cursor);
+            }
+            super::MetadataReorganizeOutcome::PartialFoldCompleted { families, .. } => {
+                assert_eq!(families, group);
+                completions += 1;
+            }
             super::MetadataReorganizeOutcome::Superseded => {
                 panic!("no concurrent publisher exists in this test")
             }
@@ -1656,7 +1711,16 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
         .expect("load the folded manifest");
         group_l0_runs.push(l0_runs(&current.manifest).len());
     }
-    assert!(published > 0, "at least one unit must publish");
+    assert!(slices > 0, "the over-budget group must fold in slices");
+    assert_eq!(completions, 1, "the fold must finish exactly once");
+    assert!(units > 0, "the groups that fit must still fold whole");
+    let mut ascending = cursors.clone();
+    ascending.sort();
+    ascending.dedup();
+    assert_eq!(
+        cursors, ascending,
+        "every slice must leave the fold further along than it found it"
+    );
 
     let after = load_manifest_materialization_for_inspection(
         &store,
@@ -1667,7 +1731,7 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
     .expect("load the drained manifest");
     assert!(
         l0_runs(&after.manifest).is_empty(),
-        "delta runs must drain even with the base frozen, ran {group_l0_runs:?}"
+        "delta runs must drain, ran {group_l0_runs:?}"
     );
     assert!(
         runs_from_metadata_files(&after.manifest.payload).len()
@@ -1677,10 +1741,23 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
     let remaining = run_segment_object_keys(&after.manifest);
     for segment in &base_segments {
         assert!(
-            remaining.contains(segment),
-            "the base run this step could not read must stay referenced untouched"
+            !remaining.contains(segment),
+            "the base run no step could read whole must be rebuilt, not left behind"
         );
     }
+    let group_runs: BTreeSet<(ChangeSeq, u32)> = after
+        .manifest
+        .payload
+        .metadata_files
+        .iter()
+        .filter(|descriptor| group.contains(&descriptor.family))
+        .map(|descriptor| (descriptor.run_seq, descriptor.level))
+        .collect();
+    assert_eq!(
+        group_runs.len(),
+        1,
+        "the fold must leave the group in one run, got {group_runs:?}"
+    );
     let projection = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
@@ -1696,6 +1773,11 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
 /// the bind it names, and both have to leave together. A window that starts
 /// above the base cannot see the bind at all, so dropping the unbind there
 /// would put a deleted file back. The step merges without dropping instead.
+///
+/// This is also the normal path a partial fold leaves alone. The budget here
+/// admits the group's base run on its own, so nothing reports an over-budget
+/// bottom and nothing starts a fold in slices: the step merges the delta
+/// runs above the base, exactly as it always did.
 #[tokio::test]
 async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1773,12 +1855,16 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         "this test is about the binding families, got {group:?}"
     );
     let base_rows = group_run_rows(&base_run(&before.manifest), &group);
-    let policy = policy_that_cannot_fold_the_base(base_rows);
+    let policy = policy_that_folds_only_above_the_base(base_rows);
 
     let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
     let input = selection.input.expect("the delta runs must still merge");
     assert!(!input.starts_at_group_bottom);
     assert!(input.runs.len() > 1);
+    assert!(
+        selection.group_bottom_over_budget.is_none(),
+        "the base fits one step here, so nothing should fold this group in slices"
+    );
 
     let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
         .await

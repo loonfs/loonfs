@@ -380,6 +380,36 @@ all. Any other value fails the process rather than being guessed at.
 and leaves the rest alone. `LOONFS_TRACE=off` silences the output whatever
 `RUST_LOG` says.
 
+### Metadata folds that take several steps
+
+Background maintenance rewrites a namespace's metadata into fewer files as
+it goes. It does that one group of metadata at a time, and one step reads a
+whole group. A group that has grown past what one step may read is handled
+differently, and it logs three kinds of line.
+
+The first is a warning saying that the oldest metadata run in a family group
+no longer fits one reorganization step. It names the group, the run, how many
+rows and bytes that run holds, and the two per-step budgets it did not fit.
+It is logged once, on the step that decides to rebuild that group a slice at
+a time.
+
+After that, the same group logs `metadata partial fold advanced` on every
+step it gets, saying how many partitions the step covered, how many rows it
+read and wrote, and where it has reached. A final `metadata partial fold
+completed` says the group has been rebuilt into one file set.
+
+Nothing needs doing about any of this. The rebuild records where it is in the
+namespace manifest, so it survives restarts and picks up where it stopped;
+the other groups keep being maintained on the steps in between; and reads
+answer exactly the same thing from the first step to the last. A large
+namespace can spend many steps here, which is expected — the warning is
+saying the work is now paced, not that it is stuck.
+
+The two budgets the warning names are what set that pace: a step folds as
+much as they allow and no more. This build does not expose them in the
+config, so the way to finish a long rebuild sooner is to run maintenance
+steps more often rather than to make each one bigger.
+
 ## The optional local cache
 
 The server can keep encoded metadata blocks on this machine's disk, in front
