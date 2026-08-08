@@ -23,8 +23,8 @@ mod validate_error;
 pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
 pub use self::identity::CommitFingerprint;
 pub(crate) use self::ir::CommitIr;
+pub use self::materialize::MaterializedCommitDelta;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
-pub use self::materialize::{CommitOpResult, MaterializedCommitDelta};
 pub(crate) use self::ops::{CommitOp, CommitPrecondition, PlannedOp};
 #[cfg(test)]
 pub(crate) use self::plan::CommitValidationContext;

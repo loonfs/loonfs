@@ -762,10 +762,9 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
             ErrorCode::StaleAttributes
         }
         CommitValidationError::UpdateAttributesInodeMissing { .. } => ErrorCode::PathNotFound,
-        // The planner numbers the attribute revision, so a plan that
-        // publishes anything else is a bug in this server.
-        CommitValidationError::UpdateAttributesRevisionNotSuccessive { .. }
-        | CommitValidationError::UpdateAttributesRevisionOverflow { .. } => ErrorCode::ServerError,
+        // Validation numbers the attribute revision, so running out of
+        // numbers is a bug in this server rather than a caller mistake.
+        CommitValidationError::UpdateAttributesRevisionOverflow { .. } => ErrorCode::ServerError,
         CommitValidationError::CreateChildNameCollision { .. }
         | CommitValidationError::NamePreconditionParentNotDirectory { .. }
         | CommitValidationError::BindingPreconditionMissing { .. }

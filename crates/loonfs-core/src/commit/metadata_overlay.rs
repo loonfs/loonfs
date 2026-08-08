@@ -44,8 +44,7 @@ impl CommitOverlayRows {
         committed_at_ms: u64,
         op: &ValidatedOp,
     ) {
-        let (deltas, _result) = materialize_validated_op(op);
-        for delta in &deltas {
+        for delta in &materialize_validated_op(op) {
             self.rows.apply_committed_wal_delta_mut(
                 committed_seq,
                 committed_at_ms,
@@ -98,7 +97,7 @@ mod tests {
 
     fn materialized_wal_deltas(ops: &[ValidatedOp]) -> Vec<WalDelta> {
         ops.iter()
-            .flat_map(|op| materialize_validated_op(op).0)
+            .flat_map(materialize_validated_op)
             .map(|delta| delta.wal_delta)
             .collect()
     }
