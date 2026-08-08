@@ -105,8 +105,9 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // overrunning — the sessions waiting on it are retained and the sweep
     // continues.
     let mut references = ContentReferences::over(&mark);
-    let mut position = resume.clone();
-    let mut decided = 0_u64;
+    // The position this pass walked to, or `None` while it has decided
+    // nothing and has no progress of its own to report.
+    let mut position: Option<GcCursor> = None;
 
     // Data precedes mutable records. A crash or bounded return can therefore
     // leave data protected for an extra pass, never a readable record whose
@@ -128,7 +129,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             // candidate reads or mutations, and the key is reconsidered
             // from the exclusive last-examined position on resume.
             if budget.exhausted() {
-                return stopped_on_budget(report, config, &position, decided, &sweep);
+                return stopped_on_budget(report, config, position.as_ref(), &sweep);
             }
 
             let step = process_candidate(
@@ -150,7 +151,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
                 // The re-verification this candidate's decision needs could
                 // not be paid for, so the candidate stays undecided and is
                 // reconsidered from the same exclusive position on resume.
-                return stopped_on_budget(report, config, &position, decided, &sweep);
+                return stopped_on_budget(report, config, position.as_ref(), &sweep);
             }
             // Every candidate that gets past the check above comes back
             // decided one way or the other, so the cursor always advances
@@ -160,8 +161,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             // rather than by leaving the key undecided. A budget below that
             // scan's cost would otherwise pin the walk to one key forever.
             budget.charge();
-            decided += 1;
-            position = GcCursor::after(namespace_id, family, key);
+            position = Some(GcCursor::after(namespace_id, family, key));
         }
     }
 
@@ -181,15 +181,13 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
 fn stopped_on_budget(
     mut report: GcResponse,
     config: &GcConfig,
-    position: &GcCursor,
-    decided: u64,
+    position: Option<&GcCursor>,
     sweep: &SweepVerifier,
 ) -> Result<GcResponse> {
     report.budget_exhausted = true;
-    if decided == 0 {
-        report.next_cursor.clone_from(&config.cursor);
-    } else {
-        report.next_cursor = Some(position.encode()?);
+    match position {
+        Some(position) => report.next_cursor = Some(position.encode()?),
+        None => report.next_cursor.clone_from(&config.cursor),
     }
     report.degraded_retention = sweep.degraded;
     Ok(report)
@@ -251,7 +249,10 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         CandidateFamily::MetadataTables => !mark.tables.contains(key),
         CandidateFamily::Manifests => match manifest_object_id_of(key) {
             Some(Ok(id)) => !mark.manifests.contains(&id),
-            None | Some(Err(_)) => false,
+            // A key that names no readable manifest is reachable from no
+            // root, so it is selected like any other unreferenced
+            // candidate; the decision below is where it is kept and said.
+            None | Some(Err(_)) => true,
         },
         CandidateFamily::Checkpoints => !mark.checkpoint_keys.contains(key),
         CandidateFamily::UploadSessions => false,
@@ -301,9 +302,9 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
                             report.deleted_manifests += 1;
                         }
                     }
-                    // Candidate selection above never picks an unreadable
-                    // manifest key, so this arm is the same belt-and-braces
-                    // the selection already wears.
+                    // A key under the manifest prefix that does not name a
+                    // manifest is never deleted: this pass cannot tell what
+                    // wrote it, so it is retained and reported.
                     None | Some(Err(_)) => report.retain(RetainedReason::UnrecognizedKey),
                 }
             }

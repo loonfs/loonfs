@@ -29,7 +29,6 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
-    family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     entry: &SegmentIndexEntry,
 ) -> Result<Arc<DecodedDataBlock>, ManifestLoadError> {
@@ -51,7 +50,7 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            return Ok(decoded_data_cache_block(family, decoded));
+            return Ok(decoded_data_cache_block(descriptor.family, decoded));
         }
         let bytes = load_section_bytes(
             store,
@@ -68,7 +67,7 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
             &bytes,
         );
         Ok(decoded_data_cache_block(
-            family,
+            descriptor.family,
             decode_data_block(&bytes, &handle)
                 .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
         ))
@@ -109,7 +108,6 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
-    family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     entries: &[SegmentIndexEntry],
 ) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
@@ -149,7 +147,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 memo,
                 probe_key.clone(),
                 &DecodedMetadataTableBlock::Data {
-                    decoded_byte_len: decoded_manifest_block_weight(family, &block.rows),
+                    decoded_byte_len: decoded_manifest_block_weight(descriptor.family, &block.rows),
                     block: Arc::clone(&block),
                 },
             );
@@ -193,7 +191,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 span[0].block.offset,
             );
             let fetch = || async {
-                load_and_publish_span(store, table_cache, memo, family, descriptor, span).await
+                load_and_publish_span(store, table_cache, memo, descriptor, span).await
             };
             match table_cache {
                 Some(cache) => {
@@ -214,9 +212,8 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
         if blocks[position].is_some() {
             continue;
         }
-        blocks[position] = Some(
-            load_segment_data_block(store, table_cache, memo, family, descriptor, entry).await?,
-        );
+        blocks[position] =
+            Some(load_segment_data_block(store, table_cache, memo, descriptor, entry).await?);
     }
 
     Ok(blocks
@@ -234,7 +231,6 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
-    family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     span: &[SegmentIndexEntry],
 ) -> Result<DecodedMetadataTableBlock, ManifestLoadError> {
@@ -263,7 +259,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
         let cache_key =
             segment_block_cache_key(descriptor, MetadataTableBlockKind::Data, handle.offset);
         let cache_block = DecodedMetadataTableBlock::Data {
-            decoded_byte_len: decoded_manifest_block_weight(family, &decoded.rows),
+            decoded_byte_len: decoded_manifest_block_weight(descriptor.family, &decoded.rows),
             block: decoded,
         };
         memo.record(&cache_key, &cache_block);

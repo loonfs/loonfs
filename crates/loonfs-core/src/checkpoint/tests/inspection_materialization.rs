@@ -177,9 +177,9 @@ where
         for chunk in descriptors.chunks(MAX_MAINTENANCE_TABLE_IO) {
             loaded_segments.extend(
                 try_join_all(
-                    chunk.iter().map(|descriptor| {
-                        load_manifest_segment_rows(store, table.family, descriptor)
-                    }),
+                    chunk
+                        .iter()
+                        .map(|descriptor| load_manifest_segment_rows(store, descriptor)),
                 )
                 .await?,
             );
@@ -221,10 +221,9 @@ where
 #[cfg(test)]
 pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
-    family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
-    load_manifest_segment_rows_with_cache(store, None, family, descriptor).await
+    load_manifest_segment_rows_with_cache(store, None, descriptor).await
 }
 
 /// Loads a segment's full row set: every data block, in key order, checked
@@ -234,14 +233,12 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
 pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
-    family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let row_set = load_manifest_segment_rows_in_key_range_with_cache(
         store,
         table_cache,
         &SessionBlockMemo::default(),
-        family,
         descriptor,
         "",
         None,

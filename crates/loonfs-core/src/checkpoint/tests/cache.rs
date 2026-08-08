@@ -1157,19 +1157,12 @@ async fn segment_rows(
     let index = block_fetch::load_segment_index(store, None, &memo, descriptor)
         .await
         .expect("segment index");
-    data_block_load::load_segment_data_block_span(
-        store,
-        None,
-        &memo,
-        descriptor.family,
-        descriptor,
-        &index,
-    )
-    .await
-    .expect("segment data blocks")
-    .iter()
-    .flat_map(|block| block.rows.iter().cloned())
-    .collect()
+    data_block_load::load_segment_data_block_span(store, None, &memo, descriptor, &index)
+        .await
+        .expect("segment data blocks")
+        .iter()
+        .flat_map(|block| block.rows.iter().cloned())
+        .collect()
 }
 
 /// One segment object's whole body, which the seeding helpers slice.
@@ -1265,16 +1258,10 @@ async fn wide_read(
 ) -> (Vec<Arc<DecodedDataBlock>>, usize) {
     let memo = load::SessionBlockMemo::default();
     store.reset();
-    let blocks = data_block_load::load_segment_data_block_span(
-        store,
-        cache,
-        &memo,
-        descriptor.family,
-        descriptor,
-        index,
-    )
-    .await
-    .expect("wide read");
+    let blocks =
+        data_block_load::load_segment_data_block_span(store, cache, &memo, descriptor, index)
+            .await
+            .expect("wide read");
     (blocks, store.count(OperationClass::Read))
 }
 
@@ -1298,7 +1285,6 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
         &store,
         Some(&cold_cache),
         &load::SessionBlockMemo::default(),
-        descriptor.family,
         &descriptor,
         entry,
     )
@@ -1331,7 +1317,6 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
         &store,
         Some(&warm_cache),
         &load::SessionBlockMemo::default(),
-        descriptor.family,
         &descriptor,
         entry,
     )

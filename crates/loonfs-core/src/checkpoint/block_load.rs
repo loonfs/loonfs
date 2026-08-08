@@ -6,7 +6,7 @@ use super::data_block_load::load_segment_data_block_span;
 use super::error::ManifestLoadError;
 use super::scan::Readahead;
 use super::validate::validate_manifest_row_seq_range;
-use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow};
 use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -103,12 +103,10 @@ const RANGE_SCAN_READAHEAD_BLOCKS: usize = 32;
 /// `[lower_bound, upper_bound)`: index first, then only the data blocks the
 /// index says can match. Callers trim edge blocks with
 /// [`SegmentKeyRangeBlocks::rows_in_key_range`].
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
-    family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     lower_bound: &str,
     upper_bound: Option<&str>,
@@ -132,7 +130,6 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
         store,
         table_cache,
         memo,
-        family,
         descriptor,
         &index[needed.start..extended_end],
     )

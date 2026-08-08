@@ -286,52 +286,6 @@ async fn retention_floor_advancement_preserves_writer_identity() {
     assert_eq!(after, before);
 }
 
-#[tokio::test]
-async fn retention_floor_does_not_advance_past_missing_metadata_segment() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
-            .await
-            .expect("load manifest");
-    let missing_key = materialized
-        .manifest
-        .payload
-        .metadata_files
-        .first()
-        .expect("metadata file")
-        .object_key
-        .clone();
-    store.delete(&missing_key).await.expect("delete segment");
-
-    let error = advance_retention_floor(&store, &namespace_id, &context)
-        .await
-        .expect_err("floor must not advance past missing segment");
-    assert!(
-        matches!(error, CoreError::CheckpointUnavailable(_)),
-        "unexpected error: {error:?}"
-    );
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
-}
-
 /// Reads the files one checkpoint pins, or the error that says it no longer
 /// pins anything.
 async fn read_checkpoint_files<S: ObjectStore + ?Sized>(

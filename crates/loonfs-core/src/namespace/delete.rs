@@ -19,13 +19,22 @@ const MAX_DELETE_CAS_ATTEMPTS: usize = 8;
 /// `acquired_writer` is the deleting session's writer epoch, so no stale
 /// writer session can publish past the delete. The caller owns acquisition —
 /// [`NamespaceCommitEngine`](crate::publish::NamespaceCommitEngine), which
-/// refuses outright when the session is already fenced. Every retry re-checks
-/// that epoch against the reloaded head, so a writer takeover between
-/// acquisition and the swap aborts the delete instead of deleting a namespace
-/// another writer now owns.
+/// refuses outright when the session is already fenced. Every retry that
+/// still has a swap to make re-checks that epoch against the reloaded head,
+/// so a writer takeover between acquisition and the swap aborts the delete
+/// instead of deleting a namespace another writer now owns.
 /// The delete linearizes at that swap: commits whose
 /// head advance serialized before it stay committed and durable; everything
 /// that observes the deleted head afterward fails with `namespace_deleted`.
+///
+/// A reload that finds the head already deleted answers before the fence,
+/// because there is no swap left to fence. The namespace is in the terminal
+/// state this call was asking for, so the answer is the same whoever owns
+/// the writer epoch now: `namespace_deleted` when this call never swapped
+/// (API spec, "DELETE /v0/namespaces/{ns}"), and success when it did. Every
+/// acquisition bumps the epoch, so checking the fence first would report a
+/// concurrent deleter's tombstone as `writer_fenced` and, worse, would fence
+/// this session for good over a delete that landed.
 ///
 /// Because `deleted` is terminal, a lost acknowledgment is self-resolving:
 /// if a reload after an ambiguous swap shows the head deleted, the delete
@@ -44,10 +53,13 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             .map_err(|error| CoreError::MetadataProjection(error.into()))?;
         let head = loaded.envelope.state.clone();
 
+        // Terminal state first, ahead of the fence and the precondition
+        // below: both of those decide whether this call may swap, and there
+        // is nothing left to swap. See the fence paragraph above.
         if head.state == NamespaceState::Deleted {
-            // Terminal state reached. If we already sent a swap, the delete
-            // is done regardless of whose swap landed; if we never sent one,
-            // the namespace was already deleted when we arrived.
+            // If we already sent a swap, the delete is done regardless of
+            // whose swap landed; if we never sent one, the namespace was
+            // already deleted when we arrived.
             if attempted_swap {
                 return Ok(DeleteNamespaceResponse {
                     namespace_id: namespace_id.clone(),
