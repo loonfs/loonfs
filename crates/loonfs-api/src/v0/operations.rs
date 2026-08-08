@@ -603,6 +603,12 @@ pub struct RetainedCandidates {
     /// Unreachable, and the provider reported no last-modified time at all,
     /// so the object's age is unknown and it is treated as young.
     pub no_provider_timestamp: u64,
+    /// Unreachable, but this namespace published no manifest old enough to
+    /// say what it referenced when the grace window opened, so nothing
+    /// proves the object was already unreferenced then. A reader that pinned
+    /// its anchor inside the window may still be reading it, and the pass
+    /// keeps it until a manifest ages past the window.
+    pub no_reference_manifest: u64,
     /// Root resolution failed somewhere in this pass, so manifest and table
     /// deletion was suppressed wholesale (`degraded_retention` is set too).
     pub degraded_roots: u64,
@@ -767,6 +773,8 @@ pub enum RetainedReason {
     GraceWindow,
     /// Counts into [`RetainedCandidates::no_provider_timestamp`].
     NoProviderTimestamp,
+    /// Counts into [`RetainedCandidates::no_reference_manifest`].
+    NoReferenceManifest,
     /// Counts into [`RetainedCandidates::degraded_roots`].
     DegradedRoots,
     /// Counts into [`RetainedCandidates::unrecognized_key`].
@@ -787,6 +795,7 @@ impl RetainedReason {
             Self::Referenced => &mut retained.referenced,
             Self::GraceWindow => &mut retained.grace_window,
             Self::NoProviderTimestamp => &mut retained.no_provider_timestamp,
+            Self::NoReferenceManifest => &mut retained.no_reference_manifest,
             Self::DegradedRoots => &mut retained.degraded_roots,
             Self::UnrecognizedKey => &mut retained.unrecognized_key,
             Self::CheckpointNotReleasable => &mut retained.checkpoint_not_releasable,
@@ -800,11 +809,12 @@ impl RetainedReason {
 impl RetainedCandidates {
     /// Every reason and its count, in a fixed order, for callers that
     /// report the breakdown rather than read one field of it.
-    pub fn by_reason(&self) -> [(&'static str, u64); 9] {
+    pub fn by_reason(&self) -> [(&'static str, u64); 10] {
         [
             ("referenced", self.referenced),
             ("grace_window", self.grace_window),
             ("no_provider_timestamp", self.no_provider_timestamp),
+            ("no_reference_manifest", self.no_reference_manifest),
             ("degraded_roots", self.degraded_roots),
             ("unrecognized_key", self.unrecognized_key),
             ("checkpoint_not_releasable", self.checkpoint_not_releasable),
@@ -819,6 +829,7 @@ impl RetainedCandidates {
         self.referenced += other.referenced;
         self.grace_window += other.grace_window;
         self.no_provider_timestamp += other.no_provider_timestamp;
+        self.no_reference_manifest += other.no_reference_manifest;
         self.degraded_roots += other.degraded_roots;
         self.unrecognized_key += other.unrecognized_key;
         self.checkpoint_not_releasable += other.checkpoint_not_releasable;

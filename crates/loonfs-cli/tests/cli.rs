@@ -4209,6 +4209,7 @@ fn admin_store_probe_reports_every_check_against_the_profile_store() {
         "compare_and_swap_missing_object_rejected",
         "overwrite_updates_head_and_body",
         "get_with_metadata_round_trip",
+        "head_reports_last_modified",
         "visibility_after_write",
         "visibility_after_delete",
         "delete_missing_idempotent",
@@ -4220,13 +4221,13 @@ fn admin_store_probe_reports_every_check_against_the_profile_store() {
     ] {
         assert!(text.contains(check), "missing `{check}` in: {text}");
     }
-    assert!(text.contains("13 checks passed"), "{text}");
+    assert!(text.contains("14 checks passed"), "{text}");
 
     let json = harness.run(&["--json", "admin", "store-probe"]);
     assert_success(&json);
     let data = json_data(&json);
     assert_eq!(data["kind"], "store_probed");
-    assert_eq!(data["checks"].as_array().expect("checks array").len(), 13);
+    assert_eq!(data["checks"].as_array().expect("checks array").len(), 14);
     assert_eq!(data["checks"][0]["name"], "create_if_absent_enforced");
     assert_eq!(data["checks"][0]["outcome"], "passed");
 
@@ -5145,7 +5146,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(probe_data["kind"], "store_probed");
         assert_eq!(
             probe_data["checks"].as_array().expect("checks array").len(),
-            13
+            14
         );
 
         shapes_by_mode.push((

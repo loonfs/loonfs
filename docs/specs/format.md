@@ -2143,6 +2143,25 @@ publishing CAS) — under these rules:
    `released_at_ms`, and a record whose basis is verifiably absent is
    released only `T` after its own `created_at_ms`, which is what keeps a
    create still inside its verify budget from being raced.
+
+   An object's provider timestamp says when it appeared, not when it stopped
+   being referenced, and those differ for every object a publication once
+   named. `T` therefore also runs from the unreferencing, which the
+   **reference manifest** dates. Call R the newest surviving manifest under
+   the namespace's own prefix whose provider timestamp is at least `T` old:
+   it is a durable snapshot of what the namespace referenced when the window
+   opened. R roots what it names exactly as `metadata/root.json` does — its
+   own key, its `metadata_files`, its content references, and every WAL
+   segment above its `head_seq` — so an unreferenced object is deleted only
+   when the current root set, R, and the object's own age all agree. A
+   namespace that has published no manifest needs no R: nothing has ever
+   stopped referencing anything under it, and its floor cannot have advanced
+   past its birth sequence without a root. A namespace whose manifests are
+   all younger than `T` has no R available, and the pass then deletes no aged
+   object at all rather than deleting against evidence it does not have. A
+   terminally deleted namespace needs no R either: no read can reach a
+   tombstone. R protects itself, so a pass never sweeps away the evidence the
+   next pass needs.
 2. **Floor is necessary, not sufficient.** Being below `wal/floor.json` only
    nominates an object for deletion.
 3. **Delete-time re-verification.** Immediately before deleting, GC re-lists
@@ -2151,7 +2170,8 @@ publishing CAS) — under these rules:
    may be arbitrarily stale; deletion may not. On large batches the
    re-verification repeats at least every bounded number of deletion
    decisions, so no deletion consults an arbitrarily stale root set.
-4. Roots: `metadata/root.json`; active checkpoint records whose owner still
+4. Roots: `metadata/root.json`; the reference manifest R (rule 1); active
+   checkpoint records whose owner still
    stands — a user pin until its expiry passes, a fork pin until its target
    is provably gone (rule 10), whatever its lease says; and the visible chain from
    `wal/head.json.visible_wal_tip` down to the floor. A namespace with no

@@ -5615,6 +5615,7 @@
           "referenced",
           "grace_window",
           "no_provider_timestamp",
+          "no_reference_manifest",
           "degraded_roots",
           "unrecognized_key",
           "checkpoint_not_releasable",
@@ -5651,6 +5652,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Unreachable, and the provider reported no last-modified time at all,\nso the object's age is unknown and it is treated as young.",
+            "minimum": 0
+          },
+          "no_reference_manifest": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreachable, but this namespace published no manifest old enough to\nsay what it referenced when the grace window opened, so nothing\nproves the object was already unreferenced then. A reader that pinned\nits anchor inside the window may still be reading it, and the pass\nkeeps it until a manifest ages past the window.",
             "minimum": 0
           },
           "referenced": {

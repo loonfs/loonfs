@@ -1905,14 +1905,17 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
     assert_eq!(
         aged_store.listed_prefixes(),
         vec![
+            // Marking lists the records it roots from, then the manifests
+            // it ages to find its reference manifest.
             checkpoint_prefix(live_namespace.as_str()),
+            metadata_manifest_prefix(live_namespace.as_str()),
             wal_segment_prefix(live_namespace.as_str()),
             metadata_table_prefix(live_namespace.as_str()),
             metadata_manifest_prefix(live_namespace.as_str()),
             checkpoint_prefix(live_namespace.as_str()),
             upload_session_prefix(live_namespace.as_str()),
         ],
-        "core GC must list only its six core prefixes"
+        "core GC must list only its own core prefixes"
     );
     assert!(
         store

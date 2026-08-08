@@ -9,7 +9,7 @@ use super::fork_checkpoints::{
 };
 use super::live_set::{collect_live_set, LiveSet, LiveSetCollection, SweepStep, SweepVerifier};
 use super::reap::{
-    delete_if_aged, manifest_object_id_of, sweep_checkpoint_record, CheckpointSweep,
+    grace_age, manifest_object_id_of, sweep_checkpoint_record, CheckpointSweep, GraceAge,
 };
 use super::uploads::{sweep_upload_session, ContentReferences, UploadSessionSweep};
 use crate::context::MutationContext;
@@ -71,7 +71,17 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
 
     // Every invocation rebuilds all roots before interpreting the cursor.
     // The cursor can skip enumeration only; it never carries safety state.
-    let mark = match collect_live_set(store, namespace_id, &loaded, &mut budget, context).await? {
+    let mark = match collect_live_set(
+        store,
+        namespace_id,
+        &loaded,
+        config.grace_window_ms,
+        None,
+        &mut budget,
+        context,
+    )
+    .await?
+    {
         LiveSetCollection::Complete(live) => Arc::new(live),
         // The pass has no root set, so it may not decide any candidate. It
         // deletes nothing and hands back the token it was given, because it
@@ -233,11 +243,11 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         return Ok(SweepStep::Continue);
     }
 
-    // Preserve the existing mark selection exactly: objects reachable from
-    // the invocation's root snapshot are skipped, while every selected
-    // candidate is re-verified immediately before its decision.
+    // Objects reachable from the invocation's root snapshot — either
+    // anchor's — are skipped, while every selected candidate is re-verified
+    // immediately before its decision.
     let selected = match family {
-        CandidateFamily::WalSegments => !mark.wal_segments.contains(key),
+        CandidateFamily::WalSegments => !mark.protects_wal_segment(key),
         CandidateFamily::MetadataTables => !mark.tables.contains(key),
         CandidateFamily::Manifests => match manifest_object_id_of(key) {
             Some(Ok(id)) => !mark.manifests.contains(&id),
@@ -251,7 +261,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     }
 
     if sweep
-        .refresh_if_due(store, namespace_id, budget, context)
+        .refresh_if_due(store, namespace_id, config.grace_window_ms, budget, context)
         .await?
         == SweepStep::BudgetExhausted
     {
@@ -262,9 +272,9 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     // split only so a retention can say which half of the condition held.
     match family {
         CandidateFamily::WalSegments => {
-            if sweep.live.wal_segments.contains(key) {
+            if sweep.live.protects_wal_segment(key) {
                 report.retain(RetainedReason::Referenced);
-            } else if sweep_aged(store, key, config, context, report).await? {
+            } else if sweep_aged(store, key, config, context, sweep, report).await? {
                 report.deleted_wal_segments += 1;
             }
         }
@@ -274,7 +284,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
                 report.retain(RetainedReason::DegradedRoots);
             } else if sweep.live.tables.contains(key) {
                 report.retain(RetainedReason::Referenced);
-            } else if sweep_aged(store, key, config, context, report).await? {
+            } else if sweep_aged(store, key, config, context, sweep, report).await? {
                 report.deleted_metadata_tables += 1;
             }
         }
@@ -287,7 +297,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
                         report.retain(RetainedReason::Referenced);
                     }
                     Some(Ok(_)) => {
-                        if sweep_aged(store, key, config, context, report).await? {
+                        if sweep_aged(store, key, config, context, sweep, report).await? {
                             report.deleted_manifests += 1;
                         }
                     }
@@ -309,20 +319,48 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
 /// Ages one unreferenced key out, recording the reason when it stays.
 /// Answers whether the key was deleted, so each family still counts its own
 /// deletions.
+///
+/// Two things have to hold before the key goes. The object's own write time
+/// has to be a grace window old, which is what protects a publication still
+/// in flight and every object the reference anchor predates. And the
+/// reference anchor has to say the object was already unreferenced when the
+/// window opened, which is what protects a reader still holding an anchor it
+/// pinned inside the window. A pass with no anchor cannot answer the second
+/// question, so it keeps every aged candidate and says so.
 async fn sweep_aged<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     config: &GcConfig,
     context: &MutationContext,
+    sweep: &SweepVerifier,
     report: &mut GcResponse,
 ) -> Result<bool> {
-    let outcome = delete_if_aged(store, key, config.grace_window_ms, context.now_ms)
+    match grace_age(store, key, config.grace_window_ms, context.now_ms)
+        .await
+        .map_err(|error| CoreError::store(key, &error))?
+    {
+        // Nothing was decided about a key that is already gone, so nothing
+        // is counted for it either.
+        GraceAge::Gone => return Ok(false),
+        GraceAge::Young => {
+            report.retain(RetainedReason::GraceWindow);
+            return Ok(false);
+        }
+        GraceAge::Unknown => {
+            report.retain(RetainedReason::NoProviderTimestamp);
+            return Ok(false);
+        }
+        GraceAge::Aged if !sweep.live.anchor.proves_unreferencing() => {
+            report.retain(RetainedReason::NoReferenceManifest);
+            return Ok(false);
+        }
+        GraceAge::Aged => {}
+    }
+    store
+        .delete(key)
         .await
         .map_err(|error| CoreError::store(key, &error))?;
-    if let Some(reason) = outcome.retained_reason() {
-        report.retain(reason);
-    }
-    Ok(outcome.deleted())
+    Ok(true)
 }
 
 async fn process_checkpoint<S: ObjectStore + ?Sized>(

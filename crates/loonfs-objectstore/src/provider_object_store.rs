@@ -255,7 +255,7 @@ impl ProviderObjectStore {
             etag: meta.e_tag,
             version: meta.version,
             size_bytes: meta.size,
-            last_modified_ms: u64::try_from(meta.last_modified.timestamp_millis()).ok(),
+            last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
         }
     }
 
@@ -1026,6 +1026,30 @@ fn map_put_mode(mode: PutMode) -> provider_store::PutMode {
     }
 }
 
+/// Reads a provider last-modified stamp as the age evidence it is, or as
+/// nothing.
+///
+/// A response without a `Last-Modified` header is not an object written at
+/// the unix epoch, but the AWS-compatible client path synthesizes one for it
+/// (`object_store`'s header parsing falls back to `timestamp_nanos(0)` where
+/// the header is not required, and the AWS path is the one that does not
+/// require it). S3-compatible endpoints — MinIO, Ceph RGW, gateways — are
+/// configured through exactly that path, so the synthesized stamp is
+/// reachable in production. Passing it on would make every object read as
+/// infinitely old, and garbage collection's grace window is measured against
+/// this number: an object stamped at the epoch is past every window there
+/// is, so the window would protect nothing.
+///
+/// Absent is the honest reading, and it is the reading the rest of the system
+/// already handles — an object whose age is unknown is treated as young and
+/// retained (format spec, "Garbage collection", rule 1).
+fn last_modified_ms(timestamp_millis: i64) -> Option<u64> {
+    match timestamp_millis > 0 {
+        true => u64::try_from(timestamp_millis).ok(),
+        false => None,
+    }
+}
+
 enum RangedGet {
     Bytes(Bytes),
     NotFound,
@@ -1194,6 +1218,18 @@ mod tests {
             },
         )
         .expect("provider store")
+    }
+
+    /// The epoch stamp an AWS-compatible client synthesizes for a response
+    /// with no `Last-Modified` header is not an age, and grace protection is
+    /// exactly what reading it as one would cost.
+    #[test]
+    fn a_synthesized_epoch_stamp_reads_as_no_timestamp_at_all() {
+        assert_eq!(last_modified_ms(0), None);
+        assert_eq!(last_modified_ms(-1), None);
+        assert_eq!(last_modified_ms(i64::MIN), None);
+        assert_eq!(last_modified_ms(1), Some(1));
+        assert_eq!(last_modified_ms(1_754_000_000_000), Some(1_754_000_000_000));
     }
 
     #[test]
