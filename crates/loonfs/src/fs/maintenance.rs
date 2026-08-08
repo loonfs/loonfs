@@ -52,14 +52,7 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse> {
-        let summary = load_namespace_head_summary(self.core.store(), namespace_id).await?;
-        Ok(NamespaceStatusResponse {
-            namespace_id: summary.namespace_id,
-            head_seq: summary.head_seq,
-            current_manifest_id: summary.current_manifest_id,
-            wal_tail_segments: summary.wal_tail_segments,
-            retention_floor_seq: summary.retention_floor_seq,
-        })
+        Ok(load_namespace_head_summary(self.core.store(), namespace_id).await?)
     }
 
     /// Runs one bounded maintenance step against a namespace.
@@ -117,18 +110,11 @@ impl FsAdmin {
             Err(RuntimeError::Core(error))
                 if error.code() == ErrorCode::NamespaceDeleted && collects_only =>
             {
-                let summary = loonfs_core::cache::load_deleted_namespace_head_summary(
+                loonfs_core::cache::load_deleted_namespace_head_summary(
                     self.core.store(),
                     namespace_id,
                 )
-                .await?;
-                NamespaceStatusResponse {
-                    namespace_id: summary.namespace_id,
-                    head_seq: summary.head_seq,
-                    current_manifest_id: summary.current_manifest_id,
-                    wal_tail_segments: summary.wal_tail_segments,
-                    retention_floor_seq: summary.retention_floor_seq,
-                }
+                .await?
             }
             Err(error) => return Err(error),
         };

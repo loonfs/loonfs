@@ -28,10 +28,13 @@ use super::build::{
 use super::error::ManifestLoadError;
 use super::flush::{ensure_metadata_publication_budget, next_manifest_id_after};
 use super::load::{
-    load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
-    validate_direntry_child_bind_index, validate_revision_by_inode_desc_index,
+    load_verified_manifest_tables, validate_direntry_child_bind_index,
+    validate_revision_by_inode_desc_index,
 };
-use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
+use super::publish::{
+    manifest_write_failure, publish_metadata_root, write_namespace_manifest,
+    ManifestPublicationOutcome,
+};
 use super::runs::{
     flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, MetadataRunManifest,
     CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
@@ -39,7 +42,6 @@ use super::runs::{
 use super::scan::VerifiedMetadataTables;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{read_head_object, read_metadata_root_object_if_present};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -50,7 +52,6 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::{
     AttributeRevisionNo, ChangeSeq, InodeId, ManifestId, ManifestObjectId, NamespaceId,
 };
-use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -655,52 +656,27 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
     base_seq: ChangeSeq,
     retention_floor_seq: ChangeSeq,
 ) -> Result<NamespaceManifestEnvelope> {
+    // One generated object id, one write. The generated id ends in 16 random
+    // hex characters, so the key is this unit's alone and a conflict under it
+    // is corruption rather than contention.
     let manifest_id = next_manifest_id_after(previous.payload.manifest_id)?;
-    for _allocation_attempt in 0..CONTENTION_RETRY_LIMIT {
-        let manifest_object_id = ManifestObjectId::generate(manifest_id);
-        let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
-        match load_namespace_manifest_envelope_if_present(
-            store,
-            namespace_id,
-            &manifest_object_id,
-            &manifest_key,
-        )
+    let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        namespace_id: namespace_id.clone(),
+        manifest_id,
+        manifest_object_id: ManifestObjectId::generate(manifest_id),
+        head_seq: previous.payload.head_seq,
+        head_commit_id: previous.payload.head_commit_id.clone(),
+        base_seq,
+        writer_epoch: previous.payload.writer_epoch,
+        next_inode_id: previous.payload.next_inode_id,
+        retention_floor_seq,
+        metadata_files,
+    })
+    .map_err(|err| CoreError::Internal(format!("failed to build reorganized manifest: {err}")))?;
+    write_namespace_manifest(store, &manifest)
         .await
-        {
-            Ok(Some(_existing)) => continue,
-            Ok(None) => {}
-            Err(error) => {
-                return Err(CoreError::MetadataProjection(
-                    MetadataProjectionLoadError::ManifestLoad(error),
-                ))
-            }
-        }
-        let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_id,
-            manifest_object_id,
-            head_seq: previous.payload.head_seq,
-            head_commit_id: previous.payload.head_commit_id.clone(),
-            base_seq,
-            writer_epoch: previous.payload.writer_epoch,
-            next_inode_id: previous.payload.next_inode_id,
-            retention_floor_seq,
-            metadata_files: metadata_files.clone(),
-        })
-        .map_err(|err| {
-            CoreError::Internal(format!("failed to build reorganized manifest: {err}"))
-        })?;
-        match write_namespace_manifest(store, &manifest).await {
-            Ok(()) => return Ok(manifest),
-            Err(MetadataProjectionLoadError::ManifestLoad(
-                ManifestLoadError::ManifestConflict { .. },
-            )) => continue,
-            Err(error) => return Err(CoreError::MetadataProjection(error)),
-        }
-    }
-    Err(CoreError::Internal(
-        "reorganized manifest allocation retry exhausted".to_owned(),
-    ))
+        .map_err(manifest_write_failure)?;
+    Ok(manifest)
 }
 
 /// Drops rows that no retained sequence can observe (format spec,

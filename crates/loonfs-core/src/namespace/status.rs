@@ -6,31 +6,10 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::{read_head_and_metadata_basis, resolve_retention_floor_seq};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
+use loonfs_api::v0::NamespaceStatusResponse;
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-use serde::{Deserialize, Serialize};
-
-/// Lightweight namespace head status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceHeadSummary {
-    pub namespace_id: NamespaceId,
-    pub head_seq: ChangeSeq,
-    /// Manifest this namespace has materialized for itself, or `None` when
-    /// it has published none yet: a fresh namespace reads from the genesis
-    /// state, and a fresh fork target reads from its source's manifest.
-    pub current_manifest_id: Option<ManifestId>,
-    /// Number of visible WAL segments after the current manifest.
-    ///
-    /// Counted from the head's chain pointers (`recent_segments`, published
-    /// under the same CAS as the tip and long enough to name every segment a
-    /// legal unflushed tail can hold); no segment body is read. A head that
-    /// under-describes its own tail fails the summary rather than being
-    /// walked. An inspection count for maintenance gating and operators —
-    /// replay consumers load the validated chain instead.
-    pub wal_tail_segments: u64,
-    pub retention_floor_seq: ChangeSeq,
-}
 
 /// Whether a namespace carries visible commits its basis manifest does not
 /// cover, and the head sequence they run to.
@@ -104,10 +83,18 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     })
 }
 
+/// Summarizes a live namespace head.
+///
+/// The WAL tail is counted from the head's chain pointers
+/// (`recent_segments`, published under the same CAS as the tip and long
+/// enough to name every segment a legal unflushed tail can hold); no segment
+/// body is read. A head that under-describes its own tail fails the summary
+/// rather than being walked. The count is for inspection and maintenance
+/// gating — replay consumers load the validated chain instead.
 pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceHeadSummary> {
+) -> Result<NamespaceStatusResponse> {
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
     let wal_tail_segments = count_visible_wal_tail_segments(WalChainLoadRequest {
         namespace_id: expected_namespace_id,
@@ -120,7 +107,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
-    Ok(NamespaceHeadSummary {
+    Ok(NamespaceStatusResponse {
         namespace_id: loaded.head.namespace_id,
         head_seq: loaded.head.seq,
         current_manifest_id: loaded.current_manifest_id,
@@ -157,7 +144,7 @@ pub async fn load_namespace_fold_basis<S: ObjectStore + ?Sized>(
 pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceHeadSummary> {
+) -> Result<NamespaceStatusResponse> {
     let head = crate::namespace::control::read_head_object(store, expected_namespace_id)
         .await
         .map_err(|error| {
@@ -175,7 +162,7 @@ pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
-    Ok(NamespaceHeadSummary {
+    Ok(NamespaceStatusResponse {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         current_manifest_id: None,
