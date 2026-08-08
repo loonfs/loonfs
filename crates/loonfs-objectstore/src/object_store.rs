@@ -353,14 +353,21 @@ pub trait ObjectStore: Send + Sync + Debug {
     ///   the write is refused — which is what lets it tell "these are the
     ///   same bytes again" from "these are different bytes".
     ///
-    /// `mode` is honoured exactly while the payload fits inside one
-    /// internal part. Beyond that, the write goes through the provider's
-    /// multipart upload, whose completion is an unconditional overwrite, so
-    /// a create-only or compare-and-swap request degrades to one there.
-    /// That is the same trade [`Self::put_immutable_verified`] already makes
-    /// at its multipart threshold, and the reason both are for immutable
-    /// keys only: on a key whose bytes are fixed by its name, the condition
-    /// is a corruption tripwire rather than a concurrency control.
+    /// `mode` is enforced by the provider, as part of the write, while the
+    /// payload fits inside one internal part. Beyond that, an implementation
+    /// that uses a provider multipart upload cannot enforce it that way,
+    /// because providers assemble a multipart upload unconditionally. Such
+    /// an implementation evaluates the condition against a separate
+    /// observation of the key, taken after the payload has been consumed and
+    /// immediately before the assembly. A key that was already occupied is
+    /// still refused with [`ObjectStoreError::PreconditionFailed`]; a writer
+    /// that lands between that observation and the assembly is not, and this
+    /// write assembles over it.
+    ///
+    /// That is why this operation is for immutable keys only: on a key whose
+    /// bytes are fixed by its name, the condition is a corruption tripwire
+    /// rather than a concurrency control. A caller that must also detect the
+    /// concurrent case has to check the object again before it relies on it.
     ///
     /// A failed or abandoned write leaves no provider state behind: an
     /// implementation that opened a multipart upload aborts it.

@@ -357,11 +357,15 @@ to such a write:
    writer folding a digest over the same bytes as it forwards them therefore
    always ends up with a digest over the complete payload, even when the
    write is refused — which is what lets it tell "these are the same bytes
-   again" from "these are different bytes". Beyond one part the write is an
-   unconditional overwrite regardless, because a provider assembles a
-   multipart object unconditionally; incremental writes are for immutable,
-   uniquely-named keys, where the condition is a corruption tripwire rather
-   than a concurrency control.
+   again" from "these are different bytes". Beyond one part the precondition
+   is not part of the write, because a provider assembles a multipart object
+   unconditionally. The writer observes the key separately instead, after the
+   payload is consumed and immediately before the assembly, and refuses a key
+   that is already occupied. A writer that lands inside that window is not
+   refused. Incremental writes are therefore for immutable, uniquely-named
+   keys, where the condition is a corruption tripwire rather than a
+   concurrency control, and a caller that must also catch the concurrent case
+   observes the object again before it relies on it.
 
 ### 1.8 Provider conformance
 
