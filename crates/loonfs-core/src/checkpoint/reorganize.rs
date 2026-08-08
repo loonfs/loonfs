@@ -50,7 +50,7 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{
-    AttributeRevisionNo, ChangeSeq, InodeId, ManifestId, ManifestObjectId, NamespaceId,
+    AttributeRevisionNo, ChangeSeq, InodeId, ManifestId, ManifestObjectId, NameKey, NamespaceId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -667,18 +667,36 @@ pub(super) fn drop_rows_below_retention_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,
 ) -> Result<()> {
-    // At the floor only the latest non-unbound bind per (parent, name) slot
-    // is visible; an unbind marker at or below the floor has finished its
-    // work once every bind it covered is gone.
-    // Unbind identity here omits child_inode_id (the read path also matches
-    // it); the 4-tuple is already unique for writer-produced rows, so the
-    // predicates agree on every legal history.
+    let unbound_at_floor = unbindings_at_or_below_floor(
+        rows_by_family
+            .get(&MetadataTableFamily::DirentryUnbinds)
+            .map_or(&[], Vec::as_slice),
+        retention_floor_seq,
+    );
+    drop_rows_below_frozen_floor(rows_by_family, retention_floor_seq, &unbound_at_floor)
+}
+
+/// Identifies one binding generation, which is what an unbind names and what
+/// the bind drop matches on.
+///
+/// Identity here omits `child_inode_id` (the read path also matches it); the
+/// 4-tuple is already unique for writer-produced rows, so the predicates
+/// agree on every legal history.
+pub(super) type BindingGeneration = (InodeId, NameKey, ChangeSeq, u32);
+
+/// The binding generations an unbind at or below `retention_floor_seq`
+/// retires.
+///
+/// A whole-group fold builds this from its merged rows. A partial fold
+/// builds it once at the start from the whole snapshot, because the slice it
+/// is working on holds only part of the unbind family (design doc,
+/// "Retention during the walk").
+pub(super) fn unbindings_at_or_below_floor(
+    unbind_rows: &[MetadataRow],
+    retention_floor_seq: ChangeSeq,
+) -> BTreeSet<BindingGeneration> {
     let mut unbound_at_floor = BTreeSet::new();
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryUnbinds)
-        .into_iter()
-        .flatten()
-    {
+    for row in unbind_rows {
         if let MetadataRow::DirentryUnbind {
             parent_inode_id,
             name_key,
@@ -698,6 +716,26 @@ pub(super) fn drop_rows_below_retention_floor(
             }
         }
     }
+    unbound_at_floor
+}
+
+/// [`drop_rows_below_retention_floor`] against a floor and an unbind set the
+/// caller froze, rather than against rows it can see right now.
+///
+/// A partial fold calls this per slice: the floor and the unbind set are
+/// fixed for the whole walk, so every step and every resumption decides
+/// identically. The families the caller leaves out of `rows_by_family` are
+/// untouched, which is how a walk keeps the reverse bind index out of this
+/// pass — its rows are keyed by child, so the slice holding one does not
+/// hold the forward binds the rule below reads.
+pub(super) fn drop_rows_below_frozen_floor(
+    rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
+    retention_floor_seq: ChangeSeq,
+    unbound_at_floor: &BTreeSet<BindingGeneration>,
+) -> Result<()> {
+    // At the floor only the latest non-unbound bind per (parent, name) slot
+    // is visible; an unbind marker at or below the floor has finished its
+    // work once every bind it covered is gone.
     let mut latest_bind_at_floor = BTreeMap::new();
     for row in rows_by_family
         .get(&MetadataTableFamily::DirentryBinds)

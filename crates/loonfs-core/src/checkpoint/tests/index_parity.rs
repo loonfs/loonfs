@@ -1487,7 +1487,9 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
         output_run_seq,
         output_level: CHECKPOINT_BASE_RUN_LEVEL,
         frozen_floor_seq: payload.retention_floor_seq,
-        cursor: lookup_keys::inode_key(InodeId(9)),
+        // A revisions-group cursor: the family's row-key prefix and one
+        // padded inode id, above every inode the segment below holds.
+        cursor: format!("{}{:020}", lookup_keys::REVISION_ROW_PREFIX, u32::MAX),
         output_segments: vec![reorganize_output_segment(
             input,
             &namespace_id,
@@ -1520,7 +1522,16 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
     fn cursor_is_empty(progress: &mut MetadataReorganizeProgress) {
         progress.cursor.clear();
     }
-    let state_perturbations: [(&str, Perturbation); 4] = [
+    // A partition key of another group: it parses as nothing here, and a
+    // fold resumed from it would rewrite the wrong slice of the keyspace.
+    fn cursor_belongs_to_another_group(progress: &mut MetadataReorganizeProgress) {
+        progress.cursor = lookup_keys::inode_key(InodeId(9));
+    }
+    // A row key rather than a boundary between partitions.
+    fn cursor_is_not_a_partition_boundary(progress: &mut MetadataReorganizeProgress) {
+        progress.cursor.push_str("-00000000000000000001-0000000000");
+    }
+    let state_perturbations: [(&str, Perturbation); 6] = [
         ("families are not a family group", families_are_not_a_group),
         (
             "input run is not in the manifest",
@@ -1531,6 +1542,14 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
             frozen_floor_is_above_the_manifest_floor,
         ),
         ("cursor is empty", cursor_is_empty),
+        (
+            "cursor belongs to another group",
+            cursor_belongs_to_another_group,
+        ),
+        (
+            "cursor is not a partition boundary",
+            cursor_is_not_a_partition_boundary,
+        ),
     ];
     for (index, (label, perturb)) in state_perturbations.iter().enumerate() {
         let mut perturbed = progress.clone();
@@ -1566,8 +1585,18 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
         second.min_key = progress.output_segments[0].min_key.clone();
         progress.output_segments.push(second);
     }
-    let segment_perturbations: [(&str, Perturbation); 5] = [
+    // Everything written so far belongs to a partition the fold has passed.
+    // A range reaching the cursor would be rewritten by the next step and
+    // land in the finished run twice.
+    fn output_range_reaches_the_cursor(progress: &mut MetadataReorganizeProgress) {
+        progress.output_segments[0].max_key = progress.cursor.clone();
+    }
+    let segment_perturbations: [(&str, Perturbation); 6] = [
         ("output segment range is empty", output_range_is_empty),
+        (
+            "output segment range reaches the cursor",
+            output_range_reaches_the_cursor,
+        ),
         (
             "output segment carries another run seq",
             output_run_seq_is_not_the_folds,

@@ -20,7 +20,9 @@
 //!   materialization is test-only).
 //! - [`scan`] answers verified row scans over loaded manifest tables, while
 //!   [`row`] handles manifest-row encoding.
-//! - [`reorganize`] compacts bounded family groups into new base runs.
+//! - [`reorganize`] compacts bounded family groups into new base runs, and
+//!   [`partial_fold`] folds a group too large for one step a slice at a
+//!   time, along the partition grammar [`partition`] defines.
 //! - [`retention`] advances the retention floor behind verified progress.
 //! - [`runs`] models the LSM run layout shared by all of the above,
 //!   [`cache`] holds decoded SST blocks keyed by content digest, and
@@ -38,6 +40,8 @@ mod files;
 mod flush;
 mod list;
 mod load;
+mod partial_fold;
+mod partition;
 mod publish;
 pub(crate) mod record;
 mod release;

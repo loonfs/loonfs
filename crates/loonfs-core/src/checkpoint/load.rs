@@ -10,6 +10,7 @@ use super::cache::{
     DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheKey,
 };
 use super::error::ManifestLoadError;
+use super::partition::GroupPartitioning;
 use super::runs::{runs_in_materialization_order, runs_in_scan_order, REORGANIZE_FAMILY_GROUPS};
 use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
 use super::validate::{validate_manifest_materialization_ranges, validate_namespace_manifest};
@@ -505,15 +506,20 @@ fn validate_manifest_reorganize_progress(
         )));
     }
 
-    // PR 2 brings the per-group partition grammar, and with it the check
-    // that the cursor parses as a partition key for this group and that
-    // every output range lies below the cursor's bound for its family. Until
-    // then the loader can only say that the fold has a position at all.
-    if progress.cursor.is_empty() {
-        return Err(invalid(
-            "reorganize progress carries an empty cursor, so the fold has no position".to_owned(),
-        ));
-    }
+    // The cursor is the fold's whole position. A fold resumed from one that
+    // does not parse would rewrite the wrong slice of the keyspace, so a
+    // state that cannot say where it stands is refused here.
+    let partitioning = GroupPartitioning::for_group(&progress.families).ok_or_else(|| {
+        invalid(format!(
+            "reorganize progress names families {:?}, whose row keys share no partition grammar",
+            progress.families
+        ))
+    })?;
+    let cursor = partitioning.parse_cursor(&progress.cursor).map_err(|why| {
+        invalid(format!(
+            "reorganize progress carries an unusable cursor: {why}"
+        ))
+    })?;
 
     let mut previous_by_family: BTreeMap<MetadataTableFamily, &MetadataFileRef> = BTreeMap::new();
     for segment in &progress.output_segments {
@@ -546,6 +552,21 @@ fn validate_manifest_reorganize_progress(
         // a range to compare.
         if segment.row_count == 0 {
             continue;
+        }
+        // Everything written so far belongs to a partition the fold has
+        // passed, so it sorts below where the fold now stands. A row at or
+        // above the cursor would be rewritten again by the next step and
+        // land in the finished run twice.
+        let cursor_bound = partitioning.family_lower_bound(segment.family, &cursor);
+        if segment.max_key >= cursor_bound {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                object_key: segment.object_key.clone(),
+                message: format!(
+                    "reorganize output segment ends at `{}`, at or above the cursor's bound `{}` \
+                     for family `{:?}`",
+                    segment.max_key, cursor_bound, segment.family
+                ),
+            });
         }
         if let Some(previous) = previous_by_family.insert(segment.family, segment) {
             if segment.min_key <= previous.max_key {

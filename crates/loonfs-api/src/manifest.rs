@@ -359,6 +359,32 @@ impl ActiveDeletionRowAction {
     }
 }
 
+impl MetadataTableFamily {
+    /// The fixed text every row key in this family starts with, up to but
+    /// not including the family's first variable component.
+    ///
+    /// Defined here because it is the front of [`MetadataRow::row_key_for_family`]
+    /// and must change with it; `row_key_prefixes_match_the_row_keys_they_front`
+    /// holds the two together. A partial fold carves its partitions out of
+    /// the component that follows this prefix, so the boundary between two
+    /// partitions is this prefix followed by one component value (format
+    /// spec, "Partial folds").
+    pub const fn row_key_prefix(self) -> &'static str {
+        match self {
+            Self::Inodes => "inode-",
+            Self::DirentryBinds => "direntry-",
+            Self::DirentryChildBinds => "direntry-child-",
+            Self::DirentryUnbinds => "direntry-unbind-",
+            Self::Revisions => "revision-",
+            Self::RevisionsByInodeDesc => "revision-by-inode-desc-",
+            Self::Tombstones => "tombstone-",
+            Self::ActiveDeletions => "active-deletion-",
+            Self::CommitReceipts => "commit-receipt-",
+            Self::Attributes => "attributes-",
+        }
+    }
+}
+
 impl MetadataRow {
     /// Builds this row's canonical durable key in its primary table family.
     ///
@@ -1243,6 +1269,138 @@ mod tests {
         assert!(!row_of(3, 12, 1)
             .row_key()
             .starts_with(&super::lookup_keys::attributes_prefix(InodeId(43))));
+    }
+
+    /// [`MetadataTableFamily::row_key_prefix`] states the front of every row
+    /// key in a family, and a partial fold reads partition boundaries out of
+    /// the component that follows it. A prefix that drifted from the row-key
+    /// format would put boundaries in the wrong place, so the two are pinned
+    /// against each other for every family.
+    #[test]
+    fn row_key_prefixes_match_the_row_keys_they_front() {
+        let name_key = NameKey::parse("report.txt").expect("valid name key");
+        let display_name = crate::DisplayName::parse("report.txt").expect("valid display name");
+        let bind = super::MetadataRow::DirentryBind {
+            parent_inode_id: InodeId(9),
+            name_key: name_key.clone(),
+            display_name: display_name.clone(),
+            child_inode_id: InodeId(42),
+            bind_seq: ChangeSeq(17),
+            bind_delta_index: 3,
+        };
+        let rows: [(MetadataTableFamily, super::MetadataRow); 10] = [
+            (
+                MetadataTableFamily::Inodes,
+                super::MetadataRow::Inode {
+                    inode_id: InodeId(42),
+                    inode_kind: crate::InodeKind::File,
+                    created_seq: ChangeSeq(3),
+                },
+            ),
+            (MetadataTableFamily::DirentryBinds, bind.clone()),
+            (MetadataTableFamily::DirentryChildBinds, bind.clone()),
+            (
+                MetadataTableFamily::DirentryUnbinds,
+                super::MetadataRow::DirentryUnbind {
+                    parent_inode_id: InodeId(9),
+                    name_key,
+                    display_name,
+                    child_inode_id: InodeId(42),
+                    bind_seq: ChangeSeq(17),
+                    bind_delta_index: 3,
+                    unbind_seq: ChangeSeq(19),
+                    unbind_delta_index: 0,
+                },
+            ),
+            (
+                MetadataTableFamily::Revisions,
+                super::MetadataRow::Revision {
+                    inode_id: InodeId(42),
+                    revision_no: crate::RevisionNo(7),
+                    committed_seq: ChangeSeq(12),
+                    committed_at_ms: 12_000,
+                    revision_delta_index: 3,
+                    content_ref: crate::ContentRef::blob_v1(
+                        crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                            .expect("valid content id"),
+                        b"row key prefix sample",
+                    ),
+                },
+            ),
+            (
+                MetadataTableFamily::RevisionsByInodeDesc,
+                super::MetadataRow::Revision {
+                    inode_id: InodeId(42),
+                    revision_no: crate::RevisionNo(7),
+                    committed_seq: ChangeSeq(12),
+                    committed_at_ms: 12_000,
+                    revision_delta_index: 3,
+                    content_ref: crate::ContentRef::blob_v1(
+                        crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                            .expect("valid content id"),
+                        b"row key prefix sample",
+                    ),
+                },
+            ),
+            (
+                MetadataTableFamily::Tombstones,
+                super::MetadataRow::Tombstone {
+                    root_inode_id: InodeId(42),
+                    generation: super::TombstoneGeneration {
+                        seq: ChangeSeq(12),
+                        delta_index: 0,
+                    },
+                    action: super::TombstoneRowAction::Set {
+                        deleted_direntry: None,
+                    },
+                    deleted_at_ms: 12_000,
+                },
+            ),
+            (
+                MetadataTableFamily::ActiveDeletions,
+                super::MetadataRow::ActiveDeletion {
+                    root_inode_id: InodeId(42),
+                    deleted_at_seq: ChangeSeq(12),
+                    action: super::ActiveDeletionRowAction::Removed {
+                        revoked_at_seq: ChangeSeq(15),
+                    },
+                },
+            ),
+            (
+                MetadataTableFamily::CommitReceipts,
+                super::MetadataRow::CommitReceipt {
+                    commit_id: CommitId::parse("c_00000000000000000000000000000001")
+                        .expect("commit id"),
+                    semantic_commit_fingerprint: "sha256:unused".to_owned(),
+                    committed_seq: ChangeSeq(12),
+                    committed_at_ms: 12_000,
+                    message: None,
+                },
+            ),
+            (
+                MetadataTableFamily::Attributes,
+                super::MetadataRow::AttributesRevision {
+                    inode_id: InodeId(42),
+                    attributes_revision_no: crate::AttributeRevisionNo(3),
+                    committed_seq: ChangeSeq(12),
+                    delta_index: 0,
+                    attributes: crate::Attributes::default(),
+                },
+            ),
+        ];
+
+        for (family, row) in rows {
+            let row_key = row.row_key_for_family(family);
+            let prefix = family.row_key_prefix();
+            assert!(
+                row_key.starts_with(prefix),
+                "row key `{row_key}` for `{family:?}` does not start with `{prefix}`"
+            );
+            assert!(
+                !prefix.is_empty(),
+                "family `{family:?}` must declare a row-key prefix"
+            );
+        }
     }
 
     fn metadata_file_ref(

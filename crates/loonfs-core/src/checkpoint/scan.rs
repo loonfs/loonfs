@@ -125,6 +125,33 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         ))
     }
 
+    /// One page of `[lower_bound, upper_bound)` over `runs` only, for a
+    /// partial fold reading one slice of the run subset it is merging. Rows
+    /// come back with their stored keys so the caller can resume past the
+    /// last one without recomputing it.
+    pub(super) async fn scan_key_range_page_in_runs(
+        &self,
+        runs: &[MetadataRunManifest],
+        family: MetadataTableFamily,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.scan_range_page_rows(
+            runs,
+            family,
+            lower_bound,
+            upper_bound,
+            limit,
+            None,
+            Readahead::Disabled,
+        )
+        .await
+    }
+
     /// [`Self::scan_prefix`] for a point lookup: `filter_probe` is the
     /// family's exact filter key for the value being looked up, so each
     /// candidate segment's bloom filter is consulted before its index or

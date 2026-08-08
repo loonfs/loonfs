@@ -2163,6 +2163,32 @@ alike ("Garbage collection", rule 1). An abandoned rebuild therefore leaks
 nothing: the manifest that survives the crash names every segment written so
 far, and the next step resumes from it.
 
+**Partition keys.** Each family group names one partition key that every
+family in the group prefixes its row keys by, and a rebuild advances in whole
+partitions so that two rows where one cancels the other always land in one
+slice. The key is the leading variable component of the group's row keys:
+
+| group | partition key | per-family bound |
+| --- | --- | --- |
+| `direntry_binds`, `direntry_child_binds`, `direntry_unbinds` | inode id | `direntry-{parent}`, `direntry-child-{child}`, `direntry-unbind-{parent}` |
+| `revisions`, `revisions_by_inode_desc` | inode id | `revision-{inode}`, `revision-by-inode-desc-{inode}` |
+| `inodes` | inode id | `inode-{inode}` |
+| `tombstones` | root inode id | `tombstone-{root}` |
+| `active_deletions` | deletion sequence | `active-deletion-{deleted_at_seq}` |
+| `commit_receipts` | receipt id | `commit-receipt-{commit_id_hex}` |
+| `attributes` | inode id | `attributes-{inode}` |
+
+A cursor is spelled as the first-named family's bound: that family's row-key
+prefix followed by one partition component, which is a twenty-digit
+zero-padded number everywhere except commit receipts, where it is the hex
+receipt id. The single spelling `~` in place of the component means every
+partition is done. The reverse bind index is keyed by child rather than by
+parent, so it shares the group's partition space without sharing a partition
+with the rows it indexes; a rebuild decides its drops against the retired
+bindings it recorded when it froze the floor, so the two families always drop
+together. They have to: every bind row has exactly one reverse row, and a run
+whose two counts disagree does not load.
+
 **Validation at load.** A manifest carrying the state is rejected unless
 `families` is one of the family groups, every `input_runs` entry names a run
 the manifest references, `frozen_floor_seq` is at or below the manifest's own

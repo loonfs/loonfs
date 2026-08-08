@@ -90,12 +90,16 @@ a partition. This is what keeps the retention drop rules local:
   its handling is defined below.
 - `Inodes`, `Tombstones`, `ActiveDeletions`, `CommitReceipts`,
   `Attributes`: single-family groups. Partition = the family's own leading
-  prefix (inode id, root inode id, deletion root, receipt id, inode id).
-  `ActiveDeletions` pairs (a removal marker and the listed row it cancels)
-  live in one family by construction — the group comment says so — and the
-  partition must keep each pair together. `Attributes` supersession is
-  per-inode. `CommitReceipts` drop by horizon, a per-row rule that needs no
-  neighbors.
+  key component (inode id, root inode id, deletion sequence, receipt id,
+  inode id). `ActiveDeletions` pairs (a removal marker and the listed row it
+  cancels) live in one family by construction — the group comment says so —
+  and the partition must keep each pair together; the marker repeats its
+  target's deletion sequence, which is the family's leading component, so
+  partitioning on that sequence does keep them together. (An earlier draft
+  said the partition was the deletion root; the root is the family's
+  *second* component, so it is not a prefix of the row keys.) `Attributes`
+  supersession is per-inode. `CommitReceipts` drop by horizon, a per-row
+  rule that needs no neighbors.
 
 Each family maps a partition boundary to a key bound with a small pure
 function per group. The implementation must state, as a tested invariant per
@@ -129,14 +133,30 @@ Two rules need care:
    no-drop mode for this group and says so in its outcome — a pure rewrite
    still unfreezes the base, and the next walk drops with a smaller set.
 2. The reverse-index row (`DirentryChildBinds`) for a dropped binding lives
-   in a different partition than the forward row. Its drop decision uses
-   the same frozen predicate, answered by point lookups into the snapshot
-   (bloom filters make the common live-binding case cheap), charged against
-   the step's budgets. If the implementation finds the lookups too
-   expensive, the stated fallback is to retain dangling reverse rows: a
-   reverse row whose forward binding is gone is invisible — visibility
-   requires the forward row, the reverse row, and the inode to agree — so
-   the cost is space until the next walk, not correctness.
+   in a different partition than the forward row, so the slice holding it
+   holds neither the parent's other binds nor the parent's unbinds. It is
+   decided against the same frozen unbind set rule 1 builds, which is
+   already in memory whenever the walk drops at all: a reverse row is a
+   bind row, carrying its parent, name, sequence, and delta index, which is
+   exactly what the set is keyed by. No extra read is needed, and the two
+   families drop in lockstep by construction.
+
+   The forward rule keeps a bind at or below the floor when it is both the
+   latest in its slot and not unbound; the set alone settles the reverse
+   row because a bind is only ever superseded by an operation that also
+   unbinds it, an invariant the drop pass refuses to compact without.
+
+   An earlier draft answered this with point lookups into the snapshot and
+   gave them a share of the step's budget, with a fallback that retained
+   the *dangling* reverse rows on their own — on the grounds that a reverse
+   row whose forward binding is gone is invisible, since visibility
+   requires the forward row, the reverse row, and the inode to agree. Two
+   things were wrong with it. The read argument holds but the run would not
+   publish: the format gives every bind row exactly one reverse row, and
+   manifest load rejects a run whose two counts disagree
+   (`validate_manifest_table_descriptors`). And the lookups bought nothing
+   the frozen set did not already answer, so they are gone along with their
+   budget share.
 
 ## Interaction rules
 
