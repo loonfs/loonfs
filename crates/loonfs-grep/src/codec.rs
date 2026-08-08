@@ -436,6 +436,29 @@ mod tests {
         );
     }
 
+    /// The index segment builder is the shared `SegmentBlocksBuilder`, so a
+    /// lost `max_key` would surface here as a segment whose row range
+    /// descends — which `GrepManifestState` rejects, parking the reorganize
+    /// step on `InvalidSegmentRange`. Target 1 closes a data block on every
+    /// push, the final one included, which is the case that once lost the key.
+    #[test]
+    fn segment_max_row_key_survives_a_full_final_block() {
+        use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+
+        let mut builder = SegmentBlocksBuilder::new(std::num::NonZeroUsize::MIN);
+        let mut last_key = String::new();
+        for gram in [Gram(*b"abc"), Gram(*b"abd"), Gram(*b"abe")] {
+            let row = IndexRow::gram_postings(gram, &[posting(42, 7)]).expect("row");
+            last_key = row.row_key();
+            builder
+                .push(&last_key, &row.filter_key(), &row)
+                .expect("push");
+        }
+        let built = builder.finish().expect("finish");
+        assert_eq!(built.max_key, last_key);
+        assert!(built.min_key <= built.max_key);
+    }
+
     #[test]
     fn rows_reject_first_inode_mismatch() {
         let row = IndexRow::GramPostings {

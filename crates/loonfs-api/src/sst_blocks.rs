@@ -183,7 +183,6 @@ pub struct SegmentBlocksBuilder {
     /// segment's max key. A block's first entry stores its key in full
     /// regardless, because a restart point always begins a block.
     previous_key: String,
-    block_first_key: String,
     finished_blocks: Vec<(String, Vec<u8>)>,
     filter_hashes: Vec<(u64, u64)>,
     row_count: u64,
@@ -205,7 +204,6 @@ impl SegmentBlocksBuilder {
             restarts: Vec::new(),
             entry_count: 0,
             previous_key: String::new(),
-            block_first_key: String::new(),
             finished_blocks: Vec::new(),
             filter_hashes: Vec::new(),
             row_count: 0,
@@ -237,9 +235,6 @@ impl SegmentBlocksBuilder {
         let restart = self.entry_count % RESTART_INTERVAL == 0;
         if restart {
             self.restarts.push(self.entries.len() as u32);
-        }
-        if self.entries.is_empty() {
-            self.block_first_key = row_key.to_owned();
         }
         let shared_len = if restart {
             0
