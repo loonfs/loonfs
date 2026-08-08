@@ -832,6 +832,12 @@ including at minimum:
 - `next_inode_id`
 - `visible_wal_tip` and the bounded `recent_segments` accelerator
 
+`recent_segments` always begins at `visible_wal_tip`. A head published before
+the namespace's first commit carries neither, and every head published after
+it carries the tip as the accelerator's first entry, because one
+compare-and-swap writes both. A head that disagrees with itself is corrupt,
+and decoding rejects it.
+
 `wal/floor.json` is the symmetrical pair to the head — the earliest retained
 commit boundary next to the latest visible one. It records `floor_seq` and
 verification and update stamps. It is updated only by monotonic compare-and-swap on its

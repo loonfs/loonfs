@@ -308,8 +308,7 @@ fn validate_pointer_matches_envelope(
 /// the whole tail and this takes no store parameter: the signature is the
 /// guarantee.
 ///
-/// A head that under-describes its own tail is corrupted or predates that
-/// coverage, and either way is reported as
+/// A head that under-describes its own tail is corrupted, and is reported as
 /// [`WalChainLoadError::TailNotDescribedByHead`] rather than walked. This
 /// serves inspection surfaces (status, maintenance gating), and a serial
 /// chain walk of an unbounded tail is not something a foreground call
@@ -365,6 +364,10 @@ pub(crate) fn count_visible_wal_tail_segments(
         return Ok(count);
     }
 
+    // A decoded head always begins its accelerator at its tip. This request
+    // carries a plain pointer slice rather than a head, and the count reads
+    // no segment bodies, so it checks that relationship here rather than
+    // assuming it.
     if request.recent_segments.first() == Some(&tip) {
         for pointer in &request.recent_segments[1..] {
             if pointer.end_seq.0 + 1 != oldest_counted.start_seq.0 {

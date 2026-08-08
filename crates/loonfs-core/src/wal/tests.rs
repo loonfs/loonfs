@@ -883,9 +883,9 @@ fn tail_count_from_contiguous_hints_covers_the_longest_legal_tail() {
     assert_eq!(count, 0);
 }
 
-/// A head that does not name its whole tail is corrupted or predates the
-/// coverage guarantee. Either way the count says so instead of walking
-/// chain links one round trip at a time on an inspection call.
+/// A head that does not name its whole tail is corrupted. The count says so
+/// instead of walking chain links one round trip at a time on an inspection
+/// call.
 #[test]
 fn tail_count_rejects_a_head_that_does_not_describe_its_tail() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
