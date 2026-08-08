@@ -9,6 +9,12 @@ use std::process::Command;
 
 /// Writes a server config that binds `bind` and stores under `store_root`.
 fn write_config(dir: &Path, bind: &str, store_root: &Path) -> PathBuf {
+    write_config_with(dir, bind, store_root, "")
+}
+
+/// [`write_config`] with `extra` written verbatim between the top-level
+/// fields and the `[store]` table, for the optional tables a test needs.
+fn write_config_with(dir: &Path, bind: &str, store_root: &Path, extra: &str) -> PathBuf {
     let path = dir.join("loonfs-server.toml");
     let contents = format!(
         r#"
@@ -16,7 +22,7 @@ bind = "{bind}"
 auth_token = "check-config-token"
 content_token_secret = "check-config-secret"
 writer_id = "check-config-writer"
-
+{extra}
 [store]
 kind = "local-fs"
 root = "{}"
@@ -25,6 +31,36 @@ root = "{}"
     );
     std::fs::write(&path, contents).expect("write server config");
     path
+}
+
+/// A `[tls]` table naming the two files.
+fn tls_table(cert_path: &Path, key_path: &Path) -> String {
+    format!(
+        "\n[tls]\ncert_path = \"{}\"\nkey_path = \"{}\"\n",
+        cert_path.display(),
+        key_path.display()
+    )
+}
+
+/// A `[local_cache]` table at `path`, sized at the smallest disk tier the
+/// config accepts so the check allocates as little as it can.
+fn local_cache_table(path: &Path) -> String {
+    format!(
+        "\n[local_cache]\npath = \"{}\"\nmemory_bytes = 4194304\ndisk_bytes = 100663296\n",
+        path.display()
+    )
+}
+
+/// Generates a self-signed identity in `dir` and returns its certificate and
+/// key paths.
+fn write_tls_identity(dir: &Path) -> (PathBuf, PathBuf) {
+    let cert_path = dir.join("server.crt");
+    let key_path = dir.join("server.key");
+    let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+        .expect("generate self-signed identity");
+    std::fs::write(&cert_path, identity.cert.pem()).expect("write certificate");
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).expect("write private key");
+    (cert_path, key_path)
 }
 
 fn check_config(config_path: &Path) -> std::process::Output {
@@ -84,6 +120,143 @@ root = "/tmp/loonfs-check-config-unused"
     assert!(
         stderr.contains("bind"),
         "expected the config error to name the field, got: {stderr}"
+    );
+}
+
+/// The check loads the TLS identity, so an identity a start could not use
+/// fails the check too. Field validation passes both configs below: each one
+/// names two non-empty paths, which is all the config file can say about
+/// them.
+#[test]
+fn check_config_reports_a_tls_identity_it_cannot_load() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_root = dir.path().join("store");
+    let (cert_path, key_path) = write_tls_identity(dir.path());
+
+    // A certificate path that names no file.
+    let missing_cert = dir.path().join("absent.crt");
+    let config_path = write_config_with(
+        dir.path(),
+        "127.0.0.1:9400",
+        &store_root,
+        &tls_table(&missing_cert, &key_path),
+    );
+
+    let output = check_config(&config_path);
+
+    assert!(
+        !output.status.success(),
+        "a certificate file that is not there must fail the check"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("absent.crt"),
+        "the error must name the file it could not read, got: {stderr}"
+    );
+
+    // A key file that is there and is not the PEM it is configured as.
+    let not_pem = dir.path().join("not-pem.key");
+    std::fs::write(&not_pem, b"this file holds no private key\n")
+        .expect("write a key that is not PEM");
+    let config_path = write_config_with(
+        dir.path(),
+        "127.0.0.1:9400",
+        &store_root,
+        &tls_table(&cert_path, &not_pem),
+    );
+
+    let output = check_config(&config_path);
+
+    assert!(
+        !output.status.success(),
+        "a key file that is not PEM must fail the check"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("not-pem.key"),
+        "the error must name the file it could not parse, got: {stderr}"
+    );
+}
+
+/// The check opens the local block cache, so a directory a start could not
+/// own fails the check too. A plain file where the directory belongs is one
+/// way to be unable to own it, and it fails whichever user runs the test.
+#[test]
+fn check_config_reports_a_local_cache_it_cannot_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let occupied = dir.path().join("cache");
+    std::fs::write(&occupied, b"a file, not a directory").expect("occupy the cache path");
+    let config_path = write_config_with(
+        dir.path(),
+        "127.0.0.1:9400",
+        &dir.path().join("store"),
+        &local_cache_table(&occupied),
+    );
+
+    let output = check_config(&config_path);
+
+    assert!(
+        !output.status.success(),
+        "a cache directory the server cannot open must fail the check"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("local_cache.path"),
+        "the error must name the field it came from, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("cache"),
+        "the error must name the directory, got: {stderr}"
+    );
+}
+
+/// A configured identity and a configured cache both pass, and the check
+/// leaves the cache directory the way the start that follows it needs to
+/// find it.
+///
+/// The second run is what proves the release: it calls the same open a start
+/// calls, so a lock the first run still held would fail it.
+#[test]
+fn check_config_opens_the_local_cache_and_leaves_it_openable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_root = dir.path().join("store");
+    let (cert_path, key_path) = write_tls_identity(dir.path());
+    let cache_root = dir.path().join("cache");
+    let config_path = write_config_with(
+        dir.path(),
+        "127.0.0.1:9400",
+        &store_root,
+        &format!(
+            "{}{}",
+            tls_table(&cert_path, &key_path),
+            local_cache_table(&cache_root)
+        ),
+    );
+
+    let output = check_config(&config_path);
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        output.status.success(),
+        "expected success, got {:?}: {stdout}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout.trim(),
+        "config ok: bind 127.0.0.1:9400, store local-fs"
+    );
+    assert!(
+        cache_root.is_dir(),
+        "the check opens the cache, and opening it builds the directory"
+    );
+
+    let second = check_config(&config_path);
+
+    assert!(
+        second.status.success(),
+        "the checked directory must be one the next open can take: {}",
+        String::from_utf8_lossy(&second.stderr)
     );
 }
 

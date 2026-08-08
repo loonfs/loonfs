@@ -40,8 +40,20 @@ loonfs-server --config /etc/loonfs/server.toml --check-config
 ```
 
 It prints one line naming the bind address and the store kind, then exits.
-A `local-fs` store creates its root directory during the check; the cloud
-providers touch no storage.
+
+The check runs the startup work a config file cannot describe by itself. It
+decodes and validates the file, it loads the TLS certificate and key, and it
+opens the local block cache. It does not bind the configured address, and it
+performs no object-store operation, so it says nothing about whether the
+store is reachable. `loonfs admin store-probe` answers that.
+
+Two of those steps touch the filesystem, exactly as a start does. A
+`local-fs` store creates its root directory. A configured `[local_cache]`
+creates its directory, takes the directory lock, allocates the disk tier,
+and then releases the lock again. Run the check where the server it is
+checking is not already running: the lock belongs to one process, so a check
+against a running server's cache directory fails, and so would a second
+start.
 
 ### The minimal config
 
