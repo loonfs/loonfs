@@ -12,7 +12,10 @@ use super::cache::{
 use super::error::ManifestLoadError;
 use super::partial_fold::parse_row_digest;
 use super::partition::{GroupPartitioning, PartitionCursor};
-use super::runs::{runs_in_materialization_order, runs_in_scan_order, REORGANIZE_FAMILY_GROUPS};
+use super::runs::{
+    runs_in_materialization_order, runs_in_scan_order, MetadataRunManifest,
+    CHECKPOINT_L0_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
+};
 use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
 use super::validate::{validate_manifest_materialization_ranges, validate_namespace_manifest};
 use crate::error::{CoreError, MetadataProjectionLoadError};
@@ -333,7 +336,9 @@ fn validate_manifest_table_descriptors(
     manifest_object_key: &str,
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<(), ManifestLoadError> {
-    for run in runs_in_materialization_order(&manifest.payload) {
+    let runs = runs_in_materialization_order(&manifest.payload);
+    validate_one_base_run_per_family_group(manifest_object_key, &runs)?;
+    for run in &runs {
         let ordered_tables = ordered_manifest_tables(manifest_object_key, &run.tables)?;
         let mut direntry_bind_rows = 0u64;
         let mut direntry_child_bind_rows = 0u64;
@@ -341,6 +346,7 @@ fn validate_manifest_table_descriptors(
         let mut revision_by_inode_desc_rows = 0u64;
         for table in ordered_tables {
             validate_segment_descriptors(&table.segments)?;
+            validate_segment_numbering(&table.segments)?;
             for descriptor in &table.segments {
                 match table.family {
                     MetadataTableFamily::DirentryBinds => {
@@ -438,30 +444,88 @@ fn validate_segment_descriptors(descriptors: &[MetadataFileRef]) -> Result<(), M
     Ok(())
 }
 
-/// Checks that one family's output segments of a partial fold are numbered
-/// the way the fold numbers them: from zero, once each, in the order it wrote
-/// them.
+/// Checks that one family's segments inside one run are numbered the way the
+/// producer that wrote them numbered them: from zero, once each, in the order
+/// they were written.
 ///
-/// The check is the fold's own, not the file set's. A whole-group fold can
-/// stamp a second base run at an existing base run's identity when its window
-/// has to start above that run, so `metadata_files` does hold repeated
-/// segment indexes within one run and family today. A fold's outputs are one
-/// run built by one producer, so there the numbering is an invariant, and
-/// each slice reads the count back to number the segments it adds.
-fn validate_output_segment_numbering(
-    descriptors: &[MetadataFileRef],
-) -> Result<(), ManifestLoadError> {
+/// One family in one run has exactly one producer — a flush's delta run, a
+/// merge's output, or the run a partial fold builds across its slices — and
+/// every one of them numbers from zero. Two producers writing one family at
+/// one run identity is what this rejects. That used to be reachable: a merge
+/// that had to start above the group's base wrote its output at the base tier
+/// stamped at the manifest head, so a group whose base already sat at that
+/// identity ended up with two sets of segments both numbered from zero. A
+/// merge above the base now writes a delta run at its newest input's identity
+/// instead, and that identity's segments for the group leave the file set in
+/// the same publication the output's enter it.
+///
+/// Segments reach this sorted by index (`runs_from_metadata_files`), so
+/// comparing each index against its position catches a repeat, a gap, and a
+/// number no producer would have written.
+fn validate_segment_numbering(descriptors: &[MetadataFileRef]) -> Result<(), ManifestLoadError> {
     for (position, descriptor) in descriptors.iter().enumerate() {
         if descriptor.segment_index as usize != position {
             return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: descriptor.object_key.clone(),
                 message: format!(
-                    "reorganize output segment carries index {} at position {position} of its \
-                     family; a fold numbers its outputs from zero in the order it writes them",
-                    descriptor.segment_index
+                    "segment carries index {} at position {position} of family `{:?}` in run seq \
+                     `{}` level {}; a family's segments within one run are numbered from zero, \
+                     once each, in the order they were written",
+                    descriptor.segment_index,
+                    descriptor.family,
+                    descriptor.run_seq,
+                    descriptor.level
                 ),
             });
         }
+    }
+    Ok(())
+}
+
+/// Checks that no family group holds more than one base-tier run.
+///
+/// A merge writes a base-tier run only when its window starts at the group's
+/// oldest run, and such a window always contains the group's existing base
+/// run, so the merge replaces it rather than adding one. A completed partial
+/// fold does the same over the whole group. Nothing else in the system mints
+/// a base run: a flush appends a delta run, and a merge above the base writes
+/// a delta run too.
+///
+/// A group with two base runs is the state a merge above the base used to
+/// leave behind, and it is worse than untidy. Each fragment on its own stays
+/// under the per-step budget, so nothing reports the group as too large to
+/// fold from its oldest run, the group goes on merging delta runs above the
+/// fragments instead, and the rows its retention floor covers can never be
+/// dropped — dropping needs a merge that starts at the group's oldest run.
+///
+/// Different groups may share one base-tier run identity, and usually do:
+/// each group folds at the manifest head, so the base runs they write land at
+/// the same sequence and become one run holding several groups' families.
+/// That is one run per group, which is what this counts.
+fn validate_one_base_run_per_family_group(
+    manifest_object_key: &str,
+    runs: &[MetadataRunManifest],
+) -> Result<(), ManifestLoadError> {
+    for group in REORGANIZE_FAMILY_GROUPS {
+        let mut base_runs = runs.iter().filter(|run| {
+            run.level != CHECKPOINT_L0_RUN_LEVEL
+                && run
+                    .tables
+                    .iter()
+                    .any(|table| group.contains(&table.family) && !table.segments.is_empty())
+        });
+        let (Some(first), Some(second)) = (base_runs.next(), base_runs.next()) else {
+            continue;
+        };
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: manifest_object_key.to_owned(),
+            message: format!(
+                "family group {group:?} holds base-tier runs at seq `{}` level {} and seq `{}` \
+                 level {}; a group holds at most one base run, because a merge writes one only \
+                 when it starts at the group's oldest run and then replaces it",
+                first.run_seq, first.level, second.run_seq, second.level
+            ),
+        });
     }
     Ok(())
 }
@@ -667,7 +731,7 @@ fn validate_manifest_reorganize_progress(
     }
     for (family, segments) in &segments_by_family {
         validate_segment_descriptors(segments)?;
-        validate_output_segment_numbering(segments)?;
+        validate_segment_numbering(segments)?;
         let bound = written_through(*family);
         let mut previous: Option<&MetadataFileRef> = None;
         for segment in segments {

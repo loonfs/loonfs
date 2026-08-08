@@ -1742,7 +1742,7 @@ fn partition_offset_key(partition: u64, revision_no: u64) -> String {
 /// One output segment of a partial fold, modelled on a segment the manifest
 /// already holds: a fresh table id and object key, stamped with the run the
 /// fold is building.
-fn reorganize_output_segment(
+pub(super) fn reorganize_output_segment(
     modelled_on: &MetadataFileRef,
     namespace_id: &NamespaceId,
     output_run_seq: ChangeSeq,
@@ -1761,7 +1761,7 @@ fn reorganize_output_segment(
 
 /// Republishes a payload under a fresh manifest id and loads it back, so a
 /// caller can assert on what validation makes of an edited manifest.
-async fn load_perturbed_manifest(
+pub(super) async fn load_perturbed_manifest(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     mut payload: NamespaceManifestPayload,

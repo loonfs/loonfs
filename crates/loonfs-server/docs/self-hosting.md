@@ -387,11 +387,14 @@ it goes. It does that one group of metadata at a time, and one step reads a
 whole group. A group that has grown past what one step may read is handled
 differently, and it logs three kinds of line.
 
-The first is a warning saying that the oldest metadata run in a family group
-no longer fits one reorganization step. It names the group, the run, how many
-rows and bytes that run holds, and the two per-step budgets it did not fit.
-It is logged once, on the step that decides to rebuild that group a slice at
-a time.
+The first is a warning saying that a family group can no longer be rebuilt
+from its oldest metadata run in one step. It names the group, the run that
+stopped the step, how many rows and bytes that run holds, and the two
+per-step budgets it did not fit. The run it names is usually the group's
+oldest, which did not fit on its own; when the oldest one does fit, the named
+run is the one above it that would not fit beside it, which leaves the group
+just as unrebuildable in one step. The line is logged once, on the step that
+decides to rebuild that group a slice at a time.
 
 After that, the same group logs `metadata partial fold advanced` on every
 step it gets, saying how many partitions the step covered, how many rows it

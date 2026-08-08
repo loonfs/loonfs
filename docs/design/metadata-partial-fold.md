@@ -226,6 +226,29 @@ it. Two mechanisms cover the two pairs:
   from seeing the snapshot to seeing the output in one step; no manifest
   ever shows both to a scan.
 
+A walk is bottom-anchored by construction — its snapshot is every run of the
+group — which is why its output is a base run. That is the general rule the
+whole-group fold follows too: **a merge's output is base-tier if and only if
+its window is bottom-anchored**, and a merge that had to start above the
+group's base writes a bigger delta run instead, stamped at its newest input's
+sequence. This was added after a soak showed the ceiling coming back in a new
+shape. A merge above the base used to write a base-tier run stamped at the
+manifest head, so it minted a *second* base run for the group. Each fragment
+stayed under one step's budget, so the trigger above — the group's oldest run
+alone over the budget — never fired, no walk ever started, and the group's
+below-floor rows could never be dropped. With the rule as stated a group has
+one base run, the trigger sees the whole of it, and the delta runs a merge
+above the base produces stay counted as delta pressure instead of hiding at
+the base tier.
+
+The trigger has one more case for the same reason. A group whose oldest run
+fits one step but cannot be read together with the run above it can never
+fold from its bottom either. When no window makes progress at all — not the
+bottom-anchored one, and not a merge of two or more delta runs above it —
+the group is folded in slices, and the step names the run that stopped the
+bottom-anchored window rather than reporting a blocked group every step
+forever.
+
 ## Garbage collection
 
 Progress output segments are referenced only by the progress state, so the

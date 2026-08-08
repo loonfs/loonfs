@@ -324,6 +324,43 @@ fn l0_runs(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataRunManifest> {
         .collect()
 }
 
+/// A run's identity: the sequence and level a manifest names it by.
+type RunId = (ChangeSeq, u32);
+
+/// The base-tier runs one family group holds right now.
+///
+/// A group holds at most one: only a merge that starts at the group's oldest
+/// run writes a base run, and such a merge always replaces the one that was
+/// there. More than one is the fragmented base a merge above the base used to
+/// create, which manifest load now refuses.
+fn group_base_runs(
+    manifest: &NamespaceManifestEnvelope,
+    group: &[ApiMetadataTableFamily],
+) -> Vec<RunId> {
+    runs_from_metadata_files(&manifest.payload)
+        .into_iter()
+        .filter(|run| {
+            run.level != CHECKPOINT_L0_RUN_LEVEL
+                && run
+                    .tables
+                    .iter()
+                    .any(|table| group.contains(&table.family) && !table.segments.is_empty())
+        })
+        .map(|run| (run.run_seq, run.level))
+        .collect()
+}
+
+/// Every family group's base-tier runs, for a caller asserting that none of
+/// them has fragmented.
+fn base_runs_per_family_group(
+    manifest: &NamespaceManifestEnvelope,
+) -> Vec<(&'static [ApiMetadataTableFamily], Vec<RunId>)> {
+    REORGANIZE_FAMILY_GROUPS
+        .into_iter()
+        .map(|group| (group, group_base_runs(manifest, group)))
+        .collect()
+}
+
 fn base_segment_object_keys_for_family(
     manifest: &NamespaceManifestEnvelope,
     family: ApiMetadataTableFamily,

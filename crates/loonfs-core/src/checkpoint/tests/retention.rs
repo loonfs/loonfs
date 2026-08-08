@@ -1669,6 +1669,10 @@ async fn a_base_run_over_the_step_budget_folds_the_group_a_slice_at_a_time() {
 
     // Repeated steps keep the group moving. Nothing parks, and the fold of
     // the group runs a slice at a time until it swaps its finished run in.
+    //
+    // This budget is one row under this group's base run, and another group's
+    // base can be larger still, so more than one group may end up folding in
+    // slices here. Only this group's slices are counted.
     let mut slices = 0usize;
     let mut completions = 0usize;
     let mut units = 0usize;
@@ -1683,16 +1687,15 @@ async fn a_base_run_over_the_step_budget_folds_the_group_a_slice_at_a_time() {
             super::MetadataReorganizeOutcome::PartialFoldAdvanced {
                 families, cursor, ..
             } => {
-                assert_eq!(
-                    families, group,
-                    "only the over-budget group folds in slices"
-                );
-                slices += 1;
-                cursors.push(cursor);
+                if families == group {
+                    slices += 1;
+                    cursors.push(cursor);
+                }
             }
             super::MetadataReorganizeOutcome::PartialFoldCompleted { families, .. } => {
-                assert_eq!(families, group);
-                completions += 1;
+                if families == group {
+                    completions += 1;
+                }
             }
             super::MetadataReorganizeOutcome::Superseded => {
                 panic!("no concurrent publisher exists in this test")
@@ -1867,6 +1870,13 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         selection.group_bottom_over_budget.is_none(),
         "the base fits one step here, so nothing should fold this group in slices"
     );
+    let base_before = group_base_runs(&before.manifest, &group);
+    let newest_input = input
+        .runs
+        .iter()
+        .map(|run| run.run_seq)
+        .max()
+        .expect("the window holds runs");
 
     let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
         .await
@@ -1887,6 +1897,29 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     )
     .await
     .expect("load the manifest after the fold");
+    // The merge wrote a delta run, not a second base run: the group's base is
+    // exactly the one it was, and the merged rows sit at the identity of the
+    // newest run the window held, which is where that run stood.
+    assert_eq!(
+        group_base_runs(&after.manifest, &group),
+        base_before,
+        "a merge above the base must not mint a base run"
+    );
+    let merged_run: BTreeSet<(ChangeSeq, u32)> = after
+        .manifest
+        .payload
+        .metadata_files
+        .iter()
+        .filter(|descriptor| {
+            group.contains(&descriptor.family) && descriptor.level == CHECKPOINT_L0_RUN_LEVEL
+        })
+        .map(|descriptor| (descriptor.run_seq, descriptor.level))
+        .collect();
+    assert_eq!(
+        merged_run,
+        BTreeSet::from([(newest_input, CHECKPOINT_L0_RUN_LEVEL)]),
+        "the merged delta runs must leave one delta run at the newest input's identity"
+    );
     // A merge that skipped older runs drops nothing, so the row set is
     // exactly what it was: the cancelling row still shadows the base's
     // binding and the deleted file stays deleted.
@@ -1913,10 +1946,17 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
 
 /// Skipping is only ever legal at the recency bottom.
 ///
-/// A run in the middle that busts the budget stops the window. The step
-/// refuses to reach past it for a newer run that would have fit, because a
-/// merge stamped at the manifest head lands above everything it left behind
-/// and would reorder the group.
+/// A run in the middle that busts the budget stops the window. The selector
+/// refuses to reach past it for a newer run that would have fit, because the
+/// merged output stands where the window stood and reaching past a run would
+/// move rows past it.
+///
+/// So no window makes progress at all, and that is what says this group can
+/// only be folded a slice at a time. The selector names the run that stopped
+/// the window — here the wide run in the middle, not the group's oldest run,
+/// which fits one step on its own — and the step starts the fold rather than
+/// reporting a blocked group and leaving it to report the same thing every
+/// step after that.
 #[tokio::test]
 async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1992,26 +2032,21 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         selection.input.is_none(),
         "no legal window exists; the selector must not assemble one across the wide run"
     );
-    assert!(
-        selection.group_bottom_over_budget.is_none(),
-        "the base run fits here, so nothing should claim it does not"
+    let blocked_by = selection
+        .group_bottom_over_budget
+        .expect("a group no window can fold must be reported as needing slices");
+    assert_eq!(
+        blocked_by.rows, wide,
+        "the wide run in the middle is what stopped the window, not the group's oldest run"
     );
+    assert_eq!(blocked_by.level, CHECKPOINT_L0_RUN_LEVEL);
 
-    let root_before = current_manifest_id(&store, &namespace_id).await;
     let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
         .await
         .expect("reorganization step");
-    assert!(
-        matches!(
-            report.outcome,
-            super::MetadataReorganizeOutcome::BudgetExhausted { .. }
-        ),
-        "expected a blocked step, got {:?}",
-        report.outcome
-    );
-    assert_eq!(
-        current_manifest_id(&store, &namespace_id).await,
-        root_before,
-        "a blocked step must not publish"
-    );
+    let super::MetadataReorganizeOutcome::PartialFoldAdvanced { families, .. } = &report.outcome
+    else {
+        panic!("expected a fold in slices, got {:?}", report.outcome)
+    };
+    assert_eq!(families, &group);
 }

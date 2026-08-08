@@ -9,6 +9,7 @@ use super::super::partial_fold::{
 use super::super::partition::{GroupPartitioning, PartitionCursor, PartitionKey};
 use super::super::row::manifest_row_commit_seq;
 use super::super::scan::VerifiedMetadataTables;
+use super::index_parity::{load_perturbed_manifest, reorganize_output_segment};
 use super::*;
 use crate::path::read::{
     load_metadata_view, resolve_current_files, CurrentFileState, ReadLoadContext,
@@ -1591,6 +1592,20 @@ async fn visible_namespace(
         .expect("resolve every inode the namespace knows")
 }
 
+/// The check every reorganization step in these tests must pass: nothing a
+/// reader can see moved.
+async fn continue_after_step(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    visible: &[CurrentFileState],
+) {
+    assert_eq!(
+        visible_namespace(store, namespace_id).await,
+        visible,
+        "a step changed what a read answers"
+    );
+}
+
 /// The binding one row names: what an unbind retires, and what a bind is.
 fn binding_generation(row: &MetadataRow) -> Option<(InodeId, NameKey, ChangeSeq, u32)> {
     match row {
@@ -1669,7 +1684,6 @@ async fn an_over_budget_group_folds_through_repeated_maintenance_steps() {
                 drops,
                 ..
             } => {
-                assert_eq!(families, group, "only this group folds in slices here");
                 // A slice that covers no partition is one that stepped over
                 // a stretch of the keyspace holding no row at all, and it
                 // must have read nothing for it.
@@ -1678,14 +1692,22 @@ async fn an_over_budget_group_folds_through_repeated_maintenance_steps() {
                     decoded_input_rows == 0,
                     "a slice must read the rows of the partitions it covers"
                 );
-                // A slice may keep nothing: every row in its partitions can
-                // be churn the frozen floor lets go.
-                written_rows += output_rows;
                 assert_eq!(
                     drops,
                     MetadataFoldSliceDrops::Applied,
                     "every partition of this workload fits one step"
                 );
+                // This budget is one row under this group's base run, and
+                // another group's base can be larger still, so more than one
+                // group may fold in slices here. The arc below is this
+                // group's, so only its slices are counted.
+                if families != group {
+                    continue_after_step(&store, &namespace_id, &visible).await;
+                    continue;
+                }
+                // A slice may keep nothing: every row in its partitions can
+                // be churn the frozen floor lets go.
+                written_rows += output_rows;
                 cursors.push(cursor.clone());
                 slices += 1;
                 if slices == 1 {
@@ -1722,7 +1744,10 @@ async fn an_over_budget_group_folds_through_repeated_maintenance_steps() {
                 output_rows,
                 ..
             } => {
-                assert_eq!(families, group);
+                if families != group {
+                    continue_after_step(&store, &namespace_id, &visible).await;
+                    continue;
+                }
                 assert!(!completed, "the fold must finish exactly once");
                 assert!(output_segments > 0);
                 assert_eq!(
@@ -1755,11 +1780,7 @@ async fn an_over_budget_group_folds_through_repeated_maintenance_steps() {
                 panic!("no concurrent publisher exists in this test")
             }
         }
-        assert_eq!(
-            visible_namespace(&store, &namespace_id).await,
-            visible,
-            "a step changed what a read answers"
-        );
+        continue_after_step(&store, &namespace_id, &visible).await;
     }
 
     assert!(
@@ -2328,5 +2349,255 @@ async fn a_walk_refuses_to_swap_in_a_run_whose_reverse_index_disagrees() {
             .reorganize
             .is_some(),
         "a refused swap leaves the fold in flight rather than half applied"
+    );
+}
+
+// -------------------------------------------------------------------------
+// The fragmented base
+// -------------------------------------------------------------------------
+
+/// A namespace with one folded base run and one delta run above it, which is
+/// the smallest shape a second base-tier run can be added to.
+async fn seed_folded_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &NamespaceId) {
+    let context = test_context();
+    bootstrap_namespace(store, namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_seed_file(store, namespace_id, 0, 0).await;
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint the seed");
+    drain_reorganization(store, namespace_id, &context, MetadataLsmPolicy::default()).await;
+    write_seed_file(store, namespace_id, 0, 1).await;
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint a delta run above the base");
+}
+
+/// One base-tier segment of `family`, for a test that builds a second run out
+/// of it.
+fn base_segment_of_family(
+    manifest: &NamespaceManifestEnvelope,
+    family: ApiMetadataTableFamily,
+) -> MetadataFileRef {
+    manifest
+        .payload
+        .metadata_files
+        .iter()
+        .find(|descriptor| {
+            descriptor.family == family && descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
+        })
+        .expect("a folded base segment of this family")
+        .clone()
+}
+
+/// A group with two base-tier runs does not load.
+///
+/// This is the shape a merge above the base used to write: its output went to
+/// the base tier stamped at the manifest head, so it became a second base run
+/// for the group rather than a bigger delta run. Every fragment stayed under
+/// the per-step budget on its own, so nothing ever reported the group's oldest
+/// run as over budget, the fold in slices never started, and the group's rows
+/// below the retention floor could never be dropped — dropping needs a fold
+/// whose window starts at the group's oldest run.
+///
+/// Refusing the shape at load is what says it cannot come back: no builder
+/// writes it now, and a manifest carrying it is corruption rather than a
+/// state to carry on from.
+#[tokio::test]
+async fn a_manifest_whose_group_base_fragmented_does_not_load() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_folded_base_with_a_delta_run(&store, &namespace_id).await;
+
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let manifest = tables.manifest().clone();
+    drop(tables);
+    let group = group_containing(ApiMetadataTableFamily::Inodes);
+    assert_eq!(
+        group_base_runs(&manifest, group).len(),
+        1,
+        "the seed must leave the group in one base run"
+    );
+
+    let mut fragmented = manifest.payload.clone();
+    fragmented.metadata_files.push(reorganize_output_segment(
+        &base_segment_of_family(&manifest, ApiMetadataTableFamily::Inodes),
+        &namespace_id,
+        manifest.payload.head_seq,
+        CHECKPOINT_BASE_RUN_LEVEL,
+    ));
+
+    let error = load_perturbed_manifest(&store, &namespace_id, fragmented, 1)
+        .await
+        .expect_err("a group with two base runs must not load");
+    let ManifestLoadError::RunManifestMismatch { message, .. } = &error else {
+        panic!("expected a run mismatch, got {error:?}")
+    };
+    assert!(
+        message.contains("Inodes") && message.contains("base"),
+        "the rejection must name the group and what it holds too many of, got `{message}`"
+    );
+}
+
+/// Two segments of one family carrying the same index inside one run do not
+/// load.
+///
+/// A family in a run has one producer, and every producer numbers from zero,
+/// so the numbers are a dense sequence. Two sets of them at one identity is
+/// what a merge above the base used to leave behind when the group's base
+/// already sat at the identity the merge stamped: both sets started at zero.
+/// The hardening pass could only check this for a fold's own outputs, because
+/// the file set genuinely held repeats; with the level rule it holds for every
+/// run, and the check moved there.
+#[tokio::test]
+async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_folded_base_with_a_delta_run(&store, &namespace_id).await;
+
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let manifest = tables.manifest().clone();
+    drop(tables);
+    let existing = base_segment_of_family(&manifest, ApiMetadataTableFamily::Inodes);
+    assert_eq!(existing.segment_index, 0);
+
+    let mut repeated = manifest.payload.clone();
+    repeated.metadata_files.push(reorganize_output_segment(
+        &existing,
+        &namespace_id,
+        existing.run_seq,
+        existing.level,
+    ));
+
+    let error = load_perturbed_manifest(&store, &namespace_id, repeated, 2)
+        .await
+        .expect_err("two segments of one family at one index must not load");
+    let ManifestLoadError::SegmentDescriptorMismatch { message, .. } = &error else {
+        panic!("expected a segment descriptor mismatch, got {error:?}")
+    };
+    assert!(
+        message.contains("Inodes") && message.contains("numbered from zero"),
+        "the rejection must name the family and the numbering rule, got `{message}`"
+    );
+}
+
+/// The end state the soak never reached.
+///
+/// Four cycles of writes, deletions, and a retention floor that moves past
+/// them, folded under budgets too small to take a group whole. The old level
+/// rule turned every merge above the base into another base-tier run, so the
+/// bases fragmented and the fold in slices never started: a live soak of that
+/// code ended with six base-tier runs — direntry binds split across three of
+/// them, revisions across four — with no fold in flight and every unbind
+/// below the floor still there.
+///
+/// What is pinned here is what that run should have reached: one base run per
+/// group throughout, a fold in slices that starts once a group stops fitting
+/// one step, and the churn below the floor gone.
+#[tokio::test]
+async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    // Small segments so a fold in slices has places to stop, and a row budget
+    // the groups outgrow within a couple of cycles.
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(24).expect("nonzero"),
+        max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+
+    let group = group_containing(ApiMetadataTableFamily::DirentryUnbinds);
+    let mut folds_in_slices = 0usize;
+    for cycle in 0..4u64 {
+        for file in 0..4u64 {
+            write_seed_file(&store, &namespace_id, cycle, file).await;
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the writes");
+        for file in 0..3u64 {
+            delete_path(
+                &store,
+                &namespace_id,
+                &format!("/d{cycle}/f{file}.txt"),
+                &context,
+                None,
+            )
+            .await
+            .expect("delete a file");
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the deletions");
+        advance_retention_floor(&store, &namespace_id, &context)
+            .await
+            .expect("advance the floor past the deletions");
+        let visible = visible_namespace(&store, &namespace_id).await;
+
+        let mut quiet = false;
+        for _step in 0..512 {
+            let report = reorganize_metadata_step(&store, &namespace_id, &context, policy)
+                .await
+                .expect("reorganization step");
+            let tables = load_current_manifest_tables(&store, &namespace_id).await;
+            for (folded, base_runs) in base_runs_per_family_group(tables.manifest()) {
+                assert!(
+                    base_runs.len() <= 1,
+                    "cycle {cycle}: {folded:?} holds base runs {base_runs:?}"
+                );
+            }
+            drop(tables);
+            continue_after_step(&store, &namespace_id, &visible).await;
+            match report.outcome {
+                MetadataReorganizeOutcome::PartialFoldCompleted { .. } => folds_in_slices += 1,
+                MetadataReorganizeOutcome::NotNeeded { .. } => {
+                    quiet = true;
+                    break;
+                }
+                MetadataReorganizeOutcome::BudgetExhausted { ref families, .. } => {
+                    panic!("cycle {cycle}: {families:?} parked instead of folding")
+                }
+                MetadataReorganizeOutcome::Superseded => {
+                    panic!("no concurrent publisher exists in this test")
+                }
+                MetadataReorganizeOutcome::PartialFoldAdvanced { .. }
+                | MetadataReorganizeOutcome::UnitPublished { .. } => {}
+            }
+        }
+        assert!(quiet, "cycle {cycle}: reorganization did not go quiet");
+    }
+
+    assert!(
+        folds_in_slices > 0,
+        "a group must have outgrown one step and been folded in slices"
+    );
+    // The bindings group ends in one run, and the churn the floor covers is
+    // gone from it: every deletion below the floor left an unbind, and an
+    // unbind is only ever dropped by a fold that starts at the group's oldest
+    // run.
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    assert_eq!(group_base_runs(tables.manifest(), group).len(), 1);
+    drop(tables);
+    let floor_seq = read_floor_seq(&store, &namespace_id).await;
+    let rows = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    assert!(
+        rows[&ApiMetadataTableFamily::DirentryUnbinds]
+            .iter()
+            .all(|row| !matches!(row, MetadataRow::DirentryUnbind { unbind_seq, .. } if *unbind_seq <= floor_seq)),
+        "the unbind markers the floor covers must have been dropped"
+    );
+    assert_eq!(
+        rows[&ApiMetadataTableFamily::DirentryBinds].len(),
+        rows[&ApiMetadataTableFamily::DirentryChildBinds].len(),
+        "the two bind families must drop in lockstep"
     );
 }
