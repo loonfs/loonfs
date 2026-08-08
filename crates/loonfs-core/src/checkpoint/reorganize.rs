@@ -26,6 +26,11 @@
 //! flight its group folds no other way: a step that selects the group
 //! advances the fold and does nothing else for it. Group selection still
 //! runs per step, so the other groups keep folding on the steps they win.
+//!
+//! A manifest carries one such fold at a time. A second group whose oldest
+//! run does not fit either waits its turn: it merges its delta runs the way
+//! it did before partial folds existed, and its fold starts once the slot is
+//! free.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::build::{
@@ -90,6 +95,9 @@ pub enum MetadataReorganizeOutcome {
         decoded_input_bytes: u64,
         /// Rows this slice wrote into the run the fold is building.
         output_rows: u64,
+        /// Point reads this slice made into the snapshot to decide bind rows
+        /// whose unbinds sit outside it.
+        unbind_probes: u64,
         /// Where the fold now stands: the next partition it has not
         /// processed.
         cursor: String,
@@ -214,12 +222,21 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
     if let Some(bottom) = selection.group_bottom_over_budget {
-        // The group's oldest run no longer fits one step. Say so once, then
-        // start folding the group a slice at a time; from the next step on
-        // the fold's progress is what this group reports.
+        // The group's oldest run no longer fits one step. Say so, then start
+        // folding the group a slice at a time; from the next step on the
+        // fold's progress is what this group reports.
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
-        return start_partial_fold(store, namespace_id, &tables, group, policy, context, timer)
-            .await;
+        // Unless another group is already folding. A manifest carries one
+        // partial fold at a time, so this group waits its turn: until the
+        // fold in flight completes and frees the slot, it merges its delta
+        // runs the way it did before partial folds existed. Starting a
+        // second fold here would replace the state in flight, and two
+        // over-budget groups would take turns discarding each other's work
+        // with neither ever finishing.
+        if previous.payload.reorganize.is_none() {
+            return start_partial_fold(store, namespace_id, &tables, group, policy, context, timer)
+                .await;
+        }
     }
     let Some(input) = selection.input else {
         return Ok(MetadataReorganizeReport {
@@ -391,7 +408,7 @@ async fn advance_partial_fold<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<MetadataReorganizeReport> {
-    let Some(mut walk) = MetadataFoldWalk::resume_from_manifest(tables, policy).await? else {
+    let Some(mut walk) = MetadataFoldWalk::resume_from_manifest(tables)? else {
         return Err(CoreError::Internal(
             "a partial fold was selected against a manifest that carries none".to_owned(),
         ));
@@ -407,10 +424,8 @@ async fn advance_partial_fold<S: ObjectStore + ?Sized>(
 /// Starting is not a step of its own. The executor publishes nothing until a
 /// slice is written, so one step both starts the fold and folds its first
 /// slice, and the manifest that step publishes carries the state a resume
-/// reads back. The budgets still hold across the pair: the start scans the
-/// group's unbind rows to freeze the set its drops read, and
-/// `MetadataFoldWalk` charges those rows against this step's row budget
-/// before it plans the slice.
+/// reads back. Starting reads nothing of its own: everything a slice needs
+/// beyond its own rows is a point read the slice pays for.
 ///
 /// The input is every run of the manifest that holds rows of the group.
 /// Dropping rows is only visibility-preserving over a merge that starts at
@@ -439,8 +454,7 @@ async fn start_partial_fold<S: ObjectStore + ?Sized>(
         .filter(|run| run_has_group_rows(run, group))
         .cloned()
         .collect();
-    let mut walk =
-        MetadataFoldWalk::start(tables, group, snapshot, frozen_floor_seq, policy).await?;
+    let mut walk = MetadataFoldWalk::start(tables, group, snapshot, frozen_floor_seq)?;
     let outcome = walk
         .advance(store, namespace_id, tables, policy, context, timer)
         .await?;
@@ -462,6 +476,7 @@ fn partial_fold_report(
                 decoded_input_rows: slice.decoded_input_rows,
                 decoded_input_bytes: slice.decoded_input_bytes,
                 output_rows: slice.output_rows,
+                unbind_probes: slice.unbind_probes,
                 // Read back from the fold rather than from the slice: this
                 // is the position the manifest now carries, which is where
                 // the next step resumes.
@@ -694,8 +709,11 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
 /// past the numbers here is what makes a fold like that finish in fewer
 /// steps.
 ///
-/// One line per fold: the step after this one has a fold in flight, and a
-/// group with a fold in flight never reaches the selection that logs this.
+/// Usually one line per fold: the step after this one has a fold in flight,
+/// and a group with a fold in flight never reaches the selection that logs
+/// this. A group waiting for another group's fold to finish keeps logging it
+/// on the steps it wins, which is what says the group is still over budget
+/// and still waiting.
 fn report_group_bottom_over_budget(
     namespace_id: &NamespaceId,
     group: &[MetadataTableFamily],
@@ -879,7 +897,12 @@ pub(super) fn drop_rows_below_retention_floor(
             .map_or(&[], Vec::as_slice),
         retention_floor_seq,
     );
-    drop_rows_below_frozen_floor(rows_by_family, retention_floor_seq, &unbound_at_floor)
+    drop_rows_below_frozen_floor(
+        rows_by_family,
+        retention_floor_seq,
+        &unbound_at_floor,
+        FrozenFloorScope::WholePartitions,
+    )
 }
 
 /// Identifies one binding generation, which is what an unbind names and what
@@ -893,10 +916,11 @@ pub(super) type BindingGeneration = (InodeId, NameKey, ChangeSeq, u32);
 /// The binding generations an unbind at or below `retention_floor_seq`
 /// retires.
 ///
-/// A whole-group fold builds this from its merged rows. A partial fold
-/// builds it once at the start from the whole snapshot, because the slice it
-/// is working on holds only part of the unbind family (design doc,
-/// "Retention during the walk").
+/// A whole-group fold builds this from its merged rows, and so does a
+/// partial fold for the rows of one slice: binds and the unbinds that retire
+/// them share a partition, so a slice holding whole partitions holds both
+/// halves of every pair its rows belong to (design doc, "Retention during
+/// the walk").
 pub(super) fn unbindings_at_or_below_floor(
     unbind_rows: &[MetadataRow],
     retention_floor_seq: ChangeSeq,
@@ -925,109 +949,58 @@ pub(super) fn unbindings_at_or_below_floor(
     unbound_at_floor
 }
 
+/// Whether the rows handed to [`drop_rows_below_frozen_floor`] cover whole
+/// partitions of their family group, or one bounded piece of a single
+/// partition.
+///
+/// Some drop rules read a row's neighbours inside its own partition: the
+/// bind rule reads the other binds in the slot, the active-deletion rule
+/// reads the marker that cancels a listed row, and the attribute rule reads
+/// the other revisions of the inode. Those rules only run when the caller
+/// holds whole partitions. The rules that decide a row on its own run either
+/// way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FrozenFloorScope {
+    /// Every row of every partition the rows touch is present.
+    WholePartitions,
+    /// One bounded piece of one partition, which a partial fold reads when
+    /// that partition alone is larger than one step.
+    PartitionPiece,
+}
+
 /// [`drop_rows_below_retention_floor`] against a floor and an unbind set the
 /// caller froze, rather than against rows it can see right now.
 ///
-/// A partial fold calls this per slice: the floor and the unbind set are
-/// fixed for the whole walk, so every step and every resumption decides
-/// identically. The families the caller leaves out of `rows_by_family` are
-/// untouched, which is how a walk keeps the reverse bind index out of this
-/// pass — its rows are keyed by child, so the slice holding one does not
-/// hold the forward binds the rule below reads.
+/// A partial fold calls this per slice: the floor is fixed for the whole
+/// walk, so every step and every resumption decides identically. The
+/// families the caller leaves out of `rows_by_family` are untouched, which is
+/// how a walk keeps the reverse bind index out of this pass — its rows are
+/// keyed by child, so the slice holding one does not hold the forward binds
+/// the invariant check below reads, and the walk decides those rows with a
+/// point read instead.
 pub(super) fn drop_rows_below_frozen_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,
     unbound_at_floor: &BTreeSet<BindingGeneration>,
+    scope: FrozenFloorScope,
 ) -> Result<()> {
-    // At the floor only the latest non-unbound bind per (parent, name) slot
-    // is visible; an unbind marker at or below the floor has finished its
-    // work once every bind it covered is gone.
-    let mut latest_bind_at_floor = BTreeMap::new();
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryBinds)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } = row
-        {
-            if *bind_seq <= retention_floor_seq {
-                let candidate = (*bind_seq, *bind_delta_index);
-                let latest = latest_bind_at_floor
-                    .entry((*parent_inode_id, name_key.clone()))
-                    .or_insert(candidate);
-                if candidate > *latest {
-                    *latest = candidate;
-                }
-            }
-        }
+    if scope == FrozenFloorScope::WholePartitions {
+        refuse_superseded_bind_without_unbind(
+            rows_by_family
+                .get(&MetadataTableFamily::DirentryBinds)
+                .map_or(&[], Vec::as_slice),
+            retention_floor_seq,
+            unbound_at_floor,
+        )?;
     }
-    // Load-bearing writer invariant: a bind is only ever superseded by an
-    // operation that also unbinds it, so every non-latest bind at or below
-    // the floor must have a matching unbind at or below the floor. The drop
-    // is only visibility-preserving under that rule; refuse to compact state
-    // that violates it.
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryBinds)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } = row
-        {
-            if *bind_seq <= retention_floor_seq
-                && latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
-                    != Some(&(*bind_seq, *bind_delta_index))
-                && !unbound_at_floor.contains(&(
-                    *parent_inode_id,
-                    name_key.clone(),
-                    *bind_seq,
-                    *bind_delta_index,
-                ))
-            {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "bind at seq `{bind_seq}` delta {bind_delta_index} for parent `{parent_inode_id}` is superseded at or below the retention floor without an unbind; refusing to drop rows"
-                )));
-            }
-        }
-    }
-
-    let retain_bind = |row: &MetadataRow| match row {
-        MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } => {
-            *bind_seq > retention_floor_seq
-                || (latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
-                    == Some(&(*bind_seq, *bind_delta_index))
-                    && !unbound_at_floor.contains(&(
-                        *parent_inode_id,
-                        name_key.clone(),
-                        *bind_seq,
-                        *bind_delta_index,
-                    )))
-        }
-        _ => true,
-    };
     for family in [
         MetadataTableFamily::DirentryBinds,
         MetadataTableFamily::DirentryChildBinds,
     ] {
         if let Some(rows) = rows_by_family.get_mut(&family) {
-            rows.retain(retain_bind);
+            rows.retain(|row| {
+                bind_survives_frozen_floor(row, retention_floor_seq, unbound_at_floor)
+            });
         }
     }
     if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::DirentryUnbinds) {
@@ -1046,7 +1019,10 @@ pub(super) fn drop_rows_below_frozen_floor(
     // the deletion commits before the undelete, runs merge oldest-first, and
     // the selected subset is a prefix of that order, so a marker can never
     // outlive the row it names.
-    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::ActiveDeletions) {
+    if let Some(rows) = rows_by_family
+        .get_mut(&MetadataTableFamily::ActiveDeletions)
+        .filter(|_| scope == FrozenFloorScope::WholePartitions)
+    {
         let revoked: BTreeSet<(ChangeSeq, InodeId)> = rows
             .iter()
             .filter_map(|row| match row {
@@ -1087,7 +1063,109 @@ pub(super) fn drop_rows_below_frozen_floor(
         });
     }
 
-    drop_superseded_attribute_revisions(rows_by_family, retention_floor_seq)?;
+    if scope == FrozenFloorScope::WholePartitions {
+        drop_superseded_attribute_revisions(rows_by_family, retention_floor_seq)?;
+    }
+    Ok(())
+}
+
+/// Whether one bind row survives the frozen floor.
+///
+/// A bind above the floor always survives. At or below it the bind survives
+/// exactly when nothing retired it, because a bind is only ever superseded by
+/// an operation that also unbinds it — the writer invariant
+/// [`refuse_superseded_bind_without_unbind`] refuses to compact without.
+///
+/// Both bind families read this same rule, which is what keeps them dropping
+/// in lockstep: the format gives every bind row exactly one reverse row, and
+/// a run whose two counts disagree does not load. They reach the rule by
+/// different routes — the forward row's unbinds share its partition, the
+/// reverse row's do not — but the rule is one function and the answer is one
+/// answer.
+pub(super) fn bind_survives_frozen_floor(
+    row: &MetadataRow,
+    retention_floor_seq: ChangeSeq,
+    unbound_at_floor: &BTreeSet<BindingGeneration>,
+) -> bool {
+    let MetadataRow::DirentryBind {
+        parent_inode_id,
+        name_key,
+        bind_seq,
+        bind_delta_index,
+        ..
+    } = row
+    else {
+        return true;
+    };
+    *bind_seq > retention_floor_seq
+        || !unbound_at_floor.contains(&(
+            *parent_inode_id,
+            name_key.clone(),
+            *bind_seq,
+            *bind_delta_index,
+        ))
+}
+
+/// Refuses to compact bind rows that break the writer invariant the drop
+/// rests on.
+///
+/// At the floor only the latest bind per (parent, name) slot is visible, and
+/// a bind is only ever superseded by an operation that also unbinds it. So
+/// every non-latest bind at or below the floor must have a matching unbind at
+/// or below the floor. Where that does not hold, dropping by
+/// [`bind_survives_frozen_floor`] would keep a bind no read can reach and
+/// call it live, so the compaction stops instead.
+fn refuse_superseded_bind_without_unbind(
+    bind_rows: &[MetadataRow],
+    retention_floor_seq: ChangeSeq,
+    unbound_at_floor: &BTreeSet<BindingGeneration>,
+) -> Result<()> {
+    let mut latest_bind_at_floor = BTreeMap::new();
+    for row in bind_rows {
+        if let MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } = row
+        {
+            if *bind_seq <= retention_floor_seq {
+                let candidate = (*bind_seq, *bind_delta_index);
+                let latest = latest_bind_at_floor
+                    .entry((*parent_inode_id, name_key.clone()))
+                    .or_insert(candidate);
+                if candidate > *latest {
+                    *latest = candidate;
+                }
+            }
+        }
+    }
+    for row in bind_rows {
+        if let MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } = row
+        {
+            if *bind_seq <= retention_floor_seq
+                && latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
+                    != Some(&(*bind_seq, *bind_delta_index))
+                && !unbound_at_floor.contains(&(
+                    *parent_inode_id,
+                    name_key.clone(),
+                    *bind_seq,
+                    *bind_delta_index,
+                ))
+            {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "bind at seq `{bind_seq}` delta {bind_delta_index} for parent `{parent_inode_id}` is superseded at or below the retention floor without an unbind; refusing to drop rows"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 

@@ -395,6 +395,11 @@ fn sample_reorganizing_manifest_envelope() -> NamespaceManifestEnvelope {
         output_level: 1,
         frozen_floor_seq: ChangeSeq(0),
         cursor: "revision-00000000000000000042".to_owned(),
+        // The fold stands on a partition boundary, which is where it stands
+        // whenever no single partition has outgrown one step.
+        partition_offset: None,
+        canonical_rows_digest: "8f2b1c6d4a90e357700b1d2c3e4f5a6b".to_owned(),
+        index_rows_digest: "8f2b1c6d4a90e357700b1d2c3e4f5a6b".to_owned(),
         output_segments: vec![MetadataFileRef {
             owner_namespace_id: namespace_id(),
             table_id: MetadataTableId::parse("tbl_fedcba9876543210fedcba9876543210")
@@ -523,10 +528,19 @@ fn reorganizing_namespace_manifest_golden_decodes_to_sample() {
         decode_namespace_manifest_json(&read_golden("namespace_manifest.reorganizing.v1.json"))
             .expect("decode golden reorganizing manifest");
     assert_eq!(decoded, sample_reorganizing_manifest_envelope());
-    let progress = decoded.payload.reorganize.expect("progress state");
+    let progress = decoded.payload.reorganize.clone().expect("progress state");
     assert_eq!(progress.output_segments.len(), 1);
     assert_eq!(progress.output_segments[0].run_seq, progress.output_run_seq);
     assert_eq!(progress.output_segments[0].level, progress.output_level);
+    // A fold standing on a partition boundary states nothing about an
+    // offset, so the field is absent from its bytes rather than null.
+    let document: serde_json::Value =
+        serde_json::from_slice(&read_golden("namespace_manifest.reorganizing.v1.json"))
+            .expect("golden manifest json");
+    assert!(!document["payload"]["reorganize"]
+        .as_object()
+        .expect("progress object")
+        .contains_key("partition_offset"));
     // The outputs are not part of the file set readers materialize; only the
     // swap moves them there.
     assert!(!decoded
@@ -534,6 +548,34 @@ fn reorganizing_namespace_manifest_golden_decodes_to_sample() {
         .metadata_files
         .iter()
         .any(|file| file.object_key == progress.output_segments[0].object_key));
+}
+
+/// A fold that has stopped part-way through one partition carries the row key
+/// it wrote up to, and that spelling has to survive the manifest round trip
+/// like everything else the fold resumes from.
+#[test]
+fn a_partial_fold_stopped_inside_a_partition_round_trips_its_offset() {
+    let mut envelope = sample_reorganizing_manifest_envelope();
+    let progress = envelope
+        .payload
+        .reorganize
+        .as_mut()
+        .expect("progress state");
+    progress.partition_offset =
+        Some("revision-00000000000000000042-00000000000000000007-0000000000".to_owned());
+    let envelope =
+        NamespaceManifestEnvelope::from_payload(envelope.payload).expect("re-checksummed manifest");
+
+    let encoded = encode_namespace_manifest_json(&envelope).expect("encode");
+    assert_eq!(
+        decode_namespace_manifest_json(&encoded).expect("decode"),
+        envelope
+    );
+    let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
+    assert_eq!(
+        document["payload"]["reorganize"]["partition_offset"],
+        serde_json::json!("revision-00000000000000000042-00000000000000000007-0000000000")
+    );
 }
 
 fn check_control_golden<T>(fixture: &str, kind: ControlObjectKind, state: T)

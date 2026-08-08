@@ -22,6 +22,7 @@ thiserror.workspace = true
 # sync-only: single-flight primitives; core stays executor-agnostic.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 tracing.workspace = true
+xxhash-rust.workspace = true
 
 [features]
 default = []

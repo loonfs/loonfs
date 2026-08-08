@@ -1490,6 +1490,9 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
         // A revisions-group cursor: the family's row-key prefix and one
         // padded inode id, above every inode the segment below holds.
         cursor: format!("{}{:020}", lookup_keys::REVISION_ROW_PREFIX, u32::MAX),
+        partition_offset: None,
+        canonical_rows_digest: "0".repeat(32),
+        index_rows_digest: "0".repeat(32),
         output_segments: vec![reorganize_output_segment(
             input,
             &namespace_id,
@@ -1505,6 +1508,16 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
     load_perturbed_manifest(&store, &namespace_id, valid, 1)
         .await
         .expect("a manifest whose reorganize state agrees with itself must load");
+
+    // The same state with the fold standing part-way through the cursor's
+    // partition, which is the other position it can be in.
+    let mut inside_partition = progress.clone();
+    inside_partition.partition_offset = Some(partition_offset_key(u32::MAX.into(), 7));
+    let mut valid_inside = payload.clone();
+    valid_inside.reorganize = Some(inside_partition.clone());
+    load_perturbed_manifest(&store, &namespace_id, valid_inside, 2)
+        .await
+        .expect("a manifest whose fold stands inside a partition must load too");
 
     type Perturbation = fn(&mut MetadataReorganizeProgress);
     fn families_are_not_a_group(progress: &mut MetadataReorganizeProgress) {
@@ -1531,7 +1544,30 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
     fn cursor_is_not_a_partition_boundary(progress: &mut MetadataReorganizeProgress) {
         progress.cursor.push_str("-00000000000000000001-0000000000");
     }
-    let state_perturbations: [(&str, Perturbation); 6] = [
+    // A fold with no input merges nothing, and its completing step would swap
+    // an empty run in for a group it never read.
+    fn there_are_no_input_runs(progress: &mut MetadataReorganizeProgress) {
+        progress.input_runs.clear();
+    }
+    fn an_input_run_is_named_twice(progress: &mut MetadataReorganizeProgress) {
+        let repeated = progress.input_runs[0];
+        progress.input_runs.push(repeated);
+    }
+    fn the_canonical_digest_is_not_a_digest(progress: &mut MetadataReorganizeProgress) {
+        progress.canonical_rows_digest = "not a digest".to_owned();
+    }
+    fn the_index_digest_is_not_a_digest(progress: &mut MetadataReorganizeProgress) {
+        progress.index_rows_digest.push_str("00");
+    }
+    // An offset spelled in a family outside the group says nothing about
+    // where inside the partition the fold has got.
+    fn the_offset_is_not_a_row_key_of_the_group(progress: &mut MetadataReorganizeProgress) {
+        progress.partition_offset = Some(lookup_keys::inode_key(InodeId(9)));
+    }
+    fn the_offset_lies_in_another_partition(progress: &mut MetadataReorganizeProgress) {
+        progress.partition_offset = Some(partition_offset_key(5, 7));
+    }
+    let state_perturbations: [(&str, Perturbation); 12] = [
         ("families are not a family group", families_are_not_a_group),
         (
             "input run is not in the manifest",
@@ -1549,6 +1585,24 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
         (
             "cursor is not a partition boundary",
             cursor_is_not_a_partition_boundary,
+        ),
+        ("there are no input runs", there_are_no_input_runs),
+        ("an input run is named twice", an_input_run_is_named_twice),
+        (
+            "the canonical digest is not a digest",
+            the_canonical_digest_is_not_a_digest,
+        ),
+        (
+            "the index digest is not a digest",
+            the_index_digest_is_not_a_digest,
+        ),
+        (
+            "the offset is not a row key of the group",
+            the_offset_is_not_a_row_key_of_the_group,
+        ),
+        (
+            "the offset lies in another partition",
+            the_offset_lies_in_another_partition,
         ),
     ];
     for (index, (label, perturb)) in state_perturbations.iter().enumerate() {
@@ -1591,7 +1645,28 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
     fn output_range_reaches_the_cursor(progress: &mut MetadataReorganizeProgress) {
         progress.output_segments[0].max_key = progress.cursor.clone();
     }
-    let segment_perturbations: [(&str, Perturbation); 6] = [
+    // The checks below are the ones every run descriptor passes. An output
+    // segment becomes a run segment at the swap, so it passes them too, and a
+    // fold that wrote one of these would otherwise build a root that fails on
+    // its next load.
+    fn output_filter_does_not_precede_its_index(progress: &mut MetadataReorganizeProgress) {
+        progress.output_segments[0].filter_block.offset -= 1;
+    }
+    fn output_inline_filter_disagrees_with_its_handle(progress: &mut MetadataReorganizeProgress) {
+        progress.output_segments[0].filter_inline = Some("00".to_owned());
+    }
+    // A fold numbers its outputs from zero in the order it writes them, and
+    // each slice reads that count back to number the segments it adds.
+    fn output_segment_indexes_skip_a_number(progress: &mut MetadataReorganizeProgress) {
+        progress.output_segments[0].segment_index = 3;
+    }
+    // The fold stands inside the cursor's partition, and this segment holds a
+    // row it has not written yet.
+    fn output_range_passes_the_offset(progress: &mut MetadataReorganizeProgress) {
+        progress.partition_offset = Some(partition_offset_key(u32::MAX.into(), 7));
+        progress.output_segments[0].max_key = partition_offset_key(u32::MAX.into(), 9);
+    }
+    let segment_perturbations: [(&str, Perturbation); 10] = [
         ("output segment range is empty", output_range_is_empty),
         (
             "output segment range reaches the cursor",
@@ -1610,13 +1685,29 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
             output_family_is_outside_the_group,
         ),
         ("output segment ranges overlap", output_ranges_overlap),
+        (
+            "output segment filter does not precede its index",
+            output_filter_does_not_precede_its_index,
+        ),
+        (
+            "output segment inline filter disagrees with its handle",
+            output_inline_filter_disagrees_with_its_handle,
+        ),
+        (
+            "output segment indexes skip a number",
+            output_segment_indexes_skip_a_number,
+        ),
+        (
+            "output segment range passes the offset",
+            output_range_passes_the_offset,
+        ),
     ];
     for (index, (label, perturb)) in segment_perturbations.iter().enumerate() {
         let mut perturbed = progress.clone();
         perturb(&mut perturbed);
         let mut candidate = payload.clone();
         candidate.reorganize = Some(perturbed);
-        let error = load_perturbed_manifest(&store, &namespace_id, candidate, 20 + index as u64)
+        let error = load_perturbed_manifest(&store, &namespace_id, candidate, 40 + index as u64)
             .await
             .expect_err(label);
         assert!(
@@ -1624,6 +1715,28 @@ async fn manifest_load_rejects_a_reorganize_state_that_disagrees_with_its_manife
             "{label}: unexpected error {error:?}"
         );
     }
+
+    // An object key that does not follow from the segment's owner and table
+    // id has its own rejection, the one a run descriptor gets.
+    let mut renamed_output = progress.clone();
+    renamed_output.output_segments[0]
+        .object_key
+        .push_str(".moved");
+    let mut candidate = payload.clone();
+    candidate.reorganize = Some(renamed_output);
+    match load_perturbed_manifest(&store, &namespace_id, candidate, 80).await {
+        Err(ManifestLoadError::SegmentObjectKeyMismatch { .. }) => {}
+        other => panic!("an output segment under the wrong object key must not load: {other:?}"),
+    }
+}
+
+/// A revisions-group row key inside `partition`, which is what a partial fold
+/// standing part-way through one partition records as its offset.
+fn partition_offset_key(partition: u64, revision_no: u64) -> String {
+    format!(
+        "{}{partition:020}-{revision_no:020}-0000000000",
+        lookup_keys::REVISION_ROW_PREFIX
+    )
 }
 
 /// One output segment of a partial fold, modelled on a segment the manifest

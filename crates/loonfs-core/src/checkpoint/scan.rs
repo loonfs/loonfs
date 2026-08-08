@@ -152,6 +152,29 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         .await
     }
 
+    /// A point lookup restricted to `runs`, for a partial fold deciding one
+    /// row against the snapshot it is merging rather than against the whole
+    /// manifest. See [`Self::scan_prefix_for_lookup`] for the probe
+    /// contract.
+    pub(super) async fn scan_prefix_in_runs_for_lookup(
+        &self,
+        runs: &[MetadataRunManifest],
+        family: MetadataTableFamily,
+        prefix: &str,
+        filter_probe: &str,
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+        Ok(strip_row_keys(
+            self.scan_prefix_rows_in_runs(
+                runs,
+                family,
+                prefix,
+                Some(filter_probe),
+                Readahead::Disabled,
+            )
+            .await?,
+        ))
+    }
+
     /// [`Self::scan_prefix`] for a point lookup: `filter_probe` is the
     /// family's exact filter key for the value being looked up, so each
     /// candidate segment's bloom filter is consulted before its index or

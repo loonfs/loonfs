@@ -398,6 +398,16 @@ step it gets, saying how many partitions the step covered, how many rows it
 read and wrote, and where it has reached. A final `metadata partial fold
 completed` says the group has been rebuilt into one file set.
 
+Those lines carry a `drops` field with one of two values. `Applied` means
+the step ran every rule that decides which rows the rebuild may let go.
+`PartitionPiece` means the step was working through a single group of
+metadata larger than one step can read — one very large directory, most
+often — and could only run the rules that decide a row on its own. Rows still
+get let go on those steps; what does not run is the handful of rules that
+need to see a row's neighbours. Seeing `PartitionPiece` for a stretch of
+steps is expected on a namespace with one very large directory and needs
+nothing done about it.
+
 Nothing needs doing about any of this. The rebuild records where it is in the
 namespace manifest, so it survives restarts and picks up where it stopped;
 the other groups keep being maintained on the steps in between; and reads

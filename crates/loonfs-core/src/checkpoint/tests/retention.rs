@@ -1714,12 +1714,14 @@ async fn a_base_run_over_the_step_budget_folds_the_group_a_slice_at_a_time() {
     assert!(slices > 0, "the over-budget group must fold in slices");
     assert_eq!(completions, 1, "the fold must finish exactly once");
     assert!(units > 0, "the groups that fit must still fold whole");
+    // Non-decreasing rather than strictly increasing: a fold working through
+    // one partition larger than a step republishes the same cursor with its
+    // offset moved on, and the step outcome carries the cursor only.
     let mut ascending = cursors.clone();
     ascending.sort();
-    ascending.dedup();
     assert_eq!(
         cursors, ascending,
-        "every slice must leave the fold further along than it found it"
+        "no slice may leave the fold further back than it found it"
     );
 
     let after = load_manifest_materialization_for_inspection(

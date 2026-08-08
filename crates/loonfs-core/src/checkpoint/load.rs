@@ -10,7 +10,8 @@ use super::cache::{
     DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheKey,
 };
 use super::error::ManifestLoadError;
-use super::partition::GroupPartitioning;
+use super::partial_fold::parse_row_digest;
+use super::partition::{GroupPartitioning, PartitionCursor};
 use super::runs::{runs_in_materialization_order, runs_in_scan_order, REORGANIZE_FAMILY_GROUPS};
 use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
 use super::validate::{validate_manifest_materialization_ranges, validate_namespace_manifest};
@@ -27,6 +28,7 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId, WriterEpoch};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
 use loonfs_objectstore::ObjectStore;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tracing::Instrument;
@@ -338,45 +340,8 @@ fn validate_manifest_table_descriptors(
         let mut revision_rows = 0u64;
         let mut revision_by_inode_desc_rows = 0u64;
         for table in ordered_tables {
+            validate_segment_descriptors(&table.segments)?;
             for descriptor in &table.segments {
-                let expected_key = metadata_file_object_key(descriptor);
-                if descriptor.object_key != expected_key {
-                    return Err(ManifestLoadError::SegmentObjectKeyMismatch {
-                        object_key: descriptor.object_key.clone(),
-                        expected: expected_key,
-                    });
-                }
-                // The one segment layout: the filter block sits immediately
-                // before the index block at the object tail. The read path
-                // assumes it (a filter fetch extends through the index; the
-                // index ends the object), so a descriptor that disagrees is
-                // rejected here rather than tolerated with slower fetches.
-                let filter_end =
-                    descriptor.filter_block.offset + u64::from(descriptor.filter_block.stored_len);
-                if filter_end != descriptor.index_block.offset {
-                    return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                        object_key: descriptor.object_key.clone(),
-                        message: format!(
-                            "filter block ends at {filter_end} but the index block starts at {}; \
-                             the filter must directly precede the index",
-                            descriptor.index_block.offset
-                        ),
-                    });
-                }
-                if let Some(inline) = &descriptor.filter_inline {
-                    let expected_hex_len = 2 * descriptor.filter_block.stored_len as usize;
-                    if inline.len() != expected_hex_len {
-                        return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                            object_key: descriptor.object_key.clone(),
-                            message: format!(
-                                "inline filter is {} hex chars but the filter block stores {} bytes",
-                                inline.len(),
-                                descriptor.filter_block.stored_len
-                            ),
-                        });
-                    }
-                }
-                validate_segment_key_range(descriptor)?;
                 match table.family {
                     MetadataTableFamily::DirentryBinds => {
                         direntry_bind_rows =
@@ -421,14 +386,90 @@ fn validate_manifest_table_descriptors(
     Ok(())
 }
 
+/// Checks one family's segment descriptors within one run.
+///
+/// Every descriptor the read path may reach goes through this, whether it
+/// sits in `metadata_files` or in the output list of a partial fold: a fold's
+/// outputs become run segments at the swap, and a malformed one is no more
+/// acceptable for having been written by a fold in progress. Rejecting it at
+/// load is what stops a fold from building a root that fails on its next
+/// load.
+fn validate_segment_descriptors(descriptors: &[MetadataFileRef]) -> Result<(), ManifestLoadError> {
+    for descriptor in descriptors {
+        let expected_key = metadata_file_object_key(descriptor);
+        if descriptor.object_key != expected_key {
+            return Err(ManifestLoadError::SegmentObjectKeyMismatch {
+                object_key: descriptor.object_key.clone(),
+                expected: expected_key,
+            });
+        }
+        // The one segment layout: the filter block sits immediately before
+        // the index block at the object tail. The read path assumes it (a
+        // filter fetch extends through the index; the index ends the
+        // object), so a descriptor that disagrees is rejected here rather
+        // than tolerated with slower fetches.
+        let filter_end =
+            descriptor.filter_block.offset + u64::from(descriptor.filter_block.stored_len);
+        if filter_end != descriptor.index_block.offset {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                object_key: descriptor.object_key.clone(),
+                message: format!(
+                    "filter block ends at {filter_end} but the index block starts at {}; \
+                     the filter must directly precede the index",
+                    descriptor.index_block.offset
+                ),
+            });
+        }
+        if let Some(inline) = &descriptor.filter_inline {
+            let expected_hex_len = 2 * descriptor.filter_block.stored_len as usize;
+            if inline.len() != expected_hex_len {
+                return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                    object_key: descriptor.object_key.clone(),
+                    message: format!(
+                        "inline filter is {} hex chars but the filter block stores {} bytes",
+                        inline.len(),
+                        descriptor.filter_block.stored_len
+                    ),
+                });
+            }
+        }
+        validate_segment_key_range(descriptor)?;
+    }
+    Ok(())
+}
+
+/// Checks that one family's output segments of a partial fold are numbered
+/// the way the fold numbers them: from zero, once each, in the order it wrote
+/// them.
+///
+/// The check is the fold's own, not the file set's. A whole-group fold can
+/// stamp a second base run at an existing base run's identity when its window
+/// has to start above that run, so `metadata_files` does hold repeated
+/// segment indexes within one run and family today. A fold's outputs are one
+/// run built by one producer, so there the numbering is an invariant, and
+/// each slice reads the count back to number the segments it adds.
+fn validate_output_segment_numbering(
+    descriptors: &[MetadataFileRef],
+) -> Result<(), ManifestLoadError> {
+    for (position, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.segment_index as usize != position {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                object_key: descriptor.object_key.clone(),
+                message: format!(
+                    "reorganize output segment carries index {} at position {position} of its \
+                     family; a fold numbers its outputs from zero in the order it writes them",
+                    descriptor.segment_index
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Keyed scans prune a segment by this key range: a segment whose max key
 /// sorts below the scan bound is skipped without a read. An empty or
 /// descending range hides every row the segment holds, so a manifest that
 /// carries one is rejected here rather than answering "not found".
-///
-/// A partial fold's output segments go through this too: they become run
-/// segments at the swap, and a range that hides rows is no more acceptable
-/// for having been written by a fold in progress.
 fn validate_segment_key_range(descriptor: &MetadataFileRef) -> Result<(), ManifestLoadError> {
     if descriptor.row_count > 0
         && (descriptor.min_key.is_empty()
@@ -476,7 +517,13 @@ fn validate_manifest_reorganize_progress(
 
     // The input runs stay in `metadata_files` and serve reads until the
     // swap, so a name with no run behind it means the fold has already lost
-    // its input.
+    // its input. A fold with no input at all merges nothing and would swap an
+    // empty run in for a group it never read.
+    if progress.input_runs.is_empty() {
+        return Err(invalid(
+            "reorganize progress names no input run, so it is merging nothing".to_owned(),
+        ));
+    }
     let runs: BTreeSet<MetadataRunId> = payload
         .metadata_files
         .iter()
@@ -485,12 +532,37 @@ fn validate_manifest_reorganize_progress(
             level: descriptor.level,
         })
         .collect();
+    let mut named_inputs = BTreeSet::new();
     for input in &progress.input_runs {
         if !runs.contains(input) {
             return Err(invalid(format!(
                 "reorganize progress names input run seq `{}` level {}, which the manifest does \
                  not reference",
                 input.run_seq, input.level
+            )));
+        }
+        // The completing step drops every named run from the file set at
+        // once, and the selector counts a group's waiting work by excluding
+        // them. A run named twice is a state no builder produces.
+        if !named_inputs.insert(*input) {
+            return Err(invalid(format!(
+                "reorganize progress names input run seq `{}` level {} twice",
+                input.run_seq, input.level
+            )));
+        }
+    }
+
+    // The digests are how the completing step decides whether the run it
+    // built holds the same rows in a secondary index as in its canonical
+    // family. One that does not parse leaves that question unanswerable.
+    for (field, spelled) in [
+        ("canonical_rows_digest", &progress.canonical_rows_digest),
+        ("index_rows_digest", &progress.index_rows_digest),
+    ] {
+        if parse_row_digest(spelled).is_none() {
+            return Err(invalid(format!(
+                "reorganize progress carries `{field}` `{spelled}`, which is not thirty-two \
+                 lowercase hex characters"
             )));
         }
     }
@@ -521,9 +593,61 @@ fn validate_manifest_reorganize_progress(
         ))
     })?;
 
-    let mut previous_by_family: BTreeMap<MetadataTableFamily, &MetadataFileRef> = BTreeMap::new();
+    // A fold that stands inside one oversized partition says so with an
+    // offset, which names the family it is working through and how far. The
+    // outputs it has written reach further for the families already done than
+    // for the ones not started, so the bound below reads the offset too.
+    let offset = match &progress.partition_offset {
+        Some(spelled) => Some(
+            partitioning
+                .parse_partition_offset(&progress.families, &cursor, spelled)
+                .map_err(|why| {
+                    invalid(format!(
+                        "reorganize progress carries an unusable partition offset: {why}"
+                    ))
+                })?,
+        ),
+        None => None,
+    };
+    let written_through = |family: MetadataTableFamily| -> WrittenThrough {
+        let Some(offset) = &offset else {
+            return WrittenThrough::Below(partitioning.family_lower_bound(family, &cursor));
+        };
+        let PartitionCursor::At(partition) = &cursor else {
+            unreachable!("an offset only parses against a cursor standing at a partition")
+        };
+        let position = |family| progress.families.iter().position(|held| *held == family);
+        match position(family).cmp(&position(offset.family)) {
+            // A family the fold has finished for this partition: its rows
+            // reach the partition's end and no further.
+            Ordering::Less => {
+                WrittenThrough::Below(partitioning.family_partition_end(family, partition))
+            }
+            Ordering::Equal => WrittenThrough::AtOrBelow(offset.written_through.clone()),
+            // A family the fold has not reached in this partition: its rows
+            // stop where the partition starts.
+            Ordering::Greater => {
+                WrittenThrough::Below(partitioning.family_lower_bound(family, &cursor))
+            }
+        }
+    };
+
+    // Output segments become run segments at the swap, so they pass the same
+    // checks a run's descriptors pass, per family and in the order the fold
+    // wrote them.
+    let mut segments_by_family: BTreeMap<MetadataTableFamily, Vec<MetadataFileRef>> =
+        BTreeMap::new();
     for segment in &progress.output_segments {
-        validate_segment_key_range(segment)?;
+        if !progress.families.contains(&segment.family) {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                object_key: segment.object_key.clone(),
+                message: format!(
+                    "reorganize output segment holds family `{:?}`, which is outside the folded \
+                     group {:?}",
+                    segment.family, progress.families
+                ),
+            });
+        }
         // Every output segment belongs to the run the fold is building. One
         // stamped otherwise would land in some other run at the swap.
         if segment.run_seq != progress.output_run_seq || segment.level != progress.output_level {
@@ -536,53 +660,80 @@ fn validate_manifest_reorganize_progress(
                 ),
             });
         }
-        if !progress.families.contains(&segment.family) {
-            return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                object_key: segment.object_key.clone(),
-                message: format!(
-                    "reorganize output segment holds family `{:?}`, which is outside the folded \
-                     group {:?}",
-                    segment.family, progress.families
-                ),
-            });
-        }
-        // A fold writes one family's outputs in ascending key order and
-        // never revisits a partition, so two output segments of one family
-        // can neither overlap nor descend. Only segments holding rows carry
-        // a range to compare.
-        if segment.row_count == 0 {
-            continue;
-        }
-        // Everything written so far belongs to a partition the fold has
-        // passed, so it sorts below where the fold now stands. A row at or
-        // above the cursor would be rewritten again by the next step and
-        // land in the finished run twice.
-        let cursor_bound = partitioning.family_lower_bound(segment.family, &cursor);
-        if segment.max_key >= cursor_bound {
-            return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                object_key: segment.object_key.clone(),
-                message: format!(
-                    "reorganize output segment ends at `{}`, at or above the cursor's bound `{}` \
-                     for family `{:?}`",
-                    segment.max_key, cursor_bound, segment.family
-                ),
-            });
-        }
-        if let Some(previous) = previous_by_family.insert(segment.family, segment) {
-            if segment.min_key <= previous.max_key {
+        segments_by_family
+            .entry(segment.family)
+            .or_default()
+            .push(segment.clone());
+    }
+    for (family, segments) in &segments_by_family {
+        validate_segment_descriptors(segments)?;
+        validate_output_segment_numbering(segments)?;
+        let bound = written_through(*family);
+        let mut previous: Option<&MetadataFileRef> = None;
+        for segment in segments {
+            // A fold writes one family's outputs in ascending key order and
+            // never revisits a key, so two output segments of one family can
+            // neither overlap nor descend. Only segments holding rows carry a
+            // range to compare.
+            if segment.row_count == 0 {
+                continue;
+            }
+            // Everything written so far belongs to a key the fold has
+            // passed, so it sorts below where the fold now stands. A row at
+            // or above that would be rewritten again by the next step and
+            // land in the finished run twice.
+            if !bound.admits(&segment.max_key) {
                 return Err(ManifestLoadError::SegmentDescriptorMismatch {
                     object_key: segment.object_key.clone(),
                     message: format!(
-                        "reorganize output segment starts at `{}`, at or below the preceding \
-                         segment's last key `{}` in family `{:?}`",
-                        segment.min_key, previous.max_key, segment.family
+                        "reorganize output segment ends at `{}`, past `{}`, which is as far as \
+                         the fold has written family `{family:?}`",
+                        segment.max_key,
+                        bound.key()
                     ),
                 });
             }
+            if let Some(previous) = previous {
+                if segment.min_key <= previous.max_key {
+                    return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                        object_key: segment.object_key.clone(),
+                        message: format!(
+                            "reorganize output segment starts at `{}`, at or below the preceding \
+                             segment's last key `{}` in family `{family:?}`",
+                            segment.min_key, previous.max_key
+                        ),
+                    });
+                }
+            }
+            previous = Some(segment);
         }
     }
 
     Ok(())
+}
+
+/// How far into one family's keyspace a partial fold has written.
+enum WrittenThrough {
+    /// Every row written sorts strictly below this key.
+    Below(String),
+    /// Every row written sorts at or below this key, which is the last one
+    /// the fold wrote.
+    AtOrBelow(String),
+}
+
+impl WrittenThrough {
+    fn admits(&self, max_key: &str) -> bool {
+        match self {
+            Self::Below(bound) => max_key < bound.as_str(),
+            Self::AtOrBelow(bound) => max_key <= bound.as_str(),
+        }
+    }
+
+    fn key(&self) -> &str {
+        match self {
+            Self::Below(bound) | Self::AtOrBelow(bound) => bound.as_str(),
+        }
+    }
 }
 
 pub(super) fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {

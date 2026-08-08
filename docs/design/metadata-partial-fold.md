@@ -61,6 +61,9 @@ MetadataReorganizeProgress {
     output_level: u32,                    // the base level
     frozen_floor_seq: ChangeSeq,          // the retention floor at walk start
     cursor: String,                       // the next unprocessed partition key (see below)
+    partition_offset: Option<String>,     // how far into the cursor's partition, when it is being folded in pieces
+    canonical_rows_digest: String,        // index-parity digest over the canonical family's written rows
+    index_rows_digest: String,            // the same over the secondary index's written rows
     output_segments: Vec<MetadataFileRef>,  // outputs so far; each descriptor carries its family
 }
 
@@ -73,7 +76,12 @@ tuples encode as bare JSON arrays, and durable ChangeSeq fields carry the
 
 At most one walk exists per manifest. One walk per group is the invariant a
 single field gives us for free; if two groups ever need concurrent walks the
-field becomes a list, and nothing else in this design changes.
+field becomes a list, and nothing else in this design changes. A second group
+that needs a walk while one is in flight waits: it keeps merging its delta
+runs the way it did before partial folds existed, warning each time, and its
+walk starts once the field is free. Starting a second walk is refused rather
+than allowed to replace the state in flight, which would strand every segment
+that walk had written and send it back to the front.
 
 ## The cursor is a partition key, not a row key
 
@@ -109,10 +117,34 @@ Metadata row keys are globally unique (established during #528), so any
 boundary between two partitions is a legal cursor. The cursor stores the
 next unprocessed partition key; a step plans its slice by reading index
 sections (per-block key ranges and row counts are already durable) and takes
-as many whole partitions as fit the row and byte budgets, always at least
-one partition even if that partition alone exceeds them — a walk must never
-park the way the old selector did, and a single partition is bounded by what
-one inode or one directory can accumulate, not by group size.
+as many whole partitions as fit the row and byte budgets.
+
+## One partition larger than one step
+
+A partition is not a bound. One directory can hold millions of entries, and
+one inode's revision history has no limit either, so a walk that accepted its
+first partition whatever it cost would have unbounded step memory, would
+overrun its publication window, and would retry the same partition forever.
+
+When planning finds that the cursor's own partition does not fit either
+budget, the step folds a bounded piece of it instead. `partition_offset`
+records the position inside the partition: the last row key the fold has
+written, and by the family that row key belongs to, which families of the
+group are already done. The families are folded in their declared order, one
+per piece; the piece takes as many whole data blocks of that family as fit
+the budgets and always at least one. When no family has a row left in the
+partition, the offset clears and the cursor moves on, in the same step.
+
+A piece is decided by rules that read no neighbours. Some of the frozen
+floor's rules do read neighbours inside a partition — the active-deletion
+rule needs the marker that cancels a listed row, the attribute rule needs the
+other revisions of the inode, and the bind rule's writer-invariant check
+needs the other binds in the slot — and those do not run over a piece. The
+step says so in its outcome. The two groups that realistically grow a huge
+partition lose nothing to this: revision rows are never dropped at all, and
+for the bindings group the drop rule itself is decided per row by the point
+read described below, so a directory too large to fold whole still sheds its
+retired bindings.
 
 ## Retention during the walk
 
@@ -121,42 +153,63 @@ oldest run — only the output arrives in pieces. Rules are evaluated against
 the floor frozen in the progress state, so every step and every resume
 decides identically.
 
-Two rules need care:
+The bind drop is the rule that needs care, because the rows it reads do not
+always share a slice with the rows it decides:
 
-1. The bind drop consults the set of unbindings at or below the floor.
-   Today that set is built from the whole merged row set in memory. The walk
-   builds it once at walk start by scanning the snapshot's `DirentryUnbinds`
-   family and keeping the at-or-below-floor entries; the scan is charged
-   against the starting step's budgets, and the set is re-derived
-   identically on resume because the floor is frozen and the snapshot is
-   immutable. If the set exceeds a size bound, the walk falls back to
-   no-drop mode for this group and says so in its outcome — a pure rewrite
-   still unfreezes the base, and the next walk drops with a smaller set.
-2. The reverse-index row (`DirentryChildBinds`) for a dropped binding lives
-   in a different partition than the forward row, so the slice holding it
-   holds neither the parent's other binds nor the parent's unbinds. It is
-   decided against the same frozen unbind set rule 1 builds, which is
-   already in memory whenever the walk drops at all: a reverse row is a
-   bind row, carrying its parent, name, sequence, and delta index, which is
-   exactly what the set is keyed by. No extra read is needed, and the two
-   families drop in lockstep by construction.
+1. A bind at or below the floor survives exactly when nothing retired it.
+   The forward rule also asks whether the bind is the latest in its
+   (parent, name) slot, but under the writer invariant — a bind is only ever
+   superseded by an operation that also unbinds it — the two questions have
+   one answer, and the drop pass refuses to compact state that breaks the
+   invariant. So one predicate decides a bind row, and it needs the
+   unbindings of that one binding.
+2. A slice of whole partitions holds them. Binds and the unbinds that retire
+   them share a partition by construction, so the slice's own unbind rows
+   are exactly the set its forward binds are decided against — the same
+   derivation a whole-group fold does, over the slice's rows.
+3. The reverse-index row (`DirentryChildBinds`) is keyed by child, so it
+   never shares a partition with the binds it indexes, and neither does a
+   piece of a partition being folded one family at a time. Those rows are
+   decided by a point read into the snapshot's `DirentryUnbinds` family. A
+   reverse row is a bind row carrying the full binding identity, and the
+   unbind key grammar leads with exactly that identity, so the read is a
+   prefix lookup returning the unbinds of one binding. Only rows at or below
+   the frozen floor cost a read — a bind above the floor survives whatever
+   retired it later — so a slice makes at most one read per such row, and the
+   plan charges the family's rows twice to keep the step inside its row
+   budget. The segment bloom filters are keyed by parent and name, so a
+   binding no operation ever retired misses them outright.
 
-   The forward rule keeps a bind at or below the floor when it is both the
-   latest in its slot and not unbound; the set alone settles the reverse
-   row because a bind is only ever superseded by an operation that also
-   unbinds it, an invariant the drop pass refuses to compact without.
+Both routes run the same two functions over unbind rows from the same
+immutable snapshot against the same frozen floor, so the two bind families
+drop in lockstep. They must: the format gives every bind row exactly one
+reverse row, and manifest load rejects a run whose two counts disagree
+(`validate_manifest_table_descriptors`).
 
-   An earlier draft answered this with point lookups into the snapshot and
-   gave them a share of the step's budget, with a fallback that retained
-   the *dangling* reverse rows on their own — on the grounds that a reverse
-   row whose forward binding is gone is invisible, since visibility
-   requires the forward row, the reverse row, and the inode to agree. Two
-   things were wrong with it. The read argument holds but the run would not
-   publish: the format gives every bind row exactly one reverse row, and
-   manifest load rejects a run whose two counts disagree
-   (`validate_manifest_table_descriptors`). And the lookups bought nothing
-   the frozen set did not already answer, so they are gone along with their
-   budget share.
+An earlier draft built one set of every unbinding at or below the floor,
+once, and held it for the whole walk. It is gone. Deriving it rescanned the
+whole `DirentryUnbinds` family on every step, including on a young family
+where no row enters the set at all; and its over-size fallback could never
+recover, because a walk that rewrites without dropping retains every unbind,
+so the next walk faces the same set plus whatever arrived meanwhile.
+
+## Index parity during the walk
+
+A whole-group fold verifies on every unit that a secondary index holds the
+same rows as its canonical family. A walk cannot do that outright for the
+bind pair: no slice ever holds a bind row and the reverse row that indexes
+it. Two mechanisms cover the two pairs:
+
+- The revisions pair is co-partitioned, so a slice of whole partitions holds
+  both sides and is checked outright, by the same function the whole-group
+  fold calls.
+- Both pairs additionally carry a running digest each, in
+  `canonical_rows_digest` and `index_rows_digest`. Every step folds the rows
+  it wrote into them with an order-independent combiner, so the two agree at
+  the end exactly when the walk wrote the two families the same rows. The
+  completing step requires that before the swap and fails the walk with a
+  corruption error naming the group otherwise. A group with no secondary
+  index leaves both at the zero digest.
 
 ## Interaction rules
 
@@ -190,12 +243,23 @@ checks. A manifest carrying progress is rejected unless:
 
 - `families` equals one `REORGANIZE_FAMILY_GROUPS` entry exactly;
 - every `input_runs` entry names a run present in `runs`;
-- every output segment carries a non-empty ascending key range (the #525
-  check applies as-is), ranges within a family are disjoint and ascending,
-  and every range lies strictly below the cursor's bound for that family;
+- `input_runs` is not empty and names no run twice;
+- every output segment passes the checks a run's descriptors pass: object key
+  agreeing with its owner and table id, the filter block directly preceding
+  the index block, an inline filter whose length matches its handle, and a
+  non-empty ascending key range;
+- output segments of one family are numbered from zero in the order they were
+  written, and their ranges are disjoint and ascending;
+- every output range lies below where the fold has written that family, which
+  is the cursor's bound normally and, when the fold stands inside a partition,
+  the offset for the family it names, the partition's end for the families
+  before it, and the partition's start for the families after it;
 - output segments carry the declared `output_run_seq` and `output_level`;
 - `frozen_floor` is at or below the manifest's current floor;
-- the cursor parses as a partition key for the group.
+- the cursor parses as a partition key for the group;
+- `partition_offset`, when present, parses as a row key of the cursor's
+  partition for one of the group's families;
+- both digest fields parse.
 
 ## Triggering
 
@@ -211,20 +275,24 @@ the runbook gains a paragraph on reading it.
 
 At the default budget a step handles up to 131,072 rows, so a 10-million-row
 group completes in roughly 80 steps — 80 manifest publications on the
-ordinary maintenance cadence. Each step's memory is bounded by the budgets
-plus the unbind set, which has its own bound and fallback.
+ordinary maintenance cadence. A step's memory is the budgets and nothing
+else: the walk holds no derived set, and the only reads beyond the slice are
+the point reads the plan reserves budget for.
 
 ## Implementation plan
 
-Three stacked PRs, in order:
+Four stacked PRs, in order:
 
 1. Format: the progress struct, decode validation, golden fixtures for the
    in-progress shape (existing goldens unchanged), the GC enumeration
    change, and a format.md section.
 2. The walk executor: start, step, complete, resume — driven entirely by
    tests, not yet reachable from the selector. This PR carries the
-   partition-mapping functions per group, the frozen-floor drop pass, the
-   unbind-set derivation with its fallback, and the crash-resume tests.
+   partition-mapping functions per group, the frozen-floor drop pass, and
+   the crash-resume tests.
 3. The trigger: selector integration, group exclusivity, observability,
    runbook, and the end-to-end test — a group past the budget completes a
    walk, its base folds, retention resumes, and the #528 warning stops.
+4. Hardening: pieces for a partition larger than one step, the point read
+   that replaced the frozen unbind set, the index-parity digests, and the
+   full descriptor validation for the state's outputs.

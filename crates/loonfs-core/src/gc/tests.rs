@@ -1999,6 +1999,9 @@ async fn add_reorganize_progress<S: ObjectStore + ?Sized>(
         output_level: modelled_on.level + 1,
         frozen_floor_seq: payload.retention_floor_seq,
         cursor: "inode-00000000000000000009".to_owned(),
+        partition_offset: None,
+        canonical_rows_digest: "0".repeat(32),
+        index_rows_digest: "0".repeat(32),
         output_segments: vec![MetadataFileRef {
             table_id: loonfs_api::MetadataTableId::parse(output_table_id).expect("valid table id"),
             object_key: output_key.clone(),

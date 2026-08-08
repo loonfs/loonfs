@@ -16,9 +16,11 @@ pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_RUNS: usize = 8;
 pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_ROWS: usize = 131_072;
 pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
-/// Rows one page of a partial fold's start-up unbind scan reads. The scan
-/// covers a whole family, so it pages rather than materializing it.
-pub(super) const PARTIAL_FOLD_UNBIND_SCAN_PAGE_ROWS: usize = 4_096;
+/// Point reads a partial fold's slice issues at once when it decides bind
+/// rows whose unbinds sit outside the slice. Each read is a filtered prefix
+/// lookup that usually costs one cached filter block, so a few in flight
+/// hide the round trips without the fan-out a scan's own batching adds.
+pub(super) const PARTIAL_FOLD_PROBE_CONCURRENCY: usize = 16;
 
 pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 pub(super) const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;

@@ -260,6 +260,7 @@ impl FsAdmin {
                 decoded_input_rows,
                 decoded_input_bytes,
                 output_rows,
+                unbind_probes,
                 cursor,
                 drops,
                 ..
@@ -271,6 +272,7 @@ impl FsAdmin {
                     decoded_input_rows,
                     decoded_input_bytes,
                     output_rows,
+                    unbind_probes,
                     cursor = cursor.as_str(),
                     drops = ?drops,
                     "metadata partial fold advanced"

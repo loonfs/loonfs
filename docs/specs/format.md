@@ -2127,9 +2127,9 @@ The state holds:
 - `families`: the family group being rebuilt. It equals one of the family
   groups compaction folds together, exactly.
 - `input_runs`: the runs being merged, as `run_seq` and `level` pairs, fixed
-  when the rebuild started. Every entry names a run the manifest still
-  references. Runs published while the rebuild runs stay out of this set and
-  survive it untouched.
+  when the rebuild started. The set is not empty, names no run twice, and
+  every entry names a run the manifest still references. Runs published while
+  the rebuild runs stay out of this set and survive it untouched.
 - `output_run_seq` and `output_level`: the identity of the single run being
   built. It is fixed at the start and is the base level, so the finished run
   lands where the input runs sat, below every run that arrived meanwhile.
@@ -2137,8 +2137,18 @@ The state holds:
   rules are evaluated against it rather than the live floor, so every step
   and every resumption decides identically.
 - `cursor`: the next unprocessed partition key. A rebuild advances in whole
-  partitions of the group's keyspace and never splits one, so the cursor is
-  always a boundary between two partitions.
+  partitions of the group's keyspace wherever they fit one step, so the
+  cursor is always a boundary between two partitions.
+- `partition_offset`: how far into the cursor's partition the rebuild has
+  got, present only while it is working through a partition larger than one
+  step. The value is the last row key of that partition the rebuild has
+  written; the next step resumes strictly after it, in the family that row
+  key belongs to. The field is omitted whenever the rebuild stands on a
+  partition boundary, which is the ordinary case.
+- `canonical_rows_digest` and `index_rows_digest`: thirty-two lowercase hex
+  characters each, the running digests a rebuild keeps over the rows it has
+  written into a canonical family and into its secondary index. A group with
+  no secondary index leaves both at the zero digest.
 - `output_segments`: the segment descriptors written so far, each carrying
   the declared `output_run_seq` and `output_level` and a family inside the
   group.
@@ -2184,19 +2194,47 @@ zero-padded number everywhere except commit receipts, where it is the hex
 receipt id. The single spelling `~` in place of the component means every
 partition is done. The reverse bind index is keyed by child rather than by
 parent, so it shares the group's partition space without sharing a partition
-with the rows it indexes; a rebuild decides its drops against the retired
-bindings it recorded when it froze the floor, so the two families always drop
-together. They have to: every bind row has exactly one reverse row, and a run
-whose two counts disagree does not load.
+with the rows it indexes; a rebuild decides its drops with a point read into
+the unbind family for the one binding each reverse row names, against the
+same frozen floor the forward rows are decided against, so the two families
+always drop together. They have to: every bind row has exactly one reverse
+row, and a run whose two counts disagree does not load.
+
+**Partitions larger than one step.** A partition is not a bound: one
+directory can hold millions of entries. A rebuild that cannot fit the
+cursor's partition in one step folds a bounded piece of it instead, one
+family of the group at a time in the group's declared order, and records
+where it stopped in `partition_offset`. Drop rules that read a row's
+neighbours inside its own partition do not run over such a piece; the rules
+that decide a row on its own, including the bind rule above, do.
+
+**Index parity.** A group whose families are a canonical family and its
+secondary index must be rebuilt with the same rows in both. The two are not
+always partitioned alike — the reverse bind index never shares a partition
+with the binds it indexes — so no single step sees both halves. Each step
+folds the rows it writes into `canonical_rows_digest` and
+`index_rows_digest` with an order-independent combiner, and the step that
+finishes the rebuild refuses the swap unless the two agree.
 
 **Validation at load.** A manifest carrying the state is rejected unless
-`families` is one of the family groups, every `input_runs` entry names a run
-the manifest references, `frozen_floor_seq` is at or below the manifest's own
-`retention_floor_seq`, the cursor parses as a partition key for the group,
-and every output segment carries the declared run and level, a family inside
-the group, and a non-empty ascending key range that lies below the cursor's
-bound for its family and neither overlaps nor precedes another output segment
-of the same family.
+`families` is one of the family groups; `input_runs` is non-empty, free of
+repeats, and names only runs the manifest references; `frozen_floor_seq` is
+at or below the manifest's own `retention_floor_seq`; the cursor parses as a
+partition key for the group; `partition_offset`, when present, parses as a
+row key of the cursor's partition for one of the group's families; and both
+digests parse.
+
+Output segments are rejected unless each carries the declared run and level
+and a family inside the group, and passes the checks every run descriptor
+passes: an object key that follows from its owner and table id, a filter
+block directly preceding its index block, an inline filter whose length
+matches its handle, and a non-empty ascending key range. Within one family
+the segments are numbered from zero in the order they were written, their
+ranges neither overlap nor descend, and every range lies below where the
+rebuild has written that family — the cursor's bound normally, and when the
+rebuild stands inside a partition, the offset for the family it names, the
+partition's end for the families before it, and the partition's start for the
+families after it.
 
 ### 6.3 Retention management
 

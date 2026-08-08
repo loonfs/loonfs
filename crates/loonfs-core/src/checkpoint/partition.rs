@@ -24,12 +24,17 @@
 //! **parent** inode for the two forward families, because an unbind cancels
 //! the bind under the same parent and name; the reverse index is keyed by
 //! **child**, so it shares the group's partition space without sharing a
-//! partition with the rows it indexes, and the fold decides its drops against
-//! the unbind set it froze at the start rather than against the slice (see
-//! [`super::partial_fold`]). Active deletions partition
+//! partition with the rows it indexes, and the fold decides its drops with a
+//! point read into the snapshot's unbind family rather than from the slice
+//! (see [`super::partial_fold`]). Active deletions partition
 //! by **deletion sequence**, the family's leading key component — not by
 //! root inode, which sits second — and a removal marker repeats its target's
 //! sequence, so the cancelling pair still shares a partition.
+//!
+//! One partition can still be larger than one step may read: a directory has
+//! no size limit, and neither has an inode's revision history. Such a
+//! partition is folded in pieces, and [`PartitionOffset`] is the position
+//! inside it.
 
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 
@@ -63,6 +68,30 @@ pub(super) enum PartitionCursor {
     At(PartitionKey),
     /// Every partition is processed.
     End,
+}
+
+/// How far into one partition a fold has got, when that partition alone is
+/// larger than one step may read.
+///
+/// A fold normally advances in whole partitions. One partition too large for
+/// that is folded in pieces instead, one family at a time in the group's
+/// declared order, and this is the position inside it: the family the fold is
+/// working through and the last row key of that family it has written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PartitionOffset {
+    pub(super) family: MetadataTableFamily,
+    /// The last row key written. The next piece resumes strictly after it,
+    /// which is why callers read it through [`Self::resume_bound`].
+    pub(super) written_through: String,
+}
+
+impl PartitionOffset {
+    /// The least row key the next piece may read: row keys are globally
+    /// unique, so resuming strictly past the last one written skips exactly
+    /// that row.
+    pub(super) fn resume_bound(&self) -> String {
+        format!("{}\0", self.written_through)
+    }
 }
 
 /// What a group's partition keys are made of.
@@ -157,6 +186,59 @@ impl GroupPartitioning {
             .ok_or_else(|| format!("`{component}` is not a partition key of this group"))
     }
 
+    /// Reads back an offset published beside a cursor.
+    ///
+    /// The loader runs this over every manifest that carries a partial fold
+    /// standing inside a partition: the offset says which family the fold is
+    /// working through and how far, so an offset that names no family of the
+    /// group, or a row key of some other partition, is a position the fold
+    /// cannot resume from.
+    pub(super) fn parse_partition_offset(
+        self,
+        group: &[MetadataTableFamily],
+        cursor: &PartitionCursor,
+        spelled: &str,
+    ) -> Result<PartitionOffset, String> {
+        let PartitionCursor::At(partition) = cursor else {
+            return Err(
+                "a fold that has passed every partition cannot stand inside one".to_owned(),
+            );
+        };
+        let family = self
+            .family_of_row_key(group, spelled)
+            .ok_or_else(|| format!("`{spelled}` is not a row key of any family in this group"))?;
+        let offset_partition = self
+            .partition_of_row_key(family, spelled)
+            .ok_or_else(|| format!("`{spelled}` carries no partition key"))?;
+        if offset_partition != *partition {
+            return Err(format!(
+                "`{spelled}` lies in partition {offset_partition:?}, but the cursor stands at \
+                 {partition:?}"
+            ));
+        }
+        Ok(PartitionOffset {
+            family,
+            written_through: spelled.to_owned(),
+        })
+    }
+
+    /// The family of `group` whose row keys `row_key` is spelled in.
+    ///
+    /// The longest matching prefix wins: within the bindings group
+    /// `direntry-child-` and `direntry-unbind-` both extend `direntry-`, so a
+    /// shorter match would claim rows of the wrong family.
+    pub(super) fn family_of_row_key(
+        self,
+        group: &[MetadataTableFamily],
+        row_key: &str,
+    ) -> Option<MetadataTableFamily> {
+        group
+            .iter()
+            .filter(|family| row_key.starts_with(family.row_key_prefix()))
+            .max_by_key(|family| family.row_key_prefix().len())
+            .copied()
+    }
+
     /// The least row key of `family` that `cursor` admits: every row of the
     /// family in the cursor's partition or above sorts at or above this, and
     /// every row below it sorts below.
@@ -166,6 +248,16 @@ impl GroupPartitioning {
         cursor: &PartitionCursor,
     ) -> String {
         self.bound_for(family, cursor)
+    }
+
+    /// The bound one past every row of `family` in `partition`: the lower
+    /// bound of the next partition.
+    pub(super) fn family_partition_end(
+        self,
+        family: MetadataTableFamily,
+        partition: &PartitionKey,
+    ) -> String {
+        self.bound_for(family, &self.cursor_after(partition))
     }
 
     fn bound_for(self, family: MetadataTableFamily, cursor: &PartitionCursor) -> String {

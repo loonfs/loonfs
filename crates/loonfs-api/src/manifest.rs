@@ -909,8 +909,29 @@ pub struct MetadataReorganizeProgress {
     pub frozen_floor_seq: ChangeSeq,
     /// The next unprocessed partition key. The fold advances in whole
     /// partitions of the group's keyspace, so this is always a boundary
-    /// between two partitions and never splits one.
+    /// between two partitions.
     pub cursor: String,
+    /// How far into the cursor's partition the fold has got, when that one
+    /// partition is larger than one step may read and is therefore being
+    /// folded in pieces. The value is the last row key of the partition the
+    /// fold has written; the next step resumes strictly after it, in the
+    /// family that row key belongs to. Absent whenever the fold stands on a
+    /// partition boundary, which is the ordinary case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_offset: Option<String>,
+    /// Order-independent digest of every canonical row the fold has written,
+    /// as thirty-two lowercase hex characters.
+    ///
+    /// A group whose families are a canonical family and its secondary index
+    /// must write the two the same rows. The two families are not always
+    /// partitioned alike, so no single step sees both halves; each step folds
+    /// the rows it writes into these two digests instead, and the step that
+    /// finishes the fold refuses the swap unless they agree. A group with no
+    /// secondary index leaves both at the zero digest.
+    pub canonical_rows_digest: String,
+    /// Order-independent digest of every secondary-index row the fold has
+    /// written; see [`Self::canonical_rows_digest`].
+    pub index_rows_digest: String,
     /// The output segments written so far, each carrying its own family,
     /// `output_run_seq`, and `output_level`. Nothing else references these
     /// objects, so garbage collection roots them through this field.
