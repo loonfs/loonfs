@@ -2017,9 +2017,17 @@ the rewrite selected.
 Compaction rewrites metadata runs (and, in the future, content layouts) into
 more efficient physical shapes.
 
-A base rebuild drops rows that no retained sequence can observe: bindings
-superseded or unbound at or below the retention floor, spent unbind markers,
-and commit receipts below the floor. The floor governs replay state only.
+A rebuild merges an oldest-first run of runs for one family group. It may
+skip runs at the oldest end that are too large to read inside one step's
+budget, and then it merges the runs above them; it never steps over a delta
+run, so its output is always older than every delta run it leaves behind. A
+rebuild that skipped runs drops nothing, because the rules below read across
+the merged rows and a skipped run may hold the other half of a pair.
+
+A base rebuild that starts at the group's oldest run drops rows that no
+retained sequence can observe: bindings superseded or unbound at or below the
+retention floor, spent unbind markers, and commit receipts below the floor.
+The floor governs replay state only.
 Revision rows are never dropped: file revision history is durable data,
 retained in full regardless of the floor, and a revisions listing is always
 complete. Tombstone rows — set and revoke events alike — and inode rows are
@@ -2034,8 +2042,8 @@ rebuild removes there are the cancelled pairs — a `removed` row and the
 `listed` row whose key it repeats, dropped together, since a deletion that was
 undeleted is not state any reader can still observe. A `removed` row can never
 outlive the row it names: the deletion commits before the undelete, runs merge
-oldest-first, and a rebuild's input is a prefix of that order, so both rows are
-always in the same merge.
+oldest-first, and a rebuild only drops rows when its input starts at the
+group's oldest run, so both rows are always in the same merge.
 
 The `attributes` family is folded by the same rule the retention floor gives
 every other superseded row, applied per inode: every revision above the floor

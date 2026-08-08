@@ -88,6 +88,13 @@ decoded row count, and decoded SST data-block bytes. Rows that no retained
 history can observe are dropped during the merge; runs no longer referenced
 by any retained manifest become garbage.
 
+A budget bounds one step, and it never stops a group. When the base run has
+grown past what one step may decode, the fold starts above it and merges the
+delta runs on their own, so the delta count keeps falling. That fold drops
+nothing — the drop rules read across the merged rows, and the base holds
+rows they would need — and the step says so in a warning naming the group,
+the base run's size, and the budget it crossed.
+
 ```
 checkpoints append:          reorganization folds, one group per step:
 
@@ -130,7 +137,9 @@ Two kinds of numbers appear above, with different contracts:
   compression and base segments target 65,536 rows; readers take
   whatever the descriptor and index describe, so both can be retuned
   without a format change.
-- **Reorganization budgets are writer-side defaults.** One step inspects at
+- **Reorganization budgets are writer-side defaults.** One step merges at
   most 8 complete runs and decodes at most 131,072 row payloads or 64 MiB of
-  SST data blocks. A manifest publish is the only progress record, so later
-  steps continue with the runs the prior publish left referenced.
+  SST data blocks. It weighs a few more runs than it merges when it has to
+  start above a base run that no longer fits. A manifest publish is the only
+  progress record, so later steps continue with the runs the prior publish
+  left referenced.

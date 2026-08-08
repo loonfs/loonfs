@@ -181,12 +181,15 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
         });
     };
-    let Some(input) = select_reorganization_input(&tables, group, policy)
+    let selection = select_reorganization_input(&tables, group, policy)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?
-    else {
+        })?;
+    if let Some(bottom) = selection.group_bottom_over_budget {
+        report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
+    }
+    let Some(input) = selection.input else {
         return Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::BudgetExhausted {
@@ -247,7 +250,14 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
-    drop_rows_below_retention_floor(&mut rows_by_family, floor_seq)?;
+    // Dropping is only visibility-preserving over a merge that starts at
+    // the group's oldest run; see
+    // [`ReorganizationInput::starts_at_group_bottom`]. A window that had to
+    // skip older runs merges them exactly as they are, so its output holds
+    // every row its inputs held.
+    if input.starts_at_group_bottom {
+        drop_rows_below_retention_floor(&mut rows_by_family, floor_seq)?;
+    }
 
     let run_tables = build_manifest_tables_from_rows(
         store,
@@ -324,24 +334,84 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     }
 }
 
-struct ReorganizationInput {
-    runs: Vec<MetadataRunManifest>,
+pub(super) struct ReorganizationInput {
+    pub(super) runs: Vec<MetadataRunManifest>,
     run_ids: BTreeSet<(ChangeSeq, u32)>,
     folded_l0_rows: u64,
     decoded_rows: u64,
     decoded_bytes: u64,
+    /// Whether the selected window starts at the group's oldest run.
+    ///
+    /// Retention dropping reads across the merged rows: an unbind cancels
+    /// the bind it names, and a removal marker cancels the listed deletion
+    /// it repeats. Dropping one half of such a pair is only
+    /// visibility-preserving when the other half is in the same merge, and
+    /// what guarantees that is starting the merge at the group's oldest
+    /// run — the cancelling row is always the newer of the two, so every row
+    /// it can cancel is already in the window (format spec, "Compaction").
+    pub(super) starts_at_group_bottom: bool,
 }
 
-/// Selects the existing compacted accumulator followed by L0 runs
-/// oldest-first. Index sections are read before row payloads so the
-/// decoded-byte budget is known exactly from each data block's durable
-/// `decoded_len`; a run that would cross a budget is not decoded or
-/// partially included.
-async fn select_reorganization_input<S: ObjectStore + ?Sized>(
+/// What one selection attempt found.
+///
+/// The saturation record travels beside the input because the caller
+/// reports it on both paths: a group whose oldest run has outgrown one
+/// step's budget still folds its newer runs, and that is exactly when an
+/// operator needs to hear that the run underneath them is frozen.
+pub(super) struct ReorganizationSelection {
+    pub(super) input: Option<ReorganizationInput>,
+    pub(super) group_bottom_over_budget: Option<OverBudgetRun>,
+}
+
+/// A run that does not fit one step's budgets on its own.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OverBudgetRun {
+    pub(super) run_seq: ChangeSeq,
+    pub(super) level: u32,
+    pub(super) rows: u64,
+    /// The run's decoded byte total, or `None` when the row budget ruled
+    /// the run out before its byte total was read.
+    pub(super) decoded_bytes: Option<u64>,
+}
+
+/// Selects a contiguous window of complete runs to merge, oldest-first.
+///
+/// **The order.** The comparator below is the group's recency order, oldest
+/// first. Base-tier runs hold rows an earlier fold already absorbed, so they
+/// sit under every L0 run whatever their `run_seq` says: a bounded fold
+/// stamps its output at the manifest head, which can leave a base run
+/// carrying a higher `run_seq` than an L0 run it did not fold (see
+/// [`manifest_has_partial_reorganization`]). Within one tier the lower
+/// `run_seq` is the older run.
+///
+/// **The invariant.** A merge writes its inputs back as one base-tier run
+/// stamped at the manifest head. That output is older than every L0 run in
+/// the order above, so it may not carry a row newer than an L0 run it left
+/// behind — otherwise a later fold could drop a row while the row it cancels
+/// sits outside the window. Two rules keep that true. The window is a
+/// *contiguous* slice of the order, and its start only ever moves forward
+/// past **base-tier** runs; an L0 run is never stepped over. Every run the
+/// window leaves out therefore sits wholly below it or wholly above it, never
+/// interleaved, and the output can stand in for the whole window without
+/// moving any row past any other. When the window starts at the very bottom
+/// nothing is left out below it at all, and that is the stronger property
+/// retention dropping needs — see
+/// [`ReorganizationInput::starts_at_group_bottom`].
+///
+/// **The budgets pace the work; they never end it.** When no window starting
+/// at the group's oldest run can fit the budgets, the start moves past the
+/// base-tier runs that block it and the step merges the L0 runs above them
+/// on their own. The group keeps shedding runs even while the run at its
+/// bottom stays too large to fold.
+///
+/// Index sections are read before row payloads so the decoded-byte budget is
+/// known exactly from each data block's durable `decoded_len`; a run that
+/// would cross a budget is not decoded or partially included.
+pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     group: &[MetadataTableFamily],
     policy: MetadataLsmPolicy,
-) -> std::result::Result<Option<ReorganizationInput>, ManifestLoadError> {
+) -> std::result::Result<ReorganizationSelection, ManifestLoadError> {
     let mut candidates = tables
         .scan_runs
         .iter()
@@ -360,46 +430,132 @@ async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         u64::try_from(policy.max_decoded_input_rows_per_step.get()).unwrap_or(u64::MAX);
     let byte_budget =
         u64::try_from(policy.max_decoded_input_bytes_per_step.get()).unwrap_or(u64::MAX);
+    let max_runs = policy.max_input_runs_per_step.get();
+    // Base-tier runs sort first, so this is also the index of the oldest L0
+    // candidate. The window start may move up to it and no further.
+    let base_tier_candidates = candidates
+        .iter()
+        .take_while(|run| run.level != CHECKPOINT_L0_RUN_LEVEL)
+        .count();
+    let window_starts = (base_tier_candidates + 1)
+        .min(candidate_count)
+        .min(max_runs);
+    // Reading a run's decoded byte total costs its index sections, so each
+    // candidate's total is read at most once however many windows weigh it.
+    let mut decoded_bytes_by_candidate = vec![None::<u64>; candidate_count];
+    let mut group_bottom_over_budget = None;
 
-    let mut runs = Vec::new();
-    let mut decoded_rows = 0u64;
-    let mut decoded_bytes = 0u64;
-    let mut folded_l0_rows = 0u64;
-    for run in candidates
-        .into_iter()
-        .take(policy.max_input_runs_per_step.get())
-    {
-        let run_rows = group_run_descriptors(run, group)
-            .map(|descriptor| descriptor.row_count)
-            .sum::<u64>();
-        if decoded_rows.saturating_add(run_rows) > row_budget {
-            break;
+    for window_start in 0..window_starts {
+        let mut runs = Vec::new();
+        let mut decoded_rows = 0u64;
+        let mut decoded_bytes = 0u64;
+        let mut folded_l0_rows = 0u64;
+        for index in window_start..candidate_count.min(window_start + max_runs) {
+            let run = candidates[index];
+            let run_rows = group_run_descriptors(run, group)
+                .map(|descriptor| descriptor.row_count)
+                .sum::<u64>();
+            if decoded_rows.saturating_add(run_rows) > row_budget {
+                // Index zero is only reached by the first window, whose
+                // accumulator is still empty there, so this is the group's
+                // oldest run failing the budget on its own.
+                if index == 0 {
+                    group_bottom_over_budget = Some(OverBudgetRun {
+                        run_seq: run.run_seq,
+                        level: run.level,
+                        rows: run_rows,
+                        decoded_bytes: None,
+                    });
+                }
+                break;
+            }
+            let run_bytes = match decoded_bytes_by_candidate[index] {
+                Some(bytes) => bytes,
+                None => {
+                    let bytes = decoded_group_run_bytes(tables, run, group).await?;
+                    decoded_bytes_by_candidate[index] = Some(bytes);
+                    bytes
+                }
+            };
+            if decoded_bytes.saturating_add(run_bytes) > byte_budget {
+                if index == 0 {
+                    group_bottom_over_budget = Some(OverBudgetRun {
+                        run_seq: run.run_seq,
+                        level: run.level,
+                        rows: run_rows,
+                        decoded_bytes: Some(run_bytes),
+                    });
+                }
+                break;
+            }
+            if run.level == CHECKPOINT_L0_RUN_LEVEL {
+                folded_l0_rows = folded_l0_rows.saturating_add(run_rows);
+            }
+            decoded_rows = decoded_rows.saturating_add(run_rows);
+            decoded_bytes = decoded_bytes.saturating_add(run_bytes);
+            runs.push(run.clone());
         }
-        let run_bytes = decoded_group_run_bytes(tables, run, group).await?;
-        if decoded_bytes.saturating_add(run_bytes) > byte_budget {
-            break;
+
+        // Every merge writes one base-tier run, so each L0 run it takes
+        // leaves L0 for good and the group's L0 count strictly falls. That
+        // is the whole progress condition, and it is what makes the fold
+        // terminate: a window holding no L0 run would only rewrite base-tier
+        // rows where they stand, forever.
+        let makes_progress = runs.iter().any(|run| run.level == CHECKPOINT_L0_RUN_LEVEL);
+        if !makes_progress {
+            continue;
         }
-        if run.level == CHECKPOINT_L0_RUN_LEVEL {
-            folded_l0_rows = folded_l0_rows.saturating_add(run_rows);
-        }
-        decoded_rows = decoded_rows.saturating_add(run_rows);
-        decoded_bytes = decoded_bytes.saturating_add(run_bytes);
-        runs.push(run.clone());
+        let run_ids = runs.iter().map(|run| (run.run_seq, run.level)).collect();
+        return Ok(ReorganizationSelection {
+            input: Some(ReorganizationInput {
+                runs,
+                run_ids,
+                folded_l0_rows,
+                decoded_rows,
+                decoded_bytes,
+                starts_at_group_bottom: window_start == 0,
+            }),
+            group_bottom_over_budget,
+        });
     }
 
-    let selected_l0 = runs.iter().any(|run| run.level == CHECKPOINT_L0_RUN_LEVEL);
-    let makes_progress = selected_l0 && (runs.len() > 1 || candidate_count == 1);
-    if !makes_progress {
-        return Ok(None);
-    }
-    let run_ids = runs.iter().map(|run| (run.run_seq, run.level)).collect();
-    Ok(Some(ReorganizationInput {
-        runs,
-        run_ids,
-        folded_l0_rows,
-        decoded_rows,
-        decoded_bytes,
-    }))
+    Ok(ReorganizationSelection {
+        input: None,
+        group_bottom_over_budget,
+    })
+}
+
+/// Says out loud that a family group's oldest run no longer fits one
+/// reorganization step.
+///
+/// Nothing is broken when this fires and nothing stalls: folds keep merging
+/// the newer runs above the run named here. What stops is reclamation of
+/// that run's rows, because no step can rewrite a run it cannot read whole.
+/// The group's run count therefore drifts up over time. Raising
+/// `max_decoded_input_rows_per_step` and `max_decoded_input_bytes_per_step`
+/// past the numbers in this line is the operator's lever.
+///
+/// One line per step: a step is already the unit maintenance schedules, so
+/// the cadence of the warning is the cadence of maintenance.
+fn report_group_bottom_over_budget(
+    namespace_id: &NamespaceId,
+    group: &[MetadataTableFamily],
+    bottom: &OverBudgetRun,
+    policy: MetadataLsmPolicy,
+) {
+    tracing::warn!(
+        namespace_id = namespace_id.as_str(),
+        families = ?group,
+        run_seq = bottom.run_seq.0,
+        run_level = bottom.level,
+        run_rows = bottom.rows,
+        run_decoded_bytes = bottom.decoded_bytes,
+        max_decoded_input_rows_per_step = policy.max_decoded_input_rows_per_step.get(),
+        max_decoded_input_bytes_per_step = policy.max_decoded_input_bytes_per_step.get(),
+        "the oldest metadata run in this family group no longer fits one reorganization step; \
+         folds skip it and merge the newer runs, so its rows are never reclaimed and the \
+         group's run count grows",
+    );
 }
 
 /// A bounded fold stamps its output at the manifest head. If older or
@@ -456,7 +612,7 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
 
 /// The family group with the most L0 rows to fold; ties resolve in group
 /// order. `None` when no group has L0 rows.
-fn select_family_group(
+pub(super) fn select_family_group(
     payload: &NamespaceManifestPayload,
 ) -> Option<&'static [MetadataTableFamily]> {
     REORGANIZE_FAMILY_GROUPS
