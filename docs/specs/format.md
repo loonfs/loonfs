@@ -381,8 +381,8 @@ to such a write:
    that is already occupied. A writer that lands inside that window is not
    refused. Incremental writes are therefore for immutable, uniquely-named
    keys, where the condition is a corruption tripwire rather than a
-   concurrency control, and a caller that must also catch the concurrent case
-   observes the object again before it relies on it.
+   concurrency control; a caller that needs two writers kept off one key
+   must exclude them itself, as staging does in §2.4.2.
 
 ### 1.8 Provider conformance
 
@@ -1052,6 +1052,18 @@ one per id. Retrying *within* one upload session reuses that session's id and
 therefore its object, which is where staging idempotency now lives. An
 orphaned content object — one whose upload never completed — is harmless
 because nothing can reference an id that was never published.
+
+Because every request against one session writes one object key, staging is
+**exclusive**: a request takes a durable claim on the session record before it
+writes, and gives it back in the same compare-and-swap that records what it
+wrote. A second request that arrives while the claim is held is refused and
+writes nothing. This is required rather than an optimization — step 3's
+create-if-absent condition cannot be part of a multipart write (§1.7 rule 2),
+so two requests that both found the key absent would both assemble over it,
+and the one that lost the record swap would leave its bytes behind under the
+winner's digest. The claim carries no expiry of its own: it is honoured only
+while the session is open, so the session's lease bounds it and a request
+cancelled while holding it costs that session the rest of its lease.
 
 **Direct upload** hands the transfer to the client instead of proxying it. The
 client declares the size and SHA-256 of bytes it already holds; the server

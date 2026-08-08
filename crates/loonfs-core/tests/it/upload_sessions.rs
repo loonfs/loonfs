@@ -19,8 +19,11 @@ use loonfs_core::{
 use loonfs_objectstore::keys::{upload_session, upload_session_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+};
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 async fn begin_upload<S: ObjectStore + ?Sized>(
@@ -487,6 +490,119 @@ mod streamed_content {
             Bytes::from(bytes),
             "a refused upload must not have rewritten what the session staged"
         );
+    }
+
+    /// Two staging requests against one session, overlapped so the second
+    /// starts while the first is still writing the object.
+    ///
+    /// This is the shape that used to corrupt the session. Both requests
+    /// would find the key absent, both would assemble over it, and the one
+    /// that lost the record compare-and-swap would leave its bytes behind
+    /// under the winner's digest. The payloads here are the same length and
+    /// different bytes, which is exactly the pair a size comparison cannot
+    /// tell apart, so nothing downstream could have caught it.
+    ///
+    /// The staging claim is what settles it: exactly one request writes, the
+    /// other is refused before it touches the object, and the reference the
+    /// session recorded describes the object byte for byte.
+    #[tokio::test]
+    async fn one_session_admits_one_writer_and_records_what_that_writer_wrote() {
+        let temp_dir = tempdir().expect("tempdir");
+        let blocking = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::content_blob(),
+            OperationClass::Put,
+        ));
+        let context = mutation_context();
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(blocking.as_ref(), &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        let begin = begin_upload(blocking.as_ref(), &namespace_id, &context)
+            .await
+            .expect("begin upload");
+
+        let first_bytes = payload();
+        let mut second_bytes = first_bytes.clone();
+        // Same length, different bytes.
+        second_bytes[0] ^= 0xff;
+        assert_eq!(first_bytes.len(), second_bytes.len());
+
+        // Park only the first content write, so the second request runs to
+        // whatever conclusion the protocol gives it rather than parking too.
+        blocking.block_next();
+        let first = tokio::spawn({
+            let blocking = Arc::clone(&blocking);
+            let namespace_id = namespace_id.clone();
+            let upload_id = begin.upload_id().clone();
+            let context = context.clone();
+            let bytes = first_bytes.clone();
+            async move {
+                upload_streamed(
+                    blocking.as_ref(),
+                    &namespace_id,
+                    &upload_id,
+                    &bytes,
+                    &context,
+                )
+                .await
+            }
+        });
+        blocking.wait_until_blocked().await;
+
+        // The second request arrives while the first still holds the claim.
+        let second = upload_streamed(
+            blocking.as_ref(),
+            &namespace_id,
+            begin.upload_id(),
+            &second_bytes,
+            &context,
+        )
+        .await;
+
+        blocking.release();
+        let first = first.await.expect("first staging task");
+
+        // Whichever request the protocol lets through, the session must end
+        // up holding a digest that describes the object. This is the
+        // assertion the shared-key race breaks: without the claim both
+        // requests write, and the session records one request's digest over
+        // the other request's bytes.
+        let staged = match (first, second) {
+            (Ok(staged), Err(refused)) => {
+                assert_eq!(refused.code(), ErrorCode::UploadContentConflict);
+                staged
+            }
+            (Err(refused), Ok(staged)) => {
+                assert_eq!(refused.code(), ErrorCode::UploadContentConflict);
+                staged
+            }
+            (Ok(_), Ok(_)) => panic!("two requests staged into one session"),
+            (Err(first), Err(second)) => {
+                panic!("no request staged: {first:?} then {second:?}")
+            }
+        };
+
+        let catalog =
+            loonfs_core::control::load_namespace_catalog_entry(blocking.as_ref(), &namespace_id)
+                .await
+                .expect("catalog");
+        let object_key = content_blob(
+            catalog.content_store_id().as_str(),
+            &staged.content_ref.content_id,
+        );
+        let stored = blocking
+            .get(&object_key, None)
+            .await
+            .expect("read staged object")
+            .expect("staged object exists");
+        assert_eq!(
+            staged.content_ref,
+            ContentRef::blob_v1(staged.content_ref.content_id.clone(), &stored),
+            "the recorded reference must describe the object byte for byte"
+        );
+        // The claim admits the first writer, so those are the bytes that last.
+        assert_eq!(stored, Bytes::from(first_bytes));
     }
 }
 

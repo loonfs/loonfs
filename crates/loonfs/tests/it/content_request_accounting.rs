@@ -522,11 +522,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .expect("complete upload with proof");
     let prepared = completed.prepared;
     assert_eq!(prepared.content_ref(), &completed.response.content_ref);
-    // One object HEAD and nothing else: the completion checks that the object
-    // the session staged is still the object it staged, because a streamed
-    // staging write past the store's multipart threshold cannot make its
-    // create-only condition part of the write. It never reads the blob.
-    assert_content_counts(harness.recording.snapshot(), 1, 0, 0, 0);
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
     harness.recording.reset();
 
     harness

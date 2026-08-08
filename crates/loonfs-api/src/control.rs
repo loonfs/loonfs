@@ -687,6 +687,24 @@ pub enum UploadSessionLifecycle {
         /// completed one names its content once, below.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         staged_content: Option<ContentRef>,
+        /// Unix-millisecond stamp of the staging request currently writing
+        /// the content object, or `None` when no request holds the slot.
+        ///
+        /// The claim is what makes staging exclusive. A service-proxied
+        /// session writes one object key, and a provider cannot make the
+        /// create-only condition on a multipart write part of the write, so
+        /// two requests that both found the key absent would both assemble
+        /// over it and only one of them would record its digest. Taking this
+        /// claim is a compare-and-swap, so exactly one request writes at a
+        /// time and the recorded reference always describes the object.
+        ///
+        /// It carries no expiry of its own. The claim is honoured only while
+        /// the session is open, so `expires_at_ms` above bounds it: a request
+        /// that is cancelled while holding the claim leaves the session
+        /// unable to stage until its lease passes, and garbage collection
+        /// aborts the session at exactly that point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        staging_claimed_at_ms: Option<u64>,
     },
     /// Terminal: the content is durable and verified. This is the only state
     /// a receipt may be minted from, and the content reference it carries is
@@ -806,6 +824,32 @@ impl UploadSessionState {
                 "upload session `{}` writes past the service but holds staged content",
                 self.upload_id
             )),
+            // Only a proxied session stages, so only a proxied session can
+            // hold the claim that makes staging exclusive.
+            (
+                UploadSessionTransport::DirectPut { .. }
+                | UploadSessionTransport::DirectMultipart { .. },
+                UploadSessionLifecycle::Open {
+                    staging_claimed_at_ms: Some(_),
+                    ..
+                },
+            ) => Err(format!(
+                "upload session `{}` writes past the service but holds a staging claim",
+                self.upload_id
+            )),
+            // The compare-and-swap that records staged content is the one
+            // that releases the claim, so the two never stand together.
+            (
+                UploadSessionTransport::ServiceProxied {},
+                UploadSessionLifecycle::Open {
+                    staged_content: Some(_),
+                    staging_claimed_at_ms: Some(_),
+                    ..
+                },
+            ) => Err(format!(
+                "upload session `{}` holds a staging claim over content it already staged",
+                self.upload_id
+            )),
             (
                 UploadSessionTransport::DirectPut { promised_content },
                 UploadSessionLifecycle::Completed { content_ref, .. },
@@ -872,6 +916,8 @@ enum StrictUploadSessionLifecycle {
         expires_at_ms: u64,
         #[serde(default)]
         staged_content: Option<StrictContentRef>,
+        #[serde(default)]
+        staging_claimed_at_ms: Option<u64>,
     },
     Completed {
         completed_at_ms: u64,
@@ -888,9 +934,11 @@ impl From<StrictUploadSessionLifecycle> for UploadSessionLifecycle {
             StrictUploadSessionLifecycle::Open {
                 expires_at_ms,
                 staged_content,
+                staging_claimed_at_ms,
             } => Self::Open {
                 expires_at_ms,
                 staged_content: staged_content.map(Into::into),
+                staging_claimed_at_ms,
             },
             StrictUploadSessionLifecycle::Completed {
                 completed_at_ms,

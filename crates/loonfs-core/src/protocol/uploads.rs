@@ -442,6 +442,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         state: UploadSessionLifecycle::Open {
             expires_at_ms: context.now_ms.saturating_add(UPLOAD_SESSION_LEASE_MS),
             staged_content: None,
+            staging_claimed_at_ms: None,
         },
     };
     let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
@@ -527,6 +528,119 @@ fn staged_content(state: &UploadSessionLifecycle) -> Option<&ContentRef> {
     }
 }
 
+/// What a staging request found when it asked for the right to write.
+enum StagingSlot {
+    /// The request holds the claim and is the only one that may write.
+    Claimed,
+    /// The session already staged content, so nothing is written. The
+    /// caller decides from this reference whether its bytes are the same
+    /// upload arriving twice or a conflicting one.
+    AlreadyStaged(ContentRef),
+}
+
+/// Takes the exclusive right to write this session's content object.
+///
+/// A proxied session writes one object key, and past the store's multipart
+/// threshold the create-only condition on that write cannot be part of the
+/// write (see [`stage_streamed_under_content_id`]). Two requests that both
+/// found the key absent would therefore both assemble over it, and the one
+/// that lost the record compare-and-swap would leave its bytes behind under
+/// the winner's digest. This compare-and-swap is what stops that: exactly
+/// one request holds the claim, so only one ever writes.
+///
+/// A session that already staged content needs no claim, because nothing
+/// will be written — the caller answers from the reference instead.
+async fn claim_staging_slot<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    now_ms: u64,
+) -> Result<StagingSlot> {
+    update_upload_session(
+        store,
+        namespace_id,
+        upload_id,
+        CONTENTION_RETRY_LIMIT,
+        |mut state| {
+            let upload_id = upload_id.to_owned();
+            async move {
+                if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
+                    return Err(error);
+                }
+                if let Some(staged) = staged_content(&state.state) {
+                    return Ok(UploadSessionUpdate::Noop(StagingSlot::AlreadyStaged(
+                        staged.clone(),
+                    )));
+                }
+                let UploadSessionLifecycle::Open {
+                    staging_claimed_at_ms,
+                    ..
+                } = &mut state.state
+                else {
+                    return Err(CoreError::UploadNotFound { upload_id });
+                };
+                // Another request is writing the object right now. Its bytes
+                // are not this request's to overwrite, and its digest is not
+                // this request's to displace.
+                if staging_claimed_at_ms.is_some() {
+                    return Err(CoreError::UploadContentConflict { upload_id });
+                }
+                *staging_claimed_at_ms = Some(now_ms);
+                Ok(UploadSessionUpdate::Replace {
+                    next: Box::new(state),
+                    outcome: StagingSlot::Claimed,
+                })
+            }
+        },
+    )
+    .await
+}
+
+/// Gives the staging claim back after a write that will never be recorded.
+///
+/// Best effort on purpose. The claim is bounded by the session's own lease,
+/// so a release lost to a crash costs the session the rest of that lease and
+/// nothing more; failing the caller's request over it would replace a
+/// recoverable error with a worse one.
+async fn release_staging_claim<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+) {
+    let released = update_upload_session(
+        store,
+        namespace_id,
+        upload_id,
+        CONTENTION_RETRY_LIMIT,
+        |mut state| async move {
+            let UploadSessionLifecycle::Open {
+                staging_claimed_at_ms,
+                ..
+            } = &mut state.state
+            else {
+                return Ok(UploadSessionUpdate::Noop(()));
+            };
+            if staging_claimed_at_ms.take().is_none() {
+                return Ok(UploadSessionUpdate::Noop(()));
+            }
+            Ok(UploadSessionUpdate::Replace {
+                next: Box::new(state),
+                outcome: (),
+            })
+        },
+    )
+    .await;
+    if let Err(error) = released {
+        tracing::warn!(
+            namespace_id = %namespace_id,
+            upload_id = %upload_id,
+            error = %error,
+            "failed to release the staging claim of a failed upload; \
+             the session cannot stage again until its lease passes"
+        );
+    }
+}
+
 /// What one session's transport is called in a message to its client.
 fn transport_name(transport: &UploadSessionTransport) -> &'static str {
     match transport {
@@ -548,59 +662,110 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     bytes: &[u8],
+    context: &MutationContext,
 ) -> Result<UploadContentResponse> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
+    let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
+    if let Some(error) = terminal_session_error(&loaded.state, upload_id.clone()) {
+        return Err(error);
+    }
+    if !matches!(loaded.transport, UploadSessionTransport::ServiceProxied {}) {
+        return Err(CoreError::InvalidUploadContent(format!(
+            "{} sessions must be completed after using the presigned URLs",
+            transport_name(&loaded.transport)
+        )));
+    }
 
+    let content_ref = ContentRef::blob_v1(loaded.content_id.clone(), bytes);
+    let response = UploadContentResponse {
+        namespace_id: namespace_id.clone(),
+        upload_id: upload_id.clone(),
+        content_ref: content_ref.clone(),
+    };
+    // The claim is what makes the write exclusive, so it is taken before any
+    // byte is written and released by the same swap that records the result.
+    match claim_staging_slot(store, namespace_id, upload_id, context.now_ms).await? {
+        StagingSlot::AlreadyStaged(staged) if staged == content_ref => return Ok(response),
+        StagingSlot::AlreadyStaged(_) => {
+            return Err(CoreError::UploadContentConflict {
+                upload_id: upload_id.clone(),
+            })
+        }
+        StagingSlot::Claimed => {}
+    }
+
+    let stored = match stage_bytes_under_content_id(
+        store,
+        content_store_id,
+        loaded.content_id.clone(),
+        bytes,
+    )
+    .await
+    {
+        Ok(stored) => stored,
+        Err(error) => {
+            release_staging_claim(store, namespace_id, upload_id).await;
+            return Err(error);
+        }
+    };
+
+    record_staged_content(store, namespace_id, upload_id, stored.content_ref, false).await
+}
+
+/// Records what a staging write produced and releases the claim it held, in
+/// the one compare-and-swap that makes the staged reference the session's.
+///
+/// `already_present` says the store refused to create the object because the
+/// key was occupied. Only this session can name that key, and the claim means
+/// no other request on it was writing, so an occupied key holds bytes from an
+/// earlier attempt of this session that never recorded them. Equal bytes are
+/// that attempt arriving again; different bytes are a conflict.
+async fn record_staged_content<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    content_ref: ContentRef,
+    already_present: bool,
+) -> Result<UploadContentResponse> {
     update_upload_session(
         store,
         namespace_id,
         upload_id,
         CONTENTION_RETRY_LIMIT,
         |mut state| {
-            let content_store_id = content_store_id.clone();
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
+            let content_ref = content_ref.clone();
             async move {
                 if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
                     return Err(error);
                 }
-                if !matches!(state.transport, UploadSessionTransport::ServiceProxied {}) {
-                    return Err(CoreError::InvalidUploadContent(format!(
-                        "{} sessions must be completed after using the presigned URLs",
-                        transport_name(&state.transport)
-                    )));
-                }
-
-                let content_ref = ContentRef::blob_v1(state.content_id.clone(), bytes);
-                if let Some(existing) = staged_content(&state.state) {
-                    if existing == &content_ref {
-                        return Ok(UploadSessionUpdate::Noop(UploadContentResponse {
-                            namespace_id,
-                            upload_id,
-                            content_ref,
-                        }));
+                let response = UploadContentResponse {
+                    namespace_id,
+                    upload_id: upload_id.clone(),
+                    content_ref: content_ref.clone(),
+                };
+                match staged_content(&state.state) {
+                    Some(existing) if existing == &content_ref => {
+                        Ok(UploadSessionUpdate::Noop(response))
                     }
-                    return Err(CoreError::UploadContentConflict { upload_id });
+                    Some(_) => Err(CoreError::UploadContentConflict { upload_id }),
+                    None if already_present => Err(CoreError::UploadContentConflict { upload_id }),
+                    None => {
+                        if let UploadSessionLifecycle::Open {
+                            staging_claimed_at_ms,
+                            ..
+                        } = &mut state.state
+                        {
+                            *staging_claimed_at_ms = None;
+                        }
+                        *open_staging_slot(&mut state.state, &upload_id)? = Some(content_ref);
+                        Ok(UploadSessionUpdate::Replace {
+                            next: Box::new(state),
+                            outcome: response,
+                        })
+                    }
                 }
-
-                let stored = stage_bytes_under_content_id(
-                    store,
-                    content_store_id,
-                    state.content_id.clone(),
-                    bytes,
-                )
-                .await?;
-                *open_staging_slot(&mut state.state, &upload_id)? =
-                    Some(stored.content_ref.clone());
-
-                Ok(UploadSessionUpdate::Replace {
-                    next: Box::new(state),
-                    outcome: UploadContentResponse {
-                        namespace_id,
-                        upload_id,
-                        content_ref: stored.content_ref,
-                    },
-                })
             }
         },
     )
@@ -623,6 +788,7 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     body: ByteStream,
+    context: &MutationContext,
 ) -> Result<UploadContentResponse> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
@@ -640,65 +806,45 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     // rewritten while the answer is being worked out. Reading the body
     // without writing it decides the question: the same bytes are one
     // upload arriving twice, and different bytes are a conflict either way.
-    if let Some(staged) = staged_content(&loaded.state) {
-        let content_ref = identify_streamed_payload(loaded.content_id.clone(), body).await?;
-        if staged != &content_ref {
-            return Err(CoreError::UploadContentConflict {
+    // Taking the claim is what establishes that nothing else is writing.
+    match claim_staging_slot(store, namespace_id, upload_id, context.now_ms).await? {
+        StagingSlot::AlreadyStaged(staged) => {
+            let content_ref = identify_streamed_payload(loaded.content_id.clone(), body).await?;
+            if staged != content_ref {
+                return Err(CoreError::UploadContentConflict {
+                    upload_id: upload_id.clone(),
+                });
+            }
+            return Ok(UploadContentResponse {
+                namespace_id: namespace_id.clone(),
                 upload_id: upload_id.clone(),
+                content_ref,
             });
         }
-        return Ok(UploadContentResponse {
-            namespace_id: namespace_id.clone(),
-            upload_id: upload_id.clone(),
-            content_ref,
-        });
+        StagingSlot::Claimed => {}
     }
 
-    let staged =
-        stage_streamed_under_content_id(store, content_store_id, loaded.content_id.clone(), body)
-            .await?;
+    let staged = match stage_streamed_under_content_id(
+        store,
+        content_store_id,
+        loaded.content_id.clone(),
+        body,
+    )
+    .await
+    {
+        Ok(staged) => staged,
+        Err(error) => {
+            release_staging_claim(store, namespace_id, upload_id).await;
+            return Err(error);
+        }
+    };
 
-    update_upload_session(
+    record_staged_content(
         store,
         namespace_id,
         upload_id,
-        CONTENTION_RETRY_LIMIT,
-        |mut state| {
-            let namespace_id = namespace_id.clone();
-            let upload_id = upload_id.to_owned();
-            let content_ref = staged.content_ref.clone();
-            let already_present = staged.already_present;
-            async move {
-                if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
-                    return Err(error);
-                }
-                let response = UploadContentResponse {
-                    namespace_id,
-                    upload_id: upload_id.clone(),
-                    content_ref: content_ref.clone(),
-                };
-                match staged_content(&state.state) {
-                    Some(existing) if existing == &content_ref => {
-                        Ok(UploadSessionUpdate::Noop(response))
-                    }
-                    Some(_) => Err(CoreError::UploadContentConflict { upload_id }),
-                    // Nothing is recorded yet, so an occupied key holds
-                    // bytes this session never acknowledged writing. Past the
-                    // store's multipart threshold `already_present` cannot
-                    // see a concurrent request that occupies the key after
-                    // this write observed it absent; `complete_upload` reads
-                    // the object again and is the backstop for that case.
-                    None if already_present => Err(CoreError::UploadContentConflict { upload_id }),
-                    None => {
-                        *open_staging_slot(&mut state.state, &upload_id)? = Some(content_ref);
-                        Ok(UploadSessionUpdate::Replace {
-                            next: Box::new(state),
-                            outcome: response,
-                        })
-                    }
-                }
-            }
-        },
+        staged.content_ref,
+        staged.already_present,
     )
     .await
 }
@@ -1369,7 +1515,7 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
                     "completed content ref does not match staged content".to_owned(),
                 ));
             }
-            verify_staged_content_object(store, content_store_id, staged).await
+            Ok(CompletionOutcome::Verified(staged.clone()))
         }
         CompletionPlan::DirectPut {
             requested,
@@ -1411,56 +1557,6 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
             .await
         }
     }
-}
-
-/// Checks that the object a proxied session staged is still the object that
-/// session staged.
-///
-/// The staging write hashed its own bytes, so the reference is trusted. The
-/// object is not, because a second request against the same session can
-/// write over it. A streamed write past the store's multipart threshold
-/// cannot make its create-only condition part of the write (see
-/// [`stage_streamed_under_content_id`]), so the second request assembles its
-/// own bytes over the first request's object. The `already_present` guard in
-/// [`upload_streamed_content`] usually refuses that second request, but it
-/// cannot see a writer that lands inside its own window. The second request
-/// is then refused a record while its bytes sit at the key, and the session
-/// keeps holding the first request's digest. This check catches that, so the
-/// reference is never frozen and published.
-///
-/// One `head` decides it, and it decides it by size. A proxied reference
-/// carries the SHA-256 this server folded over the payload. The provider's
-/// stored checksum is a different number: Cloudflare R2 stores a CRC-64/NVME
-/// it computed itself, and an AWS S3 multipart object's SHA-256 covers the
-/// part digests rather than the payload. So
-/// [`verify_durable_content_checksum`] has nothing to compare here, and the
-/// direct transports use it only because their references name the algorithm
-/// the provider stores. Size does not tell two payloads of the same length
-/// apart. A completion whose object is missing or a different length can
-/// never publish.
-async fn verify_staged_content_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
-    staged: &ContentRef,
-) -> Result<CompletionOutcome> {
-    let object_key = content_blob(content_store_id.as_str(), &staged.content_id);
-    let observed = store
-        .head(&object_key)
-        .await
-        .map_err(|err| CoreError::store(&object_key, &err))?;
-    let Some(observed) = observed else {
-        return Ok(CompletionOutcome::Unusable(format!(
-            "staged content object `{object_key}` is gone"
-        )));
-    };
-    if observed.size_bytes != staged.size_bytes {
-        return Ok(CompletionOutcome::Unusable(format!(
-            "staged content object `{object_key}` holds {} bytes, not the {} bytes this session \
-             staged",
-            observed.size_bytes, staged.size_bytes
-        )));
-    }
-    Ok(CompletionOutcome::Verified(staged.clone()))
 }
 
 /// Asks the provider to assemble the parts a client uploaded, then proves
@@ -1570,7 +1666,7 @@ mod tests {
         )
         .await
         .expect("begin upload");
-        let staged = upload_content(store, &namespace_id, begin.upload_id(), BYTES)
+        let staged = upload_content(store, &namespace_id, begin.upload_id(), BYTES, context)
             .await
             .expect("stage upload");
         let content_store_id = load_namespace_content_store_id(store, &namespace_id)
@@ -1650,55 +1746,6 @@ mod tests {
             }
         ));
         assert!(store.head(&content_key).await.expect("head").is_none());
-    }
-
-    /// A streamed write past the store's multipart threshold cannot make its
-    /// create-only condition part of the write, so a second request against
-    /// one session can assemble its own bytes over the object the session
-    /// staged and be refused only its record. The completion reads the object
-    /// and refuses to freeze a reference the object no longer matches.
-    #[tokio::test]
-    async fn a_completion_refuses_a_staged_object_that_was_written_over() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let setup = context(1_000);
-        let (namespace_id, content_store_id, upload_id, content_ref, content_key) =
-            staged_session(&store, &setup).await;
-
-        // What the refused request's multipart completion leaves at the key.
-        store
-            .put_overwrite(
-                &content_key,
-                Bytes::from_static(b"bytes from a second request"),
-            )
-            .await
-            .expect("overwrite the staged object");
-
-        let error = complete(
-            &store,
-            &namespace_id,
-            &content_store_id,
-            &upload_id,
-            &content_ref,
-            &context(2_000),
-        )
-        .await
-        .expect_err("a staged object that was written over cannot be frozen");
-        assert!(matches!(error, CoreError::InvalidUploadContent(_)));
-
-        let state = read_upload_session_state(&store, &namespace_id, &upload_id)
-            .await
-            .expect("session still readable");
-        assert!(matches!(
-            state.state,
-            UploadSessionLifecycle::Aborted {
-                aborted_at_ms: 2_000
-            }
-        ));
-        assert!(
-            store.head(&content_key).await.expect("head").is_none(),
-            "the object nothing can name again is removed",
-        );
     }
 
     /// Completion is terminal in the other direction. An abort cannot
@@ -1789,7 +1836,7 @@ mod tests {
         )
         .await
         .expect("complete");
-        let error = upload_content(&store, &namespace_id, &upload_id, BYTES)
+        let error = upload_content(&store, &namespace_id, &upload_id, BYTES, &context(2_000))
             .await
             .expect_err("a completed session takes no more bytes");
         assert!(matches!(error, CoreError::UploadAlreadyCompleted { .. }));
@@ -1811,9 +1858,15 @@ mod tests {
         )
         .await
         .expect("abort");
-        let error = upload_content(&store, &namespace_id, aborted.upload_id(), BYTES)
-            .await
-            .expect_err("an aborted session takes no more bytes");
+        let error = upload_content(
+            &store,
+            &namespace_id,
+            aborted.upload_id(),
+            BYTES,
+            &context(3_000),
+        )
+        .await
+        .expect_err("an aborted session takes no more bytes");
         assert!(matches!(error, CoreError::UploadNotFound { .. }));
     }
 
