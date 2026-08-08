@@ -56,13 +56,19 @@ reorganize: Option<MetadataReorganizeProgress>
 
 MetadataReorganizeProgress {
     families: Vec<MetadataTableFamily>,   // must equal one REORGANIZE_FAMILY_GROUPS entry
-    input_runs: Vec<(run_seq, level)>,    // the snapshot; every entry must exist in `runs`
+    input_runs: Vec<MetadataRunId>,       // named {run_seq, level} pairs; every entry must exist in `runs`
     output_run_seq: ChangeSeq,            // fixed at walk start: the head seq of the starting step
     output_level: u32,                    // the base level
-    frozen_floor: ChangeSeq,              // the retention floor at walk start
+    frozen_floor_seq: ChangeSeq,          // the retention floor at walk start
     cursor: String,                       // the next unprocessed partition key (see below)
-    output_segments: Vec<MetadataTableManifest>,  // outputs so far, grouped per family
+    output_segments: Vec<MetadataFileRef>,  // outputs so far; each descriptor carries its family
 }
+
+The field spellings follow the format layer as built: `MetadataFileRef` is
+the durable descriptor type (the doc originally said the core-side grouping
+view, which has no durable encoding), input runs are named structs because
+tuples encode as bare JSON arrays, and durable ChangeSeq fields carry the
+`_seq` suffix.
 ```
 
 At most one walk exists per manifest. One walk per group is the invariant a
