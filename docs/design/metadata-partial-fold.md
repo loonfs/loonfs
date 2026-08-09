@@ -1,210 +1,387 @@
-# Partial folds: reorganizing a family group larger than one step
+# Partial metadata folds for large family groups
 
-Status: approved for implementation. Follow-up to the liveness fix in #528,
-which made an over-budget group survivable and loud. This design makes it
-foldable again.
+Status: approved for implementation.
 
-## The problem
+Current maintenance behavior prevents an oversized metadata family group from
+blocking all reorganization work, but it cannot reorganize the oversized
+group itself. This design divides that work across multiple maintenance
+steps.
 
-Reorganization folds a family group as one unit: a fold reads every row of
-every input run and writes the merged result back as one base run.
-`max_decoded_input_rows_per_step` (131,072 rows) bounds what one step may
-decode, and nothing splits a group, so a group whose base run alone exceeds
-the budget can never fold again. After #528 such a group keeps merging its
-delta runs among themselves and logs a warning, but three things stay
-degraded permanently: the base is frozen, run count drifts up, and retention
-for the group stops entirely, because rows are only dropped by a fold whose
-input starts at the group's oldest run.
+## Summary
 
-The ceiling is low. The revisions group carries two rows per revision and
-never drops them, so it crosses at roughly 65,000 revisions namespace-wide.
-The bindings group crosses at roughly 65,000 live files. Raising the budget
-buys a single-digit multiple and costs step memory; it is a lever, not a fix.
+A metadata fold currently reads and rewrites a complete family group in one
+maintenance step. The default step limit is 131,072 decoded rows. If the
+group's base run exceeds that limit, no later fold can include the base run.
 
-## The design in one paragraph
+A partial fold divides that work by partition. The manifest records the input
+run set, completed output segments, retention floor, and next partition. Each
+maintenance step processes one or more complete partitions. The final step
+replaces the selected input descriptors with the completed output descriptors
+in one manifest publication.
 
-A fold that cannot read its input whole becomes a walk. The step that starts
-it records, durably in the manifest, the exact input run set (the snapshot),
-the identity of the output run, the retention floor frozen at that moment,
-and a cursor. Each step merges one bounded slice of the snapshot's keyspace
-into fresh output segments and publishes the manifest with the outputs
-accumulated so far and the cursor advanced. Readers never consult any of it:
-the snapshot runs stay in `runs` and serve reads exactly as before, and the
-outputs stay inside the progress state until the completing step atomically
-replaces the snapshot runs with the finished output run and clears the
-progress. A walk interrupted anywhere resumes from the cursor in the last
-published manifest.
+The read path continues to use the original input descriptors until the
+partial fold completes. In-progress output descriptors are stored only in the
+progress record and are not visible to metadata reads.
 
-The grep index already reorganizes this way (see
-`docs/design/content-search-index.md`, "partitioned segment reorganize", and
-`GrepReorganizeState`). This design borrows its shape with one deliberate
-difference: grep serves snapshot and outputs together, because postings are
-add-only and readers that union them see duplicates, never gaps. Metadata
-rows must appear exactly once — scans concatenate runs with no
-deduplication — so here the outputs are invisible until the swap. That
-keeps the read path byte-for-byte unchanged, which is where most of the
-risk in the earlier sketch lived.
+## Current limitation
 
-## Durable state
+Reorganization operates on a family group because some metadata families must
+be compacted together. A normal fold:
 
-`NamespaceManifestPayload` gains one optional field, skipped when absent, so
-every existing manifest encodes byte-identically and no golden fixture
-changes:
+1. selects an oldest-first set of complete runs;
+2. reads every row for the selected family group;
+3. applies retention rules;
+4. writes replacement base-level segments; and
+5. publishes a manifest that replaces the selected input descriptors.
 
-```
+`max_decoded_input_rows_per_step` limits the decoded input to 131,072 rows by
+default. The selection cannot split a run. Once the base run for a family
+group exceeds the limit, every selection that includes that base also exceeds
+the limit.
+
+With the current fallback behavior, maintenance can still merge newer delta
+runs for that group and can reorganize other groups. However, the oversized
+base remains unchanged, the number of runs can continue to increase, and
+retention rules are not applied to that group. Retention requires a fold that
+begins with the oldest run.
+
+This limit is reachable in normal use:
+
+- The revisions group stores two rows per revision and does not discard them.
+  It reaches the default limit at about 65,000 revisions in one namespace.
+- The bindings group can reach the limit at about 65,000 live files.
+
+Increasing the step limit only delays the same failure and increases memory
+usage. It does not remove the dependency on total group size.
+
+## Requirements
+
+The partial-fold implementation must:
+
+- make progress when a family group is larger than one maintenance step;
+- preserve the existing metadata read path;
+- keep in-progress output invisible until completion;
+- resume from the last published manifest after a restart;
+- apply retention against one fixed floor for the entire operation;
+- preserve metadata created after the operation starts; and
+- keep all referenced output objects reachable by garbage collection.
+
+Only one partial fold may be active in a namespace manifest. Concurrent
+partial folds are outside the scope of this design.
+
+## Terms
+
+- **Family group:** the set of metadata families that reorganization processes
+  together.
+- **Input run set:** the run identities selected when the partial fold starts.
+  Only descriptors for the selected family group are replaced.
+- **Partition:** rows that must be processed in the same step because their
+  retention decisions depend on one another.
+- **Cursor:** the next partition that has not been processed.
+- **In-progress output:** replacement segments already written by completed
+  steps but not yet available to metadata reads.
+
+## Operation
+
+### Start
+
+The first step performs the following work:
+
+1. Select a family group and an oldest-first input run set.
+2. Record the current retention floor as `frozen_floor_seq`.
+3. Assign the output run identity. Its sequence is the manifest head sequence
+   at the start of the operation, and its level is the base level.
+4. Set the phase to `primary_families` and the cursor to that phase's first
+   partition.
+5. Process the first bounded range of complete partitions.
+6. Publish the progress record and any output segments from this step.
+
+The selected input descriptors remain in `metadata_files`. This keeps them
+available to the read path and to later partial-fold steps.
+
+### Advance
+
+Each later step:
+
+1. loads the progress record from the current manifest;
+2. selects complete partitions beginning at the cursor;
+3. merges the selected rows from the recorded input run set;
+4. applies retention using `frozen_floor_seq`;
+5. writes new output segments;
+6. appends their descriptors to `output_segments`; and
+7. publishes a manifest with the updated cursor.
+
+Most family groups have only the `primary_families` phase. The bindings group
+uses a second phase because its reverse index has a different key order. After
+the parent-keyed binding families are complete, publish a phase transition to
+`binding_reverse_index` and reset the cursor to the first child-keyed
+partition. The output from both phases remains invisible until the second
+phase completes.
+
+A publication conflict is handled by the existing manifest compare-and-swap
+rules. Output written by a step that loses the compare-and-swap is
+unreferenced and can be reclaimed by garbage collection. A retry loads the
+new current manifest before doing more work.
+
+### Complete
+
+After the final partition, one manifest publication:
+
+1. removes descriptors that belong to both the selected family group and the
+   recorded input run set;
+2. adds all descriptors from `output_segments` to `metadata_files`;
+3. retains descriptors for other family groups, including descriptors that
+   share an input run identity;
+4. retains runs published after the partial fold started; and
+5. clears the progress record.
+
+This publication is the visibility point. A metadata read uses either the
+complete input set or the complete output set. No published manifest exposes
+both sets for the selected family group.
+
+## Durable manifest state
+
+`NamespaceManifestPayload` gains an optional `reorganize` field. The field is
+omitted when no partial fold is active, so existing manifests keep their
+current encoded form.
+
+```text
 reorganize: Option<MetadataReorganizeProgress>
 
-MetadataReorganizeProgress {
-    families: Vec<MetadataTableFamily>,   // must equal one REORGANIZE_FAMILY_GROUPS entry
-    input_runs: Vec<MetadataRunId>,       // named {run_seq, level} pairs; every entry must exist in `runs`
-    output_run_seq: ChangeSeq,            // fixed at walk start: the head seq of the starting step
-    output_level: u32,                    // the base level
-    frozen_floor_seq: ChangeSeq,          // the retention floor at walk start
-    cursor: String,                       // the next unprocessed partition key (see below)
-    output_segments: Vec<MetadataFileRef>,  // outputs so far; each descriptor carries its family
+MetadataRunId {
+    run_seq: ChangeSeq,
+    level: u32,
 }
 
-The field spellings follow the format layer as built: `MetadataFileRef` is
-the durable descriptor type (the doc originally said the core-side grouping
-view, which has no durable encoding), input runs are named structs because
-tuples encode as bare JSON arrays, and durable ChangeSeq fields carry the
-`_seq` suffix.
+MetadataReorganizePhase {
+    PrimaryFamilies,
+    BindingReverseIndex,
+}
+
+MetadataReorganizeProgress {
+    families: Vec<MetadataTableFamily>,
+    input_runs: Vec<MetadataRunId>,
+    output_run_seq: ChangeSeq,
+    output_level: u32,
+    frozen_floor_seq: ChangeSeq,
+    phase: MetadataReorganizePhase,
+    cursor: String,
+    output_segments: Vec<MetadataFileRef>,
+}
 ```
 
-At most one walk exists per manifest. One walk per group is the invariant a
-single field gives us for free; if two groups ever need concurrent walks the
-field becomes a list, and nothing else in this design changes.
+The fields have the following meanings:
 
-## The cursor is a partition key, not a row key
+- `families` must exactly match one entry in
+  `REORGANIZE_FAMILY_GROUPS`, including order.
+- `input_runs` identifies the selected runs by the durable `run_seq` and
+  `level` fields. Named fields are used instead of JSON arrays.
+- `output_run_seq` and `output_level` are fixed when the operation starts.
+- `frozen_floor_seq` is the only retention floor used by the operation.
+- `phase` selects the key order currently being processed. The reverse-index
+  phase is valid only for the bindings group.
+- `cursor` encodes the next partition key in the current phase.
+- `output_segments` contains the durable `MetadataFileRef` descriptors written
+  by completed steps. Each descriptor includes its family, run sequence, and
+  level.
 
-Each group names a partition key that every one of its families' row keys is
-prefixed by, and the walk advances in whole partitions. A step never splits
-a partition. This is what keeps the retention drop rules local:
+`MetadataFileRef` is used here because it is the durable descriptor type. The
+grouped table and run types in `loonfs-core` are derived in-memory views and do
+not have durable encodings.
 
-- Revisions group: partition = inode id. `Revisions` and
-  `RevisionsByInodeDesc` both prefix on the inode. Revision rows are never
-  dropped, so this walk is a pure rewrite.
-- Bindings group: partition = parent inode id for `DirentryBinds` and
-  `DirentryUnbinds`, whose cancellation pairs share a (parent, name). The
-  reverse index `DirentryChildBinds` is keyed by child and does not align;
-  its handling is defined below.
-- `Inodes`, `Tombstones`, `ActiveDeletions`, `CommitReceipts`,
-  `Attributes`: single-family groups. Partition = the family's own leading
-  prefix (inode id, root inode id, deletion root, receipt id, inode id).
-  `ActiveDeletions` pairs (a removal marker and the listed row it cancels)
-  live in one family by construction — the group comment says so — and the
-  partition must keep each pair together. `Attributes` supersession is
-  per-inode. `CommitReceipts` drop by horizon, a per-row rule that needs no
-  neighbors.
+## Partition boundaries
 
-Each family maps a partition boundary to a key bound with a small pure
-function per group. The implementation must state, as a tested invariant per
-group, that every cancellation-coupled row pair maps to the same partition.
+The cursor identifies a partition in the current phase, not an individual
+row. A step never splits a partition. This ensures that rows needed for one
+retention decision are available in the same step whenever their key order
+permits it.
 
-Metadata row keys are globally unique (established during #528), so any
-boundary between two partitions is a legal cursor. The cursor stores the
-next unprocessed partition key; a step plans its slice by reading index
-sections (per-block key ranges and row counts are already durable) and takes
-as many whole partitions as fit the row and byte budgets, always at least
-one partition even if that partition alone exceeds them — a walk must never
-park the way the old selector did, and a single partition is bounded by what
-one inode or one directory can accumulate, not by group size.
+| Phase and families | Partition key | Reason |
+| --- | --- | --- |
+| Primary: `Revisions`, `RevisionsByInodeDesc` | inode ID | Both indexes use the inode ID as their leading key. Revision rows are rewritten but not discarded. |
+| Primary: `DirentryBinds`, `DirentryUnbinds` | parent inode ID | A binding and its matching unbinding share the parent-and-name prefix. |
+| Binding reverse index: `DirentryChildBinds` | child inode ID | The reverse index uses a different leading key and is processed after the forward output is complete. |
+| Primary: `Inodes` | inode ID | Each inode row is independent for retention. |
+| Primary: `Tombstones` | root inode ID | Rows for one tombstone root stay together. |
+| Primary: `ActiveDeletions` | deletion root | A listed deletion row and its removal marker stay together. |
+| Primary: `CommitReceipts` | receipt ID | Expiration is evaluated per row. |
+| Primary: `Attributes` | inode ID | Attribute supersession is evaluated per inode. |
 
-## Retention during the walk
+Each phase needs a pure mapping from its partition key to the corresponding
+row-key bound for every family in that phase. Tests must prove that every pair
+of rows used by a cancellation rule maps to the same primary partition. The
+reverse-index phase uses the completed forward output as described below.
 
-Drops stay legal because the walk's input is the whole group from its
-oldest run — only the output arrives in pieces. Rules are evaluated against
-the floor frozen in the progress state, so every step and every resume
-decides identically.
+Metadata row keys are globally unique. The cursor therefore can use the
+boundary between two partitions without identifying a specific row.
 
-Two rules need care:
+### Step planning and limits
 
-1. The bind drop consults the set of unbindings at or below the floor.
-   Today that set is built from the whole merged row set in memory. The walk
-   builds it once at walk start by scanning the snapshot's `DirentryUnbinds`
-   family and keeping the at-or-below-floor entries; the scan is charged
-   against the starting step's budgets, and the set is re-derived
-   identically on resume because the floor is frozen and the snapshot is
-   immutable. If the set exceeds a size bound, the walk falls back to
-   no-drop mode for this group and says so in its outcome — a pure rewrite
-   still unfreezes the base, and the next walk drops with a smaller set.
-2. The reverse-index row (`DirentryChildBinds`) for a dropped binding lives
-   in a different partition than the forward row. Its drop decision uses
-   the same frozen predicate, answered by point lookups into the snapshot
-   (bloom filters make the common live-binding case cheap), charged against
-   the step's budgets. If the implementation finds the lookups too
-   expensive, the stated fallback is to retain dangling reverse rows: a
-   reverse row whose forward binding is gone is invisible — visibility
-   requires the forward row, the reverse row, and the inode to agree — so
-   the cost is space until the next walk, not correctness.
+Segment index entries provide block key ranges, row counts, and decoded byte
+counts. Planning uses this metadata to select as many complete partitions as
+fit within the row and byte limits.
 
-## Interaction rules
+At least one complete partition must be selected. If one partition exceeds a
+limit by itself, the step processes that partition anyway. The row and byte
+limits are therefore soft limits at a partition boundary, not strict memory
+limits. This design removes the limit on total family-group size, but it does
+not place a strict bound on the size of one inode or directory partition.
+Strictly bounding an oversized partition would require a separate design for
+splitting retention dependencies across steps.
 
-- While a group has a walk in progress, that group performs only walk
-  steps. No delta merges for it, no second fold. Other groups reorganize
-  normally. Delta merges for the group resume after the swap.
-- Runs that arrive during the walk stay out of the snapshot and survive it
-  untouched, exactly as in grep.
-- The output run's seq is fixed at walk start and its level is the base
-  level, so at swap time it sits below every run that arrived during the
-  walk, in the same position the snapshot occupied.
-- The swap is one manifest publication: remove the snapshot runs from
-  `runs`, insert the completed output run, clear `reorganize`. Readers go
-  from seeing the snapshot to seeing the output in one step; no manifest
-  ever shows both to a scan.
+After a step, every output key range must be before the new cursor bound for
+its family. This makes the cursor sufficient to determine which partitions
+have completed.
 
-## Garbage collection
+## Retention
 
-Progress output segments are referenced only by the progress state, so the
-function that enumerates a manifest's referenced objects must include them —
-otherwise GC reaps a walk's outputs mid-walk. This covers the current live
-set and the reference-anchor manifest from #529 through the same
-enumeration. The snapshot runs are still in `runs` and need nothing new. A
-walk abandoned by crash resumes rather than leaking: every output segment is
-named by the manifest that survives the crash.
+The input run set begins with the group's oldest run, so the same retention
+rules used by a normal fold remain valid. Every step uses
+`frozen_floor_seq`, even if the namespace retention floor advances while the
+partial fold is active. Using an older floor is conservative: it can retain
+extra rows but cannot remove rows that are still observable.
 
-## Validation at load
+Most retention rules are local to the partitions in the table above. The
+bindings group requires two additional rules.
 
-The #525 rule: an invariant a builder maintains is an invariant the loader
-checks. A manifest carrying progress is rejected unless:
+### Binding and unbinding rows
 
-- `families` equals one `REORGANIZE_FAMILY_GROUPS` entry exactly;
-- every `input_runs` entry names a run present in `runs`;
-- every output segment carries a non-empty ascending key range (the #525
-  check applies as-is), ranges within a family are disjoint and ascending,
-  and every range lies strictly below the cursor's bound for that family;
-- output segments carry the declared `output_run_seq` and `output_level`;
-- `frozen_floor` is at or below the manifest's current floor;
-- the cursor parses as a partition key for the group.
+Dropping a binding requires the set of matching unbindings at or below the
+retention floor. A normal fold builds this set from all merged rows in memory.
+For a partial fold, derive the set from the snapshot's
+`DirentryUnbinds` descriptors and `frozen_floor_seq`.
 
-## Triggering
+The scan and the set both count toward configured limits. Use index metadata
+to avoid starting a scan that is already known to exceed those limits. Stop
+the derivation if the runtime limit is reached. In either case, process the
+step in conservative no-drop mode for this family group. No-drop mode still
+rewrites the selected partitions and reduces run count; it only postpones
+retention for those rows.
 
-The #528 selector already detects the condition: the bottom-anchored window
-cannot fit the budgets. Where today it warns and falls back to delta
-merges, it will: advance the walk if one exists for the group; start one if
-the group has delta-run pressure or an over-budget base; otherwise behave
-as today. The #528 warning keeps firing until a walk starts, then the walk
-reports progress (partitions done, rows written) in the step outcome, and
-the runbook gains a paragraph on reading it.
+The set may be cached during one process lifetime, but it is not part of the
+durable state. After a restart, recompute it from the immutable input run set
+and the fixed retention floor. A successful recomputation produces the same
+set. A no-drop result remains correct because retaining an otherwise
+discardable row is safe.
 
-## Sizing
+### Reverse binding index
 
-At the default budget a step handles up to 131,072 rows, so a 10-million-row
-group completes in roughly 80 steps — 80 manifest publications on the
-ordinary maintenance cadence. Each step's memory is bounded by the budgets
-plus the unbind set, which has its own bound and fallback.
+`DirentryChildBinds` is ordered by child inode ID, while its corresponding
+forward binding is ordered by parent inode ID. The two rows may therefore be
+processed in different steps. After the primary phase completes, the
+`binding_reverse_index` phase scans `DirentryChildBinds` by child inode ID.
+
+For each reverse-index row, use a point lookup against the completed
+`DirentryBinds` output to check whether the corresponding forward row was
+retained. Bloom filters reduce the number of segment reads. Charge these
+lookups to the step limits.
+
+If the lookup cost is too high, retain the reverse-index row. A reverse row
+without a matching visible forward binding is ignored by visibility checks,
+so retaining it consumes storage but does not change query results. A later
+fold can remove it.
+
+## Concurrent metadata changes
+
+While progress exists:
+
+- the selected family group performs partial-fold steps only;
+- no delta merge or second fold runs for that group;
+- other family groups continue to reorganize normally; and
+- checkpoint runs published after the start are excluded from `input_runs`.
+
+The output sequence remains fixed at the head sequence recorded at the start,
+and the output level remains the base level. Newer runs therefore keep their
+existing order above the replacement base descriptors after completion.
+
+## Read behavior
+
+The grep index has a related durable progress type, `GrepReorganizeState`.
+Grep queries can read both input and output segments during reorganization
+because duplicate postings do not change the result.
+
+Metadata scans concatenate rows and do not deduplicate them. Exposing both
+input and output segments would return duplicate metadata rows. For this
+reason, metadata reads use only `metadata_files`; they do not inspect
+`reorganize.output_segments`. No read-path change is required.
+
+## Crash recovery and garbage collection
+
+Every output descriptor in `reorganize.output_segments` is a live object
+reference. The common manifest reference enumerator must include these
+descriptors for both the current manifest and the manifest used as the
+garbage-collection reference anchor.
+
+The input descriptors remain in `metadata_files` and require no additional
+garbage-collection handling.
+
+After a crash:
+
+- output written before a failed manifest publication is unreferenced and can
+  be collected; and
+- output included in the last successful publication is referenced by the
+  progress record, and the next maintenance step resumes at its cursor.
+
+## Manifest validation
+
+Decode-time validation must reject a progress record unless all
+construction-time invariants hold:
+
+- `families` exactly matches one `REORGANIZE_FAMILY_GROUPS` entry;
+- every `input_runs` entry identifies a run represented in `metadata_files`;
+- every output segment has a non-empty, ascending key range;
+- output ranges for one family are ordered and do not overlap;
+- every output range for the current phase is strictly before that phase's
+  cursor bound;
+- every output segment has the declared `output_run_seq` and `output_level`;
+- `frozen_floor_seq` is less than or equal to the manifest's current
+  `retention_floor_seq`;
+- `phase` is valid for the selected family group; and
+- `cursor` parses as a partition key for the current phase.
+
+The existing validation for segment descriptors still applies.
+
+## Triggering and observability
+
+Maintenance already reports `BudgetExhausted` when no oldest-first input
+selection fits within the step limits. The behavior changes as follows:
+
+1. If a progress record exists, advance that partial fold.
+2. Otherwise, start a partial fold when the selected group has delta-run
+   pressure or an oversized base and a normal fold cannot fit.
+3. If neither condition applies, keep the existing selection behavior.
+
+The budget warning continues until a partial fold starts. After that, each
+maintenance result reports the completed partition count and number of rows
+written. The operator runbook must explain these fields and how to identify
+stalled progress.
+
+## Expected number of steps
+
+At the default row limit, 10 million rows require at least 77 steps
+(`ceil(10,000,000 / 131,072)`). Partition boundaries, byte limits, retention
+work, and the bindings reverse-index phase can increase that number. Each
+successful step publishes a new manifest.
+
+Normal step memory remains within the row and byte targets plus the bounded
+unbinding set. As described above, one oversized partition may exceed those
+targets.
 
 ## Implementation plan
 
-Three stacked PRs, in order:
+Implement this design in three stages:
 
-1. Format: the progress struct, decode validation, golden fixtures for the
-   in-progress shape (existing goldens unchanged), the GC enumeration
-   change, and a format.md section.
-2. The walk executor: start, step, complete, resume — driven entirely by
-   tests, not yet reachable from the selector. This PR carries the
-   partition-mapping functions per group, the frozen-floor drop pass, the
-   unbind-set derivation with its fallback, and the crash-resume tests.
-3. The trigger: selector integration, group exclusivity, observability,
-   runbook, and the end-to-end test — a group past the budget completes a
-   walk, its base folds, retention resumes, and the #528 warning stops.
+1. **Format:** add the progress types and decode validation, add a golden
+   fixture for an in-progress manifest, include progress outputs in manifest
+   reference enumeration, and document the format in `docs/specs/format.md`.
+   Existing manifest goldens remain unchanged because the absent field is
+   omitted.
+2. **Executor:** implement start, advance, completion, and restart behavior
+   behind tests but without selector integration. Include partition mapping,
+   the bindings phase transition, frozen-floor retention, bounded
+   unbinding-set derivation, conservative fallbacks, and crash-recovery tests.
+3. **Trigger:** integrate the executor with selection, enforce one active
+   operation per group, add maintenance results and runbook guidance, and add
+   an end-to-end test. The test must show that an oversized group completes a
+   partial fold, replaces its base descriptors, resumes retention, and stops
+   producing the budget warning.
