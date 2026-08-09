@@ -146,6 +146,113 @@ async fn overwrite_manifest(
     }
 }
 
+/// Republishes a payload under a fresh manifest id and loads it back, so a
+/// caller can assert on what validation makes of an edited manifest.
+async fn load_perturbed_manifest(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    mut payload: NamespaceManifestPayload,
+    id_offset: u64,
+) -> Result<(), ManifestLoadError> {
+    payload.manifest_id = ManifestId(payload.manifest_id.0 + id_offset);
+    payload.manifest_object_id = ManifestObjectId::generate(payload.manifest_id);
+    let manifest_object_id = payload.manifest_object_id.clone();
+    let envelope =
+        NamespaceManifestEnvelope::from_payload(payload).expect("perturbed manifest envelope");
+    write_namespace_manifest(store, &envelope)
+        .await
+        .expect("write perturbed manifest");
+    load_verified_manifest_tables(store, namespace_id, &manifest_object_id)
+        .await
+        .map(|_| ())
+}
+
+/// A second descriptor modelled on one the manifest already holds: a fresh
+/// table id and object key, stamped with whatever run identity the caller
+/// wants to test. The rows it points at are the modelled segment's, which is
+/// what a stray or duplicated descriptor looks like.
+fn segment_modelled_on(
+    modelled_on: &MetadataFileRef,
+    namespace_id: &NamespaceId,
+    run_seq: ChangeSeq,
+    level: u32,
+) -> MetadataFileRef {
+    let table_id = loonfs_api::MetadataTableId::generate();
+    MetadataFileRef {
+        object_key: metadata_table(namespace_id.as_str(), table_id.as_str()),
+        table_id,
+        run_seq,
+        level,
+        segment_index: 0,
+        ..modelled_on.clone()
+    }
+}
+
+/// One base-tier segment of `family`, for a test that builds a second
+/// descriptor out of it.
+fn base_segment_of_family(
+    manifest: &NamespaceManifestEnvelope,
+    family: ApiMetadataTableFamily,
+) -> MetadataFileRef {
+    manifest
+        .payload
+        .metadata_files
+        .iter()
+        .find(|descriptor| {
+            descriptor.family == family && descriptor.level == CHECKPOINT_BASE_RUN_LEVEL
+        })
+        .expect("a folded base segment of this family")
+        .clone()
+}
+
+/// A namespace with one folded base run and one delta run above it, which is
+/// the smallest shape a second base-tier run can be added to.
+async fn seed_folded_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &NamespaceId) {
+    let context = test_context();
+    bootstrap_namespace(store, namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        store,
+        namespace_id,
+        "/docs/first.txt",
+        b"first\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write the seed file");
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint the seed");
+    drain_reorganization(store, namespace_id, &context, MetadataLsmPolicy::default()).await;
+    write_file_bytes(
+        store,
+        namespace_id,
+        "/docs/second.txt",
+        b"second\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write a file above the base");
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint a delta run above the base");
+}
+
+/// The current manifest, loaded and detached from the tables that hold it.
+async fn current_manifest(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> NamespaceManifestEnvelope {
+    let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
+    let tables = load_verified_manifest_tables(store, namespace_id, &manifest_object_id)
+        .await
+        .expect("load the current manifest's tables");
+    tables.manifest().clone()
+}
+
 fn assert_revision_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
     match result {
         Err(ManifestLoadError::RevisionIndexMismatch { .. }) => {}
@@ -1393,8 +1500,6 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     ];
     for (index, (label, perturb)) in perturbations.iter().enumerate() {
         let mut perturbed = payload.clone();
-        perturbed.manifest_id = ManifestId(perturbed.manifest_id.0 + 1 + index as u64);
-        perturbed.manifest_object_id = ManifestObjectId::generate(perturbed.manifest_id);
         let descriptor = perturbed
             .metadata_files
             .iter_mut()
@@ -1405,21 +1510,139 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
             })
             .expect("an inline-filtered descriptor spanning several keys");
         perturb(descriptor);
-        let perturbed_object_id = perturbed.manifest_object_id.clone();
-        let envelope = NamespaceManifestEnvelope::from_payload(perturbed)
-            .expect("perturbed manifest envelope");
-        write_namespace_manifest(&store, &envelope)
-            .await
-            .expect("write perturbed manifest");
-        let error = match load_verified_manifest_tables(&store, &namespace_id, &perturbed_object_id)
-            .await
-        {
-            Ok(_) => panic!("{label}: perturbed manifest must not load"),
-            Err(error) => error,
+        let Err(error) =
+            load_perturbed_manifest(&store, &namespace_id, perturbed, 1 + index as u64).await
+        else {
+            panic!("{label}: perturbed manifest must not load")
         };
         assert!(
             matches!(error, ManifestLoadError::SegmentDescriptorMismatch { .. }),
             "{label}: unexpected error {error:?}"
         );
     }
+}
+
+/// A group with two base-tier runs does not load.
+///
+/// This is the shape a merge above the base used to write: its output went to
+/// the base tier stamped at the manifest head, so it became a second base run
+/// for the group rather than a bigger delta run. Every fragment stayed under
+/// the per-step budget on its own, so nothing ever reported the group's oldest
+/// run as over budget, and the group's rows below the retention floor could
+/// never be dropped — dropping needs a fold whose window starts at the group's
+/// oldest run.
+///
+/// Refusing the shape at load is what says it cannot come back: no builder
+/// writes it now, and a manifest carrying it is corruption rather than a
+/// state to carry on from.
+#[tokio::test]
+async fn a_manifest_whose_group_base_fragmented_does_not_load() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_folded_base_with_a_delta_run(&store, &namespace_id).await;
+
+    let manifest = current_manifest(&store, &namespace_id).await;
+    let group = group_containing(ApiMetadataTableFamily::Inodes);
+    assert_eq!(
+        group_base_runs(&manifest, group).len(),
+        1,
+        "the seed must leave the group in one base run"
+    );
+
+    let mut fragmented = manifest.payload.clone();
+    fragmented.metadata_files.push(segment_modelled_on(
+        &base_segment_of_family(&manifest, ApiMetadataTableFamily::Inodes),
+        &namespace_id,
+        manifest.payload.head_seq,
+        CHECKPOINT_BASE_RUN_LEVEL,
+    ));
+
+    let error = load_perturbed_manifest(&store, &namespace_id, fragmented, 1)
+        .await
+        .expect_err("a group with two base runs must not load");
+    let ManifestLoadError::RunManifestMismatch { message, .. } = &error else {
+        panic!("expected a run mismatch, got {error:?}")
+    };
+    assert!(
+        message.contains("Inodes") && message.contains("base"),
+        "the rejection must name the group and what it holds too many of, got `{message}`"
+    );
+}
+
+/// Two segments of one family carrying the same index inside one run do not
+/// load.
+///
+/// A family in a run has one producer, and every producer numbers from zero,
+/// so the numbers are a dense sequence. Two sets of them at one identity is
+/// what a merge above the base used to leave behind when the group's base
+/// already sat at the identity the merge stamped: both sets started at zero.
+#[tokio::test]
+async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_folded_base_with_a_delta_run(&store, &namespace_id).await;
+
+    let manifest = current_manifest(&store, &namespace_id).await;
+    let existing = base_segment_of_family(&manifest, ApiMetadataTableFamily::Inodes);
+    assert_eq!(existing.segment_index, 0);
+
+    let mut repeated = manifest.payload.clone();
+    repeated.metadata_files.push(segment_modelled_on(
+        &existing,
+        &namespace_id,
+        existing.run_seq,
+        existing.level,
+    ));
+
+    let error = load_perturbed_manifest(&store, &namespace_id, repeated, 2)
+        .await
+        .expect_err("two segments of one family at one index must not load");
+    let ManifestLoadError::SegmentDescriptorMismatch { message, .. } = &error else {
+        panic!("expected a segment descriptor mismatch, got {error:?}")
+    };
+    assert!(
+        message.contains("Inodes") && message.contains("numbered from zero"),
+        "the rejection must name the family and the numbering rule, got `{message}`"
+    );
+}
+
+/// Two segments of one family whose key ranges touch inside one run do not
+/// load.
+///
+/// One producer writes a family's segments in ascending key order, so segment
+/// one starts strictly above where segment zero ended. A descriptor can keep
+/// the numbering dense and still not belong — stamped with another run's
+/// identity, say — and then its key range is what disagrees with its
+/// neighbours'. Here the second segment repeats the first one's whole range,
+/// which is the shape a duplicated descriptor takes.
+#[tokio::test]
+async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_folded_base_with_a_delta_run(&store, &namespace_id).await;
+
+    let manifest = current_manifest(&store, &namespace_id).await;
+    let existing = base_segment_of_family(&manifest, ApiMetadataTableFamily::Inodes);
+    assert_eq!(existing.segment_index, 0);
+
+    let mut overlapping = manifest.payload.clone();
+    let mut second =
+        segment_modelled_on(&existing, &namespace_id, existing.run_seq, existing.level);
+    // Index one keeps the numbering dense, so only the key order can object.
+    second.segment_index = 1;
+    overlapping.metadata_files.push(second);
+
+    let error = load_perturbed_manifest(&store, &namespace_id, overlapping, 3)
+        .await
+        .expect_err("overlapping segment ranges within one run must not load");
+    let ManifestLoadError::SegmentDescriptorMismatch { message, .. } = &error else {
+        panic!("expected a segment descriptor mismatch, got {error:?}")
+    };
+    assert!(
+        message.contains("Inodes") && message.contains("ascending key order"),
+        "the rejection must name the family and the ordering rule, got `{message}`"
+    );
 }

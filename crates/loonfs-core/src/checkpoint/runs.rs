@@ -19,6 +19,7 @@ pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_BYTES: usize = 64 * 1024 * 102
 pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 pub(super) const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
 pub(super) const CHECKPOINT_BASE_RUN_LEVEL: u32 = 1;
+
 pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
     MetadataTableFamily::Inodes,
     MetadataTableFamily::DirentryBinds,
@@ -30,6 +31,36 @@ pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
     MetadataTableFamily::ActiveDeletions,
     MetadataTableFamily::CommitReceipts,
     MetadataTableFamily::Attributes,
+];
+
+/// Families whose rows merge in one reorganization unit. Families that read
+/// each other's rows to decide what to drop (see
+/// `super::reorganize::drop_rows_below_retention_floor`) must compact
+/// together, and a secondary index always travels with its canonical family.
+///
+/// The grouping is layout policy, not reorganization's alone: manifest load
+/// checks a per-group invariant — at most one base-tier run per group — so
+/// the loader reads this table too.
+pub(super) const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 7] = [
+    &[
+        MetadataTableFamily::DirentryBinds,
+        MetadataTableFamily::DirentryChildBinds,
+        MetadataTableFamily::DirentryUnbinds,
+    ],
+    &[
+        MetadataTableFamily::Revisions,
+        MetadataTableFamily::RevisionsByInodeDesc,
+    ],
+    &[MetadataTableFamily::Inodes],
+    &[MetadataTableFamily::Tombstones],
+    // Active deletions fold alone: a removal marker is cancelled by the
+    // listed row it names, and both live in this family.
+    &[MetadataTableFamily::ActiveDeletions],
+    &[MetadataTableFamily::CommitReceipts],
+    // Attributes fold alone too: a revision supersedes the revisions of the
+    // same inode, and they all live in this family. The family has no
+    // secondary index to travel with.
+    &[MetadataTableFamily::Attributes],
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

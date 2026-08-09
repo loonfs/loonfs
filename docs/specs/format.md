@@ -1854,6 +1854,17 @@ out-of-order index entries, and checksum failures as malformed. The segment
 format is versioned by the manifest that references it (`namespace_manifest`
 `format_version`), since a segment is unreachable except through a manifest.
 
+A run is identified by its `run_seq` and `level` together, and holds one
+family's segments from one producer: a WAL flush's delta run or a rebuild's
+output. A producer writes a family's rows in ascending key order and writes
+no key twice. So one family's `segment_index` values inside one run are
+numbered from zero, once each, in the order they were written, the segments'
+key ranges ascend in that same order without touching, and a manifest whose
+descriptors say otherwise does not load. Two runs of different levels may
+share a sequence, and two family groups routinely share one base run — they
+rebuild at the same manifest head — but within one run each family has
+exactly one producer.
+
 #### 4.2.2 Grep roots, manifests, and gram-index segments
 
 `loonfs-grep` owns all grep durability under the namespace extension prefix:
@@ -2057,11 +2068,32 @@ Compaction rewrites metadata runs (and, in the future, content layouts) into
 more efficient physical shapes.
 
 A rebuild merges an oldest-first run of runs for one family group. It may
-skip runs at the oldest end that are too large to read inside one step's
-budget, and then it merges the runs above them; it never steps over a delta
-run, so its output is always older than every delta run it leaves behind. A
-rebuild that skipped runs drops nothing, because the rules below read across
-the merged rows and a skipped run may hold the other half of a pair.
+skip the run at the oldest end when that run is too large to read inside one
+step's budget, and then it merges the delta runs above it; it never steps
+over a delta run.
+
+**A rebuild's output is a base run if and only if its window starts at the
+group's oldest run.** The level a run carries and the rules that produced it
+say the same thing: a base run is one some rebuild was allowed to drop rows
+from, a delta run is one nothing has dropped from yet. So a family group
+holds at most one base run — a bottom-anchored rebuild always contains the
+group's existing base run and replaces it, and nothing else writes one — and
+a manifest that carries two base runs for one group does not load.
+
+The output stands where its window stood, so no row moves past any other. A
+bottom-anchored rebuild's output is stamped at the manifest's `head_seq`;
+base runs sort below every delta run whatever sequence they carry, so it
+lands at the bottom of the group where its inputs were. A rebuild that
+skipped the oldest run writes a delta run stamped at its newest input's
+sequence, which is where that run stood: above every run the window left
+below it, below every run it left above.
+
+A rebuild that skipped the oldest run drops nothing, because the rules below
+read across the merged rows and a skipped run may hold the other half of a
+pair. Such a rebuild reduces the group's run count without touching its base.
+It merges two or more runs into one — merging a single run would rewrite it
+as itself, at its own identity — so a group whose delta runs are down to one
+and whose base is over budget has no rebuild left to run.
 
 A base rebuild that starts at the group's oldest run drops rows that no
 retained sequence can observe: bindings superseded or unbound at or below the
