@@ -5,7 +5,7 @@ use super::super::block_load::{
 };
 use super::super::cache::MetadataTableCache;
 use super::super::error::ManifestLoadError;
-use super::super::load::{load_namespace_manifest_envelope_if_present, metadata_file_object_key};
+use super::super::load::{ensure_segment_object_key, load_namespace_manifest_envelope_if_present};
 use super::super::row::manifest_row_kind;
 use super::super::runs::{
     runs_in_materialization_order, MetadataTableManifest, MAX_MAINTENANCE_TABLE_IO,
@@ -163,13 +163,7 @@ where
     for table in ordered_tables {
         let mut descriptors = Vec::with_capacity(table.segments.len());
         for descriptor in &table.segments {
-            let expected_key = metadata_file_object_key(descriptor);
-            if descriptor.object_key != expected_key {
-                return Err(ManifestLoadError::SegmentObjectKeyMismatch {
-                    object_key: descriptor.object_key.clone(),
-                    expected: expected_key,
-                });
-            }
+            ensure_segment_object_key(descriptor)?;
             descriptors.push(descriptor);
         }
 

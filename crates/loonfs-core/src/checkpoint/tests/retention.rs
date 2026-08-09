@@ -1509,10 +1509,23 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
         .expect("load manifest tables");
     let group = super::reorganize::select_family_group(&tables.manifest().payload)
         .expect("a family group with L0 rows to fold");
-    let selection = super::reorganize::select_reorganization_input(&tables, group, policy)
-        .await
-        .expect("select a reorganization input");
-    (group.to_vec(), selection)
+    let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
+    let selection =
+        super::reorganize::select_reorganization_input(&tables, group, policy, frozen_floor_seq)
+            .await
+            .expect("select a reorganization input");
+    (group.families().to_vec(), selection)
+}
+
+/// The bounded merge a selection chose, or `None` when it chose a streaming
+/// compaction instead.
+fn bounded_merge(
+    selection: super::reorganize::ReorganizationSelection,
+) -> Option<super::reorganize::ReorganizationInput> {
+    match selection.plan {
+        Some(super::reorganize::ReorganizationPlan::BoundedMerge(input)) => Some(input),
+        _ => None,
+    }
 }
 
 /// Rows one run holds in one family group: the quantity the per-step row
@@ -1606,8 +1619,10 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_above_it() {
     let policy = policy_that_cannot_fold_the_base(base_rows);
 
     let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
-    let input = selection
-        .input
+    let bottom = selection
+        .group_bottom_over_budget
+        .expect("a base run over the budget must raise the alarm");
+    let input = bounded_merge(selection)
         .expect("a group must keep finding work above a base run it cannot fold");
     assert!(
         matches!(
@@ -1633,9 +1648,6 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_above_it() {
         input.runs.len() > 1,
         "a merge must consume more than one run to reduce the count"
     );
-    let bottom = selection
-        .group_bottom_over_budget
-        .expect("a base run over the budget must raise the alarm");
     assert_eq!(bottom.run_seq, base.run_seq);
     assert_eq!(bottom.level, CHECKPOINT_BASE_RUN_LEVEL);
     assert_eq!(bottom.rows, base_rows);
@@ -1811,7 +1823,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let policy = policy_that_cannot_fold_the_base(base_rows);
 
     let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
-    let input = selection.input.expect("the delta runs must still merge");
+    let input = bounded_merge(selection).expect("the delta runs must still merge");
     let newest_input = input
         .runs
         .iter()
@@ -1962,12 +1974,16 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
 
     let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
     assert!(
-        selection.input.is_none(),
-        "no legal window exists; the selector must not assemble one across the wide run"
-    );
-    assert!(
         selection.group_bottom_over_budget.is_none(),
         "the base run fits here, so nothing should claim it does not"
+    );
+    assert!(
+        matches!(
+            selection.plan,
+            Some(super::reorganize::ReorganizationPlan::FullCompaction(_))
+        ),
+        "no legal window exists; the selector must hand the group to a streaming compaction \
+         rather than assemble one across the wide run"
     );
 
     let root_before = current_manifest_id(&store, &namespace_id).await;

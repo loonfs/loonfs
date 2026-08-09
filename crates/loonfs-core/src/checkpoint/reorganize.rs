@@ -29,6 +29,12 @@
 //! concurrent checkpoint racing a unit wins at the root compare-and-swap;
 //! the unit's segments are left unreferenced for garbage collection and the
 //! next step retries against the fresh manifest.
+//!
+//! The planner answers with one of two plans ([`ReorganizationPlan`]). A
+//! group with a window that fits the budgets and makes progress gets that
+//! window. A group with no such window gets a streaming compaction over
+//! every run it holds ([`super::streaming_compaction`]), which is what takes
+//! a frozen base off the step budgets entirely.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::build::{
@@ -46,10 +52,12 @@ use super::publish::{
     ManifestPublicationOutcome,
 };
 use super::runs::{
-    flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, MetadataRunManifest,
-    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
+    flatten_manifest_tables, l0_run_count, MetadataFamilyGroup, MetadataLsmPolicy,
+    MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
+    REORGANIZE_FAMILY_GROUPS,
 };
 use super::scan::VerifiedMetadataTables;
+use super::streaming_compaction::MetadataCompactionSpec;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
@@ -60,7 +68,7 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{
-    AttributeRevisionNo, ChangeSeq, InodeId, ManifestId, ManifestObjectId, NamespaceId,
+    AttributeRevisionNo, ChangeSeq, InodeId, ManifestId, ManifestObjectId, NameKey, NamespaceId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -168,7 +176,19 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
         });
     };
-    let selection = select_reorganization_input(&tables, group, policy)
+    // The floor is read before the plan rather than after it, because a plan
+    // that hands the group to a streaming compaction carries the floor that
+    // job will judge every row against, and the spec it carries is immutable
+    // for the job's life.
+    let head = read_head_object(store, namespace_id)
+        .await
+        .map_err(CoreError::load_head)?
+        .envelope
+        .state;
+    let floor_seq = resolve_retention_floor_seq(store, &head)
+        .await
+        .map_err(CoreError::load_head)?;
+    let selection = select_reorganization_input(&tables, group, policy, floor_seq)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
@@ -176,11 +196,14 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     if let Some(bottom) = selection.group_bottom_over_budget {
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
     }
-    let Some(input) = selection.input else {
+    // A group that needs a streaming compaction reports the same blocked
+    // outcome it reported before the compactor existed. Scheduling the job is
+    // the runner's, and lands with it.
+    let Some(ReorganizationPlan::BoundedMerge(input)) = selection.plan else {
         return Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::BudgetExhausted {
-                families: group.to_vec(),
+                families: group.families().to_vec(),
                 l0_runs,
             },
         });
@@ -190,7 +213,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // manifest's tables — never the WAL tail — and the unselected
     // descriptors remain in the replacement manifest unchanged.
     let mut rows_by_family = BTreeMap::<MetadataTableFamily, Vec<MetadataRow>>::new();
-    for family in group {
+    for family in group.families() {
         let rows = tables
             .scan_prefix_in_runs(&input.runs, *family, "")
             .await
@@ -201,7 +224,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     }
     // The paired groups exist to preserve index parity; verify it on the
     // selected complete runs before writing anything.
-    if group.contains(&MetadataTableFamily::DirentryBinds) {
+    if group.contains(MetadataTableFamily::DirentryBinds) {
         validate_direntry_child_bind_index(
             root.manifest_object_id.as_ref(),
             rows_by_family
@@ -215,7 +238,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
     }
-    if group.contains(&MetadataTableFamily::Revisions) {
+    if group.contains(MetadataTableFamily::Revisions) {
         validate_revision_by_inode_desc_index(
             root.manifest_object_id.as_ref(),
             rows_by_family
@@ -229,14 +252,6 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
     }
-    let head = read_head_object(store, namespace_id)
-        .await
-        .map_err(CoreError::load_head)?
-        .envelope
-        .state;
-    let floor_seq = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(CoreError::load_head)?;
     // Dropping is only visibility-preserving over a merge that starts at the
     // group's oldest run, which is what the placement records. A window that
     // had to skip older runs merges them exactly as they are, so its output
@@ -263,7 +278,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         .metadata_files
         .iter()
         .filter(|descriptor| {
-            !group.contains(&descriptor.family)
+            !group.contains(descriptor.family)
                 || !input
                     .run_ids
                     .contains(&(descriptor.run_seq, descriptor.level))
@@ -303,7 +318,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         ManifestPublicationOutcome::Published(_) => Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::UnitPublished {
-                families: group.to_vec(),
+                families: group.families().to_vec(),
                 folded_l0_rows: input.folded_l0_rows,
                 input_runs: input.runs.len(),
                 decoded_input_rows: input.decoded_rows,
@@ -318,6 +333,23 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             })
         }
     }
+}
+
+/// What one reorganization step should do for the group it selected.
+///
+/// The two arms are the two shapes of work, not two levels of urgency: a
+/// bounded merge is one step's worth of merging that ends in a publication,
+/// and a full compaction is a background job over the whole group that no
+/// budget paces. The planner decides between them once, from the same run
+/// list, so no caller has to rediscover which case it is in.
+pub(super) enum ReorganizationPlan {
+    /// A window of complete runs fits one step's budgets and makes progress.
+    BoundedMerge(ReorganizationInput),
+    /// No window that makes progress fits the budgets, so the group is
+    /// rebuilt by a streaming compaction over every run it holds. The step
+    /// reports the group blocked and reads no further; the runner that starts
+    /// the job from this spec lands next.
+    FullCompaction(#[allow(dead_code)] MetadataCompactionSpec),
 }
 
 pub(super) struct ReorganizationInput {
@@ -387,20 +419,20 @@ pub(super) enum MergePlacement {
 }
 
 impl MergePlacement {
-    fn output_seq(self) -> ChangeSeq {
+    pub(super) fn output_seq(self) -> ChangeSeq {
         match self {
             Self::Base { output_seq } | Self::Delta { output_seq } => output_seq,
         }
     }
 
-    fn output_level(self) -> u32 {
+    pub(super) fn output_level(self) -> u32 {
         match self {
             Self::Base { .. } => CHECKPOINT_BASE_RUN_LEVEL,
             Self::Delta { .. } => CHECKPOINT_L0_RUN_LEVEL,
         }
     }
 
-    fn may_drop_rows_below_the_retention_floor(self) -> bool {
+    pub(super) fn may_drop_rows_below_the_retention_floor(self) -> bool {
         matches!(self, Self::Base { .. })
     }
 }
@@ -431,7 +463,9 @@ fn merge_placement(
 /// step's budget still folds its newer runs, and that is exactly when an
 /// operator needs to hear that the run underneath them is frozen.
 pub(super) struct ReorganizationSelection {
-    pub(super) input: Option<ReorganizationInput>,
+    /// What the step should do, or `None` when the group holds no runs at
+    /// all and there is nothing to do either way.
+    pub(super) plan: Option<ReorganizationPlan>,
     pub(super) group_bottom_over_budget: Option<OverBudgetRun>,
 }
 
@@ -479,15 +513,22 @@ pub(super) struct OverBudgetRun {
 /// at the group's oldest run can fit the budgets, the start moves past the
 /// base run that blocks it and the step merges the L0 runs above it on their
 /// own. The group keeps shedding runs even while the run at its bottom stays
-/// too large to fold.
+/// too large to fold. When not even that is left — no window at all makes
+/// progress inside the budgets — the group is handed to a streaming
+/// compaction, which merges every run it holds and is paced by nothing.
 ///
 /// Index sections are read before row payloads so the decoded-byte budget is
 /// known exactly from each data block's durable `decoded_len`; a run that
 /// would cross a budget is not decoded or partially included.
+///
+/// `frozen_floor_seq` is the live retention floor. A bounded merge reads it
+/// again at drop time; a compaction spec carries it, because the floor a job
+/// judges every row against is fixed when the job is planned.
 pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
-    group: &[MetadataTableFamily],
+    group: MetadataFamilyGroup,
     policy: MetadataLsmPolicy,
+    frozen_floor_seq: ChangeSeq,
 ) -> std::result::Result<ReorganizationSelection, ManifestLoadError> {
     let mut candidates = tables
         .scan_runs
@@ -599,20 +640,41 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         let run_ids = runs.iter().map(|run| (run.run_seq, run.level)).collect();
         let placement = merge_placement(bottom_anchored, &runs, head_seq);
         return Ok(ReorganizationSelection {
-            input: Some(ReorganizationInput {
+            plan: Some(ReorganizationPlan::BoundedMerge(ReorganizationInput {
                 runs,
                 run_ids,
                 folded_l0_rows,
                 decoded_rows,
                 decoded_bytes,
                 placement,
-            }),
+            })),
             group_bottom_over_budget,
         });
     }
 
+    // No window makes progress inside the budgets. That is the whole of the
+    // stuck case: the bottom-anchored window cannot reach an L0 run, so
+    // retention for the group has stopped, and the delta runs above the
+    // bottom are down to one or blocked as well, so nothing shrinks the run
+    // count either. A streaming compaction takes the whole group. Its input
+    // is every run the group holds, which is bottom-anchored by
+    // construction, so its output is the group's base run and it may drop
+    // what the floor allows.
+    let spec = (!candidates.is_empty()).then(|| {
+        MetadataCompactionSpec::new(
+            group,
+            candidates
+                .iter()
+                .map(|run| (run.run_seq, run.level))
+                .collect(),
+            MergePlacement::Base {
+                output_seq: head_seq,
+            },
+            frozen_floor_seq,
+        )
+    });
     Ok(ReorganizationSelection {
-        input: None,
+        plan: spec.map(ReorganizationPlan::FullCompaction),
         group_bottom_over_budget,
     })
 }
@@ -636,13 +698,13 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
 /// the cadence of the warning is the cadence of maintenance.
 fn report_group_bottom_over_budget(
     namespace_id: &NamespaceId,
-    group: &[MetadataTableFamily],
+    group: MetadataFamilyGroup,
     bottom: &OverBudgetRun,
     policy: MetadataLsmPolicy,
 ) {
     tracing::warn!(
         namespace_id = namespace_id.as_str(),
-        families = ?group,
+        families = ?group.families(),
         run_seq = bottom.run_seq.0,
         run_level = bottom.level,
         run_rows = bottom.rows,
@@ -682,24 +744,24 @@ fn manifest_has_partial_reorganization(runs: &[MetadataRunManifest]) -> bool {
         .any(|run| run.level != CHECKPOINT_L0_RUN_LEVEL && run.run_seq >= oldest_l0_seq)
 }
 
-fn run_has_group_rows(run: &MetadataRunManifest, group: &[MetadataTableFamily]) -> bool {
+fn run_has_group_rows(run: &MetadataRunManifest, group: MetadataFamilyGroup) -> bool {
     group_run_descriptors(run, group).next().is_some()
 }
 
-fn group_run_descriptors<'a>(
-    run: &'a MetadataRunManifest,
-    group: &'a [MetadataTableFamily],
-) -> impl Iterator<Item = &'a MetadataFileRef> {
+pub(super) fn group_run_descriptors(
+    run: &MetadataRunManifest,
+    group: MetadataFamilyGroup,
+) -> impl Iterator<Item = &MetadataFileRef> {
     run.tables
         .iter()
-        .filter(|table| group.contains(&table.family))
+        .filter(move |table| group.contains(table.family))
         .flat_map(|table| &table.segments)
 }
 
 async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     run: &MetadataRunManifest,
-    group: &[MetadataTableFamily],
+    group: MetadataFamilyGroup,
 ) -> std::result::Result<u64, ManifestLoadError> {
     let mut decoded_bytes = 0u64;
     for descriptor in group_run_descriptors(run, group) {
@@ -721,40 +783,32 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
 /// order. `None` when no group has L0 rows.
 pub(super) fn select_family_group(
     payload: &NamespaceManifestPayload,
-) -> Option<&'static [MetadataTableFamily]> {
+) -> Option<MetadataFamilyGroup> {
     REORGANIZE_FAMILY_GROUPS
         .into_iter()
         .map(|group| (group_l0_rows(payload, group), group))
         .filter(|(rows, _)| *rows > 0)
         .max_by(|(left_rows, left), (right_rows, right)| {
-            left_rows.cmp(right_rows).then_with(|| {
-                // On ties the EARLIER group must win; comparing positions
-                // reversed makes max_by pick it.
-                position_of(right).cmp(&position_of(left))
-            })
+            // On ties the EARLIER group must win, and group order is the
+            // enum's declaration order; comparing the groups reversed makes
+            // max_by pick it.
+            left_rows.cmp(right_rows).then_with(|| right.cmp(left))
         })
         .map(|(_, group)| group)
 }
 
-fn position_of(group: &[MetadataTableFamily]) -> usize {
-    REORGANIZE_FAMILY_GROUPS
-        .iter()
-        .position(|candidate| candidate.as_ptr() == group.as_ptr())
-        .unwrap_or(usize::MAX)
-}
-
-fn group_l0_rows(payload: &NamespaceManifestPayload, group: &[MetadataTableFamily]) -> u64 {
+fn group_l0_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGroup) -> u64 {
     payload
         .metadata_files
         .iter()
         .filter(|descriptor| {
-            descriptor.level == CHECKPOINT_L0_RUN_LEVEL && group.contains(&descriptor.family)
+            descriptor.level == CHECKPOINT_L0_RUN_LEVEL && group.contains(descriptor.family)
         })
         .map(|descriptor| descriptor.row_count)
         .sum()
 }
 
-async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
+pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     previous: &NamespaceManifestEnvelope,
@@ -796,18 +850,36 @@ pub(super) fn drop_rows_below_retention_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,
 ) -> Result<()> {
-    // At the floor only the latest non-unbound bind per (parent, name) slot
-    // is visible; an unbind marker at or below the floor has finished its
-    // work once every bind it covered is gone.
-    // Unbind identity here omits child_inode_id (the read path also matches
-    // it); the 4-tuple is already unique for writer-produced rows, so the
-    // predicates agree on every legal history.
+    let unbound_at_floor = unbindings_at_or_below_floor(
+        rows_by_family
+            .get(&MetadataTableFamily::DirentryUnbinds)
+            .map_or(&[], Vec::as_slice),
+        retention_floor_seq,
+    );
+    drop_rows_below_frozen_floor(rows_by_family, retention_floor_seq, &unbound_at_floor)
+}
+
+/// Identifies one binding generation, which is what an unbind names and what
+/// the bind drop matches on.
+///
+/// Identity here omits `child_inode_id` (the read path also matches it); the
+/// 4-tuple is already unique for writer-produced rows, so the predicates
+/// agree on every legal history.
+pub(super) type BindingGeneration = (InodeId, NameKey, ChangeSeq, u32);
+
+/// The binding generations an unbind at or below `retention_floor_seq`
+/// retires.
+///
+/// A whole-group fold builds this from every unbind row it merged. A
+/// streaming compaction builds it per slot, from the unbind rows of that one
+/// (parent, name) slot: an unbind and the bind it cancels share a slot, so
+/// the rows of one slot hold both halves of every pair they belong to.
+pub(super) fn unbindings_at_or_below_floor(
+    unbind_rows: &[MetadataRow],
+    retention_floor_seq: ChangeSeq,
+) -> BTreeSet<BindingGeneration> {
     let mut unbound_at_floor = BTreeSet::new();
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryUnbinds)
-        .into_iter()
-        .flatten()
-    {
+    for row in unbind_rows {
         if let MetadataRow::DirentryUnbind {
             parent_inode_id,
             name_key,
@@ -827,92 +899,75 @@ pub(super) fn drop_rows_below_retention_floor(
             }
         }
     }
-    let mut latest_bind_at_floor = BTreeMap::new();
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryBinds)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } = row
-        {
-            if *bind_seq <= retention_floor_seq {
-                let candidate = (*bind_seq, *bind_delta_index);
-                let latest = latest_bind_at_floor
-                    .entry((*parent_inode_id, name_key.clone()))
-                    .or_insert(candidate);
-                if candidate > *latest {
-                    *latest = candidate;
-                }
-            }
-        }
-    }
-    // Load-bearing writer invariant: a bind is only ever superseded by an
-    // operation that also unbinds it, so every non-latest bind at or below
-    // the floor must have a matching unbind at or below the floor. The drop
-    // is only visibility-preserving under that rule; refuse to compact state
-    // that violates it.
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryBinds)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } = row
-        {
-            if *bind_seq <= retention_floor_seq
-                && latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
-                    != Some(&(*bind_seq, *bind_delta_index))
-                && !unbound_at_floor.contains(&(
-                    *parent_inode_id,
-                    name_key.clone(),
-                    *bind_seq,
-                    *bind_delta_index,
-                ))
-            {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "bind at seq `{bind_seq}` delta {bind_delta_index} for parent `{parent_inode_id}` is superseded at or below the retention floor without an unbind; refusing to drop rows"
-                )));
-            }
-        }
-    }
+    unbound_at_floor
+}
 
-    let retain_bind = |row: &MetadataRow| match row {
-        MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } => {
-            *bind_seq > retention_floor_seq
-                || (latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
-                    == Some(&(*bind_seq, *bind_delta_index))
-                    && !unbound_at_floor.contains(&(
-                        *parent_inode_id,
-                        name_key.clone(),
-                        *bind_seq,
-                        *bind_delta_index,
-                    )))
-        }
-        _ => true,
+/// Whether one bind row survives the frozen floor.
+///
+/// A bind above the floor always survives. At or below it the bind survives
+/// exactly when nothing retired it, because a bind is only ever superseded by
+/// an operation that also unbinds it — the writer invariant
+/// [`refuse_superseded_bind_without_unbind`] refuses to compact without.
+///
+/// Both bind families read this same rule, which is what keeps them dropping
+/// in lockstep: the format gives every bind row exactly one reverse row, and a
+/// run whose two counts disagree does not load. They reach the rule by
+/// different routes — the forward row's unbinds share its slot, the reverse
+/// row's do not — but the rule is one function and the answer is one answer.
+pub(super) fn bind_survives_frozen_floor(
+    row: &MetadataRow,
+    retention_floor_seq: ChangeSeq,
+    unbound_at_floor: &BTreeSet<BindingGeneration>,
+) -> bool {
+    let MetadataRow::DirentryBind {
+        parent_inode_id,
+        name_key,
+        bind_seq,
+        bind_delta_index,
+        ..
+    } = row
+    else {
+        return true;
     };
+    *bind_seq > retention_floor_seq
+        || !unbound_at_floor.contains(&(
+            *parent_inode_id,
+            name_key.clone(),
+            *bind_seq,
+            *bind_delta_index,
+        ))
+}
+
+/// [`drop_rows_below_retention_floor`] against a floor and an unbind set the
+/// caller froze, rather than against rows it can see right now.
+///
+/// A streaming compaction calls this per locality group: the floor is fixed
+/// for the whole job, so every group and every attempt decides identically.
+/// Families the caller leaves out of `rows_by_family` are untouched, which is
+/// how a compaction keeps the reverse bind index out of this pass — its rows
+/// are keyed by child, so the group holding one does not hold the forward
+/// binds the invariant check below reads, and the compaction decides those
+/// rows with a point read instead.
+pub(super) fn drop_rows_below_frozen_floor(
+    rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
+    retention_floor_seq: ChangeSeq,
+    unbound_at_floor: &BTreeSet<BindingGeneration>,
+) -> Result<()> {
+    refuse_superseded_bind_without_unbind(
+        rows_by_family
+            .get(&MetadataTableFamily::DirentryBinds)
+            .map_or(&[], Vec::as_slice),
+        retention_floor_seq,
+        unbound_at_floor,
+    )?;
     for family in [
         MetadataTableFamily::DirentryBinds,
         MetadataTableFamily::DirentryChildBinds,
     ] {
         if let Some(rows) = rows_by_family.get_mut(&family) {
-            rows.retain(retain_bind);
+            rows.retain(|row| {
+                bind_survives_frozen_floor(row, retention_floor_seq, unbound_at_floor)
+            });
         }
     }
     if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::DirentryUnbinds) {
@@ -930,7 +985,9 @@ pub(super) fn drop_rows_below_retention_floor(
     // other. A removal marker's listed row is always in the same merged set:
     // the deletion commits before the undelete, runs merge oldest-first, and
     // the selected subset is a prefix of that order, so a marker can never
-    // outlive the row it names.
+    // outlive the row it names. A streaming compaction groups the family by
+    // deletion generation, which is the pair's shared key prefix, so the pair
+    // lands in one group there too.
     if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::ActiveDeletions) {
         let revoked: BTreeSet<(ChangeSeq, InodeId)> = rows
             .iter()
@@ -976,6 +1033,69 @@ pub(super) fn drop_rows_below_retention_floor(
     Ok(())
 }
 
+/// Refuses to compact bind rows that break the writer invariant the drop
+/// rests on.
+///
+/// At the floor only the latest bind per (parent, name) slot is visible, and a
+/// bind is only ever superseded by an operation that also unbinds it. So every
+/// non-latest bind at or below the floor must have a matching unbind at or
+/// below the floor. Where that does not hold, dropping by
+/// [`bind_survives_frozen_floor`] would keep a bind no read can reach and call
+/// it live, so the compaction stops instead.
+fn refuse_superseded_bind_without_unbind(
+    bind_rows: &[MetadataRow],
+    retention_floor_seq: ChangeSeq,
+    unbound_at_floor: &BTreeSet<BindingGeneration>,
+) -> Result<()> {
+    let mut latest_bind_at_floor = BTreeMap::new();
+    for row in bind_rows {
+        if let MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } = row
+        {
+            if *bind_seq <= retention_floor_seq {
+                let candidate = (*bind_seq, *bind_delta_index);
+                let latest = latest_bind_at_floor
+                    .entry((*parent_inode_id, name_key.clone()))
+                    .or_insert(candidate);
+                if candidate > *latest {
+                    *latest = candidate;
+                }
+            }
+        }
+    }
+    for row in bind_rows {
+        if let MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } = row
+        {
+            if *bind_seq <= retention_floor_seq
+                && latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
+                    != Some(&(*bind_seq, *bind_delta_index))
+                && !unbound_at_floor.contains(&(
+                    *parent_inode_id,
+                    name_key.clone(),
+                    *bind_seq,
+                    *bind_delta_index,
+                ))
+            {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "bind at seq `{bind_seq}` delta {bind_delta_index} for parent `{parent_inode_id}` is superseded at or below the retention floor without an unbind; refusing to drop rows"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Keeps every attribute revision above the retention floor, plus the newest
 /// revision at or below it per inode, and drops the rest.
 ///
@@ -989,6 +1109,9 @@ pub(super) fn drop_rows_below_retention_floor(
 /// Attributes are never dropped for being unreachable. A deleted inode keeps
 /// its rows, the same posture inode and tombstone rows take, and that is what
 /// makes an undelete give back the map the inode had.
+///
+/// The rule reads one inode's rows and no others, so a streaming compaction
+/// runs it over one inode's rows at a time and reaches the same answer.
 fn drop_superseded_attribute_revisions(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,

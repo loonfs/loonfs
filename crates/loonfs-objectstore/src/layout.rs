@@ -35,6 +35,11 @@ pub enum DurableObjectFamily {
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataTable,
+    /// Classifies an immutable metadata SST segment a streaming compaction
+    /// wrote before any manifest referenced it.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+    MetadataCompactionStaging,
     /// Classifies a mutable checkpoint lifecycle record.
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
@@ -141,6 +146,22 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/metadata/tables/")
     }
 
+    /// A metadata segment a streaming compaction has written but no manifest
+    /// references yet. The object is an ordinary metadata segment; only the
+    /// directory differs, which is what keeps a running job's output out of
+    /// the sweep that reaps unreferenced table keys.
+    pub(crate) fn metadata_compaction_staging_table(
+        &self,
+        namespace: &str,
+        table_id: &str,
+    ) -> String {
+        format!("namespaces/{namespace}/metadata/compaction-staging/{table_id}.sst.zst")
+    }
+
+    pub(crate) fn metadata_compaction_staging_prefix(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/metadata/compaction-staging/")
+    }
+
     /// Durable stable-view pin to a metadata manifest.
     pub(crate) fn checkpoint_record(&self, namespace: &str, checkpoint_id: &str) -> String {
         format!("namespaces/{namespace}/checkpoints/{checkpoint_id}.json")
@@ -198,6 +219,14 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         }
         ["namespaces", namespace, "metadata", "tables", table] if table.ends_with(".sst.zst") => {
             parsed(DurableObjectFamily::MetadataTable, Some(namespace))
+        }
+        ["namespaces", namespace, "metadata", "compaction-staging", table]
+            if table.ends_with(".sst.zst") =>
+        {
+            parsed(
+                DurableObjectFamily::MetadataCompactionStaging,
+                Some(namespace),
+            )
         }
         ["namespaces", namespace, "checkpoints", checkpoint] if checkpoint.ends_with(".json") => {
             parsed(DurableObjectFamily::CheckpointRecord, Some(namespace))
@@ -267,6 +296,12 @@ mod tests {
         );
         assert_eq!(
             layout
+                .metadata_compaction_staging_table("ns-1", "tbl_00000000000000000000000000000001")
+                .as_str(),
+            "namespaces/ns-1/metadata/compaction-staging/tbl_00000000000000000000000000000001.sst.zst"
+        );
+        assert_eq!(
+            layout
                 .checkpoint_record("ns-1", "chk_00000000000000000000000000000001")
                 .as_str(),
             "namespaces/ns-1/checkpoints/chk_00000000000000000000000000000001.json"
@@ -298,6 +333,28 @@ mod tests {
             .starts_with(&prefix));
     }
 
+    /// A streaming compaction's staged segments must not appear in the
+    /// listing that enumerates referenced metadata tables. That listing is
+    /// what a collector sweeps, and a running job's output is unreferenced
+    /// for as long as the job runs.
+    #[test]
+    fn staged_compaction_segments_live_outside_the_table_listing_prefix() {
+        let layout = ObjectLayout::new();
+        let tables = layout.metadata_table_prefix("ns-1");
+        let staging = layout.metadata_compaction_staging_prefix("ns-1");
+
+        assert!(!staging.starts_with(&tables));
+        assert!(!layout
+            .metadata_compaction_staging_table("ns-1", "tbl_abc")
+            .starts_with(&tables));
+        assert!(layout
+            .metadata_compaction_staging_table("ns-1", "tbl_abc")
+            .starts_with(&staging));
+        assert!(!layout
+            .metadata_table("ns-1", "tbl_abc")
+            .starts_with(&staging));
+    }
+
     #[test]
     fn parse_build_round_trips_for_namespace_key_families() {
         let layout = ObjectLayout::new();
@@ -323,6 +380,10 @@ mod tests {
             (
                 layout.metadata_table("ns-1", "tbl_abc"),
                 DurableObjectFamily::MetadataTable,
+            ),
+            (
+                layout.metadata_compaction_staging_table("ns-1", "tbl_abc"),
+                DurableObjectFamily::MetadataCompactionStaging,
             ),
             (
                 layout.checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
