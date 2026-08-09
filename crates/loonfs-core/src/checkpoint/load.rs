@@ -28,7 +28,8 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId, WriterEpoch};
 use loonfs_objectstore::keys::{
-    metadata_compaction_staging_table, metadata_manifest_object, metadata_table,
+    metadata_compaction_job_id_from_key, metadata_compaction_table, metadata_manifest_object,
+    metadata_table,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -576,22 +577,27 @@ pub(super) fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
 /// identity may live at.
 ///
 /// The ordinary key is the metadata-table key its owner and table id build.
-/// The other is the staging directory a streaming compaction writes to: a
-/// compaction writes its output before any manifest names it, so its segments
-/// must sit outside the listing a collector sweeps for unreferenced tables
-/// (format spec, "Compaction"). Publication moves no bytes, so the manifest
-/// that swaps a compaction's output in names the staged keys. The segment is
-/// an ordinary one either way — same encoding, same descriptor — and the
-/// table id still makes the key its producer's alone.
+/// The other is one streaming compaction job's own prefix: a compaction
+/// writes its output before any manifest names it, so its segments must sit
+/// outside the listing a collector sweeps for unreferenced tables (format
+/// spec, "Compaction"). Publication moves no bytes, so the manifest that swaps
+/// a compaction's output in names the staged keys. The segment is an ordinary
+/// one either way — same encoding, same descriptor — and the table id still
+/// makes the key its producer's alone. The job id is read back out of the key
+/// rather than carried on the descriptor, because which job wrote a segment
+/// stops mattering the moment a manifest names it.
 pub(super) fn ensure_segment_object_key(
     descriptor: &MetadataFileRef,
 ) -> Result<(), ManifestLoadError> {
     let expected = metadata_file_object_key(descriptor);
-    let staged = metadata_compaction_staging_table(
-        descriptor.owner_namespace_id.as_str(),
-        descriptor.table_id.as_str(),
-    );
-    if descriptor.object_key == expected || descriptor.object_key == staged {
+    let staged = metadata_compaction_job_id_from_key(&descriptor.object_key).map(|job_id| {
+        metadata_compaction_table(
+            descriptor.owner_namespace_id.as_str(),
+            job_id,
+            descriptor.table_id.as_str(),
+        )
+    });
+    if descriptor.object_key == expected || staged.as_deref() == Some(&descriptor.object_key) {
         return Ok(());
     }
     Err(ManifestLoadError::SegmentObjectKeyMismatch {

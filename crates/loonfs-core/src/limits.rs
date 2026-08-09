@@ -107,25 +107,86 @@ pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 /// Default candidate budget for one step-driven garbage-collection pass.
 pub const DEFAULT_GC_MAX_OBJECTS: u64 = 1024;
 
-/// Grace a streaming compaction's staged segments get before garbage
-/// collection may reap one as an orphan (format spec, "Garbage collection",
-/// rule 12).
+/// How often a running streaming compaction rewrites its lease (format spec,
+/// "Garbage collection", rule 12).
 ///
-/// A staged segment is unreferenced for as long as its job runs, and the job
-/// has no time budget at all: it rebuilds a whole family group, which is the
-/// work no per-step budget could hold. The ordinary grace window only has to
-/// cover a publication in flight, so it is far too short here — a pass would
-/// reap the output of a job still writing it.
+/// A job's staged output is unreferenced for as long as the job runs, and a
+/// job has no time budget at all, so the collector cannot tell a running
+/// job's output from a dead one's by age. The lease is what tells it: the
+/// job rewrites it on this interval, and a prefix whose lease is fresh is
+/// retained whole.
 ///
-/// This window is a liveness bound and not a correctness one. A job that
-/// publishes leaves its segments named by the manifest, and a referenced
-/// object is live wherever it sits, so nothing this window protects is
-/// needed once the publication lands. Being generous costs storage for
-/// orphans a crash left behind; being tight costs a job that was nearly done.
-/// So it is one day, spelled as the number of metadata publication budgets
-/// that fit in one: a job that has not finished within that many is not one a
-/// restart is going to shorten.
-pub const METADATA_COMPACTION_STAGING_GRACE_MS: u64 = 96 * METADATA_PUBLICATION_BUDGET_MS;
+/// One small overwrite per interval is nothing beside the reads the job is
+/// already making, so the interval is set by the other side of the trade:
+/// it has to be long enough that a heartbeat spending its whole provider
+/// budget still lands before the next one is due, and short enough that a
+/// dead job's output is reclaimable in a sensible time. Five minutes is
+/// twice the provider bound below it and leaves the reclamation window
+/// under an hour.
+pub const METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS: u64 = 5 * 60 * 1000;
+
+/// Heartbeats a lease may miss before the collector reads its job as gone.
+pub const METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS: u64 = 5;
+
+/// How long after its last heartbeat a lease still says its job owns its
+/// prefix.
+///
+/// Two things have to fit inside it. A running job must never lose its
+/// prefix, so the window covers several missed heartbeats rather than one.
+/// And a job's last heartbeat before it publishes is at the top of a
+/// finalization attempt, so the window must also outlast one publication:
+/// `GC_MIN_GRACE_WINDOW_MS` is the bound on the span from a publication's
+/// first object write to its root compare-and-swap, and the assertion below
+/// holds the lease above it.
+pub const METADATA_COMPACTION_LEASE_EXPIRY_MS: u64 =
+    METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS * METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS;
+
+/// Grace a streaming compaction's staged segments get, once their job's
+/// lease is stale or gone, before garbage collection may reap one as an
+/// orphan (format spec, "Garbage collection", rule 12).
+///
+/// Derived, not tuned. A job owns its prefix while its lease is fresh, so
+/// what remains to cover is the gap between the last heartbeat and the moment
+/// the objects become referenced: the lease's own expiry, plus the bound on
+/// the publication that names them, which is what `GC_MIN_GRACE_WINDOW_MS`
+/// bounds for every other publication in the system.
+///
+/// This is the window that replaced a fixed day. A day was a guess at how
+/// long a job might run, which is exactly the thing the streaming design
+/// refuses to bound; the lease measures it instead, and this window only has
+/// to cover what happens after a lease stops being refreshed.
+pub const METADATA_COMPACTION_STAGING_GRACE_MS: u64 =
+    METADATA_COMPACTION_LEASE_EXPIRY_MS + GC_MIN_GRACE_WINDOW_MS;
+
+/// The heartbeat's inequality, shared by the compile-time assertion below
+/// and the test that proves the assertion has teeth.
+const fn heartbeats_land_before_the_next_one_is_due(interval_ms: u64) -> bool {
+    interval_ms > PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS
+}
+
+// A heartbeat is one small overwrite, and one provider operation's total wall
+// time is its deadline plus one attempt timeout. An interval below that would
+// make a healthy job fall behind its own lease under nothing worse than a
+// slow provider, so the two constants have to move together.
+const _: () = assert!(
+    heartbeats_land_before_the_next_one_is_due(METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS),
+    "a heartbeat that spends its whole provider budget must still land before the next is due"
+);
+
+/// The lease's inequality, shared by the compile-time assertion below and the
+/// test that proves the assertion has teeth.
+const fn outlasts_one_publication(expiry_ms: u64) -> bool {
+    expiry_ms >= GC_MIN_GRACE_WINDOW_MS
+}
+
+// A job's last heartbeat before its output becomes referenced is at the top
+// of a finalization attempt, and that attempt's compare-and-swap lands within
+// one publication bound of it. A lease shorter than that bound would expire
+// while the publication naming its output was still in flight.
+const _: () = assert!(
+    outlasts_one_publication(METADATA_COMPACTION_LEASE_EXPIRY_MS),
+    "a compaction lease must outlast the publication that ends the job holding it"
+);
 
 const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right {
@@ -316,16 +377,39 @@ mod tests {
         );
     }
 
-    /// The staging window has to outlast a job, and a job is allowed to be
-    /// long. Anything near the ordinary window would reap a job's output
-    /// while it was still writing it.
+    /// The staging window is derived from the lease, not from a guess at how
+    /// long a job runs. A running job holds its prefix through its lease, so
+    /// this window only has to cover what follows the last heartbeat.
     #[test]
-    fn the_compaction_staging_grace_is_a_day_of_publication_budgets() {
-        assert_eq!(METADATA_COMPACTION_STAGING_GRACE_MS, 24 * 60 * 60 * 1000);
-        assert!(
-            METADATA_COMPACTION_STAGING_GRACE_MS
-                > 10 * max_u64(GC_MIN_GRACE_WINDOW_MS, GcConfig::default().grace_window_ms),
-            "an orphan's window must be nothing like the window that covers a publication"
+    fn the_compaction_staging_grace_is_the_lease_plus_one_publication() {
+        // 25 minutes of lease + 20.5 minutes of publication.
+        assert_eq!(METADATA_COMPACTION_LEASE_EXPIRY_MS, 25 * 60 * 1000);
+        assert_eq!(METADATA_COMPACTION_STAGING_GRACE_MS, 1_500_000 + 1_230_000);
+        assert_eq!(
+            METADATA_COMPACTION_STAGING_GRACE_MS,
+            METADATA_COMPACTION_LEASE_EXPIRY_MS + GC_MIN_GRACE_WINDOW_MS
+        );
+        // Same bargain as every other derived floor here: the compile-time
+        // assertion is only worth having if its predicate can fail.
+        assert!(outlasts_one_publication(
+            METADATA_COMPACTION_LEASE_EXPIRY_MS
+        ));
+        assert!(!outlasts_one_publication(GC_MIN_GRACE_WINDOW_MS - 1));
+    }
+
+    /// Same bargain as the other derived floors: the heartbeat assertion is
+    /// only worth having if its predicate can fail.
+    #[test]
+    fn the_heartbeat_interval_floor_rejects_an_interval_one_provider_bound_short() {
+        assert!(heartbeats_land_before_the_next_one_is_due(
+            METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS
+        ));
+        assert!(!heartbeats_land_before_the_next_one_is_due(
+            PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS
+        ));
+        assert_eq!(
+            METADATA_COMPACTION_LEASE_EXPIRY_MS,
+            METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS * METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS
         );
     }
 }

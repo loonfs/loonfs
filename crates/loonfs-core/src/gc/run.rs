@@ -2,6 +2,7 @@
 //! and the bounded, resumable sweep.
 
 use super::budget::PassBudget;
+use super::compaction_staging::{CompactionLeases, StagedObject};
 use super::config::GcConfig;
 use super::cursor::{CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
@@ -106,6 +107,9 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // overrunning — the sessions waiting on it are retained and the sweep
     // continues.
     let mut references = ContentReferences::over(&mark);
+    // What this pass has learned about the compaction job whose objects it is
+    // walking. One lease read per job rather than one per object.
+    let mut leases = CompactionLeases::default();
     // The position this pass walked to, or `None` while it has decided
     // nothing and has no progress of its own to report.
     let mut position: Option<GcCursor> = None;
@@ -144,6 +148,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
                 &mark,
                 &mut sweep,
                 &mut references,
+                &mut leases,
                 &mut budget,
                 &mut report,
             )
@@ -206,6 +211,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     mark: &LiveSet,
     sweep: &mut SweepVerifier,
     references: &mut ContentReferences<'_>,
+    leases: &mut CompactionLeases,
     budget: &mut PassBudget,
     report: &mut GcResponse,
 ) -> Result<SweepStep> {
@@ -285,24 +291,57 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
                 report.deleted_wal_segments += 1;
             }
         }
-        // Both families hold metadata segments and both are counted as
-        // metadata tables. What differs is the window an unreferenced one
-        // ages under: a staged segment belongs to a job that publishes
-        // nothing until it finishes, and a job is allowed to run for a long
-        // time, so reaping one on the ordinary window would delete the output
-        // of a job still writing it.
-        CandidateFamily::MetadataTables | CandidateFamily::CompactionStaging => {
-            let grace_window_ms = match family {
-                CandidateFamily::CompactionStaging => METADATA_COMPACTION_STAGING_GRACE_MS,
-                _ => config.grace_window_ms,
-            };
+        CandidateFamily::MetadataTables => {
             // Rule 5 is sticky across every re-collection in this pass.
             if sweep.degraded {
                 report.retain(RetainedReason::DegradedRoots);
             } else if sweep.live.tables.contains(key) {
                 report.retain(RetainedReason::Referenced);
-            } else if sweep_aged(store, key, grace_window_ms, context, sweep, report).await? {
+            } else if sweep_aged(store, key, config.grace_window_ms, context, sweep, report).await?
+            {
                 report.deleted_metadata_tables += 1;
+            }
+        }
+        // A compaction job's prefix holds the segments it has written and the
+        // lease that says it is still running. A published segment is named by
+        // the manifest and is live like any other table; everything else is
+        // decided by the lease, because a job outlives the ordinary grace
+        // window and its output would otherwise read as an aged orphan while
+        // it was still being written. Only the segments are counted as
+        // metadata tables — a lease is a control object, and a pass that
+        // reclaims one reclaims that job's segments in the same walk.
+        CandidateFamily::CompactionStaging => {
+            if sweep.degraded {
+                report.retain(RetainedReason::DegradedRoots);
+            } else if sweep.live.tables.contains(key) {
+                report.retain(RetainedReason::Referenced);
+            } else {
+                match leases
+                    .owner_of(store, namespace_id, key, context.now_ms)
+                    .await?
+                {
+                    // The same reason an object inside its window is kept:
+                    // something that has not run out yet still protects it.
+                    StagedObject::OwnedByALiveJob => report.retain(RetainedReason::GraceWindow),
+                    StagedObject::UnrecognizedKey => {
+                        report.retain(RetainedReason::UnrecognizedKey);
+                    }
+                    StagedObject::Orphaned => {
+                        if sweep_aged(
+                            store,
+                            key,
+                            METADATA_COMPACTION_STAGING_GRACE_MS,
+                            context,
+                            sweep,
+                            report,
+                        )
+                        .await?
+                            && key.ends_with(".sst.zst")
+                        {
+                            report.deleted_metadata_tables += 1;
+                        }
+                    }
+                }
             }
         }
         CandidateFamily::Manifests => {
@@ -348,9 +387,10 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
 /// question, so it keeps every aged candidate and says so.
 ///
 /// The window is a parameter because one family does not use the configured
-/// one: compaction staging holds the output of a job that publishes nothing
-/// until it finishes, and it ages under
-/// [`METADATA_COMPACTION_STAGING_GRACE_MS`] instead.
+/// one: an object under a compaction job's prefix whose lease is stale or
+/// gone ages under [`METADATA_COMPACTION_STAGING_GRACE_MS`], which covers the
+/// lease's own expiry plus the publication that could still be naming the
+/// object.
 async fn sweep_aged<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,

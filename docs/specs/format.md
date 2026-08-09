@@ -79,7 +79,8 @@ The required durable object families and standard key patterns are:
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The lifecycle is monotonic: a record is created active under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
-| **Compaction staging** | Immutable | Hold metadata segments a streaming compaction has written before any manifest references them ("Compaction"). The object is an ordinary metadata segment; only the directory differs. | `namespaces/{owner_namespace_id}/metadata/compaction-staging/{table_id}.sst.zst` |
+| **Compaction staging** | Immutable | Hold metadata segments one streaming compaction job has written before any manifest references them ("Compaction"). The object is an ordinary metadata segment; only the directory differs. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/tables/{table_id}.sst.zst` |
+| **Compaction leases** | Mutable | Say that one streaming compaction job is still running, so the objects under its prefix belong to it. Carries lifecycle ownership only — job, namespace, owner, start, and last heartbeat — and is rewritten on a heartbeat interval and deleted after publication. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The lifecycle is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
@@ -314,14 +315,15 @@ Small mutable objects such as the namespace head must use compare-and-swap
 semantics. These objects must remain small enough that guarded rewrite is
 practical.
 
-Five control-object kinds are registered: `wal_head`, `wal_floor`,
-`metadata_root`, `checkpoint_record`, and `upload_session`. A control-object
-envelope carrying any other kind string is rejected, not skipped.
+Six control-object kinds are registered: `wal_head`, `wal_floor`,
+`metadata_root`, `checkpoint_record`, `upload_session`, and
+`compaction_lease`. A control-object envelope carrying any other kind string
+is rejected, not skipped.
 
 Mutable control-object decoders reject unknown fields in both the envelope and
 the complete nested payload. Otherwise, an older binary could tolerate a
 newer field, erase it during read-modify-write, and still report a successful
-guarded update. All five registered kinds use that strict decoder; immutable
+guarded update. All six registered kinds use that strict decoder; immutable
 WAL segments, metadata segments, namespace manifests, grep segments, and grep
 manifests remain tolerant of additive fields.
 
@@ -1819,6 +1821,7 @@ Two rules make these envelopes evolvable:
 | Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
+| Compaction lease | `compaction_lease` | JSON, uncompressed | 1 |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -2133,16 +2136,28 @@ A rebuild whose bottom-anchored window cannot fit one step's budget is run as
 a streaming compaction instead: it merges every run of the group in one job
 and writes each finished output segment as it fills, so nothing about the job
 follows the size of the group. Those segments are written under
-`namespaces/{owner_namespace_id}/metadata/compaction-staging/{table_id}.sst.zst`
+`namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/tables/{table_id}.sst.zst`
 rather than under `metadata/tables/`. The object is an ordinary metadata
 segment — same encoding, same descriptor, same reads — and only its directory
 differs. The directory is what keeps a running job's output out of the
 listing that enumerates metadata tables: a job outlives the collector's grace
 window, so its segments would otherwise read as unreferenced objects aged
-past grace, which is the class the collector reaps. Nothing loads or
-validates the staging directory, and a manifest may reference a staged key
-directly: a completed publication moves no bytes, because a referenced object
-is live wherever it sits.
+past grace, which is the class the collector reaps. The job id groups one
+job's output together so a collector can decide all of it from that job's
+lease ("Garbage collection", rule 12). Nothing loads or validates the
+compaction directory, and a manifest may reference a staged key directly: a
+completed publication moves no bytes, because a referenced object is live
+wherever it sits.
+
+The rules a rebuild applies are the same however it runs them. A bounded
+merge holds every row of its window and decides them together. A streaming
+compaction cannot, because one inode's attribute history and one
+parent-and-name slot's binding generations have no size limit, so it runs
+each rule as a streaming operator holding a fixed number of fields and at
+most one row. The row-key grammar is what makes the two agree: attribute rows
+of one inode arrive newest first, a deletion's removal marker arrives before
+the row it removes, and a bind arrives before the unbinds of its own binding
+generation.
 
 Invariants:
 
@@ -2186,7 +2201,7 @@ does not exist, so there is nothing to collect and nothing to ignore.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/tables/`, `metadata/compaction-staging/`, `checkpoints/`, and
+`metadata/tables/`, `metadata/compactions/`, `checkpoints/`, and
 `wal/segments/` collections. A live manifest roots every object key its
 `metadata_files` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
@@ -2359,19 +2374,49 @@ publishing CAS) — under these rules:
    reading through a pinned basis; a same-content-store copy across
    namespaces (section 2.8) would have to root the reference on the source
    side the way a fork does.
-12. **Compaction staging ages under a window of its own.** A streaming
+12. **A compaction job's objects are decided by its lease.** A streaming
    compaction ("Compaction") publishes nothing until it finishes and is paced
    by no budget, so its output is unreferenced for as long as the job runs.
    `T` only has to cover a publication in flight, so a sweep applying it to
-   `metadata/compaction-staging/` would delete the output of a job still
-   writing it. Unreferenced staged segments therefore age under
-   `METADATA_COMPACTION_STAGING_GRACE`, a generous bound on job duration
-   rather than a correctness window: nothing is unsafe about a shorter one
-   except that a job would have to run again. A published job's segments are
-   named by the manifest, and a referenced object is live wherever it sits,
-   so this window never applies to them. Every other rule — the reference
-   anchor, delete-time re-verification, degraded roots — applies here exactly
-   as it applies to `metadata/tables/`.
+   `metadata/compactions/` would delete the output of a job still writing it,
+   and no fixed window can replace it: any such window is a guess at how long
+   a job may run, which is exactly what the design refuses to bound.
+
+   The job says so instead. Every job owns the prefix
+   `namespaces/{namespace_id}/metadata/compactions/{job_id}/`, writes its
+   output under `tables/` inside it, and holds a lease at `lease.json` beside
+   that directory. The lease carries lifecycle ownership only — job,
+   namespace, owner, `started_at_ms`, `heartbeat_at_ms` — and never a cursor,
+   an output descriptor, an offset, or resumable progress. The job writes it
+   before its first output object, rewrites it every
+   `METADATA_COMPACTION_HEARTBEAT_INTERVAL` while it runs and at the top of
+   every finalization attempt, and deletes it after publishing.
+
+   A pass decides one of the prefix's objects as follows. An object the
+   manifest references is live, like every other referenced object. Otherwise,
+   if the owning job's lease decodes and its `heartbeat_at_ms` is within
+   `METADATA_COMPACTION_LEASE_EXPIRY`, the object is retained whatever its
+   age. Otherwise it ages as an ordinary unreferenced orphan under
+   `METADATA_COMPACTION_STAGING_GRACE`, which is derived rather than tuned:
+
+   ```
+   METADATA_COMPACTION_STAGING_GRACE
+       >= METADATA_COMPACTION_LEASE_EXPIRY   (a job's claim outliving its last heartbeat)
+          + T                                (rule 1: the publication that may still name it)
+   ```
+
+   `METADATA_COMPACTION_LEASE_EXPIRY` is a small multiple of the heartbeat
+   interval, and it must itself be at least `T`: a job's last heartbeat before
+   its output becomes referenced is at the top of a finalization attempt, and
+   that attempt's compare-and-swap lands within one publication bound of it.
+
+   The lease is a mutable control object and decodes strictly like every
+   other. A lease that does not decode, or that names another job or another
+   namespace, is treated as missing and reported: nothing else reads the
+   object, so believing a corrupt one would keep its prefix alive forever and
+   nothing would ever say why. Every other rule — the reference anchor,
+   delete-time re-verification, degraded roots — applies here exactly as it
+   applies to `metadata/tables/`.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.

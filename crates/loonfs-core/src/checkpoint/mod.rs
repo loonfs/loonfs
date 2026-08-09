@@ -22,7 +22,9 @@
 //!   [`row`] handles manifest-row encoding.
 //! - [`reorganize`] compacts bounded family groups into new base runs, and
 //!   [`streaming_compaction`] rebuilds a group whose bottom-anchored window
-//!   no longer fits one of those steps.
+//!   no longer fits one of those steps — with [`compaction_retention`]
+//!   holding the frozen floor's rules as streaming state and
+//!   [`compaction_lease`] holding the running job's claim on its own output.
 //! - [`retention`] advances the retention floor behind verified progress.
 //! - [`runs`] models the LSM run layout shared by all of the above,
 //!   [`cache`] holds decoded SST blocks keyed by content digest, and
@@ -33,6 +35,8 @@ mod block_fetch;
 mod block_load;
 mod build;
 mod cache;
+mod compaction_lease;
+mod compaction_retention;
 mod create;
 mod data_block_load;
 mod error;
@@ -62,7 +66,9 @@ pub use self::cache::{
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
-pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
+pub use self::reorganize::{
+    MetadataCompactionView, MetadataReorganizeOutcome, MetadataReorganizeReport,
+};
 pub(crate) use self::runs::MetadataLsmPolicy;
 pub use self::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
@@ -72,6 +78,7 @@ pub use self::streaming_compaction::{
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 
+pub(crate) use self::compaction_lease::{read_compaction_lease_state, CompactionLeaseState};
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;

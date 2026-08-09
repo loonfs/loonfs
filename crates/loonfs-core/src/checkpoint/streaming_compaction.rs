@@ -9,17 +9,20 @@
 //!
 //! Nothing about the job follows the size of the group. It opens one iterator
 //! per run per family, merges them in row-key order, feeds the merged rows
-//! through the retention rules a locality group at a time, and writes each
-//! output segment as it fills. What it holds at any instant is a fixed number
-//! of decoded input blocks per iterator, the rows of one locality group, and
-//! one segment builder per family of the group. No family, no partition, and
-//! no directory is ever collected whole.
+//! through streaming retention operators ([`super::compaction_retention`]),
+//! and writes each output segment as it fills. What it holds at any instant is
+//! a fixed number of decoded input blocks per iterator, the fixed state of one
+//! retention operator, and one segment builder per family of the group. No
+//! family, no partition, no directory, no inode's history, and no name slot's
+//! generations are ever collected whole.
 //!
-//! Output segments go to the staging directory rather than to
+//! Output segments go to the job's own prefix rather than to
 //! `metadata/tables/` (format spec, "Compaction"): a job outlives the
 //! collector's grace window, so its output would otherwise look exactly like
-//! the unreferenced aged objects the collector reaps. The executor publishes
-//! nothing itself. It returns the descriptors it wrote, and
+//! the unreferenced aged objects the collector reaps. What tells the collector
+//! the difference is the lease beside them ([`super::compaction_lease`]),
+//! which the job rewrites while it runs. The executor publishes nothing
+//! itself. It returns the descriptors it wrote, and
 //! [`run_metadata_compaction_job`] swaps them in with one manifest
 //! publication; a cancelled or crashed job leaves staged objects nothing
 //! references and the old manifest still valid.
@@ -32,6 +35,8 @@ use super::block_fetch::{load_segment_filter, load_segment_index_for_reorganizat
 use super::block_load::SessionBlockMemo;
 use super::build::{write_manifest_segment, MetadataSstWriteRequest};
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
+use super::compaction_lease::CompactionLease;
+use super::compaction_retention::{KeptRow, RetentionRule};
 use super::data_block_load::load_segment_data_block_span;
 use super::error::ManifestLoadError;
 use super::flush::ensure_metadata_publication_budget;
@@ -40,8 +45,8 @@ use super::load::{
 };
 use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
 use super::reorganize::{
-    bind_survives_frozen_floor, drop_rows_below_frozen_floor, group_run_descriptors,
-    unbindings_at_or_below_floor, write_reorganized_manifest, MergePlacement,
+    bind_survives_frozen_floor, group_run_descriptors, unbindings_at_or_below_floor,
+    write_reorganized_manifest, MergePlacement,
 };
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
 use super::scan::{descriptor_may_intersect_range, Readahead, VerifiedMetadataTables};
@@ -49,13 +54,13 @@ use super::validate::validate_manifest_row_seq_range;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::read_metadata_root_object_if_present;
-use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+use crate::timing::StdMonotonicTimer;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::{
     string_prefix_upper_bound, DecodedDataBlock, SegmentIndexEntry,
 };
-use loonfs_api::{ChangeSeq, ManifestId, MetadataTableId, NamespaceId};
-use loonfs_objectstore::keys::metadata_compaction_staging_table;
+use loonfs_api::{ChangeSeq, ManifestId, MetadataCompactionId, MetadataTableId, NamespaceId};
+use loonfs_objectstore::keys::metadata_compaction_table;
 use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -107,6 +112,10 @@ const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 /// merge the group a job is rebuilding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataCompactionSpec {
+    /// This job's identity, and the prefix its output and its lease live
+    /// under. Generated with the plan, so two plans for one group never write
+    /// into each other's prefix.
+    job_id: MetadataCompactionId,
     group: MetadataFamilyGroup,
     /// Every run the group held when the plan was made, by sequence and
     /// level. That is bottom-anchored by construction — a run the group holds
@@ -130,6 +139,7 @@ impl MetadataCompactionSpec {
         frozen_floor_seq: ChangeSeq,
     ) -> Self {
         Self {
+            job_id: MetadataCompactionId::generate(),
             group,
             inputs,
             input_rows,
@@ -140,6 +150,11 @@ impl MetadataCompactionSpec {
 
     pub(super) fn group(&self) -> MetadataFamilyGroup {
         self.group
+    }
+
+    /// The job's identity, which names the prefix its output sits under.
+    pub fn job_id(&self) -> &MetadataCompactionId {
+        &self.job_id
     }
 
     /// The families this job rebuilds, for a caller reporting what it started.
@@ -213,10 +228,11 @@ pub(super) struct MetadataCompactionResult {
     /// row at or below the frozen floor.
     pub(super) unbind_probes: u64,
     /// The most decoded input blocks the job's iterators held at once, and
-    /// the most rows one locality group held. These are what bound the job's
-    /// memory, so tests assert they do not follow the size of the group.
+    /// the most rows one retention operator held. These are what bound the
+    /// job's memory, so tests assert they do not follow the size of the
+    /// group, of one inode's history, or of one name slot's generations.
     pub(super) peak_resident_blocks: usize,
-    pub(super) peak_locality_rows: usize,
+    pub(super) peak_operator_rows: usize,
 }
 
 /// Rebuilds `spec`'s group from `spec`'s runs.
@@ -230,6 +246,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
+    lease: &mut CompactionLease<'_>,
 ) -> Result<MetadataCompactionOutcome> {
     let snapshot = resolve_snapshot_runs(tables, spec)?;
     let mut job = CompactionJob {
@@ -249,7 +266,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
             rows_written_by_family: BTreeMap::new(),
             unbind_probes: 0,
             peak_resident_blocks: 0,
-            peak_locality_rows: 0,
+            peak_operator_rows: 0,
         },
         canonical_digest: RowDigest::default(),
         index_digest: RowDigest::default(),
@@ -257,7 +274,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     };
 
     for cluster in retention_clusters(spec.group) {
-        if !job.run_cluster(cluster).await? {
+        if !job.run_cluster(cluster, lease).await? {
             return Ok(MetadataCompactionOutcome::Cancelled);
         }
     }
@@ -323,8 +340,19 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     let Some(snapshot_keys) = snapshot_segment_keys(&tables, spec) else {
         return Ok(MetadataCompactionJobOutcome::Abandoned);
     };
+    // The lease is written before the first output object, so no object under
+    // the job's prefix is ever unclaimed.
+    let mut lease = CompactionLease::new(
+        namespace_id,
+        spec.job_id(),
+        &context.writer_id,
+        context.now_ms,
+        &timer,
+    );
+    lease.heartbeat(store).await?;
     tracing::info!(
         namespace_id = namespace_id.as_str(),
+        job_id = spec.job_id().as_str(),
         families = ?spec.families(),
         input_runs = spec.input_runs(),
         input_rows = spec.input_rows(),
@@ -332,21 +360,32 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         "streaming metadata compaction started"
     );
 
-    let result =
-        match run_metadata_compaction(&tables, namespace_id, spec, policy, cancellation).await? {
-            MetadataCompactionOutcome::Completed(result) => result,
-            MetadataCompactionOutcome::Cancelled => {
-                // The executor stops between block fetches, so what it wrote is
-                // whatever segments had already filled. They are staged and named
-                // by nothing.
-                tracing::info!(
-                    namespace_id = namespace_id.as_str(),
-                    families = ?spec.families(),
-                    "streaming metadata compaction cancelled"
-                );
-                return Ok(MetadataCompactionJobOutcome::Cancelled);
-            }
-        };
+    let result = match run_metadata_compaction(
+        &tables,
+        namespace_id,
+        spec,
+        policy,
+        cancellation,
+        &mut lease,
+    )
+    .await?
+    {
+        MetadataCompactionOutcome::Completed(result) => result,
+        MetadataCompactionOutcome::Cancelled => {
+            // The executor stops between block fetches, so what it wrote is
+            // whatever segments had already filled. They are staged and named
+            // by nothing. The lease is left where it is: it expires on its
+            // own, and a pass that arrives before it does keeps a dead job's
+            // orphans a while longer, which costs storage and nothing else.
+            tracing::info!(
+                namespace_id = namespace_id.as_str(),
+                job_id = spec.job_id().as_str(),
+                families = ?spec.families(),
+                "streaming metadata compaction cancelled"
+            );
+            return Ok(MetadataCompactionJobOutcome::Cancelled);
+        }
+    };
     drop(tables);
 
     let rows_read = result.rows_read;
@@ -359,13 +398,18 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         spec,
         &snapshot_keys,
         result,
-        &timer,
+        &mut lease,
     )
     .await?
     {
         Finalization::Published(manifest_id) => {
+            // The manifest names the staged segments now, and a referenced
+            // object is live wherever it sits, so the claim has nothing left
+            // to protect.
+            lease.release(store).await;
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
+                job_id = spec.job_id().as_str(),
                 families = ?spec.families(),
                 rows_read,
                 rows_written,
@@ -398,7 +442,9 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
 /// The publication budget covers this publication and not the job: what it
 /// protects against is a root compare-and-swap landing after the objects it
 /// names could have aged into the collector's window, which is a property of
-/// the last few seconds and not of however long the rebuild took.
+/// the last few seconds and not of however long the rebuild took. That is the
+/// same span the lease has to cover, so both are measured off the lease's own
+/// clock.
 pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -406,9 +452,15 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     snapshot_keys: &BTreeSet<String>,
     result: MetadataCompactionResult,
-    timer: &dyn MonotonicTimer,
+    lease: &mut CompactionLease<'_>,
 ) -> Result<Finalization> {
+    let timer = lease.timer();
     for attempt in 1..=MAX_FINALIZATION_ATTEMPTS {
+        // The span from here to the compare-and-swap below is one publication
+        // budget, and a lease outlasts one publication, so refreshing the
+        // claim once per attempt keeps the output claimed until the manifest
+        // names it (`limits::METADATA_COMPACTION_LEASE_EXPIRY_MS`).
+        lease.heartbeat(store).await?;
         let publication_started_ms = timer.monotonic_now_ms();
         let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
             .await
@@ -542,28 +594,32 @@ pub(super) fn snapshot_segment_keys<S: ObjectStore + ?Sized>(
 struct RetentionCluster {
     families: &'static [MetadataTableFamily],
     locality: LocalityGrouping,
-    operator: RetentionOperator,
+    rule: RetentionRule,
 }
 
-/// How many rows the retention rules need to see at once.
+/// Which rows a retention rule has to see together, and therefore how the
+/// merge interleaves the families of one cluster.
 ///
 /// The rules that drop a row read its neighbours, and every one of them reads
-/// neighbours that share a row-key prefix: an unbind cancels the bind under
-/// the same parent and name, a removal marker repeats its deletion's sequence
-/// and root, and an attribute revision supersedes revisions of its own inode.
-/// So the grouping is read straight off the row-key grammar in
+/// neighbours that share a row-key prefix: an unbind cancels the bind of its
+/// own generation, a removal marker repeats its deletion's sequence and root,
+/// and an attribute revision supersedes revisions of its own inode. So the
+/// grouping is read straight off the row-key grammar in
 /// `MetadataRow::row_key_for_family`, and it is the shortest prefix each rule
 /// needs rather than the whole partition the rows happen to share:
 ///
 /// | families | grouped by | key components after the family prefix |
 /// | --- | --- | --- |
-/// | binds, unbinds | one name slot | `{parent}-{name}` |
+/// | binds, unbinds | one binding generation | `{parent}-{name}-{bind_seq}-{bind_delta}` |
 /// | active deletions | one deletion | `{deleted_at_seq}-{root}` |
 /// | attributes | one inode | `{inode}` |
 /// | everything else | one row | — |
 ///
-/// A slot rather than a directory is what keeps the bindings group bounded:
-/// a directory has no size limit, and a slot holds one binding's generations.
+/// A generation rather than a name slot is what keeps the bindings group
+/// bounded: a slot has no limit on how many times a name is created and
+/// deleted, and a generation holds one bind and the unbind that retires it.
+/// A bind's whole row key *is* its generation, and an unbind's key leads with
+/// the generation it retires, so both families name the same group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalityGrouping {
     /// Every row is judged on its own.
@@ -576,43 +632,32 @@ enum LocalityGrouping {
     LeadingKeyComponents(usize),
 }
 
-/// Which rule decides the rows of a cluster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RetentionOperator {
-    /// The frozen floor's rules over one locality group's rows, which is the
-    /// same function a whole-group fold runs over a whole family.
-    FrozenFloor,
-    /// Reverse bind rows, each decided by a point read into the snapshot for
-    /// the unbinds of its own binding.
-    ReverseBindProbe,
-}
-
 /// The bindings group merges its two forward families together, because an
-/// unbind retires the bind in its slot. The reverse index is keyed by child,
-/// so it shares no slot with the rows it indexes and streams on its own.
+/// unbind retires the bind of its generation. The reverse index is keyed by
+/// child, so it shares no group with the rows it indexes and streams on its
+/// own.
 const BINDINGS_CLUSTERS: [RetentionCluster; 2] = [
     RetentionCluster {
         families: &[
             MetadataTableFamily::DirentryBinds,
             MetadataTableFamily::DirentryUnbinds,
         ],
-        locality: LocalityGrouping::LeadingKeyComponents(2),
-        operator: RetentionOperator::FrozenFloor,
+        locality: LocalityGrouping::LeadingKeyComponents(4),
+        rule: RetentionRule::ForwardBindings,
     },
     RetentionCluster {
         families: &[MetadataTableFamily::DirentryChildBinds],
         locality: LocalityGrouping::Row,
-        operator: RetentionOperator::ReverseBindProbe,
+        rule: RetentionRule::ReverseBindProbe,
     },
 ];
 
-/// A family whose rows are each decided on their own — either because no rule
-/// drops them at all, or because the rule reads nothing but the row.
+/// A family no rule ever drops a row from, rewritten in key order.
 const fn row_cluster(families: &'static [MetadataTableFamily]) -> RetentionCluster {
     RetentionCluster {
         families,
         locality: LocalityGrouping::Row,
-        operator: RetentionOperator::FrozenFloor,
+        rule: RetentionRule::KeepEveryRow,
     }
 }
 
@@ -625,17 +670,20 @@ const REVISION_CLUSTERS: [RetentionCluster; 2] = [
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataTableFamily::Inodes])];
 const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataTableFamily::Tombstones])];
 /// A receipt is kept or dropped by its own sequence against the floor.
-const RECEIPT_CLUSTERS: [RetentionCluster; 1] =
-    [row_cluster(&[MetadataTableFamily::CommitReceipts])];
+const RECEIPT_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
+    families: &[MetadataTableFamily::CommitReceipts],
+    locality: LocalityGrouping::Row,
+    rule: RetentionRule::Receipts,
+}];
 const ACTIVE_DELETION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataTableFamily::ActiveDeletions],
     locality: LocalityGrouping::LeadingKeyComponents(2),
-    operator: RetentionOperator::FrozenFloor,
+    rule: RetentionRule::ActiveDeletions,
 }];
 const ATTRIBUTE_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataTableFamily::Attributes],
     locality: LocalityGrouping::LeadingKeyComponents(1),
-    operator: RetentionOperator::FrozenFloor,
+    rule: RetentionRule::Attributes,
 }];
 
 fn retention_clusters(group: MetadataFamilyGroup) -> &'static [RetentionCluster] {
@@ -692,7 +740,11 @@ struct CompactionJob<'a, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
     /// Merges one cluster end to end. `false` means the job was cancelled.
-    async fn run_cluster(&mut self, cluster: &RetentionCluster) -> Result<bool> {
+    async fn run_cluster(
+        &mut self,
+        cluster: &RetentionCluster,
+        lease: &mut CompactionLease<'_>,
+    ) -> Result<bool> {
         // The descriptors are cloned out of the snapshot rather than borrowed
         // from it: an iterator outlives every other borrow the job takes, and
         // a cluster opens one per run per family, which is a handful.
@@ -714,12 +766,17 @@ impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
             .map(|family| (*family, StagedSegmentWriter::new(*family)))
             .collect();
 
+        let floor_seq = self.spec.frozen_floor_seq;
+        let mut operator = cluster.rule.operator();
         let mut locality: Option<String> = None;
-        let mut group_rows: BTreeMap<MetadataTableFamily, Vec<MetadataRow>> = BTreeMap::new();
         loop {
             if self.cancellation.is_cancelled() {
                 return Ok(false);
             }
+            // The claim on the job's prefix is refreshed where the job checks
+            // whether it should stop, which is the one place it is guaranteed
+            // to reach however long a merge runs.
+            lease.heartbeat_if_due(self.store).await?;
             self.refill(&mut iterators).await?;
             let Some(next) = select_next_iterator(&iterators, cluster.locality) else {
                 break;
@@ -733,21 +790,35 @@ impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
                 let row_locality = locality_of(iterator.family, row_key, cluster.locality);
                 (locality.as_deref() != Some(row_locality)).then(|| row_locality.to_owned())
             };
-            if let Some(opened) = opened {
-                self.flush_locality(cluster, &mut group_rows, &mut writers)
-                    .await?;
-                locality = Some(opened);
+            if opened.is_some() {
+                if let Some(kept) = operator.close_group(floor_seq)? {
+                    self.write_row(kept, &mut writers).await?;
+                }
+                locality = opened;
             }
             let family = iterators[next].family;
-            group_rows
-                .entry(family)
-                .or_default()
-                .push(iterators[next].take_head());
+            let row = iterators[next].take_head();
             self.result.rows_read += 1;
             self.report_progress();
+            let kept = match cluster.rule {
+                // The reverse index is the one family no grouping can decide,
+                // so the job reads the snapshot for it rather than holding
+                // state.
+                RetentionRule::ReverseBindProbe => self
+                    .reverse_bind_survives(&row)
+                    .await?
+                    .then_some((family, row)),
+                _ => operator.push(family, row, floor_seq)?,
+            };
+            self.result.peak_operator_rows =
+                self.result.peak_operator_rows.max(operator.held_rows());
+            if let Some(kept) = kept {
+                self.write_row(kept, &mut writers).await?;
+            }
         }
-        self.flush_locality(cluster, &mut group_rows, &mut writers)
-            .await?;
+        if let Some(kept) = operator.close_group(floor_seq)? {
+            self.write_row(kept, &mut writers).await?;
+        }
 
         for writer in writers.into_values() {
             let segments = writer
@@ -802,63 +873,31 @@ impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
         Ok(())
     }
 
-    /// Judges one locality group and writes what survives.
-    async fn flush_locality(
+    /// Writes one row a retention operator kept, rolling a segment when its
+    /// family's builder fills.
+    async fn write_row(
         &mut self,
-        cluster: &RetentionCluster,
-        group_rows: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
+        (family, row): KeptRow,
         writers: &mut BTreeMap<MetadataTableFamily, StagedSegmentWriter>,
     ) -> Result<()> {
-        let held: usize = group_rows.values().map(Vec::len).sum();
-        if held == 0 {
-            return Ok(());
-        }
-        self.result.peak_locality_rows = self.result.peak_locality_rows.max(held);
-
-        match cluster.operator {
-            RetentionOperator::FrozenFloor => {
-                // A locality group holds every unbind that can retire the
-                // binds it holds, because a bind and its unbind share a slot.
-                let unbound_at_floor = unbindings_at_or_below_floor(
-                    group_rows
-                        .get(&MetadataTableFamily::DirentryUnbinds)
-                        .map_or(&[], Vec::as_slice),
-                    self.spec.frozen_floor_seq,
-                );
-                drop_rows_below_frozen_floor(
-                    group_rows,
-                    self.spec.frozen_floor_seq,
-                    &unbound_at_floor,
-                )?;
-            }
-            RetentionOperator::ReverseBindProbe => {
-                self.retain_reverse_binds(group_rows).await?;
-            }
-        }
-
-        for (family, rows) in std::mem::take(group_rows) {
-            let writer = writers
-                .get_mut(&family)
-                .expect("a cluster writes only the families it merges");
-            for row in rows {
-                self.fold_into_index_digests(family, &row)?;
-                *self
-                    .result
-                    .rows_written_by_family
-                    .entry(family)
-                    .or_default() += 1;
-                self.result.rows_written += 1;
-                writer.push(row);
-            }
-            writer
-                .roll_full_segments(self.store, self.namespace_id, self.spec, self.policy)
-                .await?;
-        }
-        Ok(())
+        self.fold_into_index_digests(family, &row)?;
+        *self
+            .result
+            .rows_written_by_family
+            .entry(family)
+            .or_default() += 1;
+        self.result.rows_written += 1;
+        let writer = writers
+            .get_mut(&family)
+            .expect("a cluster writes only the families it merges");
+        writer.push(row);
+        writer
+            .roll_full_segments(self.store, self.namespace_id, self.spec, self.policy)
+            .await
     }
 
-    /// Keeps the reverse bind rows the frozen floor still covers, deciding
-    /// each one by reading the snapshot for the unbinds of its own binding.
+    /// Whether one reverse bind row survives the frozen floor, decided by
+    /// reading the snapshot for the unbinds of its own binding.
     ///
     /// The reverse index is keyed by child and the unbind family by parent, so
     /// no grouping of the merged stream can hold a reverse row together with
@@ -873,50 +912,39 @@ impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
     /// Only rows at or below the floor cost a read: a bind above the floor
     /// survives whatever retired it later. Each read returns the unbinds of
     /// one binding generation, which is zero rows or one.
-    async fn retain_reverse_binds(
-        &mut self,
-        group_rows: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
-    ) -> Result<()> {
-        let Some(rows) = group_rows.get_mut(&MetadataTableFamily::DirentryChildBinds) else {
-            return Ok(());
+    async fn reverse_bind_survives(&mut self, row: &MetadataRow) -> Result<bool> {
+        let MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } = row
+        else {
+            return Ok(true);
         };
-        let mut kept = Vec::with_capacity(rows.len());
-        for row in std::mem::take(rows) {
-            let MetadataRow::DirentryBind {
-                parent_inode_id,
-                name_key,
-                bind_seq,
-                bind_delta_index,
-                ..
-            } = &row
-            else {
-                kept.push(row);
-                continue;
-            };
-            if *bind_seq > self.spec.frozen_floor_seq {
-                kept.push(row);
-                continue;
-            }
-            let unbind_rows = self
-                .read_unbinds_of_binding(
-                    &lookup_keys::direntry_unbind_binding_prefix(
-                        *parent_inode_id,
-                        name_key.as_str(),
-                        *bind_seq,
-                        *bind_delta_index,
-                    ),
-                    &lookup_keys::direntry_unbind_probe(*parent_inode_id, name_key.as_str()),
-                )
-                .await?;
-            self.result.unbind_probes += 1;
-            let unbound_at_floor =
-                unbindings_at_or_below_floor(&unbind_rows, self.spec.frozen_floor_seq);
-            if bind_survives_frozen_floor(&row, self.spec.frozen_floor_seq, &unbound_at_floor) {
-                kept.push(row);
-            }
+        if *bind_seq > self.spec.frozen_floor_seq {
+            return Ok(true);
         }
-        *rows = kept;
-        Ok(())
+        let unbind_rows = self
+            .read_unbinds_of_binding(
+                &lookup_keys::direntry_unbind_binding_prefix(
+                    *parent_inode_id,
+                    name_key.as_str(),
+                    *bind_seq,
+                    *bind_delta_index,
+                ),
+                &lookup_keys::direntry_unbind_probe(*parent_inode_id, name_key.as_str()),
+            )
+            .await?;
+        self.result.unbind_probes += 1;
+        let unbound_at_floor =
+            unbindings_at_or_below_floor(&unbind_rows, self.spec.frozen_floor_seq);
+        Ok(bind_survives_frozen_floor(
+            row,
+            self.spec.frozen_floor_seq,
+            &unbound_at_floor,
+        ))
     }
 
     /// One point read into the snapshot's unbind family.
@@ -1236,8 +1264,11 @@ impl StagedSegmentWriter {
         rows: Vec<MetadataRow>,
     ) -> Result<()> {
         let table_id = MetadataTableId::generate();
-        let object_key =
-            metadata_compaction_staging_table(namespace_id.as_str(), table_id.as_str());
+        let object_key = metadata_compaction_table(
+            namespace_id.as_str(),
+            spec.job_id().as_str(),
+            table_id.as_str(),
+        );
         let descriptor = write_manifest_segment(
             store,
             MetadataSstWriteRequest::new(
@@ -1366,35 +1397,49 @@ mod tests {
         }
     }
 
+    /// The grouping the bindings cluster merges by.
+    const GENERATION: LocalityGrouping = LocalityGrouping::LeadingKeyComponents(4);
+
     /// A bind and the unbind that retires it must name the same locality
     /// group, because the drop rule reads one from the other. They live in
     /// different families with different row-key prefixes, so this holds only
     /// because the grouping is read behind the prefix.
     #[test]
     fn a_bind_and_its_unbind_name_one_locality_group() {
-        let slot = LocalityGrouping::LeadingKeyComponents(2);
         let bound = bind(7, "report.txt", 11);
         let retired = unbind(7, "report.txt", 11);
         let bind_key = bound.row_key_for_family(MetadataTableFamily::DirentryBinds);
         let unbind_key = retired.row_key_for_family(MetadataTableFamily::DirentryUnbinds);
 
         assert_eq!(
-            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, slot),
-            locality_of(MetadataTableFamily::DirentryUnbinds, &unbind_key, slot),
+            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, GENERATION),
+            locality_of(
+                MetadataTableFamily::DirentryUnbinds,
+                &unbind_key,
+                GENERATION
+            ),
+        );
+        // Another generation of the same name is a different group, which is
+        // what keeps a slot with any number of generations bounded.
+        let regenerated =
+            bind(7, "report.txt", 12).row_key_for_family(MetadataTableFamily::DirentryBinds);
+        assert_ne!(
+            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, GENERATION),
+            locality_of(MetadataTableFamily::DirentryBinds, &regenerated, GENERATION),
         );
         // Another name under the same parent is a different group: the rules
-        // read one slot, not one directory.
+        // read one binding, not one directory.
         let other = bind(7, "other.txt", 11).row_key_for_family(MetadataTableFamily::DirentryBinds);
         assert_ne!(
-            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, slot),
-            locality_of(MetadataTableFamily::DirentryBinds, &other, slot),
+            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, GENERATION),
+            locality_of(MetadataTableFamily::DirentryBinds, &other, GENERATION),
         );
         // And so is the same name under another parent.
         let elsewhere =
             bind(8, "report.txt", 11).row_key_for_family(MetadataTableFamily::DirentryBinds);
         assert_ne!(
-            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, slot),
-            locality_of(MetadataTableFamily::DirentryBinds, &elsewhere, slot),
+            locality_of(MetadataTableFamily::DirentryBinds, &bind_key, GENERATION),
+            locality_of(MetadataTableFamily::DirentryBinds, &elsewhere, GENERATION),
         );
     }
 
@@ -1403,7 +1448,6 @@ mod tests {
     /// group it had already judged and written.
     #[test]
     fn locality_order_follows_row_key_order() {
-        let slot = LocalityGrouping::LeadingKeyComponents(2);
         let mut keys: Vec<String> = ["a", "ab", "b", "a-b"]
             .into_iter()
             .flat_map(|name| {
@@ -1416,7 +1460,7 @@ mod tests {
 
         let localities: Vec<&str> = keys
             .iter()
-            .map(|key| locality_of(MetadataTableFamily::DirentryBinds, key, slot))
+            .map(|key| locality_of(MetadataTableFamily::DirentryBinds, key, GENERATION))
             .collect();
         let mut runs = localities.clone();
         runs.dedup();

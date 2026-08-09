@@ -21,8 +21,8 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
     CheckpointRecordState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HeadState,
-    MetadataRootState, NamespaceState, UploadSessionLifecycle, UploadSessionState,
-    UploadSessionTransport, WalFloorState, WalSegmentPointer, WriterBlock,
+    MetadataCompactionLeaseState, MetadataRootState, NamespaceState, UploadSessionLifecycle,
+    UploadSessionState, UploadSessionTransport, WalFloorState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -37,8 +37,9 @@ use loonfs_api::wire::wal::{
 use loonfs_api::{
     sha256_digest, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
     CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
-    ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
-    NamespaceId, RevisionNo, StorageChecksum, UploadId, WalSegmentId, WriterEpoch,
+    ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataCompactionId,
+    MetadataTableId, NameKey, NamespaceId, RevisionNo, StorageChecksum, UploadId, WalSegmentId,
+    WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -600,6 +601,22 @@ fn control_objects_match_golden_bytes() {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             },
             state: CheckpointRecordLifecycle::Active {},
+        },
+    );
+    // The lease is a control object of its own family, and the only thing
+    // that reads it is garbage collection. Its bytes are pinned like every
+    // other family's so a field rename cannot silently change what a
+    // collector reads a running job's claim out of.
+    check_control_golden(
+        "control_compaction_lease.v1.json",
+        ControlObjectKind::CompactionLease,
+        MetadataCompactionLeaseState {
+            job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
+                .expect("valid compaction id"),
+            namespace_id: namespace_id(),
+            owner_id: "writer-1".to_owned(),
+            started_at_ms: 1_000,
+            heartbeat_at_ms: 3_000,
         },
     );
     check_control_golden(

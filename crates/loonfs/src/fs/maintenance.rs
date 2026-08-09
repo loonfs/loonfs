@@ -215,13 +215,18 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<ReorganizeStepOutcome> {
-        let active = self
+        // A handle with no runner has no jobs and no counts, which reads to
+        // the planner exactly as a namespace nothing is stuck on. It could
+        // not start a job either way.
+        let pressure = self
             .compactions
             .as_ref()
-            .and_then(|compactions| compactions.active_spec(namespace_id));
+            .map(|compactions| compactions.pressure(namespace_id))
+            .unwrap_or_default();
+        let engagements = pressure.engagements();
         let report = self
             .engine(namespace_id)
-            .reorganize_metadata(active.as_ref())
+            .reorganize_metadata(pressure.view(&engagements))
             .await
             .map_err(RuntimeError::Core)?;
         match report.outcome {
@@ -234,15 +239,25 @@ impl FsAdmin {
                 input_runs,
                 decoded_input_rows,
                 decoded_input_bytes,
+                bottom_anchored_merge_blocked,
                 ..
             } => {
                 self.invalidate_namespace(namespace_id);
+                // A merge that had to start above the group's base leaves the
+                // base frozen and the group's retention stopped. One step
+                // cannot see how long that has been true, so the count that
+                // decides when to stop merging deltas and start the job lives
+                // here.
+                if let Some(background) = &self.compactions {
+                    background.record_merge(namespace_id, &families, bottom_anchored_merge_blocked);
+                }
                 tracing::info!(
                     families = ?families,
                     folded_l0_rows,
                     input_runs,
                     decoded_input_rows,
                     decoded_input_bytes,
+                    bottom_anchored_merge_blocked,
                     "metadata reorganization unit published"
                 );
                 Ok(ReorganizeStepOutcome::UnitPublished)
@@ -327,6 +342,12 @@ impl FsAdmin {
                 // The manifest moved, so every cached view of this namespace
                 // is one manifest behind.
                 self.invalidate_namespace(namespace_id);
+                // The group's base is no longer frozen, so the engagements it
+                // spent merging deltas over that base are spent. It starts
+                // counting again from nothing.
+                if let Some(background) = &self.compactions {
+                    background.clear_engagements(namespace_id, spec.families());
+                }
                 tracing::info!(
                     namespace_id = %namespace_id,
                     families = ?spec.families(),

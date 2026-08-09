@@ -139,9 +139,15 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
 ) -> (ManifestId, usize) {
     let mut published = 0usize;
     for _ in 0..128 {
-        let report = super::reorganize_metadata_step(store, namespace_id, context, policy, None)
-            .await
-            .expect("reorganization step");
+        let report = super::reorganize_metadata_step(
+            store,
+            namespace_id,
+            context,
+            policy,
+            MetadataCompactionView::default(),
+        )
+        .await
+        .expect("reorganization step");
         match report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
             super::MetadataReorganizeOutcome::Superseded => {
@@ -790,9 +796,15 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let mut units = 0usize;
     let mut last_manifest_id = None;
     loop {
-        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
-            .await
-            .expect("reorganization step");
+        let report = super::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &context,
+            policy,
+            MetadataCompactionView::default(),
+        )
+        .await
+        .expect("reorganization step");
         match report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { manifest_id, .. } => {
                 units += 1;
@@ -863,10 +875,15 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         ..MetadataLsmPolicy::default()
     };
     store.reset();
-    let blocked =
-        super::reorganize_metadata_step(&store, &namespace_id, &context, tiny_byte_policy, None)
-            .await
-            .expect("budgeted step");
+    let blocked = super::reorganize_metadata_step(
+        &store,
+        &namespace_id,
+        &context,
+        tiny_byte_policy,
+        MetadataCompactionView::default(),
+    )
+    .await
+    .expect("budgeted step");
     let super::MetadataReorganizeOutcome::CompactionPlanned { families, .. } = blocked.outcome
     else {
         panic!("one byte must not admit an SST run");
@@ -890,9 +907,15 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         ..MetadataLsmPolicy::default()
     };
     store.reset();
-    let published = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
-        .await
-        .expect("bounded step");
+    let published = super::reorganize_metadata_step(
+        &store,
+        &namespace_id,
+        &context,
+        policy,
+        MetadataCompactionView::default(),
+    )
+    .await
+    .expect("bounded step");
     let super::MetadataReorganizeOutcome::UnitPublished {
         families,
         input_runs,
@@ -960,7 +983,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         &namespace_id,
         &context,
         bounded_policy,
-        None,
+        MetadataCompactionView::default(),
     )
     .await
     .expect("first bounded step");
@@ -1038,7 +1061,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         &namespace_id,
         &context,
         bounded_policy,
-        None,
+        MetadataCompactionView::default(),
     )
     .await
     .expect("below-trigger step");
@@ -1258,10 +1281,15 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
 
     // One unit runs, then the process "crashes": nothing is carried over
     // but the published manifest.
-    let first_report =
-        super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
-            .await
-            .expect("first unit");
+    let first_report = super::reorganize_metadata_step(
+        &store,
+        &namespace_id,
+        &context,
+        policy,
+        MetadataCompactionView::default(),
+    )
+    .await
+    .expect("first unit");
     let super::MetadataReorganizeOutcome::UnitPublished {
         families: first_families,
         ..
@@ -1277,9 +1305,15 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     // job, including the delta the interleaved checkpoint added.
     let mut folded_groups = vec![first_families];
     loop {
-        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
-            .await
-            .expect("resumed unit");
+        let report = super::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &context,
+            policy,
+            MetadataCompactionView::default(),
+        )
+        .await
+        .expect("resumed unit");
         match report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { families, .. } => {
                 folded_groups.push(families);
@@ -1475,7 +1509,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         &context,
         fold_everything,
-        None,
+        MetadataCompactionView::default(),
         &overrun,
     )
     .await
@@ -1497,7 +1531,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         &context,
         fold_everything,
-        None,
+        MetadataCompactionView::default(),
     )
     .await
     .expect("in-budget retry folds the unit");
@@ -1524,10 +1558,15 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     let group = super::reorganize::select_family_group(&tables.manifest().payload, None)
         .expect("a family group with L0 rows to fold");
     let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
-    let selection =
-        super::reorganize::select_reorganization_input(&tables, group, policy, frozen_floor_seq)
-            .await
-            .expect("select a reorganization input");
+    let selection = super::reorganize::select_reorganization_input(
+        &tables,
+        group,
+        policy,
+        frozen_floor_seq,
+        false,
+    )
+    .await
+    .expect("select a reorganization input");
     (group.families().to_vec(), selection)
 }
 
@@ -1674,9 +1713,15 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     let mut group_delta_run_counts = vec![group_delta_runs(&before.manifest, &group).len()];
     let mut delta_runs_when_the_compaction_was_planned = None;
     for _ in 0..64 {
-        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
-            .await
-            .expect("reorganization step");
+        let report = super::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &context,
+            policy,
+            MetadataCompactionView::default(),
+        )
+        .await
+        .expect("reorganization step");
         let current = load_manifest_materialization_for_inspection(
             &store,
             &namespace_id,
@@ -1872,9 +1917,15 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     assert!(input.runs.len() > 1);
     let base_before = group_base_runs(&before.manifest, &group);
 
-    let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
-        .await
-        .expect("reorganization step");
+    let report = super::reorganize_metadata_step(
+        &store,
+        &namespace_id,
+        &context,
+        policy,
+        MetadataCompactionView::default(),
+    )
+    .await
+    .expect("reorganization step");
     assert!(
         matches!(
             report.outcome,
@@ -2019,9 +2070,15 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     );
 
     let root_before = current_manifest_id(&store, &namespace_id).await;
-    let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
-        .await
-        .expect("reorganization step");
+    let report = super::reorganize_metadata_step(
+        &store,
+        &namespace_id,
+        &context,
+        policy,
+        MetadataCompactionView::default(),
+    )
+    .await
+    .expect("reorganization step");
     assert!(
         matches!(
             report.outcome,
@@ -2112,10 +2169,15 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
 
         let mut settled = false;
         for _step in 0..512 {
-            let report =
-                super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
-                    .await
-                    .expect("reorganization step");
+            let report = super::reorganize_metadata_step(
+                &store,
+                &namespace_id,
+                &context,
+                policy,
+                MetadataCompactionView::default(),
+            )
+            .await
+            .expect("reorganization step");
             let current = load_manifest_materialization_for_inspection(
                 &store,
                 &namespace_id,

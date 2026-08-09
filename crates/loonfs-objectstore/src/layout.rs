@@ -40,6 +40,11 @@ pub enum DurableObjectFamily {
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataCompactionStaging,
+    /// Classifies the mutable lease one streaming compaction holds over its
+    /// own staged output.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+    MetadataCompactionLease,
     /// Classifies a mutable checkpoint lifecycle record.
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
@@ -150,16 +155,46 @@ impl ObjectLayout {
     /// references yet. The object is an ordinary metadata segment; only the
     /// directory differs, which is what keeps a running job's output out of
     /// the sweep that reaps unreferenced table keys.
-    pub(crate) fn metadata_compaction_staging_table(
+    ///
+    /// The job id in the middle is what groups one job's output together, so
+    /// a collector can decide a whole job's objects from that job's lease
+    /// rather than one object at a time.
+    pub(crate) fn metadata_compaction_table(
         &self,
         namespace: &str,
+        job_id: &str,
         table_id: &str,
     ) -> String {
-        format!("namespaces/{namespace}/metadata/compaction-staging/{table_id}.sst.zst")
+        format!("namespaces/{namespace}/metadata/compactions/{job_id}/tables/{table_id}.sst.zst")
     }
 
-    pub(crate) fn metadata_compaction_staging_prefix(&self, namespace: &str) -> String {
-        format!("namespaces/{namespace}/metadata/compaction-staging/")
+    /// The lease one job holds over its own prefix. It sorts before that
+    /// job's `tables/` directory, so an ascending listing of the compaction
+    /// prefix reads a job's lease before the objects it protects.
+    pub(crate) fn metadata_compaction_lease(&self, namespace: &str, job_id: &str) -> String {
+        format!("namespaces/{namespace}/metadata/compactions/{job_id}/lease.json")
+    }
+
+    pub(crate) fn metadata_compaction_prefix(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/metadata/compactions/")
+    }
+
+    /// The job id of a key under one namespace's compaction prefix, for the
+    /// collector that has to find the lease owning a staged object.
+    ///
+    /// Returns `None` for a key under the prefix that is neither a job's
+    /// lease nor one of its staged segments; such a key belongs to no job and
+    /// the collector refuses to decide it.
+    pub(crate) fn metadata_compaction_job_id_from_key<'a>(&self, key: &'a str) -> Option<&'a str> {
+        match key.split('/').collect::<Vec<_>>().as_slice() {
+            ["namespaces", _, "metadata", "compactions", job_id, "lease.json"] => Some(job_id),
+            ["namespaces", _, "metadata", "compactions", job_id, "tables", table]
+                if table.ends_with(".sst.zst") =>
+            {
+                Some(job_id)
+            }
+            _ => None,
+        }
     }
 
     /// Durable stable-view pin to a metadata manifest.
@@ -220,7 +255,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "metadata", "tables", table] if table.ends_with(".sst.zst") => {
             parsed(DurableObjectFamily::MetadataTable, Some(namespace))
         }
-        ["namespaces", namespace, "metadata", "compaction-staging", table]
+        ["namespaces", namespace, "metadata", "compactions", _job_id, "tables", table]
             if table.ends_with(".sst.zst") =>
         {
             parsed(
@@ -228,6 +263,10 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 Some(namespace),
             )
         }
+        ["namespaces", namespace, "metadata", "compactions", _job_id, "lease.json"] => parsed(
+            DurableObjectFamily::MetadataCompactionLease,
+            Some(namespace),
+        ),
         ["namespaces", namespace, "checkpoints", checkpoint] if checkpoint.ends_with(".json") => {
             parsed(DurableObjectFamily::CheckpointRecord, Some(namespace))
         }
@@ -296,9 +335,19 @@ mod tests {
         );
         assert_eq!(
             layout
-                .metadata_compaction_staging_table("ns-1", "tbl_00000000000000000000000000000001")
+                .metadata_compaction_table(
+                    "ns-1",
+                    "cmp_00000000000000000000000000000001",
+                    "tbl_00000000000000000000000000000001"
+                )
                 .as_str(),
-            "namespaces/ns-1/metadata/compaction-staging/tbl_00000000000000000000000000000001.sst.zst"
+            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/tables/tbl_00000000000000000000000000000001.sst.zst"
+        );
+        assert_eq!(
+            layout
+                .metadata_compaction_lease("ns-1", "cmp_00000000000000000000000000000001")
+                .as_str(),
+            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/lease.json"
         );
         assert_eq!(
             layout
@@ -341,18 +390,61 @@ mod tests {
     fn staged_compaction_segments_live_outside_the_table_listing_prefix() {
         let layout = ObjectLayout::new();
         let tables = layout.metadata_table_prefix("ns-1");
-        let staging = layout.metadata_compaction_staging_prefix("ns-1");
+        let staging = layout.metadata_compaction_prefix("ns-1");
 
         assert!(!staging.starts_with(&tables));
         assert!(!layout
-            .metadata_compaction_staging_table("ns-1", "tbl_abc")
+            .metadata_compaction_table("ns-1", "cmp_abc", "tbl_abc")
             .starts_with(&tables));
         assert!(layout
-            .metadata_compaction_staging_table("ns-1", "tbl_abc")
+            .metadata_compaction_table("ns-1", "cmp_abc", "tbl_abc")
+            .starts_with(&staging));
+        assert!(layout
+            .metadata_compaction_lease("ns-1", "cmp_abc")
             .starts_with(&staging));
         assert!(!layout
             .metadata_table("ns-1", "tbl_abc")
             .starts_with(&staging));
+    }
+
+    /// A collector reads a job's lease before the objects the lease protects,
+    /// which is what lets one lease read decide a whole job's output.
+    #[test]
+    fn a_jobs_lease_sorts_before_its_staged_segments() {
+        let layout = ObjectLayout::new();
+        let lease = layout.metadata_compaction_lease("ns-1", "cmp_abc");
+        let table = layout.metadata_compaction_table("ns-1", "cmp_abc", "tbl_abc");
+        assert!(lease < table);
+        // And one job's objects are contiguous: the next job's lease sorts
+        // above every object of the job before it.
+        assert!(table < layout.metadata_compaction_lease("ns-1", "cmp_abd"));
+    }
+
+    /// Both key shapes under the compaction prefix name their job; anything
+    /// else under it names none, and the collector refuses to decide it.
+    #[test]
+    fn compaction_keys_report_the_job_that_owns_them() {
+        let layout = ObjectLayout::new();
+        assert_eq!(
+            layout.metadata_compaction_job_id_from_key(
+                &layout.metadata_compaction_lease("ns-1", "cmp_abc")
+            ),
+            Some("cmp_abc")
+        );
+        assert_eq!(
+            layout.metadata_compaction_job_id_from_key(
+                &layout.metadata_compaction_table("ns-1", "cmp_abc", "tbl_abc")
+            ),
+            Some("cmp_abc")
+        );
+        for foreign in [
+            "namespaces/ns-1/metadata/compactions/cmp_abc/tables/tbl_abc.tmp",
+            "namespaces/ns-1/metadata/compactions/cmp_abc/notes.json",
+            "namespaces/ns-1/metadata/compactions/stray.json",
+            "namespaces/ns-1/metadata/tables/tbl_abc.sst.zst",
+        ] {
+            assert_eq!(layout.metadata_compaction_job_id_from_key(foreign), None);
+        }
     }
 
     #[test]
@@ -382,8 +474,12 @@ mod tests {
                 DurableObjectFamily::MetadataTable,
             ),
             (
-                layout.metadata_compaction_staging_table("ns-1", "tbl_abc"),
+                layout.metadata_compaction_table("ns-1", "cmp_abc", "tbl_abc"),
                 DurableObjectFamily::MetadataCompactionStaging,
+            ),
+            (
+                layout.metadata_compaction_lease("ns-1", "cmp_abc"),
+                DurableObjectFamily::MetadataCompactionLease,
             ),
             (
                 layout.checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
@@ -414,6 +510,7 @@ mod tests {
             "namespaces/ns-1/gc/manifest.boundary.json",
             "namespaces/ns-1/gc/pins/pin_00000000000000000000000000000001.json",
             "namespaces/ns-1/pins/pin_00000000000000000000000000000001.json",
+            "namespaces/ns-1/metadata/compaction-staging/tbl_abc.sst.zst",
         ] {
             assert!(
                 parse_object_key(old).is_none(),
