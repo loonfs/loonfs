@@ -2,6 +2,7 @@
 
 use super::HandleBuilderCore;
 use crate::fs::{ReadCore, WriterIdentity};
+use crate::maintenance_runner::BackgroundCompactions;
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::publisher::PublisherRegistry;
 use crate::{
@@ -28,6 +29,14 @@ pub struct FsAdmin {
     /// writer's runtime for background maintenance holds that writer's
     /// registry.
     pub(crate) publisher: Option<PublisherRegistry>,
+    /// The streaming metadata compactions a writer's maintenance runner is
+    /// running, when this handle has a writer behind it.
+    ///
+    /// A maintenance step consults it twice: to leave alone the group a job
+    /// is rebuilding, and to start a job when it plans one. A handle with no
+    /// writer behind it holds `None`, schedules no background work of any
+    /// kind, and reports the plan instead of starting it.
+    pub(crate) compactions: Option<BackgroundCompactions>,
 }
 
 impl FsAdmin {
@@ -55,11 +64,13 @@ impl FsAdmin {
         core: ReadCore,
         actor: WriterIdentity,
         publisher: PublisherRegistry,
+        compactions: BackgroundCompactions,
     ) -> Self {
         Self {
             core,
             actor,
             publisher: Some(publisher),
+            compactions: Some(compactions),
         }
     }
 
@@ -76,6 +87,7 @@ impl FsAdmin {
 pub struct FsAdminBuilder {
     core: HandleBuilderCore,
     actor_id: Option<String>,
+    compactions: Option<BackgroundCompactions>,
 }
 
 impl FsAdminBuilder {
@@ -83,6 +95,7 @@ impl FsAdminBuilder {
         Self {
             core,
             actor_id: None,
+            compactions: None,
         }
     }
 
@@ -108,6 +121,25 @@ impl FsAdminBuilder {
     /// handle's other caches, but its decoded-block budget goes unused.
     pub fn shared_metadata_table_cache(mut self, writer: &super::FsWriter) -> Self {
         self.core.shared_metadata_table_cache = Some(writer.metadata_table_cache());
+        self
+    }
+
+    /// Lets this handle's maintenance steps start background work on
+    /// `writer`'s maintenance runner instead of declining it.
+    ///
+    /// One kind of upkeep does not fit in a step: a family group that has
+    /// outgrown one step's budgets is rebuilt by a streaming compaction that
+    /// runs for as long as it takes and publishes once at the end. Without
+    /// this, an explicit step reports that the group needs one and starts
+    /// nothing, because a handle that owns no background work has nowhere to
+    /// run it. With it, an operator's step starts the same job the writer's
+    /// own steps start, the two share the one-job-per-namespace rule, and
+    /// `writer`'s shutdown cancels and drains it.
+    ///
+    /// Only for a writer in the same runtime ownership domain, like
+    /// [`Self::shared_metadata_table_cache`].
+    pub fn background_maintenance(mut self, writer: &super::FsWriter) -> Self {
+        self.compactions = Some(writer.background_compactions());
         self
     }
 
@@ -157,6 +189,7 @@ impl FsAdminBuilder {
             core: self.core.open_read_core()?,
             actor,
             publisher: None,
+            compactions: self.compactions,
         })
     }
 }

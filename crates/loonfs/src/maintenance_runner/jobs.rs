@@ -11,8 +11,8 @@
 //! explicit call with no scheduler behind it.
 
 use super::{
-    MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion,
-    MaintenanceStepResult,
+    BackgroundCompactions, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
+    MaintenanceStepConclusion, MaintenanceStepResult,
 };
 use crate::fs::{ReadCore, WriterBits};
 use crate::publisher::PublisherRegistry;
@@ -38,6 +38,7 @@ pub(crate) fn register_core_jobs(
         core: core.clone(),
         bits: Arc::downgrade(bits),
         publisher: publisher.clone(),
+        compactions: runner.compactions(),
     };
     runner.register(Arc::new(MetadataJob { context: context() }))?;
     runner.register(Arc::new(GcJob { context: context() }))?;
@@ -81,6 +82,9 @@ struct StepContext {
     core: ReadCore,
     bits: Weak<WriterBits>,
     publisher: PublisherRegistry,
+    /// Held strongly: it is a map and a weak reference to the runner, so it
+    /// keeps nothing alive that a dropped writer should have taken with it.
+    compactions: BackgroundCompactions,
 }
 
 impl StepContext {
@@ -90,6 +94,7 @@ impl StepContext {
             self.core.clone(),
             bits.identity.clone(),
             self.publisher.clone(),
+            self.compactions.clone(),
         );
         Some((bits, admin))
     }
@@ -278,6 +283,12 @@ fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
 /// and then failed to fit a fold unit did move durable state and should run
 /// again; a step that only lost a race should take that race again; a step
 /// that only failed to fit has nothing to gain from an immediate retry.
+///
+/// Starting a streaming compaction is progress of the useful kind: the step
+/// that started it did no folding, and the steps behind it now have the
+/// group's peers to fold while the job runs. A group waiting on a job that is
+/// already running is a block — there is work and this step cannot make it —
+/// so the key parks and comes back on the next nudge or sweep.
 fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceStepConclusion {
     let flush = match step.wal_flush {
         WalFlushStepOutcome::Flushed { .. } => Some(MaintenanceStepConclusion::Progressed),
@@ -287,9 +298,11 @@ fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceStepCon
         WalFlushStepOutcome::NotNeeded => None,
     };
     let reorganize = match step.reorganize {
-        ReorganizeStepOutcome::UnitPublished => Some(MaintenanceStepConclusion::Progressed),
+        ReorganizeStepOutcome::UnitPublished | ReorganizeStepOutcome::CompactionStarted => {
+            Some(MaintenanceStepConclusion::Progressed)
+        }
         ReorganizeStepOutcome::Superseded => Some(MaintenanceStepConclusion::Superseded),
-        ReorganizeStepOutcome::BudgetExhausted => Some(MaintenanceStepConclusion::Blocked),
+        ReorganizeStepOutcome::CompactionPending => Some(MaintenanceStepConclusion::Blocked),
         ReorganizeStepOutcome::NotNeeded => None,
     };
     [flush, reorganize]
@@ -450,11 +463,35 @@ mod tests {
         );
         let blocked = step_response(
             WalFlushStepOutcome::NotNeeded,
-            ReorganizeStepOutcome::BudgetExhausted,
+            ReorganizeStepOutcome::CompactionPending,
         );
         assert_eq!(
             metadata_conclusion(&blocked),
             MaintenanceStepConclusion::Blocked
+        );
+    }
+
+    /// Starting a background rebuild is progress: the step that started it
+    /// folded nothing, and the steps behind it have the group's peers to fold
+    /// while the job runs.
+    #[test]
+    fn starting_a_compaction_progresses_and_waiting_on_one_blocks() {
+        let started = step_response(
+            WalFlushStepOutcome::NotNeeded,
+            ReorganizeStepOutcome::CompactionStarted,
+        );
+        assert_eq!(
+            metadata_conclusion(&started),
+            MaintenanceStepConclusion::Progressed
+        );
+        let waiting = step_response(
+            WalFlushStepOutcome::NotNeeded,
+            ReorganizeStepOutcome::CompactionPending,
+        );
+        assert_eq!(
+            metadata_conclusion(&waiting),
+            MaintenanceStepConclusion::Blocked,
+            "a group waiting on a job already running has nothing to gain from an immediate retry"
         );
     }
 
@@ -464,7 +501,7 @@ mod tests {
             WalFlushStepOutcome::Flushed {
                 manifest_head_seq: ChangeSeq(7),
             },
-            ReorganizeStepOutcome::BudgetExhausted,
+            ReorganizeStepOutcome::CompactionPending,
         );
         assert_eq!(
             metadata_conclusion(&step),

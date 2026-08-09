@@ -139,7 +139,7 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
 ) -> (ManifestId, usize) {
     let mut published = 0usize;
     for _ in 0..128 {
-        let report = super::reorganize_metadata_step(store, namespace_id, context, policy)
+        let report = super::reorganize_metadata_step(store, namespace_id, context, policy, None)
             .await
             .expect("reorganization step");
         match report.outcome {
@@ -147,7 +147,7 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
             super::MetadataReorganizeOutcome::Superseded => {
                 panic!("single-writer test must not be superseded")
             }
-            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+            super::MetadataReorganizeOutcome::CompactionPlanned { .. } => {
                 panic!("test budget must admit a progress-making subset")
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => {
@@ -790,7 +790,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let mut units = 0usize;
     let mut last_manifest_id = None;
     loop {
-        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
             .await
             .expect("reorganization step");
         match report.outcome {
@@ -805,7 +805,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
                 panic!("no concurrent publisher exists in this test")
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+            super::MetadataReorganizeOutcome::CompactionPlanned { .. } => {
                 panic!("test reorganization budget should admit a progress-making subset")
             }
         }
@@ -864,16 +864,17 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     };
     store.reset();
     let blocked =
-        super::reorganize_metadata_step(&store, &namespace_id, &context, tiny_byte_policy)
+        super::reorganize_metadata_step(&store, &namespace_id, &context, tiny_byte_policy, None)
             .await
             .expect("budgeted step");
-    let super::MetadataReorganizeOutcome::BudgetExhausted { families, .. } = blocked.outcome else {
+    let super::MetadataReorganizeOutcome::CompactionPlanned { families, .. } = blocked.outcome
+    else {
         panic!("one byte must not admit an SST run");
     };
     assert_eq!(
         current_manifest_id(&store, &namespace_id).await,
         root_before,
-        "a budget-blocked step must not publish"
+        "a step that plans a compaction must not publish"
     );
     assert_eq!(store.count(OperationClass::Put), 0);
     assert!(
@@ -889,7 +890,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         ..MetadataLsmPolicy::default()
     };
     store.reset();
-    let published = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+    let published = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
         .await
         .expect("bounded step");
     let super::MetadataReorganizeOutcome::UnitPublished {
@@ -954,10 +955,15 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         max_decoded_input_bytes_per_step: unlimited,
         ..MetadataLsmPolicy::default()
     };
-    let first =
-        super::reorganize_metadata_step(&bounded_store, &namespace_id, &context, bounded_policy)
-            .await
-            .expect("first bounded step");
+    let first = super::reorganize_metadata_step(
+        &bounded_store,
+        &namespace_id,
+        &context,
+        bounded_policy,
+        None,
+    )
+    .await
+    .expect("first bounded step");
     assert!(matches!(
         first.outcome,
         super::MetadataReorganizeOutcome::UnitPublished { input_runs: 2, .. }
@@ -1027,10 +1033,15 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     create_checkpoint(&bounded_store, &namespace_id, &context)
         .await
         .expect("checkpoint later file");
-    let below_trigger =
-        super::reorganize_metadata_step(&bounded_store, &namespace_id, &context, bounded_policy)
-            .await
-            .expect("below-trigger step");
+    let below_trigger = super::reorganize_metadata_step(
+        &bounded_store,
+        &namespace_id,
+        &context,
+        bounded_policy,
+        None,
+    )
+    .await
+    .expect("below-trigger step");
     assert!(matches!(
         below_trigger.outcome,
         super::MetadataReorganizeOutcome::NotNeeded { l0_runs: 1 }
@@ -1247,9 +1258,10 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
 
     // One unit runs, then the process "crashes": nothing is carried over
     // but the published manifest.
-    let first_report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
-        .await
-        .expect("first unit");
+    let first_report =
+        super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
+            .await
+            .expect("first unit");
     let super::MetadataReorganizeOutcome::UnitPublished {
         families: first_families,
         ..
@@ -1265,7 +1277,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     // job, including the delta the interleaved checkpoint added.
     let mut folded_groups = vec![first_families];
     loop {
-        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
             .await
             .expect("resumed unit");
         match report.outcome {
@@ -1276,7 +1288,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
                 panic!("no concurrent publisher exists in this test")
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+            super::MetadataReorganizeOutcome::CompactionPlanned { .. } => {
                 panic!("test reorganization budget should admit a progress-making subset")
             }
         }
@@ -1463,6 +1475,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         &context,
         fold_everything,
+        None,
         &overrun,
     )
     .await
@@ -1484,6 +1497,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         &context,
         fold_everything,
+        None,
     )
     .await
     .expect("in-budget retry folds the unit");
@@ -1507,7 +1521,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     let tables = load_verified_manifest_tables(store, namespace_id, &manifest_object_id)
         .await
         .expect("load manifest tables");
-    let group = super::reorganize::select_family_group(&tables.manifest().payload)
+    let group = super::reorganize::select_family_group(&tables.manifest().payload, None)
         .expect("a family group with L0 rows to fold");
     let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
     let selection =
@@ -1575,11 +1589,12 @@ fn policy_that_cannot_fold_the_base(base_rows: u64) -> MetadataLsmPolicy {
 /// base run here is what hid the over-budget bottom from the report.
 ///
 /// Once the delta runs are down to one the group has nothing left to merge,
-/// and the step reports it blocked. That is honest — the base still cannot
-/// be read in one step — and it is the case the streaming compactor is being
-/// built for.
+/// and the step hands the whole group to a streaming compaction. That job
+/// rebuilds the group under no budget, so the base is folded again, its
+/// segments are replaced, and the group ends in one run. There is no state
+/// where the group is stuck.
 #[tokio::test]
-async fn a_base_run_over_the_step_budget_merges_the_delta_runs_above_it() {
+async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the_group() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1652,13 +1667,14 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_above_it() {
     assert_eq!(bottom.level, CHECKPOINT_BASE_RUN_LEVEL);
     assert_eq!(bottom.rows, base_rows);
 
-    // Repeated steps keep merging what fits. The base run stays exactly where
-    // it is, and stays one run.
+    // Repeated steps keep merging what fits. While they do, the base run
+    // stays exactly where it is, and stays one run.
     let mut published = 0usize;
-    let mut blocked = 0usize;
+    let mut compactions = 0usize;
     let mut group_delta_run_counts = vec![group_delta_runs(&before.manifest, &group).len()];
+    let mut delta_runs_when_the_compaction_was_planned = None;
     for _ in 0..64 {
-        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
             .await
             .expect("reorganization step");
         let current = load_manifest_materialization_for_inspection(
@@ -1674,25 +1690,44 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_above_it() {
             "a merge above the base must not mint a second base run"
         );
         group_delta_run_counts.push(group_delta_runs(&current.manifest, &group).len());
-        match report.outcome {
+        match &report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
             super::MetadataReorganizeOutcome::Superseded => {
                 panic!("no concurrent publisher exists in this test")
             }
-            // The group's delta runs are down to one, and merging one run
-            // into itself is not progress. Only a fold of the whole group
-            // moves this on, and that fold does not fit one step.
-            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
-                blocked += 1;
-                break;
+            // A group whose delta runs are down to one has nothing left to
+            // merge, and merging one run into itself is not progress. Only a
+            // rebuild of the whole group moves it on, and that is the job the
+            // step plans. This budget starves more than one group, so the
+            // others are run too and the loop ends with nothing left to fold.
+            super::MetadataReorganizeOutcome::CompactionPlanned { families, spec } => {
+                if *families == group {
+                    let referenced = run_segment_object_keys(&current.manifest);
+                    assert!(
+                        base_segments
+                            .iter()
+                            .all(|segment| referenced.contains(segment)),
+                        "the base must still be untouched when the job is planned"
+                    );
+                    delta_runs_when_the_compaction_was_planned =
+                        Some(group_delta_runs(&current.manifest, &group).len());
+                    compactions += 1;
+                }
+                publish_planned_compaction(&store, &namespace_id, &context, policy, spec).await;
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
         }
     }
     assert!(published > 0, "at least one unit must publish");
     assert_eq!(
-        blocked, 1,
-        "the group must end blocked on the base it cannot read, ran {group_delta_run_counts:?}"
+        compactions, 1,
+        "the group must hand itself to one streaming compaction, ran {group_delta_run_counts:?}"
+    );
+    assert_eq!(
+        delta_runs_when_the_compaction_was_planned,
+        Some(1),
+        "the delta runs must merge down to one before the job takes the group, ran \
+         {group_delta_run_counts:?}"
     );
 
     let after = load_manifest_materialization_for_inspection(
@@ -1702,23 +1737,20 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_above_it() {
     )
     .await
     .expect("load the drained manifest");
+    // The job rebuilt the group, so it is one base run and the frozen base's
+    // segments are gone. That is the whole point: they could not be rewritten
+    // by any step, and a run nothing rewrites is a run nothing reclaims.
     assert_eq!(
-        group_delta_runs(&after.manifest, &group).len(),
+        group_runs(&after.manifest, &group).len(),
         1,
-        "the delta runs must merge down to one, ran {group_delta_run_counts:?}"
+        "the group must end in one run, ran {group_delta_run_counts:?}"
     );
-    // The group's own run count, not the manifest's: a merge only takes this
-    // group's segments out of its input runs, and those runs stay in the
-    // manifest holding the other groups' families.
-    assert!(
-        group_runs(&after.manifest, &group).len() < group_runs(&before.manifest, &group).len(),
-        "the group's run count must fall"
-    );
+    assert_eq!(group_base_runs(&after.manifest, &group).len(), 1);
     let remaining = run_segment_object_keys(&after.manifest);
     for segment in &base_segments {
         assert!(
-            remaining.contains(segment),
-            "the base run this step could not read must stay referenced untouched"
+            !remaining.contains(segment),
+            "the frozen base's segments must be replaced by the rebuilt run"
         );
     }
     let projection = load_current_projection(&store, &namespace_id)
@@ -1840,7 +1872,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     assert!(input.runs.len() > 1);
     let base_before = group_base_runs(&before.manifest, &group);
 
-    let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+    let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
         .await
         .expect("reorganization step");
     assert!(
@@ -1987,55 +2019,22 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     );
 
     let root_before = current_manifest_id(&store, &namespace_id).await;
-    let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+    let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
         .await
         .expect("reorganization step");
     assert!(
         matches!(
             report.outcome,
-            super::MetadataReorganizeOutcome::BudgetExhausted { .. }
+            super::MetadataReorganizeOutcome::CompactionPlanned { .. }
         ),
-        "expected a blocked step, got {:?}",
+        "expected a planned compaction, got {:?}",
         report.outcome
     );
     assert_eq!(
         current_manifest_id(&store, &namespace_id).await,
         root_before,
-        "a blocked step must not publish"
+        "a step that plans a compaction must not publish"
     );
-}
-
-/// What a reader sees right now: every inode the namespace knows, resolved
-/// the way a read resolves it — visible or not, at what path, at what
-/// revision.
-///
-/// This is the answer that must not move while folds run. Comparing rows
-/// would say the opposite of what is wanted: a fold drops rows precisely
-/// because no read can observe them, so the row set is meant to change and
-/// this is not.
-async fn visible_namespace(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-) -> Vec<CurrentFileState> {
-    let materialized = load_manifest_materialization_for_inspection(
-        store,
-        namespace_id,
-        current_manifest_id(store, namespace_id).await,
-    )
-    .await
-    .expect("materialize the manifest");
-    let inode_ids: Vec<InodeId> = materialized
-        .metadata_state
-        .inodes()
-        .iter()
-        .map(|inode| inode.inode_id)
-        .collect();
-    let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest())
-        .await
-        .expect("load the read view");
-    resolve_current_files(&view, &inode_ids)
-        .await
-        .expect("resolve every inode the namespace knows")
 }
 
 /// The soak's end state, as a test.
@@ -2052,10 +2051,10 @@ async fn visible_namespace(
 ///
 /// What is pinned here is that neither happens. No group's base fragments,
 /// whatever the budgets do; every step leaves reads answering exactly what
-/// they answered before; and a group whose bottom stops fitting one step says
-/// so and stops, rather than minting another base run. Folding such a group
-/// is the streaming compactor's job, and this test gains that half when the
-/// compactor lands.
+/// they answered before; a group whose bottom stops fitting one step is
+/// handed to a streaming compaction rather than minting another base run;
+/// and every cycle settles with nothing left to fold. There is no run of
+/// steps that ends with a group nothing can fold.
 #[tokio::test]
 async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2075,7 +2074,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     };
 
     let group = group_containing(ApiMetadataTableFamily::DirentryUnbinds);
-    let mut blocked_groups = 0usize;
+    let mut compacted_groups = 0usize;
     for cycle in 0..4u64 {
         for file in 0..4u64 {
             write_file_bytes(
@@ -2113,9 +2112,10 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
 
         let mut settled = false;
         for _step in 0..512 {
-            let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
-                .await
-                .expect("reorganization step");
+            let report =
+                super::reorganize_metadata_step(&store, &namespace_id, &context, policy, None)
+                    .await
+                    .expect("reorganization step");
             let current = load_manifest_materialization_for_inspection(
                 &store,
                 &namespace_id,
@@ -2140,12 +2140,15 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                     break;
                 }
                 // The group's bottom no longer fits one step and its delta
-                // runs are merged down to one. The step says so and mints
-                // nothing; the streaming compactor is what folds it.
-                super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
-                    blocked_groups += 1;
-                    settled = true;
-                    break;
+                // runs are merged down to one. The step hands the group to a
+                // streaming compaction, which is what folds it. The runner
+                // runs that job in the background; here it runs inline, so
+                // the steps that follow see what they would have seen once it
+                // landed.
+                super::MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => {
+                    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec)
+                        .await;
+                    compacted_groups += 1;
                 }
                 super::MetadataReorganizeOutcome::Superseded => {
                     panic!("no concurrent publisher exists in this test")
@@ -2153,12 +2156,15 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 super::MetadataReorganizeOutcome::UnitPublished { .. } => {}
             }
         }
-        assert!(settled, "cycle {cycle}: reorganization did not settle");
+        assert!(
+            settled,
+            "cycle {cycle}: reorganization did not settle with nothing left to fold"
+        );
     }
 
     assert!(
-        blocked_groups > 0,
-        "a group must have outgrown one step and reported it"
+        compacted_groups > 0,
+        "a group must have outgrown one step and been rebuilt by a streaming compaction"
     );
     let final_manifest = load_manifest_materialization_for_inspection(
         &store,

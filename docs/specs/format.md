@@ -2186,8 +2186,9 @@ does not exist, so there is nothing to collect and nothing to ignore.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/tables/`, `checkpoints/`, and `wal/segments/` collections. A live
-manifest roots every object key its `metadata_files` list names. The pass also
+`metadata/tables/`, `metadata/compaction-staging/`, `checkpoints/`, and
+`wal/segments/` collections. A live manifest roots every object key its
+`metadata_files` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
 halves are split at the completed line and described in rule 11.
 Core GC never recognizes, lists specifically, or deletes any object below a
@@ -2358,6 +2359,19 @@ publishing CAS) — under these rules:
    reading through a pinned basis; a same-content-store copy across
    namespaces (section 2.8) would have to root the reference on the source
    side the way a fork does.
+12. **Compaction staging ages under a window of its own.** A streaming
+   compaction ("Compaction") publishes nothing until it finishes and is paced
+   by no budget, so its output is unreferenced for as long as the job runs.
+   `T` only has to cover a publication in flight, so a sweep applying it to
+   `metadata/compaction-staging/` would delete the output of a job still
+   writing it. Unreferenced staged segments therefore age under
+   `METADATA_COMPACTION_STAGING_GRACE`, a generous bound on job duration
+   rather than a correctness window: nothing is unsafe about a shorter one
+   except that a job would have to run again. A published job's segments are
+   named by the manifest, and a referenced object is live wherever it sits,
+   so this window never applies to them. Every other rule — the reference
+   anchor, delete-time re-verification, degraded roots — applies here exactly
+   as it applies to `metadata/tables/`.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.

@@ -14,6 +14,7 @@ use super::reap::{
 use super::uploads::{sweep_upload_session, ContentReferences, UploadSessionSweep};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
+use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
 use crate::namespace::basis::read_head_and_metadata_basis;
 use crate::namespace::control::ControlObjectLoadError;
 use futures::StreamExt;
@@ -246,7 +247,11 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     // immediately before its decision.
     let selected = match family {
         CandidateFamily::WalSegments => !mark.protects_wal_segment(key),
-        CandidateFamily::MetadataTables => !mark.tables.contains(key),
+        // A staged segment a publication landed is named by the manifest like
+        // any other table, so the same root set answers for both families.
+        CandidateFamily::MetadataTables | CandidateFamily::CompactionStaging => {
+            !mark.tables.contains(key)
+        }
         CandidateFamily::Manifests => match manifest_object_id_of(key) {
             Some(Ok(id)) => !mark.manifests.contains(&id),
             // A key that names no readable manifest is reachable from no
@@ -275,17 +280,28 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         CandidateFamily::WalSegments => {
             if sweep.live.protects_wal_segment(key) {
                 report.retain(RetainedReason::Referenced);
-            } else if sweep_aged(store, key, config, context, sweep, report).await? {
+            } else if sweep_aged(store, key, config.grace_window_ms, context, sweep, report).await?
+            {
                 report.deleted_wal_segments += 1;
             }
         }
-        CandidateFamily::MetadataTables => {
+        // Both families hold metadata segments and both are counted as
+        // metadata tables. What differs is the window an unreferenced one
+        // ages under: a staged segment belongs to a job that publishes
+        // nothing until it finishes, and a job is allowed to run for a long
+        // time, so reaping one on the ordinary window would delete the output
+        // of a job still writing it.
+        CandidateFamily::MetadataTables | CandidateFamily::CompactionStaging => {
+            let grace_window_ms = match family {
+                CandidateFamily::CompactionStaging => METADATA_COMPACTION_STAGING_GRACE_MS,
+                _ => config.grace_window_ms,
+            };
             // Rule 5 is sticky across every re-collection in this pass.
             if sweep.degraded {
                 report.retain(RetainedReason::DegradedRoots);
             } else if sweep.live.tables.contains(key) {
                 report.retain(RetainedReason::Referenced);
-            } else if sweep_aged(store, key, config, context, sweep, report).await? {
+            } else if sweep_aged(store, key, grace_window_ms, context, sweep, report).await? {
                 report.deleted_metadata_tables += 1;
             }
         }
@@ -298,7 +314,9 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
                         report.retain(RetainedReason::Referenced);
                     }
                     Some(Ok(_)) => {
-                        if sweep_aged(store, key, config, context, sweep, report).await? {
+                        if sweep_aged(store, key, config.grace_window_ms, context, sweep, report)
+                            .await?
+                        {
                             report.deleted_manifests += 1;
                         }
                     }
@@ -322,21 +340,26 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
 /// deletions.
 ///
 /// Two things have to hold before the key goes. The object's own write time
-/// has to be a grace window old, which is what protects a publication still
-/// in flight and every object the reference anchor predates. And the
+/// has to be `grace_window_ms` old, which is what protects a publication
+/// still in flight and every object the reference anchor predates. And the
 /// reference anchor has to say the object was already unreferenced when the
 /// window opened, which is what protects a reader still holding an anchor it
 /// pinned inside the window. A pass with no anchor cannot answer the second
 /// question, so it keeps every aged candidate and says so.
+///
+/// The window is a parameter because one family does not use the configured
+/// one: compaction staging holds the output of a job that publishes nothing
+/// until it finishes, and it ages under
+/// [`METADATA_COMPACTION_STAGING_GRACE_MS`] instead.
 async fn sweep_aged<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
-    config: &GcConfig,
+    grace_window_ms: u64,
     context: &MutationContext,
     sweep: &SweepVerifier,
     report: &mut GcResponse,
 ) -> Result<bool> {
-    match grace_age(store, key, config.grace_window_ms, context.now_ms)
+    match grace_age(store, key, grace_window_ms, context.now_ms)
         .await
         .map_err(|error| CoreError::store(key, &error))?
     {

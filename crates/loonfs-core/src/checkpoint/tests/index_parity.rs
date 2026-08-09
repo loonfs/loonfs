@@ -776,7 +776,9 @@ async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
     };
     let mut rebuild_error = None;
     for _unit in 0..8 {
-        match super::reorganize_metadata_step(&store, &namespace_id, &context, fold_policy).await {
+        match super::reorganize_metadata_step(&store, &namespace_id, &context, fold_policy, None)
+            .await
+        {
             Ok(report) => match report.outcome {
                 super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
                 _ => continue,

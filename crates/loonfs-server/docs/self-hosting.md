@@ -380,6 +380,56 @@ all. Any other value fails the process rather than being guessed at.
 and leaves the rest alone. `LOONFS_TRACE=off` silences the output whatever
 `RUST_LOG` says.
 
+### Metadata rebuilds that run in the background
+
+Background maintenance rewrites a namespace's metadata into fewer files as it
+goes. It does that one group of metadata at a time, and one maintenance step
+reads a whole group. A group that has grown past what one step may read is
+handled differently, and it logs a few lines worth knowing.
+
+The first is a warning saying that the oldest metadata run in a family group
+no longer fits one reorganization step. It names the group, the run, how many
+rows and bytes that run holds, and the two per-step budgets it did not fit. It
+means the namespace has grown, not that anything is wrong.
+
+What follows it is `a family group outgrew one reorganization step; a
+streaming metadata compaction is rebuilding it`. That is a background job the
+server starts and does not wait for. It reads every file the group holds,
+writes the rebuilt group as it goes, and publishes the result in one step at
+the end. A large group can keep it busy for a long time, and it logs
+`streaming metadata compaction progress` as it works so you can see it moving.
+`streaming metadata compaction rebuilt a family group` is the line that says
+it landed.
+
+Nothing needs doing about any of this. While the job runs, ordinary
+maintenance carries on: the WAL still flushes, the other groups still fold,
+and reads answer exactly the same thing from the first line to the last. One
+job runs at a time per namespace, so a second group in the same state waits
+its turn and says so.
+
+A restart during a rebuild loses that rebuild's work, and this is expected.
+Nothing durable records that a job was running: the published metadata never
+moved, the files the job had written are referenced by nothing, and the next
+maintenance step starts the job again from what the namespace holds by then.
+The abandoned files sit under
+`namespaces/{namespace}/metadata/compaction-staging/` and garbage collection
+reclaims them a day later, which is a deliberately generous wait so that a
+collection pass can never delete the output of a job that is still running.
+The same is true of a graceful shutdown, which cancels a running job rather
+than waiting for it.
+
+Two lines mean the job did not land and will be run again: `streaming metadata
+compaction abandoned` (something else rewrote the group underneath it) and
+`streaming metadata compaction superseded` (writes kept landing during its
+final publication). Both are safe and both are self-correcting. `streaming
+metadata compaction failed` carries the error and is worth reading; the next
+step still tries again.
+
+This build does not expose the per-step budgets in the config, so the lever for
+everything a step does — flushing, folding, collecting — remains how often
+maintenance runs, not how much each run may do. The rebuild above is the one
+piece of upkeep that lever does not pace, because it is not paced at all.
+
 ## The optional local cache
 
 The server can keep encoded metadata blocks on this machine's disk, in front

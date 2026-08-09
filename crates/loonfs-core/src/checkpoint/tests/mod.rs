@@ -37,6 +37,10 @@ use super::runs::{
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
+use super::streaming_compaction::{
+    run_metadata_compaction_job, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
+    MetadataCompactionSpec,
+};
 use super::{
     block_fetch, create, data_block_load, flush, load, record, reorganize,
     reorganize_metadata_step, row, scan, MetadataReorganizeOutcome,
@@ -240,14 +244,15 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
         ..policy
     };
     loop {
-        let report = super::reorganize_metadata_step(store, namespace_id, context, fold_policy)
-            .await
-            .expect("reorganization step");
+        let report =
+            super::reorganize_metadata_step(store, namespace_id, context, fold_policy, None)
+                .await
+                .expect("reorganization step");
         match report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { .. }
             | super::MetadataReorganizeOutcome::Superseded => continue,
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+            super::MetadataReorganizeOutcome::CompactionPlanned { .. } => {
                 panic!("test reorganization budget should admit a progress-making subset")
             }
         }
@@ -258,6 +263,126 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
         .envelope
         .state
         .manifest_id
+}
+
+/// Runs the job a step planned, the way the maintenance runner's background
+/// task runs it — except that this waits for it, which is what makes a test
+/// deterministic.
+async fn run_planned_compaction<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+    spec: &MetadataCompactionSpec,
+) -> MetadataCompactionJobOutcome {
+    run_metadata_compaction_job(
+        store,
+        namespace_id,
+        context,
+        policy,
+        spec,
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("run the planned streaming compaction")
+}
+
+/// What a reader sees right now: every inode the namespace knows, resolved
+/// the way a read resolves it — visible or not, at what path, at what
+/// revision.
+///
+/// This is the answer that must not move while a fold or a rebuild runs.
+/// Comparing rows would say the opposite of what is wanted: both drop rows
+/// precisely because no read can observe them, so the row set is meant to
+/// change and this is not.
+async fn visible_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<CurrentFileState> {
+    let manifest_id = read_metadata_root_object(store, namespace_id)
+        .await
+        .expect("read metadata root")
+        .envelope
+        .state
+        .manifest_id;
+    let materialized =
+        load_manifest_materialization_for_inspection(store, namespace_id, manifest_id)
+            .await
+            .expect("materialize the manifest");
+    let inode_ids: Vec<InodeId> = materialized
+        .metadata_state
+        .inodes()
+        .iter()
+        .map(|inode| inode.inode_id)
+        .collect();
+    let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest())
+        .await
+        .expect("load the read view");
+    resolve_current_files(&view, &inode_ids)
+        .await
+        .expect("resolve every inode the namespace knows")
+}
+
+/// Rebuilds one family group through a streaming compaction and publishes the
+/// swap, answering with the staged object keys the manifest now names.
+///
+/// For a caller that needs a namespace whose manifest references segments
+/// under the compaction staging directory: the collector's tests, which have
+/// to tell a published job's output from an orphan.
+pub(crate) async fn compact_a_family_group_into_staging<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> BTreeSet<String> {
+    // One byte admits no run whole, so the group a step selects has no window
+    // that makes progress and is handed to a job.
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
+        ..MetadataLsmPolicy::default()
+    };
+    let report = reorganize_metadata_step(store, namespace_id, context, policy, None)
+        .await
+        .expect("plan a streaming compaction");
+    let MetadataReorganizeOutcome::CompactionPlanned { spec, .. } = report.outcome else {
+        panic!("a budget that admits no run whole must plan a streaming compaction");
+    };
+    publish_planned_compaction(store, namespace_id, context, policy, &spec).await;
+
+    let staging_prefix =
+        loonfs_objectstore::keys::metadata_compaction_staging_prefix(namespace_id.as_str());
+    let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
+    let staged: BTreeSet<String> =
+        load_verified_manifest_tables(store, namespace_id, &manifest_object_id)
+            .await
+            .expect("load the published manifest")
+            .manifest()
+            .payload
+            .metadata_files
+            .iter()
+            .map(|descriptor| descriptor.object_key.clone())
+            .filter(|key| key.starts_with(&staging_prefix))
+            .collect();
+    assert!(
+        !staged.is_empty(),
+        "a published job's output is referenced from the staging directory"
+    );
+    staged
+}
+
+/// The same, where anything but a publication is a test failure.
+async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+    spec: &MetadataCompactionSpec,
+) {
+    let outcome = run_planned_compaction(store, namespace_id, context, policy, spec).await;
+    assert!(
+        matches!(outcome, MetadataCompactionJobOutcome::Published { .. }),
+        "the planned job must publish, got {outcome:?}"
+    );
 }
 
 async fn current_manifest_object_id<S: ObjectStore + ?Sized>(

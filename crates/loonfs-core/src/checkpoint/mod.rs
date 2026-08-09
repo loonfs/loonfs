@@ -68,6 +68,9 @@ pub use self::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
     StoredMetadataBlockKind,
 };
+pub use self::streaming_compaction::{
+    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
+};
 
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
@@ -82,3 +85,4 @@ pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{Readahead, VerifiedMetadataTables};
+pub(crate) use self::streaming_compaction::run_metadata_compaction_job;

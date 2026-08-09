@@ -5595,7 +5595,21 @@
               "kind": {
                 "type": "string",
                 "enum": [
-                  "budget_exhausted"
+                  "compaction_started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "compaction_pending"
                 ]
               }
             }

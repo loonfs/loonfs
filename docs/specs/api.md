@@ -683,6 +683,15 @@ reclaimable state is collected; naming anything else is refused with
 `namespace_deleted`, because a tombstone has nothing to flush, reorganize,
 or retain.
 
+One reorganize outcome describes work the step did not do itself. A family
+group that has outgrown one step is rebuilt by a background streaming
+compaction, and `reorganize.kind` reports `compaction_started` when the step
+started that job. The step publishes nothing in that case: the job publishes
+once, when it finishes. `compaction_pending` says the group needs one and
+this step started none, because a job is already running for the namespace —
+one runs at a time — or because the process serving the request schedules no
+background work. The server log says which.
+
 Inside `metadata`, `max_wal_tail_segments` overrides the flush threshold;
 zero, and any value above the write-rejection threshold, are rejected as
 `invalid_request`. Nothing surrenders replay history unless

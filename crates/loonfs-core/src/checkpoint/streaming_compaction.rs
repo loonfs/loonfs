@@ -18,18 +18,15 @@
 //! Output segments go to the staging directory rather than to
 //! `metadata/tables/` (format spec, "Compaction"): a job outlives the
 //! collector's grace window, so its output would otherwise look exactly like
-//! the unreferenced aged objects the collector reaps. The job publishes
-//! nothing. It returns the descriptors it wrote, and the caller swaps them in
-//! with one manifest publication; a cancelled or crashed job leaves staged
-//! objects nothing references and the old manifest still valid.
+//! the unreferenced aged objects the collector reaps. The executor publishes
+//! nothing itself. It returns the descriptors it wrote, and
+//! [`run_metadata_compaction_job`] swaps them in with one manifest
+//! publication; a cancelled or crashed job leaves staged objects nothing
+//! references and the old manifest still valid.
 //!
-//! Nothing here is reachable from the maintenance step yet. The runner that
-//! schedules the job, excludes its snapshot runs from ordinary merges,
-//! cancels it on shutdown, and finalizes it lands next. Until it does, the
-//! only caller outside tests is the planner that builds the spec, which is
-//! why this module allows dead code: every item below has a caller in the
-//! change that schedules it, and the allow goes away with that change.
-#![allow(dead_code)]
+//! The job runs as a background task the maintenance runner owns. The step
+//! that plans it starts it and returns; the runner cancels it on shutdown and
+//! joins it with the rest of its background work.
 
 use super::block_fetch::{load_segment_filter, load_segment_index_for_reorganization};
 use super::block_load::SessionBlockMemo;
@@ -37,24 +34,31 @@ use super::build::{write_manifest_segment, MetadataSstWriteRequest};
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::data_block_load::load_segment_data_block_span;
 use super::error::ManifestLoadError;
-use super::load::load_manifest_segment_rows_in_key_range_with_cache;
+use super::flush::ensure_metadata_publication_budget;
+use super::load::{
+    load_manifest_segment_rows_in_key_range_with_cache, load_verified_manifest_tables,
+};
+use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
 use super::reorganize::{
     bind_survives_frozen_floor, drop_rows_below_frozen_floor, group_run_descriptors,
-    unbindings_at_or_below_floor, MergePlacement,
+    unbindings_at_or_below_floor, write_reorganized_manifest, MergePlacement,
 };
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
 use super::scan::{descriptor_may_intersect_range, Readahead, VerifiedMetadataTables};
 use super::validate::validate_manifest_row_seq_range;
+use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::namespace::control::read_metadata_root_object_if_present;
+use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{lookup_keys, MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::{
     string_prefix_upper_bound, DecodedDataBlock, SegmentIndexEntry,
 };
-use loonfs_api::{ChangeSeq, MetadataTableId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestId, MetadataTableId, NamespaceId};
 use loonfs_objectstore::keys::metadata_compaction_staging_table;
 use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -76,6 +80,20 @@ const ITERATOR_FETCH_CONCURRENCY: usize = 8;
 /// of how many reads the job makes.
 const PROBE_CACHE_DECODED_BYTES: usize = 16 * 1024 * 1024;
 
+/// Rows between two progress lines. A job that needs one at all is bigger
+/// than a step's whole row budget, so this is coarse on purpose: a handful of
+/// lines over a long job rather than one per segment.
+const PROGRESS_ROW_INTERVAL: u64 = 1_000_000;
+
+/// Publication attempts one finalization makes before giving up.
+///
+/// Only an unrelated publication landing between the reload and the root
+/// compare-and-swap costs an attempt, and the reload is what the next attempt
+/// takes the race against. A namespace publishing fast enough to win four in
+/// a row is one where re-running the job later is the better answer than
+/// spinning here, and re-running is always safe.
+const MAX_FINALIZATION_ATTEMPTS: usize = 4;
+
 /// The immutable plan of one streaming compaction.
 ///
 /// Everything the job decides is fixed here before it starts: which group it
@@ -83,14 +101,22 @@ const PROBE_CACHE_DECODED_BYTES: usize = 16 * 1024 * 1024;
 /// floor every row is judged against. A job re-run from the same spec against
 /// the same durable state produces the same rows, which is what makes a
 /// cancelled attempt free to throw away.
+///
+/// The runtime holds one of these per running job and hands it back to
+/// [`super::reorganize_metadata_step`], which is how a step knows not to
+/// merge the group a job is rebuilding.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MetadataCompactionSpec {
+pub struct MetadataCompactionSpec {
     group: MetadataFamilyGroup,
     /// Every run the group held when the plan was made, by sequence and
     /// level. That is bottom-anchored by construction — a run the group holds
     /// cannot sort below the whole of itself — which is what makes the job's
     /// drops visibility-preserving.
     inputs: Vec<(ChangeSeq, u32)>,
+    /// Rows those runs hold for the group, from their descriptors. What the
+    /// job reports it is about to read; the rows it writes are fewer by
+    /// whatever the floor lets go.
+    input_rows: u64,
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
 }
@@ -99,12 +125,14 @@ impl MetadataCompactionSpec {
     pub(super) fn new(
         group: MetadataFamilyGroup,
         inputs: Vec<(ChangeSeq, u32)>,
+        input_rows: u64,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
     ) -> Self {
         Self {
             group,
             inputs,
+            input_rows,
             placement,
             frozen_floor_seq,
         }
@@ -112,6 +140,21 @@ impl MetadataCompactionSpec {
 
     pub(super) fn group(&self) -> MetadataFamilyGroup {
         self.group
+    }
+
+    /// The families this job rebuilds, for a caller reporting what it started.
+    pub fn families(&self) -> &'static [MetadataTableFamily] {
+        self.group.families()
+    }
+
+    /// How many runs the job reads.
+    pub fn input_runs(&self) -> usize {
+        self.inputs.len()
+    }
+
+    /// How many rows those runs hold.
+    pub fn input_rows(&self) -> u64 {
+        self.input_rows
     }
 
     pub(super) fn inputs(&self) -> &[(ChangeSeq, u32)] {
@@ -137,10 +180,10 @@ impl MetadataCompactionSpec {
 /// segments are unreferenced, the manifest never moved, and a later job runs
 /// the same spec again.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct MetadataCompactionCancellation(Arc<AtomicBool>);
+pub struct MetadataCompactionCancellation(Arc<AtomicBool>);
 
 impl MetadataCompactionCancellation {
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.0.store(true, Ordering::SeqCst);
     }
 
@@ -210,6 +253,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
         },
         canonical_digest: RowDigest::default(),
         index_digest: RowDigest::default(),
+        next_progress_rows: PROGRESS_ROW_INTERVAL,
     };
 
     for cluster in retention_clusters(spec.group) {
@@ -219,6 +263,278 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     }
     job.refuse_a_run_whose_index_disagrees()?;
     Ok(MetadataCompactionOutcome::Completed(job.result))
+}
+
+/// How one background compaction job ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataCompactionJobOutcome {
+    /// The rebuilt group replaced its snapshot in a published manifest.
+    Published {
+        manifest_id: ManifestId,
+        rows_read: u64,
+        rows_written: u64,
+        output_segments: usize,
+    },
+    /// The cancellation token was set. The manifest never moved and the
+    /// segments the job had written stay staged and unreferenced.
+    Cancelled,
+    /// A run the job read is no longer in the manifest, or no longer holds
+    /// what it held, so this output cannot stand in for it. Nothing is
+    /// published and the staged segments are orphans; a later step plans the
+    /// group again from what the manifest now holds.
+    Abandoned,
+    /// Every publication attempt lost the root race. The job is thrown away
+    /// and a later step plans it again.
+    Superseded,
+}
+
+/// What one finalization attempt sequence decided.
+#[derive(Debug)]
+pub(super) enum Finalization {
+    Published(ManifestId),
+    Abandoned,
+    Superseded,
+}
+
+/// Runs one streaming compaction end to end: rebuild the group, then swap the
+/// rebuilt run in with one manifest publication.
+///
+/// This is what the maintenance runner spawns from the spec a step planned.
+/// Nothing durable records that the job is running, so every way it can end
+/// short of publishing — cancellation, a snapshot that moved, a lost race, an
+/// error — costs the work it did and nothing else: the old manifest stays
+/// valid, the staged segments stay invisible, and a later step plans the group
+/// again.
+pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+    spec: &MetadataCompactionSpec,
+    cancellation: &MetadataCompactionCancellation,
+) -> Result<MetadataCompactionJobOutcome> {
+    let timer = StdMonotonicTimer::default();
+    let Some(tables) = load_current_manifest_tables(store, namespace_id).await? else {
+        return Ok(MetadataCompactionJobOutcome::Abandoned);
+    };
+    // What the job is about to read, recorded before it reads anything.
+    // Finalization compares the manifest against this, so the run it publishes
+    // stands in for exactly the segments it merged.
+    let Some(snapshot_keys) = snapshot_segment_keys(&tables, spec) else {
+        return Ok(MetadataCompactionJobOutcome::Abandoned);
+    };
+    tracing::info!(
+        namespace_id = namespace_id.as_str(),
+        families = ?spec.families(),
+        input_runs = spec.input_runs(),
+        input_rows = spec.input_rows(),
+        frozen_floor_seq = spec.frozen_floor_seq().0,
+        "streaming metadata compaction started"
+    );
+
+    let result =
+        match run_metadata_compaction(&tables, namespace_id, spec, policy, cancellation).await? {
+            MetadataCompactionOutcome::Completed(result) => result,
+            MetadataCompactionOutcome::Cancelled => {
+                // The executor stops between block fetches, so what it wrote is
+                // whatever segments had already filled. They are staged and named
+                // by nothing.
+                tracing::info!(
+                    namespace_id = namespace_id.as_str(),
+                    families = ?spec.families(),
+                    "streaming metadata compaction cancelled"
+                );
+                return Ok(MetadataCompactionJobOutcome::Cancelled);
+            }
+        };
+    drop(tables);
+
+    let rows_read = result.rows_read;
+    let rows_written = result.rows_written;
+    let output_segments = result.output_segments.len();
+    match finalize_metadata_compaction(
+        store,
+        namespace_id,
+        context,
+        spec,
+        &snapshot_keys,
+        result,
+        &timer,
+    )
+    .await?
+    {
+        Finalization::Published(manifest_id) => {
+            tracing::info!(
+                namespace_id = namespace_id.as_str(),
+                families = ?spec.families(),
+                rows_read,
+                rows_written,
+                output_segments,
+                manifest_id = manifest_id.0,
+                "streaming metadata compaction published"
+            );
+            Ok(MetadataCompactionJobOutcome::Published {
+                manifest_id,
+                rows_read,
+                rows_written,
+                output_segments,
+            })
+        }
+        Finalization::Abandoned => Ok(MetadataCompactionJobOutcome::Abandoned),
+        Finalization::Superseded => Ok(MetadataCompactionJobOutcome::Superseded),
+    }
+}
+
+/// Swaps the rebuilt run in for the snapshot it replaces.
+///
+/// Reload the root and manifest, check that every segment the job read is
+/// still exactly what the manifest holds for the group in those runs, replace
+/// those descriptors with the output run's, keep everything else — including
+/// the runs that arrived while the job ran — and publish through the ordinary
+/// compare-and-swap. An unrelated publication winning that race is a reload
+/// and another attempt; a snapshot that moved is an abandon, because this
+/// output no longer stands in for what the manifest holds.
+///
+/// The publication budget covers this publication and not the job: what it
+/// protects against is a root compare-and-swap landing after the objects it
+/// names could have aged into the collector's window, which is a property of
+/// the last few seconds and not of however long the rebuild took.
+pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    spec: &MetadataCompactionSpec,
+    snapshot_keys: &BTreeSet<String>,
+    result: MetadataCompactionResult,
+    timer: &dyn MonotonicTimer,
+) -> Result<Finalization> {
+    for attempt in 1..=MAX_FINALIZATION_ATTEMPTS {
+        let publication_started_ms = timer.monotonic_now_ms();
+        let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
+            .await
+            .map_err(CoreError::load_head)?
+            .map(|loaded| loaded.envelope.state)
+        else {
+            return Ok(Finalization::Abandoned);
+        };
+        let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+            .await
+            .map_err(manifest_load_failure)?;
+        if snapshot_segment_keys(&tables, spec).as_ref() != Some(snapshot_keys) {
+            tracing::info!(
+                namespace_id = namespace_id.as_str(),
+                families = ?spec.families(),
+                "streaming metadata compaction abandoned: its input runs moved while it ran"
+            );
+            return Ok(Finalization::Abandoned);
+        }
+
+        let previous = tables.manifest();
+        let mut metadata_files: Vec<MetadataFileRef> = previous
+            .payload
+            .metadata_files
+            .iter()
+            .filter(|descriptor| !snapshot_keys.contains(&descriptor.object_key))
+            .cloned()
+            .collect();
+        metadata_files.extend(result.output_segments.iter().cloned());
+        let base_seq = metadata_files
+            .iter()
+            .map(|descriptor| descriptor.run_seq)
+            .min()
+            .unwrap_or(previous.payload.base_seq);
+        let manifest = write_reorganized_manifest(
+            store,
+            namespace_id,
+            previous,
+            metadata_files,
+            base_seq,
+            previous
+                .payload
+                .retention_floor_seq
+                .max(spec.frozen_floor_seq()),
+        )
+        .await?;
+
+        ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
+        let published = publish_metadata_root(
+            store,
+            namespace_id,
+            &manifest,
+            Some(root.manifest_object_id.clone()),
+            context.now_ms,
+        )
+        .await?;
+        drop(tables);
+        match published {
+            ManifestPublicationOutcome::Published(_) => {
+                return Ok(Finalization::Published(manifest.payload.manifest_id))
+            }
+            ManifestPublicationOutcome::Superseded(_)
+            | ManifestPublicationOutcome::RootCasRaceLost => {
+                tracing::debug!(
+                    namespace_id = namespace_id.as_str(),
+                    families = ?spec.families(),
+                    attempt,
+                    attempts = MAX_FINALIZATION_ATTEMPTS,
+                    "a publication landed while a streaming metadata compaction was finalizing; \
+                     reloading"
+                );
+            }
+        }
+    }
+    tracing::info!(
+        namespace_id = namespace_id.as_str(),
+        families = ?spec.families(),
+        attempts = MAX_FINALIZATION_ATTEMPTS,
+        "streaming metadata compaction superseded at every publication attempt; a later step \
+         plans it again"
+    );
+    Ok(Finalization::Superseded)
+}
+
+/// The tables of whatever manifest the namespace's root names, or `None` when
+/// it names none.
+async fn load_current_manifest_tables<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    namespace_id: &NamespaceId,
+) -> Result<Option<VerifiedMetadataTables<'a, S>>> {
+    let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
+        .await
+        .map_err(CoreError::load_head)?
+        .map(|loaded| loaded.envelope.state)
+    else {
+        return Ok(None);
+    };
+    load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+        .await
+        .map(Some)
+        .map_err(manifest_load_failure)
+}
+
+/// The object keys the spec's runs hold for its group, or `None` when the
+/// manifest no longer references one of those runs at all.
+///
+/// Segments are immutable and their keys are generated, so two manifests
+/// agreeing on this set agree on every row the job read. Runs the manifest
+/// gained meanwhile are not in it — the job never read them, and they survive
+/// the publication untouched.
+pub(super) fn snapshot_segment_keys<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+    spec: &MetadataCompactionSpec,
+) -> Option<BTreeSet<String>> {
+    let mut keys = BTreeSet::new();
+    for (run_seq, level) in spec.inputs() {
+        let run = tables
+            .scan_runs
+            .iter()
+            .find(|run| run.run_seq == *run_seq && run.level == *level)?;
+        keys.extend(
+            group_run_descriptors(run, spec.group())
+                .map(|descriptor| descriptor.object_key.clone()),
+        );
+    }
+    Some(keys)
 }
 
 /// One set of families the job merges and judges together, and how it groups
@@ -370,6 +686,8 @@ struct CompactionJob<'a, S: ObjectStore + ?Sized> {
     result: MetadataCompactionResult,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
+    /// The read count the next progress line is owed at.
+    next_progress_rows: u64,
 }
 
 impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
@@ -426,6 +744,7 @@ impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
                 .or_default()
                 .push(iterators[next].take_head());
             self.result.rows_read += 1;
+            self.report_progress();
         }
         self.flush_locality(cluster, &mut group_rows, &mut writers)
             .await?;
@@ -437,6 +756,28 @@ impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
             self.result.output_segments.extend(segments);
         }
         Ok(true)
+    }
+
+    /// Says where a long job has got to, at [`PROGRESS_ROW_INTERVAL`].
+    ///
+    /// A job has no bound on how long it runs, and it publishes nothing until
+    /// it is finished, so without this an operator watching a big namespace
+    /// sees one line at the start and nothing until it lands. The counters are
+    /// the job's own; nothing is measured for this.
+    fn report_progress(&mut self) {
+        if self.result.rows_read < self.next_progress_rows {
+            return;
+        }
+        self.next_progress_rows = self.result.rows_read.saturating_add(PROGRESS_ROW_INTERVAL);
+        tracing::info!(
+            namespace_id = self.namespace_id.as_str(),
+            families = ?self.spec.families(),
+            rows_read = self.result.rows_read,
+            rows_written = self.result.rows_written,
+            input_rows = self.spec.input_rows(),
+            output_segments = self.result.output_segments.len(),
+            "streaming metadata compaction progress"
+        );
     }
 
     /// Fills every iterator that has run out of rows, a bounded wave at a

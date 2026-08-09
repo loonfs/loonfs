@@ -828,12 +828,47 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// calling this from maintenance is what keeps read fan-out bounded.
     /// Repeat until the report says `NotNeeded`; every call re-reads durable
     /// state, so interrupted reorganizations resume from the live manifest.
-    pub async fn reorganize_metadata(&self) -> Result<crate::checkpoint::MetadataReorganizeReport> {
+    ///
+    /// A group whose oldest run no longer fits one unit is reported as
+    /// [`MetadataReorganizeOutcome::CompactionPlanned`] instead. The caller
+    /// runs that plan with [`Self::run_metadata_compaction`] as a background
+    /// job and hands its spec back here as `active_compaction` for as long as
+    /// the job runs, so no unit merges the group underneath it.
+    pub async fn reorganize_metadata(
+        &self,
+        active_compaction: Option<&crate::checkpoint::MetadataCompactionSpec>,
+    ) -> Result<crate::checkpoint::MetadataReorganizeReport> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
             crate::checkpoint::MetadataLsmPolicy::default(),
+            active_compaction,
+        )
+        .await
+    }
+
+    /// Rebuilds one family group in a single streaming pass and publishes the
+    /// swap, from a plan [`Self::reorganize_metadata`] produced.
+    ///
+    /// Long-running by design and paced by no budget: it is the caller's
+    /// background work, not a bounded step. `cancellation` stops it between
+    /// block fetches, which is what a graceful shutdown sets. Every ending
+    /// short of a publication costs only the work done — the manifest never
+    /// moved, the segments it wrote are staged and referenced by nothing, and
+    /// a later step plans the group again.
+    pub async fn run_metadata_compaction(
+        &self,
+        spec: &crate::checkpoint::MetadataCompactionSpec,
+        cancellation: &crate::checkpoint::MetadataCompactionCancellation,
+    ) -> Result<crate::checkpoint::MetadataCompactionJobOutcome> {
+        crate::checkpoint::run_metadata_compaction_job(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context()?,
+            crate::checkpoint::MetadataLsmPolicy::default(),
+            spec,
+            cancellation,
         )
         .await
     }

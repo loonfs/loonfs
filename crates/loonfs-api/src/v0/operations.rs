@@ -962,9 +962,15 @@ pub enum ReorganizeStepOutcome {
     NotNeeded,
     /// One family group was merged and a manifest published.
     UnitPublished,
-    /// A group needs merging but no progress-making subset fits the
-    /// per-step budget.
-    BudgetExhausted,
+    /// A group has outgrown one step, and this step started the background
+    /// streaming compaction that rebuilds it. The step published nothing;
+    /// the job publishes once, when it finishes.
+    CompactionStarted,
+    /// A group needs a streaming compaction and this step did not start one,
+    /// because one is already running for this namespace or because the
+    /// handle this step ran through schedules no background work. The server
+    /// log says which.
+    CompactionPending,
     /// Another publisher advanced the root first; a later step retries.
     Superseded,
 }

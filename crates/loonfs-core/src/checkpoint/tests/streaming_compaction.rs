@@ -3,17 +3,17 @@
 //! place, restart equivalence, and the resource bounds that make the job
 //! independent of the size of what it rebuilds.
 
-use super::super::reorganize::{
-    select_reorganization_input, write_reorganized_manifest, ReorganizationPlan,
-};
+use super::super::reorganize::{select_reorganization_input, ReorganizationPlan};
 use super::super::row::manifest_row_commit_seq;
 use super::super::runs::MetadataFamilyGroup;
 use super::super::scan::VerifiedMetadataTables;
 use super::super::streaming_compaction::{
-    run_metadata_compaction, MetadataCompactionCancellation, MetadataCompactionOutcome,
-    MetadataCompactionResult, MetadataCompactionSpec,
+    finalize_metadata_compaction, run_metadata_compaction, snapshot_segment_keys, Finalization,
+    MetadataCompactionCancellation, MetadataCompactionOutcome, MetadataCompactionResult,
+    MetadataCompactionSpec,
 };
 use super::*;
+use crate::timing::StdMonotonicTimer;
 use loonfs_objectstore::keys::metadata_compaction_staging_prefix;
 use loonfs_test_support::stores::ConcurrencyWatchStore;
 use std::collections::BTreeMap;
@@ -252,6 +252,50 @@ fn fold_everything_policy() -> MetadataLsmPolicy {
     }
 }
 
+/// A budget one byte wide, which admits no run whole, so the planner has no
+/// window that makes progress and answers with a compaction.
+fn starving_policy() -> MetadataLsmPolicy {
+    MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
+        ..MetadataLsmPolicy::default()
+    }
+}
+
+/// A per-step row budget one row short of what `group`'s base run holds.
+///
+/// That is the production condition: no window over this group makes progress,
+/// so a step hands it to a job, while every other group still folds normally
+/// on the steps around it.
+async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    group: MetadataFamilyGroup,
+) -> MetadataLsmPolicy {
+    let tables = load_current_manifest_tables(store, namespace_id).await;
+    let base_rows: u64 = runs_in_scan_order(&tables.manifest().payload)
+        .iter()
+        .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
+        .flat_map(|run| run.tables.iter())
+        .filter(|table| group.contains(table.family))
+        .flat_map(|table| &table.segments)
+        .map(|descriptor| descriptor.row_count)
+        .sum();
+    assert!(
+        base_rows > 1,
+        "the seed must leave this group a base run to starve"
+    );
+    MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(
+            usize::try_from(base_rows).expect("test row counts are small") - 1,
+        )
+        .expect("nonzero"),
+        max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
+        ..MetadataLsmPolicy::default()
+    }
+}
+
 /// A budget that rolls many small output segments, so the job's writers are
 /// exercised rather than producing one segment per family.
 fn small_segment_policy() -> MetadataLsmPolicy {
@@ -331,79 +375,52 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
         .expect("run the streaming compaction")
 }
 
-/// The swap a finished job's caller performs, as much of it as this change
-/// owns: reload the current manifest, verify every snapshot run is still
-/// present and unchanged, replace exactly those descriptors with the output
-/// run, and publish through the ordinary manifest path.
+/// The segments the group's snapshot runs hold right now, which is what
+/// finalization compares the manifest against.
+async fn snapshot_keys_now<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+) -> BTreeSet<String> {
+    let tables = load_current_manifest_tables(store, namespace_id).await;
+    snapshot_segment_keys(&tables, spec).expect("the snapshot must be present")
+}
+
+/// The production finalizer, called the way the job driver calls it.
 ///
-/// The runner productionizes this — the race handling, the reporting, and the
-/// retry are its business. This is the minimum the oracle needs to look at
-/// what the job built through a manifest a reader can load.
+/// The driver runs the rebuild and this together. These tests split the two so
+/// they can assert on what the rebuild produced before it is published, and on
+/// what happens when the manifest moves in between.
 async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    snapshot_at_start: &[MetadataRunManifest],
+    snapshot_keys: &BTreeSet<String>,
+    result: &MetadataCompactionResult,
+) -> Finalization {
+    finalize_metadata_compaction(
+        store,
+        namespace_id,
+        &test_context(),
+        spec,
+        snapshot_keys,
+        result.clone(),
+        &StdMonotonicTimer::default(),
+    )
+    .await
+    .expect("finalize the streaming compaction")
+}
+
+/// The same, for the tests where anything but a publication is a failure.
+async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    snapshot_keys: &BTreeSet<String>,
     result: &MetadataCompactionResult,
 ) -> ManifestId {
-    let root = read_metadata_root_object(store, namespace_id)
-        .await
-        .expect("read root")
-        .envelope
-        .state;
-    let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
-        .await
-        .expect("load the current manifest");
-    assert_eq!(
-        snapshot_runs_for_group(tables.manifest(), spec.group()),
-        snapshot_at_start,
-        "the snapshot must still be present and unchanged at finalization"
-    );
-
-    let previous = tables.manifest();
-    let inputs: BTreeSet<(ChangeSeq, u32)> = spec.inputs().iter().copied().collect();
-    let mut metadata_files: Vec<MetadataFileRef> = previous
-        .payload
-        .metadata_files
-        .iter()
-        .filter(|descriptor| {
-            !spec.group().contains(descriptor.family)
-                || !inputs.contains(&(descriptor.run_seq, descriptor.level))
-        })
-        .cloned()
-        .collect();
-    metadata_files.extend(result.output_segments.iter().cloned());
-    let base_seq = metadata_files
-        .iter()
-        .map(|descriptor| descriptor.run_seq)
-        .min()
-        .unwrap_or(previous.payload.base_seq);
-    let retention_floor_seq = previous
-        .payload
-        .retention_floor_seq
-        .max(spec.frozen_floor_seq());
-
-    let manifest = write_reorganized_manifest(
-        store,
-        namespace_id,
-        previous,
-        metadata_files,
-        base_seq,
-        retention_floor_seq,
-    )
-    .await
-    .expect("write the replacement manifest");
-    match publish_metadata_root(
-        store,
-        namespace_id,
-        &manifest,
-        Some(root.manifest_object_id.clone()),
-        test_context().now_ms,
-    )
-    .await
-    .expect("publish the replacement manifest")
-    {
-        ManifestPublicationOutcome::Published(_) => manifest.payload.manifest_id,
+    match finalize_streaming_compaction(store, namespace_id, spec, snapshot_keys, result).await {
+        Finalization::Published(manifest_id) => manifest_id,
         other => panic!("no concurrent publisher exists in this test, got {other:?}"),
     }
 }
@@ -494,6 +511,7 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
         namespace_id,
         &test_context(),
         fold_everything_policy(),
+        None,
     )
     .await
     .expect("fold the group whole");
@@ -569,10 +587,10 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     );
 }
 
-/// The step reports the same blocked outcome it reported before the compactor
-/// existed. Scheduling the job is the runner's, and lands with it.
+/// A step that plans a compaction publishes nothing and stages nothing: it
+/// hands the plan back, and the runtime starts the job.
 #[tokio::test]
-async fn a_step_that_plans_a_compaction_still_reports_the_group_blocked() {
+async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -583,26 +601,102 @@ async fn a_step_that_plans_a_compaction_still_reports_the_group_blocked() {
         &store,
         &namespace_id,
         &test_context(),
-        MetadataLsmPolicy {
-            max_l0_runs: NonZeroUsize::MIN,
-            max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
-        },
+        starving_policy(),
+        None,
     )
     .await
     .expect("budgeted step");
-    assert!(matches!(
-        report.outcome,
-        MetadataReorganizeOutcome::BudgetExhausted { .. }
-    ));
+    let MetadataReorganizeOutcome::CompactionPlanned { families, spec } = report.outcome else {
+        panic!("a group no window fits must plan a streaming compaction");
+    };
+    assert_eq!(families, MetadataFamilyGroup::Bindings.families());
+    assert!(spec.input_rows() > 0, "the plan must report what it reads");
     assert_eq!(
         current_manifest_object_id(&store, &namespace_id).await,
         before,
-        "a blocked step publishes nothing"
+        "a step that plans a compaction publishes nothing"
     );
     assert!(
         staged_object_keys(&store, &namespace_id).await.is_empty(),
-        "and stages nothing, because no job runs yet"
+        "and stages nothing, because the job has not started"
+    );
+}
+
+/// While a job rebuilds one group, steps leave that group alone and fold the
+/// others. Without this a step would keep re-planning the running job: the
+/// group's L0 rows are frozen in the job's snapshot, so its count never falls
+/// while every other group's does.
+#[tokio::test]
+async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let group = MetadataFamilyGroup::Bindings;
+    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        ..MetadataLsmPolicy::default()
+    };
+
+    // Same durable state, twice. With no job in flight this group is what a
+    // step takes: it holds the most L0 rows.
+    let fold_dir = tempdir().expect("tempdir");
+    copy_store_tree(temp_dir.path(), fold_dir.path());
+    let fold_store = LocalFsStore::new(fold_dir.path()).expect("store");
+    let without = super::super::reorganize_metadata_step(
+        &fold_store,
+        &namespace_id,
+        &test_context(),
+        policy,
+        None,
+    )
+    .await
+    .expect("step with no job running");
+    let MetadataReorganizeOutcome::UnitPublished { families, .. } = without.outcome else {
+        panic!("expected a merge, got {:?}", without.outcome);
+    };
+    assert_eq!(
+        families,
+        group.families(),
+        "the seed must leave this group the one a step would take"
+    );
+
+    // With the job's plan in hand, every step folds another group and none
+    // touches this one, so the job's input is exactly what it was.
+    let mut other_groups_folded = 0usize;
+    for _ in 0..16 {
+        let report = super::super::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &test_context(),
+            policy,
+            Some(&spec),
+        )
+        .await
+        .expect("step with the job running");
+        match report.outcome {
+            MetadataReorganizeOutcome::UnitPublished { families, .. } => {
+                assert_ne!(
+                    families,
+                    group.families(),
+                    "a step must not merge the group a job is rebuilding"
+                );
+                other_groups_folded += 1;
+            }
+            MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            other => panic!("unexpected outcome {other:?}"),
+        }
+    }
+    assert!(
+        other_groups_folded > 0,
+        "ordinary maintenance must keep going while a job runs"
+    );
+    assert_eq!(
+        snapshot_keys_now(&store, &namespace_id, &spec).await,
+        snapshot_keys,
+        "the job's input must be exactly what it was when the job was planned"
     );
 }
 
@@ -633,12 +727,7 @@ async fn a_streaming_compaction_and_a_whole_group_fold_reach_the_same_rows() {
     let folded_state = current_metadata_state(&fold_store, &namespace_id).await;
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot = snapshot_runs_for_group(
-        load_current_manifest_tables(&store, &namespace_id)
-            .await
-            .manifest(),
-        group,
-    );
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let outcome = run_compaction(
         &store,
         &namespace_id,
@@ -675,7 +764,7 @@ async fn a_streaming_compaction_and_a_whole_group_fold_reach_the_same_rows() {
     );
     assert_eq!(result.unbind_probes, reverse_rows_at_or_below_floor);
 
-    finalize_streaming_compaction(&store, &namespace_id, &spec, &snapshot, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
     let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
     assert_eq!(
@@ -770,12 +859,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
     let spec = compaction_spec_for_group(&store, &namespace_id, group)
         .await
         .with_frozen_floor_seq(ChangeSeq(0));
-    let snapshot = snapshot_runs_for_group(
-        load_current_manifest_tables(&store, &namespace_id)
-            .await
-            .manifest(),
-        group,
-    );
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let MetadataCompactionOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
@@ -788,7 +872,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
         panic!("nothing cancelled this job");
     };
     assert_eq!(result.unbind_probes, 0, "a floor of zero covers no row");
-    finalize_streaming_compaction(&store, &namespace_id, &spec, &snapshot, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
 
     let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
     assert_ne!(
@@ -814,12 +898,7 @@ async fn a_compaction_of_the_revisions_group_rewrites_every_row_it_reads() {
     let before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot = snapshot_runs_for_group(
-        load_current_manifest_tables(&store, &namespace_id)
-            .await
-            .manifest(),
-        group,
-    );
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let MetadataCompactionOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
@@ -839,7 +918,7 @@ async fn a_compaction_of_the_revisions_group_rewrites_every_row_it_reads() {
         result.unbind_probes, 0,
         "the revisions group has no bind rule, so it reads no unbind"
     );
-    finalize_streaming_compaction(&store, &namespace_id, &spec, &snapshot, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
 
     assert_eq!(
         group_rows_of_current_manifest(&store, &namespace_id, group).await,
@@ -922,12 +1001,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
 
     // The uninterrupted run, for the comparison.
     let spec = compaction_spec_for_group(&straight_store, &namespace_id, group).await;
-    let snapshot = snapshot_runs_for_group(
-        load_current_manifest_tables(&straight_store, &namespace_id)
-            .await
-            .manifest(),
-        group,
-    );
+    let snapshot_keys = snapshot_keys_now(&straight_store, &namespace_id, &spec).await;
     let MetadataCompactionOutcome::Completed(straight_result) = run_compaction(
         &straight_store,
         &namespace_id,
@@ -939,11 +1013,11 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     else {
         panic!("nothing cancelled this job");
     };
-    finalize_streaming_compaction(
+    publish_streaming_compaction(
         &straight_store,
         &namespace_id,
         &spec,
-        &snapshot,
+        &snapshot_keys,
         &straight_result,
     )
     .await;
@@ -1007,12 +1081,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     // The re-run from the same spec, against the same durable state.
     let store = LocalFsStore::new(interrupted_dir.path()).expect("store");
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot = snapshot_runs_for_group(
-        load_current_manifest_tables(&store, &namespace_id)
-            .await
-            .manifest(),
-        group,
-    );
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let MetadataCompactionOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
@@ -1038,7 +1107,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
         .iter()
         .map(|descriptor| descriptor.object_key.clone())
         .collect();
-    finalize_streaming_compaction(&store, &namespace_id, &spec, &snapshot, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
 
     assert_eq!(
         group_rows_of_current_manifest(&store, &namespace_id, group).await,
@@ -1189,12 +1258,7 @@ async fn one_directory_far_past_the_row_budget_streams_a_slot_at_a_time() {
     );
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot = snapshot_runs_for_group(
-        load_current_manifest_tables(&store, &namespace_id)
-            .await
-            .manifest(),
-        group,
-    );
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let MetadataCompactionOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
@@ -1212,7 +1276,7 @@ async fn one_directory_far_past_the_row_budget_streams_a_slot_at_a_time() {
         result.peak_locality_rows
     );
 
-    finalize_streaming_compaction(&store, &namespace_id, &spec, &snapshot, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
     assert_eq!(
         group_rows_of_current_manifest(&store, &namespace_id, group).await,
         folded,
@@ -1230,5 +1294,524 @@ async fn one_directory_far_past_the_row_budget_streams_a_slot_at_a_time() {
         snapshot_runs_for_group(tables.manifest(), group).len(),
         1,
         "the job must leave the group in one run"
+    );
+}
+
+// -------------------------------------------------------------------------
+// The whole arc, through the step the maintenance runner calls
+// -------------------------------------------------------------------------
+
+/// The unbind rows a floor covers, which is the churn a rebuild reclaims.
+fn unbinds_at_or_below(
+    rows: &BTreeMap<ApiMetadataTableFamily, Vec<MetadataRow>>,
+    floor_seq: ChangeSeq,
+) -> usize {
+    rows[&ApiMetadataTableFamily::DirentryUnbinds]
+        .iter()
+        .filter(|row| {
+            matches!(row, MetadataRow::DirentryUnbind { unbind_seq, .. } if *unbind_seq <= floor_seq)
+        })
+        .count()
+}
+
+/// The group's segments the manifest holds outside a spec's input runs: the
+/// runs that arrived after the job was planned.
+async fn group_segments_outside_the_job<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    group: MetadataFamilyGroup,
+) -> BTreeSet<String> {
+    let inputs: BTreeSet<(ChangeSeq, u32)> = spec.inputs().iter().copied().collect();
+    load_current_manifest_tables(store, namespace_id)
+        .await
+        .manifest()
+        .payload
+        .metadata_files
+        .iter()
+        .filter(|descriptor| {
+            group.contains(descriptor.family)
+                && !inputs.contains(&(descriptor.run_seq, descriptor.level))
+        })
+        .map(|descriptor| descriptor.object_key.clone())
+        .collect()
+}
+
+/// Every object key the current manifest references.
+async fn referenced_segment_keys<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> BTreeSet<String> {
+    load_current_manifest_tables(store, namespace_id)
+        .await
+        .manifest()
+        .payload
+        .metadata_files
+        .iter()
+        .map(|descriptor| descriptor.object_key.clone())
+        .collect()
+}
+
+/// The whole arc, driven through the entry point the maintenance runner
+/// calls.
+///
+/// A group past the budgets with churn below the floor is handed to a job.
+/// The runner starts that job and goes on stepping; here the steps and the job
+/// run in one task, which is the same interleaving with the timing taken out.
+/// While the job is in flight the other groups keep folding, no step touches
+/// the job's group, a run arrives above the job's snapshot and survives its
+/// publication, the loader accepts the manifest every step leaves, and a read
+/// answers the same thing throughout. The job then publishes, the group ends
+/// in one base run, and the churn the floor covered is gone.
+#[tokio::test]
+async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_bindings_workload(&store, &namespace_id).await;
+    let group = MetadataFamilyGroup::Bindings;
+    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
+    let floor_seq = read_floor_seq(&store, &namespace_id).await;
+    let rows_before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    assert!(
+        unbinds_at_or_below(&rows_before, floor_seq) > 0,
+        "the seed must leave churn the floor covers, or a rebuild reclaims nothing"
+    );
+    let mut visible = visible_namespace(&store, &namespace_id).await;
+    assert!(
+        visible.iter().any(|state| state.visible),
+        "the seed must leave something to read"
+    );
+
+    let mut active: Option<MetadataCompactionSpec> = None;
+    let mut steps_with_a_job_running = 0usize;
+    let mut other_groups_folded = 0usize;
+    let mut arrived_keys = BTreeSet::new();
+    let mut published_jobs = 0usize;
+    let mut settled = false;
+
+    for _step in 0..64 {
+        let report = super::super::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &context,
+            policy,
+            active.as_ref(),
+        )
+        .await
+        .expect("maintenance step");
+        match report.outcome {
+            MetadataReorganizeOutcome::UnitPublished { ref families, .. } => {
+                if active.is_some() {
+                    assert_ne!(
+                        families.as_slice(),
+                        group.families(),
+                        "no step may merge the group a job is rebuilding"
+                    );
+                    other_groups_folded += 1;
+                }
+            }
+            MetadataReorganizeOutcome::CompactionPlanned {
+                ref families,
+                ref spec,
+            } => {
+                // One job at a time per namespace: a plan that arrives while
+                // one runs is reported and skipped, which is what the runner
+                // does with it.
+                if active.is_none() {
+                    assert_eq!(
+                        families.as_slice(),
+                        group.families(),
+                        "this budget starves this group first"
+                    );
+                    active = Some(spec.clone());
+                    if arrived_keys.is_empty() {
+                        // A run arrives while the first job runs. It is
+                        // outside that job's snapshot, so the job never reads
+                        // it and the publication must land underneath it.
+                        write_file_bytes(
+                            &store,
+                            &namespace_id,
+                            "/arrived-mid-job.txt",
+                            b"arrived while the job ran\n",
+                            &context,
+                            None,
+                        )
+                        .await
+                        .expect("write a file while the job runs");
+                        create_checkpoint(&store, &namespace_id, &context)
+                            .await
+                            .expect("checkpoint it");
+                        arrived_keys =
+                            group_segments_outside_the_job(&store, &namespace_id, spec, group)
+                                .await;
+                        assert!(
+                            !arrived_keys.is_empty(),
+                            "the arriving run must sit outside the job's input"
+                        );
+                        visible = visible_namespace(&store, &namespace_id).await;
+                    }
+                }
+            }
+            MetadataReorganizeOutcome::Superseded => {
+                panic!("no concurrent publisher exists in this test")
+            }
+            MetadataReorganizeOutcome::NotNeeded { .. } if active.is_none() => {
+                settled = true;
+                break;
+            }
+            MetadataReorganizeOutcome::NotNeeded { .. } => {}
+        }
+
+        // Every step leaves a manifest the loader accepts and a read
+        // answering exactly what it answered before.
+        assert_eq!(
+            visible_namespace(&store, &namespace_id).await,
+            visible,
+            "a step changed what a read answers"
+        );
+
+        // The runner has the job running in another task. Waiting a few steps
+        // and then running it here is the same interleaving with the timing
+        // taken out: the steps in between did ordinary work against a
+        // manifest that holds the job's whole input.
+        if let Some(spec) = active.clone() {
+            steps_with_a_job_running += 1;
+            if steps_with_a_job_running % 3 == 0 {
+                publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
+                published_jobs += 1;
+                active = None;
+                if published_jobs == 1 {
+                    let referenced = referenced_segment_keys(&store, &namespace_id).await;
+                    assert!(
+                        arrived_keys.is_subset(&referenced),
+                        "the run that arrived while the job ran must survive its publication"
+                    );
+                }
+                assert_eq!(
+                    visible_namespace(&store, &namespace_id).await,
+                    visible,
+                    "the job's publication changed what a read answers"
+                );
+            }
+        }
+    }
+
+    assert!(published_jobs > 0, "the group must be rebuilt by a job");
+    assert!(
+        other_groups_folded > 0,
+        "ordinary maintenance must keep folding while a job runs"
+    );
+    assert!(settled, "maintenance must settle with nothing left to fold");
+
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let base_runs = snapshot_runs_for_group(tables.manifest(), group)
+        .into_iter()
+        .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
+        .count();
+    drop(tables);
+    assert_eq!(base_runs, 1, "the group must end in one base run");
+
+    let rows_after = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    assert_eq!(
+        unbinds_at_or_below(&rows_after, floor_seq),
+        0,
+        "every unbind the floor covered must be gone"
+    );
+    assert!(
+        rows_after.values().map(Vec::len).sum::<usize>()
+            < rows_before.values().map(Vec::len).sum::<usize>(),
+        "the rebuild must reclaim rows"
+    );
+}
+
+/// Runs steps until one hands a group to a job, and answers with that plan.
+///
+/// A step folds the group with the most L0 rows, so the starved group is
+/// reached after the groups that still fit have folded.
+async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+) -> MetadataCompactionSpec {
+    for _step in 0..64 {
+        let report =
+            super::super::reorganize_metadata_step(store, namespace_id, context, policy, None)
+                .await
+                .expect("maintenance step");
+        match report.outcome {
+            MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => return spec,
+            MetadataReorganizeOutcome::UnitPublished { .. } => {}
+            other => panic!("expected a plan or a merge, got {other:?}"),
+        }
+    }
+    panic!("no step handed a group to a job")
+}
+
+/// The crash variant of the same arc: the job dies mid-run, and the next step
+/// plans it again.
+///
+/// Nothing durable records that a job was running, so a process that dies —
+/// or a shutdown that cancels — costs the work and nothing else. What a read
+/// answers has not moved, the manifest has not moved, the segments the attempt
+/// wrote are staged and named by nothing, and the step after it plans the
+/// group again and the second attempt finishes.
+#[tokio::test]
+async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_bindings_workload(
+        &LocalFsStore::new(temp_dir.path()).expect("store"),
+        &namespace_id,
+    )
+    .await;
+    let group = MetadataFamilyGroup::Bindings;
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
+
+    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
+    let visible = visible_namespace(&store, &namespace_id).await;
+    let manifest_before = current_manifest_object_id(&store, &namespace_id).await;
+
+    // The attempt dies partway through, which is what a cancellation and a
+    // kill leave behind alike: staged segments and nothing else. The
+    // cancellation lands after a number of reads rather than at a boundary
+    // the test picked, so several thresholds are tried until one lands after
+    // the job has written something.
+    let mut orphans = BTreeSet::new();
+    for reads_before_cancel in [8usize, 16, 24, 32] {
+        let cancellation = MetadataCompactionCancellation::default();
+        let dying_store = CancelAfterReadsStore {
+            inner: LocalFsStore::new(temp_dir.path()).expect("store"),
+            cancellation: cancellation.clone(),
+            reads_before_cancel,
+            reads: AtomicUsize::new(0),
+        };
+        let outcome = run_metadata_compaction_job(
+            &dying_store,
+            &namespace_id,
+            &context,
+            policy,
+            &spec,
+            &cancellation,
+        )
+        .await
+        .expect("run the job");
+        assert_eq!(
+            outcome,
+            MetadataCompactionJobOutcome::Cancelled,
+            "the cancellation must land before the job finishes"
+        );
+        assert_eq!(
+            current_manifest_object_id(&store, &namespace_id).await,
+            manifest_before,
+            "a job that died must publish nothing"
+        );
+        assert_eq!(
+            visible_namespace(&store, &namespace_id).await,
+            visible,
+            "and must leave what a read answers exactly where it was"
+        );
+        orphans.extend(staged_object_keys(&store, &namespace_id).await);
+        if !orphans.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        !orphans.is_empty(),
+        "an attempt must leave the segments it had written staged"
+    );
+    let referenced = referenced_segment_keys(&store, &namespace_id).await;
+    assert!(
+        orphans.is_disjoint(&referenced),
+        "and nothing may reference them"
+    );
+
+    // The next step plans the group again, and the second attempt finishes.
+    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
+    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
+
+    assert_eq!(
+        visible_namespace(&store, &namespace_id).await,
+        visible,
+        "the rebuild must leave what a read answers where it was"
+    );
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let runs = snapshot_runs_for_group(tables.manifest(), group);
+    drop(tables);
+    assert_eq!(runs.len(), 1, "the group must end in one run");
+    assert_eq!(runs[0].level, CHECKPOINT_BASE_RUN_LEVEL);
+    // The first attempt's segments are still staged and still named by
+    // nothing: orphans for the collector, not state anything reads.
+    let referenced = referenced_segment_keys(&store, &namespace_id).await;
+    let staged_now = staged_object_keys(&store, &namespace_id).await;
+    assert!(orphans.is_subset(&staged_now));
+    assert!(orphans.is_disjoint(&referenced));
+}
+
+/// Publishes a competing manifest the first time the finalizer writes its
+/// replacement manifest object.
+///
+/// That is the window the retry is for: the finalizer has reloaded the root
+/// and decided its swap, and a flush lands before its compare-and-swap does.
+#[derive(Debug)]
+struct FlushDuringFinalizationStore {
+    inner: LocalFsStore,
+    namespace_id: NamespaceId,
+    flushed: AtomicUsize,
+}
+
+#[async_trait]
+impl ObjectStore for FlushDuringFinalizationStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key.ends_with(".manifest.json") && self.flushed.fetch_add(1, Ordering::SeqCst) == 0 {
+            super::super::flush::flush_wal(&self.inner, &self.namespace_id, &test_context())
+                .await
+                .expect("the competing flush must publish");
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+/// A flush that lands while a job is finalizing does not cost the job.
+///
+/// The finalizer reloads, checks that its input is still exactly what it read,
+/// and publishes on top of the flush. The flush's own run survives, because it
+/// arrived above the job's snapshot and the swap replaces only what the
+/// snapshot held.
+#[tokio::test]
+async fn a_flush_landing_during_finalization_is_retried_over() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_bindings_workload(
+        &LocalFsStore::new(temp_dir.path()).expect("store"),
+        &namespace_id,
+    )
+    .await;
+    let group = MetadataFamilyGroup::Bindings;
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    else {
+        panic!("nothing cancelled this job");
+    };
+
+    // A write with no checkpoint behind it leaves a WAL tail, which is what
+    // the competing flush publishes.
+    let visible_before = visible_namespace(&store, &namespace_id).await;
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/raced-the-finalizer.txt",
+        b"raced the finalizer\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write a file the flush will publish");
+
+    let racing_store = FlushDuringFinalizationStore {
+        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
+        namespace_id: namespace_id.clone(),
+        flushed: AtomicUsize::new(0),
+    };
+    let manifest_id = match finalize_streaming_compaction(
+        &racing_store,
+        &namespace_id,
+        &spec,
+        &snapshot_keys,
+        &result,
+    )
+    .await
+    {
+        Finalization::Published(manifest_id) => manifest_id,
+        other => panic!("the retry must publish, got {other:?}"),
+    };
+    assert!(
+        racing_store.flushed.load(Ordering::SeqCst) > 1,
+        "the finalizer must have written a replacement manifest more than once"
+    );
+
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    assert_eq!(tables.manifest().payload.manifest_id, manifest_id);
+    let runs = snapshot_runs_for_group(tables.manifest(), group);
+    drop(tables);
+    // Two runs: the base run the job built, and the delta run the flush
+    // published above the job's snapshot. The flush's run survives because
+    // the swap replaces only what the snapshot held.
+    assert_eq!(
+        runs.iter()
+            .filter(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
+            .count(),
+        1,
+        "the group must end in one base run"
+    );
+    assert_eq!(
+        runs.iter()
+            .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
+            .count(),
+        1,
+        "the flush's run must survive the swap"
+    );
+    // Nothing the job rebuilt moved, and the file the flush published is
+    // there: the swap replaced its own snapshot and preserved the rest.
+    let visible_after = visible_namespace(&store, &namespace_id).await;
+    assert_eq!(
+        visible_after.len(),
+        visible_before.len() + 1,
+        "the swap must leave the flush's file and nothing else new"
+    );
+    assert_eq!(
+        &visible_after[..visible_before.len()],
+        visible_before.as_slice(),
+        "the swap must not move anything a read already answered"
+    );
+    assert!(
+        visible_after.last().expect("the flush's file").visible,
+        "the file the flush published must be visible after the swap"
     );
 }
