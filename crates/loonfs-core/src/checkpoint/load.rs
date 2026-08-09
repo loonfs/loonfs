@@ -347,6 +347,7 @@ fn validate_manifest_table_descriptors(
         for table in ordered_tables {
             validate_segment_descriptors(&table.segments)?;
             validate_segment_numbering(&table.segments)?;
+            validate_segment_key_order(&table.segments)?;
             for descriptor in &table.segments {
                 match table.family {
                     MetadataTableFamily::DirentryBinds => {
@@ -478,6 +479,47 @@ fn validate_segment_numbering(descriptors: &[MetadataFileRef]) -> Result<(), Man
                 ),
             });
         }
+    }
+    Ok(())
+}
+
+/// Checks that one family's segments inside one run ascend by key range in
+/// index order, without overlap.
+///
+/// One producer writes a family's rows in ascending key order and never
+/// writes a key twice, so each of its segments starts strictly above where
+/// the previous one ended. The progress checks already hold a fold's outputs
+/// to this while the fold is in flight; this holds every run a manifest
+/// references to it. The numbering check cannot notice a descriptor stamped
+/// with the wrong run identity when the list it joins stays densely
+/// numbered. This check notices it as soon as the stray range overlaps a
+/// neighbour's, and the wide ranges of folded segments make that the common
+/// case.
+fn validate_segment_key_order(descriptors: &[MetadataFileRef]) -> Result<(), ManifestLoadError> {
+    let mut previous: Option<&MetadataFileRef> = None;
+    for descriptor in descriptors {
+        if descriptor.row_count == 0 {
+            continue;
+        }
+        if let Some(previous) = previous {
+            if descriptor.min_key <= previous.max_key {
+                return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                    object_key: descriptor.object_key.clone(),
+                    message: format!(
+                        "segment starts at `{}`, at or below the preceding segment's last key \
+                         `{}`, in family `{:?}` of run seq `{}` level {}; one producer writes a \
+                         family's segments in ascending key order, so consecutive ranges never \
+                         touch",
+                        descriptor.min_key,
+                        previous.max_key,
+                        descriptor.family,
+                        descriptor.run_seq,
+                        descriptor.level
+                    ),
+                });
+            }
+        }
+        previous = Some(descriptor);
     }
     Ok(())
 }
@@ -732,13 +774,10 @@ fn validate_manifest_reorganize_progress(
     for (family, segments) in &segments_by_family {
         validate_segment_descriptors(segments)?;
         validate_segment_numbering(segments)?;
+        validate_segment_key_order(segments)?;
         let bound = written_through(*family);
-        let mut previous: Option<&MetadataFileRef> = None;
         for segment in segments {
-            // A fold writes one family's outputs in ascending key order and
-            // never revisits a key, so two output segments of one family can
-            // neither overlap nor descend. Only segments holding rows carry a
-            // range to compare.
+            // Only segments holding rows carry a range to compare.
             if segment.row_count == 0 {
                 continue;
             }
@@ -757,19 +796,6 @@ fn validate_manifest_reorganize_progress(
                     ),
                 });
             }
-            if let Some(previous) = previous {
-                if segment.min_key <= previous.max_key {
-                    return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                        object_key: segment.object_key.clone(),
-                        message: format!(
-                            "reorganize output segment starts at `{}`, at or below the preceding \
-                             segment's last key `{}` in family `{family:?}`",
-                            segment.min_key, previous.max_key
-                        ),
-                    });
-                }
-            }
-            previous = Some(segment);
         }
     }
 

@@ -1856,12 +1856,15 @@ format is versioned by the manifest that references it (`namespace_manifest`
 
 A run is identified by its `run_seq` and `level` together, and holds one
 family's segments from one producer: a WAL flush's delta run, a rebuild's
-output, or the run a rebuild in slices builds up. So one family's
-`segment_index` values inside one run are numbered from zero, once each, in
-the order they were written, and a manifest whose descriptors say otherwise
-does not load. Two runs of different levels may share a sequence, and two
-family groups routinely share one base run — they rebuild at the same
-manifest head — but within one run each family has exactly one producer.
+output, or the run a rebuild in slices builds up. A producer writes a
+family's rows in ascending key order and writes no key twice. So one
+family's `segment_index` values inside one run are numbered from zero, once
+each, in the order they were written, the segments' key ranges ascend in
+that same order without touching, and a manifest whose descriptors say
+otherwise does not load. Two runs of different levels may share a sequence,
+and two family groups routinely share one base run — they rebuild at the
+same manifest head — but within one run each family has exactly one
+producer.
 
 #### 4.2.2 Grep roots, manifests, and gram-index segments
 

@@ -2484,6 +2484,51 @@ async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
     );
 }
 
+/// Two segments of one family whose key ranges touch inside one run do not
+/// load.
+///
+/// One producer writes a family's segments in ascending key order, so
+/// segment one starts strictly above where segment zero ended. A descriptor
+/// can keep the numbering dense and still not belong — stamped with another
+/// run's identity, say — and then its key range is what disagrees with its
+/// neighbours'. Here the second segment repeats the first one's whole range,
+/// which is the shape a duplicated descriptor takes.
+#[tokio::test]
+async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_folded_base_with_a_delta_run(&store, &namespace_id).await;
+
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let manifest = tables.manifest().clone();
+    drop(tables);
+    let existing = base_segment_of_family(&manifest, ApiMetadataTableFamily::Inodes);
+    assert_eq!(existing.segment_index, 0);
+
+    let mut overlapping = manifest.payload.clone();
+    let mut second = reorganize_output_segment(
+        &existing,
+        &namespace_id,
+        existing.run_seq,
+        existing.level,
+    );
+    // Index one keeps the numbering dense, so only the key order can object.
+    second.segment_index = 1;
+    overlapping.metadata_files.push(second);
+
+    let error = load_perturbed_manifest(&store, &namespace_id, overlapping, 3)
+        .await
+        .expect_err("overlapping segment ranges within one run must not load");
+    let ManifestLoadError::SegmentDescriptorMismatch { message, .. } = &error else {
+        panic!("expected a segment descriptor mismatch, got {error:?}")
+    };
+    assert!(
+        message.contains("Inodes") && message.contains("ascending key order"),
+        "the rejection must name the family and the ordering rule, got `{message}`"
+    );
+}
+
 /// The end state the soak never reached.
 ///
 /// Four cycles of writes, deletions, and a retention floor that moves past
