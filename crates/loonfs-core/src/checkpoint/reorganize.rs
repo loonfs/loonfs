@@ -5,12 +5,22 @@
 //! follows the WAL delta, never the namespace. Folding those L0 runs into
 //! the base happens here instead, one **family group** at a time: the
 //! group's rows are merged from an oldest-first, budgeted subset of complete
-//! runs, rows no retained sequence can observe are dropped, new base
-//! segments are written, and a manifest publishes that swaps just those
-//! references. Families whose rows must stay mutually consistent compact
-//! together — bind, child bind, and unbind rows form one group because their
-//! drop rules read each other; revisions travel with their descending index
-//! so index parity holds within every unit.
+//! runs, rows no retained sequence can observe are dropped, new segments are
+//! written, and a manifest publishes that swaps just those references.
+//! Families whose rows must stay mutually consistent compact together —
+//! bind, child bind, and unbind rows form one group because their drop rules
+//! read each other; revisions travel with their descending index so index
+//! parity holds within every unit.
+//!
+//! A merge writes a base-tier run when, and only when, its window starts at
+//! the group's oldest run. That is the same condition retention dropping
+//! needs, so the level a run carries and the rules that produced it say the
+//! same thing: a base run is a run some fold was allowed to drop rows from,
+//! a delta run is a run nothing has dropped from yet ([`MergePlacement`]). A
+//! merge that had to start above the group's base therefore writes a bigger
+//! delta run rather than a second base run, and a family group holds at most
+//! one base run at any time (manifest load refuses a manifest that says
+//! otherwise).
 //!
 //! There is no progress record: each unit ends in a durable manifest, so a
 //! crashed or interrupted reorganization resumes by reading the live
@@ -37,7 +47,7 @@ use super::publish::{
 };
 use super::runs::{
     flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, MetadataRunManifest,
-    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
+    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
 };
 use super::scan::VerifiedMetadataTables;
 use crate::context::MutationContext;
@@ -55,40 +65,16 @@ use loonfs_api::{
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Families whose rows merge in one reorganization unit. Families that read
-/// each other's rows to decide what to drop (see
-/// `drop_rows_below_retention_floor`) must compact together, and a secondary
-/// index always travels with its canonical family.
-const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 7] = [
-    &[
-        MetadataTableFamily::DirentryBinds,
-        MetadataTableFamily::DirentryChildBinds,
-        MetadataTableFamily::DirentryUnbinds,
-    ],
-    &[
-        MetadataTableFamily::Revisions,
-        MetadataTableFamily::RevisionsByInodeDesc,
-    ],
-    &[MetadataTableFamily::Inodes],
-    &[MetadataTableFamily::Tombstones],
-    // Active deletions fold alone: a removal marker is cancelled by the
-    // listed row it names, and both live in this family.
-    &[MetadataTableFamily::ActiveDeletions],
-    &[MetadataTableFamily::CommitReceipts],
-    // Attributes fold alone too: a revision supersedes the revisions of the
-    // same inode, and they all live in this family. The family has no
-    // secondary index to travel with.
-    &[MetadataTableFamily::Attributes],
-];
-
 /// What one reorganization step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataReorganizeOutcome {
     /// The manifest's L0 run count is below the policy trigger; nothing to
     /// fold yet.
     NotNeeded { l0_runs: usize },
-    /// One bounded complete-run subset for a family group folded into new
-    /// base segments and the manifest advanced.
+    /// One bounded complete-run subset for a family group merged into one
+    /// new run and the manifest advanced. The new run is the group's base
+    /// when the subset started at the group's oldest run, and a bigger delta
+    /// run otherwise.
     UnitPublished {
         families: Vec<MetadataTableFamily>,
         folded_l0_rows: u64,
@@ -251,20 +237,19 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
-    // Dropping is only visibility-preserving over a merge that starts at
-    // the group's oldest run; see
-    // [`ReorganizationInput::starts_at_group_bottom`]. A window that had to
-    // skip older runs merges them exactly as they are, so its output holds
-    // every row its inputs held.
-    if input.starts_at_group_bottom {
+    // Dropping is only visibility-preserving over a merge that starts at the
+    // group's oldest run, which is what the placement records. A window that
+    // had to skip older runs merges them exactly as they are, so its output
+    // holds every row its inputs held.
+    if input.placement.may_drop_rows_below_the_retention_floor() {
         drop_rows_below_retention_floor(&mut rows_by_family, floor_seq)?;
     }
 
     let run_tables = build_manifest_tables_from_rows(
         store,
         namespace_id,
-        previous.payload.head_seq,
-        CHECKPOINT_BASE_RUN_LEVEL,
+        input.placement.output_seq(),
+        input.placement.output_level(),
         |family| rows_by_family.remove(&family).unwrap_or_default(),
         MetadataTableSegmentation::Base {
             max_rows_per_segment: policy.max_rows_per_segment,
@@ -341,16 +326,102 @@ pub(super) struct ReorganizationInput {
     folded_l0_rows: u64,
     decoded_rows: u64,
     decoded_bytes: u64,
-    /// Whether the selected window starts at the group's oldest run.
+    /// Where this merge's output stands in the group, which decides both the
+    /// level it is written at and whether it may drop rows.
+    pub(super) placement: MergePlacement,
+}
+
+/// Where a merge's output stands in its family group.
+///
+/// **A merge's output is base-tier if and only if its window starts at the
+/// group's oldest run.** Base-tier means "rows a fold was allowed to drop
+/// from", so the level a run carries and the rules that produced it say the
+/// same thing. Both the output level and the right to drop rows are read off
+/// this one value; there is no separate flag either can disagree with.
+///
+/// A bottom-anchored merge writes the group's base run, stamped at the
+/// manifest head. Base-tier runs sort below every delta run whatever sequence
+/// they carry, so the output lands at the bottom where its inputs were, and
+/// the sequence is free to be the head's — which is also what keeps a file at
+/// `head_seq` in the manifest when the merge consumed the group's whole top.
+/// It replaces the group's previous base run, because a bottom-anchored
+/// window always contains it, so the group is left with exactly one.
+///
+/// A merge that had to start above the group's base rewrites delta runs into
+/// one bigger delta run. Two things follow from writing it at the delta level
+/// rather than the base level. It cannot mint a second base run, so a group's
+/// base never fragments and nothing ever hides an over-budget bottom behind
+/// fragments that each fit. And its rows stay counted as delta pressure, so
+/// the L0 run count reports what is really waiting.
+///
+/// Its sequence is its newest input's, not the manifest head's, so the output
+/// stands exactly where that run stood: above every run the window left below
+/// it and below every run it left above. The head would put it above runs the
+/// window never reached, and moving merged rows above newer runs is what a
+/// later bottom-anchored fold must never see — it could then drop an unbind
+/// whose bind had moved out of the window and put a deleted file back. The
+/// head is also shared by consecutive maintenance steps on a quiet namespace,
+/// so head-stamped outputs of different merges collide at one identity.
+///
+/// Nothing else in the manifest already holds that identity for these
+/// families: the newest input run's segments for this group leave
+/// `metadata_files` in the same publication the output's enter it. Segments
+/// of other families at that identity stay where they are, which is ordinary
+/// — a run is a set of families, and each family in it has one producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MergePlacement {
+    /// The window started at the group's oldest run. The output is the
+    /// group's base run at the manifest head, and retention may drop rows.
     ///
-    /// Retention dropping reads across the merged rows: an unbind cancels
-    /// the bind it names, and a removal marker cancels the listed deletion
-    /// it repeats. Dropping one half of such a pair is only
-    /// visibility-preserving when the other half is in the same merge, and
-    /// what guarantees that is starting the merge at the group's oldest
-    /// run — the cancelling row is always the newer of the two, so every row
-    /// it can cancel is already in the window (format spec, "Compaction").
-    pub(super) starts_at_group_bottom: bool,
+    /// Retention dropping reads across the merged rows: an unbind cancels the
+    /// bind it names, and a removal marker cancels the listed deletion it
+    /// repeats. Dropping one half of such a pair is only visibility-preserving
+    /// when the other half is in the same merge, and what guarantees that is
+    /// starting the merge at the group's oldest run — the cancelling row is
+    /// always the newer of the two, so every row it can cancel is already in
+    /// the window (format spec, "Compaction").
+    Base { output_seq: ChangeSeq },
+    /// The window started above the group's oldest run. The output is a delta
+    /// run at the newest input's sequence, and nothing is dropped.
+    Delta { output_seq: ChangeSeq },
+}
+
+impl MergePlacement {
+    fn output_seq(self) -> ChangeSeq {
+        match self {
+            Self::Base { output_seq } | Self::Delta { output_seq } => output_seq,
+        }
+    }
+
+    fn output_level(self) -> u32 {
+        match self {
+            Self::Base { .. } => CHECKPOINT_BASE_RUN_LEVEL,
+            Self::Delta { .. } => CHECKPOINT_L0_RUN_LEVEL,
+        }
+    }
+
+    fn may_drop_rows_below_the_retention_floor(self) -> bool {
+        matches!(self, Self::Base { .. })
+    }
+}
+
+/// Where the output of the selected window stands.
+fn merge_placement(
+    bottom_anchored: bool,
+    runs: &[MetadataRunManifest],
+    head_seq: ChangeSeq,
+) -> MergePlacement {
+    if bottom_anchored {
+        return MergePlacement::Base {
+            output_seq: head_seq,
+        };
+    }
+    // The newest input's sequence. A merge above the base needs two runs to
+    // make progress, so the window is never empty here and the fallback only
+    // keeps this total.
+    MergePlacement::Delta {
+        output_seq: runs.iter().map(|run| run.run_seq).max().unwrap_or(head_seq),
+    }
 }
 
 /// What one selection attempt found.
@@ -379,31 +450,36 @@ pub(super) struct OverBudgetRun {
 ///
 /// **The order.** The comparator below is the group's recency order, oldest
 /// first. Base-tier runs hold rows an earlier fold already absorbed, so they
-/// sit under every L0 run whatever their `run_seq` says: a bounded fold
-/// stamps its output at the manifest head, which can leave a base run
-/// carrying a higher `run_seq` than an L0 run it did not fold (see
-/// [`manifest_has_partial_reorganization`]). Within one tier the lower
-/// `run_seq` is the older run.
+/// sit under every L0 run whatever their `run_seq` says: a bottom-anchored
+/// fold stamps its output at the manifest head, which can leave a base run
+/// carrying a higher `run_seq` than an L0 run some other group has not folded
+/// yet (see [`manifest_has_partial_reorganization`]). Within one tier the
+/// lower `run_seq` is the older run.
 ///
-/// **The invariant.** A merge writes its inputs back as one base-tier run
-/// stamped at the manifest head. That output is older than every L0 run in
-/// the order above, so it may not carry a row newer than an L0 run it left
-/// behind — otherwise a later fold could drop a row while the row it cancels
-/// sits outside the window. Two rules keep that true. The window is a
-/// *contiguous* slice of the order, and its start only ever moves forward
-/// past **base-tier** runs; an L0 run is never stepped over. Every run the
-/// window leaves out therefore sits wholly below it or wholly above it, never
-/// interleaved, and the output can stand in for the whole window without
-/// moving any row past any other. When the window starts at the very bottom
-/// nothing is left out below it at all, and that is the stronger property
-/// retention dropping needs — see
-/// [`ReorganizationInput::starts_at_group_bottom`].
+/// **The invariant.** A merge writes its inputs back as one run standing
+/// where the window stood: at the bottom of the group when the window is
+/// bottom-anchored, and at its newest input's identity otherwise
+/// ([`MergePlacement`]). Either way the output may not carry a row newer than
+/// a run it left above the window — otherwise a later fold could drop a row
+/// while the row it cancels sits outside that fold's window. What keeps that
+/// true is that the window is a *contiguous* slice of the order: every run it
+/// leaves out sits wholly below it or wholly above it, never interleaved, so
+/// the output can stand in for the whole window without moving any row past
+/// any other. When the window starts at the very bottom nothing is left out
+/// below it at all, and that is the stronger property retention dropping
+/// needs — see [`MergePlacement::Base`].
+///
+/// **There are two windows to try.** A manifest holds at most one base-tier
+/// run per family group, so the search is short: the window starting at the
+/// group's oldest run, and — when a base run blocks that one — the window
+/// starting at the oldest delta run above it. A delta run is never stepped
+/// over.
 ///
 /// **The budgets pace the work; they never end it.** When no window starting
 /// at the group's oldest run can fit the budgets, the start moves past the
-/// base-tier runs that block it and the step merges the L0 runs above them
-/// on their own. The group keeps shedding runs even while the run at its
-/// bottom stays too large to fold.
+/// base run that blocks it and the step merges the L0 runs above it on their
+/// own. The group keeps shedding runs even while the run at its bottom stays
+/// too large to fold.
 ///
 /// Index sections are read before row payloads so the decoded-byte budget is
 /// known exactly from each data block's durable `decoded_len`; a run that
@@ -427,26 +503,28 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             .then(right.level.cmp(&left.level))
     });
     let candidate_count = candidates.len();
+    let head_seq = tables.manifest().payload.head_seq;
     let row_budget =
         u64::try_from(policy.max_decoded_input_rows_per_step.get()).unwrap_or(u64::MAX);
     let byte_budget =
         u64::try_from(policy.max_decoded_input_bytes_per_step.get()).unwrap_or(u64::MAX);
     let max_runs = policy.max_input_runs_per_step.get();
-    // Base-tier runs sort first, so this is also the index of the oldest L0
-    // candidate. The window start may move up to it and no further.
-    let base_tier_candidates = candidates
+    // Base-tier runs sort first, so this is the index of the oldest L0
+    // candidate, and starting there is what skips a base run the budgets
+    // cannot admit. A group has at most one base run, so this is one place
+    // and the only alternative to the bottom.
+    let first_delta_candidate = candidates
         .iter()
         .take_while(|run| run.level != CHECKPOINT_L0_RUN_LEVEL)
         .count();
-    let window_starts = (base_tier_candidates + 1)
-        .min(candidate_count)
-        .min(max_runs);
+    let delta_only_start = (first_delta_candidate > 0 && first_delta_candidate < candidate_count)
+        .then_some(first_delta_candidate);
     // Reading a run's decoded byte total costs its index sections, so each
     // candidate's total is read at most once however many windows weigh it.
     let mut decoded_bytes_by_candidate = vec![None::<u64>; candidate_count];
     let mut group_bottom_over_budget = None;
 
-    for window_start in 0..window_starts {
+    for window_start in std::iter::once(0).chain(delta_only_start) {
         let mut runs = Vec::new();
         let mut decoded_rows = 0u64;
         let mut decoded_bytes = 0u64;
@@ -497,16 +575,29 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             runs.push(run.clone());
         }
 
-        // Every merge writes one base-tier run, so each L0 run it takes
-        // leaves L0 for good and the group's L0 count strictly falls. That
-        // is the whole progress condition, and it is what makes the fold
-        // terminate: a window holding no L0 run would only rewrite base-tier
-        // rows where they stand, forever.
-        let makes_progress = runs.iter().any(|run| run.level == CHECKPOINT_L0_RUN_LEVEL);
+        // A merge must leave the group with less to fold than it found, or
+        // the same window would be chosen again forever. What counts as less
+        // follows from where the output lands.
+        //
+        // A bottom-anchored merge writes a base run, so every L0 run it takes
+        // leaves L0 for good: one L0 run in the window is enough, and a
+        // window holding none would only rewrite base rows where they stand.
+        //
+        // A merge above the base writes another delta run, so it only gains
+        // by merging two or more into one. A single-run window there would
+        // rewrite that run as itself, at its own identity, having read and
+        // written every row for nothing.
+        let bottom_anchored = window_start == 0;
+        let makes_progress = if bottom_anchored {
+            runs.iter().any(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
+        } else {
+            runs.len() > 1
+        };
         if !makes_progress {
             continue;
         }
         let run_ids = runs.iter().map(|run| (run.run_seq, run.level)).collect();
+        let placement = merge_placement(bottom_anchored, &runs, head_seq);
         return Ok(ReorganizationSelection {
             input: Some(ReorganizationInput {
                 runs,
@@ -514,7 +605,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
                 folded_l0_rows,
                 decoded_rows,
                 decoded_bytes,
-                starts_at_group_bottom: window_start == 0,
+                placement,
             }),
             group_bottom_over_budget,
         });
@@ -529,12 +620,17 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
 /// Says out loud that a family group's oldest run no longer fits one
 /// reorganization step.
 ///
-/// Nothing is broken when this fires and nothing stalls: folds keep merging
-/// the newer runs above the run named here. What stops is reclamation of
-/// that run's rows, because no step can rewrite a run it cannot read whole.
-/// The group's run count therefore drifts up over time. Raising
+/// Nothing is corrupt when this fires, but work does stop. Folds keep
+/// merging the newer runs above the run named here, into one bigger delta run
+/// each time, until only one delta run is left; from then on the group has no
+/// window that makes progress and every step reports it blocked. Reclamation
+/// of the named run's rows stops first, because no step can rewrite a run it
+/// cannot read whole. Group selection then keeps choosing this group — it
+/// still holds the most L0 rows, and a merge that cannot drop rows never
+/// reduces them — so the other groups stop folding too. Raising
 /// `max_decoded_input_rows_per_step` and `max_decoded_input_bytes_per_step`
-/// past the numbers in this line is the operator's lever.
+/// past the numbers in this line is the operator's lever until the streaming
+/// compactor takes this case off the step.
 ///
 /// One line per step: a step is already the unit maintenance schedules, so
 /// the cadence of the warning is the cadence of maintenance.
@@ -554,15 +650,25 @@ fn report_group_bottom_over_budget(
         max_decoded_input_rows_per_step = policy.max_decoded_input_rows_per_step.get(),
         max_decoded_input_bytes_per_step = policy.max_decoded_input_bytes_per_step.get(),
         "the oldest metadata run in this family group no longer fits one reorganization step; \
-         folds skip it and merge the newer runs, so its rows are never reclaimed and the \
-         group's run count grows",
+         folds skip it and merge the newer runs into one delta run, so its rows are never \
+         reclaimed, and once that merge has nothing left to take this group blocks every step \
+         and the other groups stop folding behind it",
     );
 }
 
-/// A bounded fold stamps its output at the manifest head. If older or
-/// same-seq L0 runs remain, that ordering is the durable resume marker. A
-/// fresh L0 appended after a completed fold is strictly newer than every
-/// base-tier run and therefore does not bypass the normal trigger.
+/// A bottom-anchored fold stamps its base run at the manifest head, which is
+/// at or above every L0 run's sequence. So a base run sitting at or above the
+/// oldest L0 run says one group folded here and L0 runs remain — usually
+/// other groups' rows in the very runs it just took its own rows out of. The
+/// step keeps going on that evidence rather than stopping at the trigger,
+/// which is what makes a run of bounded steps end in the same manifest shape
+/// one unbounded step would have produced.
+///
+/// A merge above the base writes a delta run at its newest input's sequence
+/// ([`MergePlacement`]), so it never puts a base run here and its inputs stay
+/// counted as L0 pressure. A fresh L0 appended after a completed fold is
+/// strictly newer than every base-tier run and therefore does not bypass the
+/// normal trigger.
 fn manifest_has_partial_reorganization(runs: &[MetadataRunManifest]) -> bool {
     let Some(oldest_l0_seq) = runs
         .iter()

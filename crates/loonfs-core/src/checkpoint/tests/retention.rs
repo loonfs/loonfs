@@ -1551,15 +1551,22 @@ fn policy_that_cannot_fold_the_base(base_rows: u64) -> MetadataLsmPolicy {
 }
 
 /// A group whose base run alone busts the per-step row budget used to park
-/// forever: selection broke on the first candidate, chose nothing, and
+/// immediately: selection broke on the first candidate, chose nothing, and
 /// reported the group blocked on every step after that while delta runs
 /// piled up behind it with nothing saying why.
 ///
-/// The budget paces the work instead of ending it. The step skips the base
-/// run it cannot read whole, merges the delta runs above it, and says out
-/// loud that the base has outgrown the budget.
+/// The step skips the base run it cannot read whole, merges the delta runs
+/// above it into one bigger delta run, and says out loud that the base has
+/// outgrown the budget. The merged output is a delta run at its newest
+/// input's identity, so the base stays exactly one run: minting a second
+/// base run here is what hid the over-budget bottom from the report.
+///
+/// Once the delta runs are down to one the group has nothing left to merge,
+/// and the step reports it blocked. That is honest — the base still cannot
+/// be read in one step — and it is the case the streaming compactor is being
+/// built for.
 #[tokio::test]
-async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
+async fn a_base_run_over_the_step_budget_merges_the_delta_runs_above_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1603,8 +1610,12 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
         .input
         .expect("a group must keep finding work above a base run it cannot fold");
     assert!(
-        !input.starts_at_group_bottom,
-        "the window must start above the base run it cannot read whole"
+        matches!(
+            input.placement,
+            super::reorganize::MergePlacement::Delta { .. }
+        ),
+        "a window that starts above the base run must write a delta run, got {:?}",
+        input.placement
     );
     assert!(
         input
@@ -1629,24 +1640,15 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
     assert_eq!(bottom.level, CHECKPOINT_BASE_RUN_LEVEL);
     assert_eq!(bottom.rows, base_rows);
 
-    // Repeated steps keep draining the group. The base run stays exactly
-    // where it is.
+    // Repeated steps keep merging what fits. The base run stays exactly where
+    // it is, and stays one run.
     let mut published = 0usize;
-    let mut group_l0_runs = vec![l0_runs(&before.manifest).len()];
+    let mut blocked = 0usize;
+    let mut group_delta_run_counts = vec![group_delta_runs(&before.manifest, &group).len()];
     for _ in 0..64 {
         let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
             .await
             .expect("reorganization step");
-        match report.outcome {
-            super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
-            super::MetadataReorganizeOutcome::Superseded => {
-                panic!("no concurrent publisher exists in this test")
-            }
-            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
-                panic!("the group parked instead of folding what fits")
-            }
-            super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-        }
         let current = load_manifest_materialization_for_inspection(
             &store,
             &namespace_id,
@@ -1654,9 +1656,32 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
         )
         .await
         .expect("load the folded manifest");
-        group_l0_runs.push(l0_runs(&current.manifest).len());
+        assert_eq!(
+            group_base_runs(&current.manifest, &group).len(),
+            1,
+            "a merge above the base must not mint a second base run"
+        );
+        group_delta_run_counts.push(group_delta_runs(&current.manifest, &group).len());
+        match report.outcome {
+            super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
+            super::MetadataReorganizeOutcome::Superseded => {
+                panic!("no concurrent publisher exists in this test")
+            }
+            // The group's delta runs are down to one, and merging one run
+            // into itself is not progress. Only a fold of the whole group
+            // moves this on, and that fold does not fit one step.
+            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                blocked += 1;
+                break;
+            }
+            super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+        }
     }
     assert!(published > 0, "at least one unit must publish");
+    assert_eq!(
+        blocked, 1,
+        "the group must end blocked on the base it cannot read, ran {group_delta_run_counts:?}"
+    );
 
     let after = load_manifest_materialization_for_inspection(
         &store,
@@ -1665,13 +1690,16 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
     )
     .await
     .expect("load the drained manifest");
-    assert!(
-        l0_runs(&after.manifest).is_empty(),
-        "delta runs must drain even with the base frozen, ran {group_l0_runs:?}"
+    assert_eq!(
+        group_delta_runs(&after.manifest, &group).len(),
+        1,
+        "the delta runs must merge down to one, ran {group_delta_run_counts:?}"
     );
+    // The group's own run count, not the manifest's: a merge only takes this
+    // group's segments out of its input runs, and those runs stay in the
+    // manifest holding the other groups' families.
     assert!(
-        runs_from_metadata_files(&after.manifest.payload).len()
-            < runs_from_metadata_files(&before.manifest.payload).len(),
+        group_runs(&after.manifest, &group).len() < group_runs(&before.manifest, &group).len(),
         "the group's run count must fall"
     );
     let remaining = run_segment_object_keys(&after.manifest);
@@ -1690,12 +1718,19 @@ async fn a_base_run_over_the_step_budget_no_longer_parks_the_group() {
     ));
 }
 
-/// A merge that skipped older runs must carry every row its inputs held.
+/// A merge that skipped older runs must carry every row its inputs held, and
+/// must leave the group's base alone.
 ///
 /// The retention drop rules read across the merged rows: an unbind cancels
 /// the bind it names, and both have to leave together. A window that starts
 /// above the base cannot see the bind at all, so dropping the unbind there
 /// would put a deleted file back. The step merges without dropping instead.
+///
+/// The output is a delta run at the newest input's sequence, so it stands
+/// where that run stood and the group keeps exactly one base run. Writing it
+/// at the base tier instead is what fragmented the base, and stamping it at
+/// the manifest head is what made two merges of one quiet namespace collide
+/// at one identity.
 #[tokio::test]
 async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1777,8 +1812,21 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
 
     let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
     let input = selection.input.expect("the delta runs must still merge");
-    assert!(!input.starts_at_group_bottom);
+    let newest_input = input
+        .runs
+        .iter()
+        .map(|run| run.run_seq)
+        .max()
+        .expect("the window holds runs");
+    assert_eq!(
+        input.placement,
+        super::reorganize::MergePlacement::Delta {
+            output_seq: newest_input
+        },
+        "a merge above the base writes a delta run at its newest input's sequence"
+    );
     assert!(input.runs.len() > 1);
+    let base_before = group_base_runs(&before.manifest, &group);
 
     let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
         .await
@@ -1799,6 +1847,19 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     )
     .await
     .expect("load the manifest after the fold");
+    // The merge wrote a delta run, not a second base run: the group's base is
+    // exactly the one it was, and the merged rows sit at the identity of the
+    // newest run the window held, which is where that run stood.
+    assert_eq!(
+        group_base_runs(&after.manifest, &group),
+        base_before,
+        "a merge above the base must not mint a base run"
+    );
+    assert_eq!(
+        group_delta_runs(&after.manifest, &group),
+        vec![(newest_input, CHECKPOINT_L0_RUN_LEVEL)],
+        "the merged delta runs must leave one delta run at the newest input's identity"
+    );
     // A merge that skipped older runs drops nothing, so the row set is
     // exactly what it was: the cancelling row still shadows the base's
     // binding and the deleted file stays deleted.
@@ -1825,10 +1886,10 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
 
 /// Skipping is only ever legal at the recency bottom.
 ///
-/// A run in the middle that busts the budget stops the window. The step
-/// refuses to reach past it for a newer run that would have fit, because a
-/// merge stamped at the manifest head lands above everything it left behind
-/// and would reorder the group.
+/// A run in the middle that busts the budget stops the window. The selector
+/// refuses to reach past it for a newer run that would have fit, because the
+/// merged output stands where the window stood and reaching past a run would
+/// move rows past it.
 #[tokio::test]
 async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1925,5 +1986,174 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         current_manifest_id(&store, &namespace_id).await,
         root_before,
         "a blocked step must not publish"
+    );
+}
+
+/// What a reader sees right now: every inode the namespace knows, resolved
+/// the way a read resolves it — visible or not, at what path, at what
+/// revision.
+///
+/// This is the answer that must not move while folds run. Comparing rows
+/// would say the opposite of what is wanted: a fold drops rows precisely
+/// because no read can observe them, so the row set is meant to change and
+/// this is not.
+async fn visible_namespace(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> Vec<CurrentFileState> {
+    let materialized = load_manifest_materialization_for_inspection(
+        store,
+        namespace_id,
+        current_manifest_id(store, namespace_id).await,
+    )
+    .await
+    .expect("materialize the manifest");
+    let inode_ids: Vec<InodeId> = materialized
+        .metadata_state
+        .inodes()
+        .iter()
+        .map(|inode| inode.inode_id)
+        .collect();
+    let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest())
+        .await
+        .expect("load the read view");
+    resolve_current_files(&view, &inode_ids)
+        .await
+        .expect("resolve every inode the namespace knows")
+}
+
+/// The soak's end state, as a test.
+///
+/// Four cycles of writes, deletions, and a retention floor that moves past
+/// them, folded under budgets too small to take a group whole. The old level
+/// rule turned every merge above the base into another base-tier run, so the
+/// bases fragmented: a live S3 soak ended with six base-tier runs — direntry
+/// binds split across three of them, revisions across four — and one run
+/// identity carrying the output of several publications. Nothing then
+/// reported any group as too large to fold from its oldest run, because every
+/// fragment fit one step on its own, and the rows below the retention floor
+/// could never be dropped.
+///
+/// What is pinned here is that neither happens. No group's base fragments,
+/// whatever the budgets do; every step leaves reads answering exactly what
+/// they answered before; and a group whose bottom stops fitting one step says
+/// so and stops, rather than minting another base run. Folding such a group
+/// is the streaming compactor's job, and this test gains that half when the
+/// compactor lands.
+#[tokio::test]
+async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    // Small segments so the folded base is many segments rather than one, and
+    // a row budget the groups outgrow within a couple of cycles.
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(24).expect("nonzero"),
+        max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+
+    let group = group_containing(ApiMetadataTableFamily::DirentryUnbinds);
+    let mut blocked_groups = 0usize;
+    for cycle in 0..4u64 {
+        for file in 0..4u64 {
+            write_file_bytes(
+                &store,
+                &namespace_id,
+                &format!("/d{cycle}/f{file}.txt"),
+                format!("body {cycle}/{file}\n").as_bytes(),
+                &context,
+                None,
+            )
+            .await
+            .expect("write file");
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the writes");
+        for file in 0..3u64 {
+            delete_path(
+                &store,
+                &namespace_id,
+                &format!("/d{cycle}/f{file}.txt"),
+                &context,
+                None,
+            )
+            .await
+            .expect("delete a file");
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the deletions");
+        advance_retention_floor(&store, &namespace_id, &context)
+            .await
+            .expect("advance the floor past the deletions");
+        let visible = visible_namespace(&store, &namespace_id).await;
+
+        let mut settled = false;
+        for _step in 0..512 {
+            let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+                .await
+                .expect("reorganization step");
+            let current = load_manifest_materialization_for_inspection(
+                &store,
+                &namespace_id,
+                current_manifest_id(&store, &namespace_id).await,
+            )
+            .await
+            .expect("load the current manifest");
+            for (folded, base_runs) in base_runs_per_family_group(&current.manifest) {
+                assert!(
+                    base_runs.len() <= 1,
+                    "cycle {cycle}: {folded:?} holds base runs {base_runs:?}"
+                );
+            }
+            assert_eq!(
+                visible_namespace(&store, &namespace_id).await,
+                visible,
+                "cycle {cycle}: a step changed what a read answers"
+            );
+            match report.outcome {
+                super::MetadataReorganizeOutcome::NotNeeded { .. } => {
+                    settled = true;
+                    break;
+                }
+                // The group's bottom no longer fits one step and its delta
+                // runs are merged down to one. The step says so and mints
+                // nothing; the streaming compactor is what folds it.
+                super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                    blocked_groups += 1;
+                    settled = true;
+                    break;
+                }
+                super::MetadataReorganizeOutcome::Superseded => {
+                    panic!("no concurrent publisher exists in this test")
+                }
+                super::MetadataReorganizeOutcome::UnitPublished { .. } => {}
+            }
+        }
+        assert!(settled, "cycle {cycle}: reorganization did not settle");
+    }
+
+    assert!(
+        blocked_groups > 0,
+        "a group must have outgrown one step and reported it"
+    );
+    let final_manifest = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the final manifest");
+    assert_eq!(
+        group_base_runs(&final_manifest.manifest, group).len(),
+        1,
+        "the bindings group must end in one base run"
     );
 }

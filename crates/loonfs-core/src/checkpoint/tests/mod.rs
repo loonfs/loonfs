@@ -31,7 +31,7 @@ use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_tables, runs_from_metadata_files, runs_in_scan_order, MetadataLsmPolicy,
     MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
-    CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_L0_RUNS,
+    CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_L0_RUNS, REORGANIZE_FAMILY_GROUPS,
 };
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
@@ -48,6 +48,9 @@ use crate::namespace::control::{
 };
 use crate::namespace::status::load_namespace_head_summary;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
+use crate::path::read::{
+    load_metadata_view, resolve_current_files, CurrentFileState, ReadLoadContext,
+};
 use crate::path::write::ops::{
     delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
 };
@@ -315,6 +318,70 @@ fn l0_runs(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataRunManifest> {
         .into_iter()
         .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
         .collect()
+}
+
+/// A run's identity: the sequence and level a manifest names it by.
+type RunId = (ChangeSeq, u32);
+
+/// Every run that holds rows of one family group right now.
+fn group_runs(
+    manifest: &NamespaceManifestEnvelope,
+    group: &[ApiMetadataTableFamily],
+) -> Vec<RunId> {
+    runs_from_metadata_files(&manifest.payload)
+        .into_iter()
+        .filter(|run| {
+            run.tables
+                .iter()
+                .any(|table| group.contains(&table.family) && !table.segments.is_empty())
+        })
+        .map(|run| (run.run_seq, run.level))
+        .collect()
+}
+
+/// The base-tier runs one family group holds right now.
+///
+/// A group holds at most one: only a merge that starts at the group's oldest
+/// run writes a base run, and such a merge always replaces the one that was
+/// there. More than one is the fragmented base a merge above the base used to
+/// create, which manifest load now refuses.
+fn group_base_runs(
+    manifest: &NamespaceManifestEnvelope,
+    group: &[ApiMetadataTableFamily],
+) -> Vec<RunId> {
+    group_runs(manifest, group)
+        .into_iter()
+        .filter(|(_, level)| *level != CHECKPOINT_L0_RUN_LEVEL)
+        .collect()
+}
+
+/// The delta runs one family group holds right now.
+fn group_delta_runs(
+    manifest: &NamespaceManifestEnvelope,
+    group: &[ApiMetadataTableFamily],
+) -> Vec<RunId> {
+    group_runs(manifest, group)
+        .into_iter()
+        .filter(|(_, level)| *level == CHECKPOINT_L0_RUN_LEVEL)
+        .collect()
+}
+
+/// Every family group's base-tier runs, for a caller asserting that none of
+/// them has fragmented.
+fn base_runs_per_family_group(
+    manifest: &NamespaceManifestEnvelope,
+) -> Vec<(&'static [ApiMetadataTableFamily], Vec<RunId>)> {
+    REORGANIZE_FAMILY_GROUPS
+        .into_iter()
+        .map(|group| (group, group_base_runs(manifest, group)))
+        .collect()
+}
+
+fn group_containing(family: ApiMetadataTableFamily) -> &'static [ApiMetadataTableFamily] {
+    REORGANIZE_FAMILY_GROUPS
+        .into_iter()
+        .find(|group| group.contains(&family))
+        .expect("every family belongs to a reorganization group")
 }
 
 fn base_segment_object_keys_for_family(
