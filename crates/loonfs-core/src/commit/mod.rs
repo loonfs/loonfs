@@ -26,8 +26,6 @@ pub(crate) use self::ir::CommitIr;
 pub use self::materialize::MaterializedCommitDelta;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
 pub(crate) use self::ops::{CommitOp, CommitPrecondition, PlannedOp};
-#[cfg(test)]
-pub(crate) use self::plan::CommitValidationContext;
 pub(crate) use self::plan::ValidatedOp;
 pub use self::plan::{CommitPlan, ResolvedBinding};
 pub use self::prepared::CommitPrepareError;

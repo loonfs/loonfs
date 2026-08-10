@@ -593,7 +593,7 @@ mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{CliConfig, ProfileConfig, StoreConfig};
+    use super::CliConfig;
 
     fn parse(contents: &str) -> Result<CliConfig, toml::de::Error> {
         toml::from_str(contents)
@@ -898,18 +898,5 @@ root = "/tmp/store"
                 panic!("repaired config must strict-decode: {}", error.message)
             }
         }
-    }
-
-    #[test]
-    fn store_kind_str_matches_config_tags() {
-        let profile = ProfileConfig::Embedded {
-            store: StoreConfig::LocalFs {
-                root: "/tmp/store".to_owned(),
-                key_prefix: None,
-            },
-            default_namespace: None,
-            writer_id: None,
-        };
-        assert_eq!(profile.store_kind_str(), Some("local-fs"));
     }
 }

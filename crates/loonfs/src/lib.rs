@@ -23,6 +23,22 @@
 //! # Ok(()) }
 //! ```
 //!
+//! Attribute types are available directly from this crate, so embedded
+//! applications do not need a separate `loonfs-api` dependency:
+//!
+//! ```
+//! use loonfs::{AttributeKey, AttributeValue, UpdateAttributesOptions};
+//!
+//! let key = AttributeKey::parse("owner").expect("valid attribute key");
+//! let options = UpdateAttributesOptions {
+//!     set: [(key, AttributeValue::String { value: "platform".into() })]
+//!         .into_iter()
+//!         .collect(),
+//!     ..UpdateAttributesOptions::default()
+//! };
+//! assert_eq!(options.set.len(), 1);
+//! ```
+//!
 //! A writer owns publication and any automatically scheduled maintenance.
 //! One [`MaintenanceJob`] runner schedules work for namespaces touched or
 //! explicitly assigned to this process; it does not discover namespaces.

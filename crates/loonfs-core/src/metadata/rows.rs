@@ -11,46 +11,18 @@ use loonfs_api::{
 use serde::{Deserialize, Serialize};
 use std::mem::{size_of, size_of_val};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataState {
-    #[serde(default)]
     pub(super) inodes: Vec<InodeRecord>,
-    #[serde(default)]
     pub(super) direntry_binds: Vec<DirentryBindRecord>,
-    #[serde(default)]
     pub(super) direntry_unbinds: Vec<DirentryUnbindRecord>,
-    #[serde(default)]
     pub(super) revisions: Vec<RevisionRecord>,
-    #[serde(default)]
     pub(super) subtree_tombstones: Vec<SubtreeTombstoneRecord>,
-    #[serde(default)]
     pub(super) commit_receipts: Vec<CommitReceiptRecord>,
-    #[serde(default)]
     pub(super) attributes_revisions: Vec<AttributesRevisionRecord>,
-    #[serde(skip)]
     pub(super) row_count: usize,
-    #[serde(skip)]
     pub(super) decoded_bytes: usize,
-    #[serde(skip)]
     pub(super) indexes: MetadataIndexes,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-struct MetadataStateRows {
-    #[serde(default)]
-    inodes: Vec<InodeRecord>,
-    #[serde(default)]
-    direntry_binds: Vec<DirentryBindRecord>,
-    #[serde(default)]
-    direntry_unbinds: Vec<DirentryUnbindRecord>,
-    #[serde(default)]
-    revisions: Vec<RevisionRecord>,
-    #[serde(default)]
-    subtree_tombstones: Vec<SubtreeTombstoneRecord>,
-    #[serde(default)]
-    commit_receipts: Vec<CommitReceiptRecord>,
-    #[serde(default)]
-    attributes_revisions: Vec<AttributesRevisionRecord>,
 }
 
 impl Default for MetadataState {
@@ -64,24 +36,6 @@ impl Default for MetadataState {
             Vec::new(),
             Vec::new(),
         )
-    }
-}
-
-impl<'de> Deserialize<'de> for MetadataState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let rows = MetadataStateRows::deserialize(deserializer)?;
-        Ok(Self::from_rows(
-            rows.inodes,
-            rows.direntry_binds,
-            rows.direntry_unbinds,
-            rows.revisions,
-            rows.subtree_tombstones,
-            rows.commit_receipts,
-            rows.attributes_revisions,
-        ))
     }
 }
 

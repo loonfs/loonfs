@@ -16,8 +16,6 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_objectstore::ObjectStore;
-#[cfg(test)]
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Segment fetches issued per wave during a scan. Wide directories touch
@@ -32,7 +30,7 @@ pub(crate) enum Readahead {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ManifestMaterializationForInspection {
     pub(crate) manifest: NamespaceManifestEnvelope,
     pub(crate) metadata_state: MetadataState,

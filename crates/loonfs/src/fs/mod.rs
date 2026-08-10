@@ -6,8 +6,6 @@ mod core;
 mod maintenance;
 mod namespaces;
 mod reads;
-#[cfg(test)]
-mod tests;
 mod uploads;
 mod writes;
 

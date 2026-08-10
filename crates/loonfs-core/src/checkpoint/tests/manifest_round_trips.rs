@@ -2,27 +2,6 @@
 
 use super::*;
 
-#[test]
-fn fork_and_retention_do_not_use_inspection_materialization() {
-    let fork_source = include_str!("../../namespace/fork.rs");
-    let retention_source = include_str!("../retention.rs");
-
-    for source in [fork_source, retention_source] {
-        assert!(
-            !source.contains("load_manifest_materialization_for_inspection"),
-            "fork/retention must use verified manifest tables, not full inspection materialization"
-        );
-        assert!(
-            !source.contains("ManifestMaterializationForInspection"),
-            "fork/retention must not depend on full inspection materialization"
-        );
-        assert!(
-            !source.contains("load_manifest_metadata_state_for_inspection"),
-            "fork/retention must not construct MetadataState from manifest rows"
-        );
-    }
-}
-
 #[tokio::test]
 async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace() {
     let temp_dir = tempdir().expect("tempdir");

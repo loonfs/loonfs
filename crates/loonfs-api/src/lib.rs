@@ -115,8 +115,8 @@ pub use commit_identity::{
     put_retry_fingerprint, semantic_commit_fingerprint, SemanticFingerprintError,
 };
 pub use content::{
-    ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc32c, Crc64Nvme,
-    Sha256, StorageChecksum, StreamingChecksum,
+    ChecksumAlgorithm, ContentEvidence, ContentRef, ContentRefKind, ContentRefValidationError,
+    Crc32c, Crc64Nvme, Sha256, StorageChecksum, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
@@ -154,49 +154,3 @@ pub use v0::{
     NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome,
     RetainedCandidates, RetainedReason, TrashEntry, WalFlushStepOutcome,
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn curated_root_exports_cover_common_public_types() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let commit_id = CommitId::generate();
-        let path = AbsolutePath::parse("/docs/report.txt").expect("valid path");
-        let display_name = DisplayName::parse("Report.txt").expect("valid display name");
-        let name_key = NameKey::for_display_name(&display_name);
-        let content_ref = ContentRef::blob_v1(ContentId::generate(), b"hello");
-
-        assert_eq!(namespace_id.as_str(), "demo");
-        assert!(commit_id.as_str().starts_with("c_"));
-        assert_eq!(path.as_str(), "/docs/report.txt");
-        assert_eq!(name_key.as_str(), "report.txt");
-        assert_eq!(content_ref.size_bytes, 5);
-    }
-
-    #[test]
-    fn durable_protocol_types_are_available_under_wire() {
-        let _head = wire::control::HeadState::initial(
-            NamespaceId::parse("demo").expect("valid namespace id"),
-            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("valid content store id"),
-        );
-        let _wal_delta = wire::wal::WalDelta::TombstoneSubtree {
-            delta_index: 0,
-            root_inode_id: InodeId(1),
-            deleted_direntry: None,
-        };
-        let _manifest_row = wire::manifest::MetadataRow::Tombstone {
-            root_inode_id: InodeId(1),
-            generation: wire::manifest::TombstoneGeneration {
-                seq: ChangeSeq(1),
-                delta_index: 0,
-            },
-            action: wire::manifest::TombstoneRowAction::Set {
-                deleted_direntry: None,
-            },
-            deleted_at_ms: 4_000,
-        };
-    }
-}

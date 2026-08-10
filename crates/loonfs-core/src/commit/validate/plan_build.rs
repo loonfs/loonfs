@@ -4,11 +4,7 @@
 use super::super::frame::validate_commit_request_frame;
 use super::super::{CommitIr, CommitOp, CommitPlan, CommitValidationError, PlannedOp};
 use super::checks::{validate_ops, OpValidationCursor};
-#[cfg(test)]
-use super::view::InMemoryValidationView;
-use super::view::{CommitValidationView, PublishValidationView};
-#[cfg(test)]
-use crate::commit::CommitValidationContext;
+use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
@@ -28,20 +24,6 @@ pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
     pub(crate) accepted_rows: &'a MetadataState,
 }
 
-/// Validates one planned commit against an in-memory metadata state. This is
-/// the store-free entry point the crate's validation tests drive; production
-/// mutations go through [`build_commit_plan_for_publish`].
-#[cfg(test)]
-pub(crate) async fn build_commit_plan(
-    request: &CommitIr,
-    committed_at_ms: u64,
-    context: &CommitValidationContext<'_>,
-) -> Result<CommitPlan, CommitValidationError> {
-    let shape = compute_commit_shape(request, &context.head)?;
-    let view = InMemoryValidationView::new(context.metadata_state, shape.assigned_seq);
-    build_commit_plan_with_view(request, committed_at_ms, &context.head, shape, view).await
-}
-
 pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
     request: &CommitIr,
     committed_at_ms: u64,
@@ -49,7 +31,7 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
 ) -> Result<CommitPlan, CoreError> {
     let shape = compute_commit_shape(request, context.head)?;
     let committed_seq = shape.assigned_seq;
-    build_commit_plan_with_view(
+    build_commit_plan(
         request,
         committed_at_ms,
         context.head,
@@ -59,15 +41,13 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// The single commit plan builder. Only the metadata view (and with it the
-/// error surface) differs between entry points.
-async fn build_commit_plan_with_view<V: CommitValidationView>(
+async fn build_commit_plan<S: ObjectStore + ?Sized>(
     request: &CommitIr,
     committed_at_ms: u64,
     head: &HeadState,
     shape: CommitShape,
-    mut metadata_state: V,
-) -> Result<CommitPlan, V::Error> {
+    mut metadata_state: PublishValidationView<'_, S>,
+) -> Result<CommitPlan, CoreError> {
     validate_commit_request_frame(request, head)?;
 
     let validated_ops = validate_ops(

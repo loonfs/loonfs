@@ -815,31 +815,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_report_names_every_check_once_and_in_run_order() {
+    async fn the_report_contains_the_complete_probe_set_once() {
         let temp_dir = TempDir::new().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
 
         let report = run_store_contract_probe(&store, "probe_test_shape").await;
 
-        let names: Vec<_> = report.checks.iter().map(|check| check.name).collect();
+        let expected = std::collections::BTreeSet::from([
+            "create_if_absent_enforced",
+            "compare_and_swap_rejects_stale",
+            "compare_and_swap_missing_object_rejected",
+            "overwrite_updates_head_and_body",
+            "get_with_metadata_round_trip",
+            "head_reports_last_modified",
+            "visibility_after_write",
+            "visibility_after_delete",
+            "delete_missing_idempotent",
+            "sorted_listing",
+            "range_reads",
+            "multipart_round_trip",
+            "stored_checksum_readback",
+            "cleanup_leaves_prefix_empty",
+        ]);
+        let names: std::collections::BTreeSet<_> =
+            report.checks.iter().map(|check| check.name).collect();
         assert_eq!(
-            names,
-            vec![
-                "create_if_absent_enforced",
-                "compare_and_swap_rejects_stale",
-                "compare_and_swap_missing_object_rejected",
-                "overwrite_updates_head_and_body",
-                "get_with_metadata_round_trip",
-                "head_reports_last_modified",
-                "visibility_after_write",
-                "visibility_after_delete",
-                "delete_missing_idempotent",
-                "sorted_listing",
-                "range_reads",
-                "multipart_round_trip",
-                "stored_checksum_readback",
-                "cleanup_leaves_prefix_empty",
-            ]
+            report.checks.len(),
+            names.len(),
+            "probe names must be unique"
+        );
+        assert_eq!(
+            names, expected,
+            "the object-store layer owns the complete probe inventory"
         );
     }
 

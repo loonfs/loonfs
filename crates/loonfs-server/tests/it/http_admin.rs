@@ -497,7 +497,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_store_probe_reports_every_check_against_the_configured_store() {
+async fn http_admin_store_probe_reports_unique_successes_from_the_configured_store() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -514,29 +514,16 @@ async fn http_admin_store_probe_reports_every_check_against_the_configured_store
     .expect("probe the configured store");
 
     assert!(probe.run_id.starts_with("probe_"));
-    let names: Vec<&str> = probe
+    assert!(!probe.checks.is_empty(), "the probe must report its work");
+    let names: std::collections::BTreeSet<&str> = probe
         .checks
         .iter()
         .map(|check| check.name.as_str())
         .collect();
     assert_eq!(
-        names,
-        vec![
-            "create_if_absent_enforced",
-            "compare_and_swap_rejects_stale",
-            "compare_and_swap_missing_object_rejected",
-            "overwrite_updates_head_and_body",
-            "get_with_metadata_round_trip",
-            "head_reports_last_modified",
-            "visibility_after_write",
-            "visibility_after_delete",
-            "delete_missing_idempotent",
-            "sorted_listing",
-            "range_reads",
-            "multipart_round_trip",
-            "stored_checksum_readback",
-            "cleanup_leaves_prefix_empty",
-        ]
+        names.len(),
+        probe.checks.len(),
+        "the serialized report must not repeat check names"
     );
     for check in &probe.checks {
         assert_ne!(

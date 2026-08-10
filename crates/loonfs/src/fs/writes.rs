@@ -12,41 +12,10 @@ use crate::{
 };
 use crate::{CommittedChange, FilesystemChange};
 use crate::{Result, RuntimeError};
-use loonfs_api::{EffectiveLimit, ErrorCode, StorageChecksum};
+use loonfs_api::{ContentEvidence, EffectiveLimit, ErrorCode};
 use loonfs_core::NamespaceEngine;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-
-/// Evidence retained for comparing a newly staged payload with an earlier
-/// committed payload.
-///
-/// Buffered bytes can be hashed again with any supported algorithm. A
-/// streamed payload retains only its computed content reference, so checksum
-/// algorithms not recorded there cannot be compared.
-#[derive(Debug, Clone, Copy)]
-enum StagedPayload<'a> {
-    /// The payload itself, which can produce any digest this build knows.
-    Bytes(&'a [u8]),
-    /// The reference built for a payload that was streamed past.
-    Streamed(&'a ContentRef),
-}
-
-impl StagedPayload<'_> {
-    /// Whether the staged bytes produce this checksum.
-    ///
-    /// `None` is a refusal to answer, never agreement. Held bytes never
-    /// refuse — every algorithm in the vocabulary is one this build can
-    /// recompute — so the only refusal left is a streamed payload being
-    /// asked for a digest nobody folded over it.
-    fn matches(&self, expected: &StorageChecksum) -> Option<bool> {
-        match self {
-            Self::Bytes(bytes) => Some(expected.matches(bytes)),
-            Self::Streamed(content_ref) => {
-                Some(content_ref.digest_under(expected.algorithm)? == expected.value)
-            }
-        }
-    }
-}
 
 /// What a reuse conflict says the commit id already landed as: where, and
 /// the semantic identity of the mutation that landed there.
@@ -83,16 +52,6 @@ fn sole_committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
     });
     let only = content.next()?;
     content.next().is_none().then_some(only)
-}
-
-/// Whether the committed reference provably holds the bytes just staged.
-///
-/// The evidence is whatever the reference holds its own bytes to. Only that
-/// digest, over a staged payload that can answer for it and agrees, proves
-/// anything: a digest that disagrees and a digest the staged payload cannot
-/// answer for are both unproven, and both leave the conflict standing.
-fn staged_matches_committed(staged: &StagedPayload<'_>, content_ref: &ContentRef) -> bool {
-    staged.matches(&content_ref.verifiable_checksum()) == Some(true)
 }
 
 impl FsWriter {
@@ -170,7 +129,7 @@ impl FsWriter {
             absolute_path,
             &attempt,
             published,
-            StagedPayload::Bytes(bytes),
+            ContentEvidence::Bytes(bytes),
         )
         .await
     }
@@ -223,7 +182,7 @@ impl FsWriter {
             absolute_path,
             &attempt,
             published,
-            StagedPayload::Streamed(&staged),
+            ContentEvidence::ContentRef(&staged),
         )
         .await
     }
@@ -236,7 +195,7 @@ impl FsWriter {
         absolute_path: &str,
         attempt: &PutFileOptions,
         published: Result<CommitResponse>,
-        staged: StagedPayload<'_>,
+        staged: ContentEvidence<'_>,
     ) -> Result<CommitResponse> {
         match (published, attempt.commit_id.as_ref()) {
             (Err(error), Some(commit_id)) if error.code() == ErrorCode::CommitIdReuseConflict => {
@@ -268,7 +227,7 @@ impl FsWriter {
         absolute_path: &str,
         commit_id: &CommitId,
         attempt: &PutFileOptions,
-        staged: StagedPayload<'_>,
+        staged: ContentEvidence<'_>,
         conflict: RuntimeError,
     ) -> Result<CommitResponse> {
         let Some((committed_seq, committed_fingerprint)) = reported_commit_receipt(&conflict)
@@ -300,7 +259,7 @@ impl FsWriter {
         if retried.as_deref() != Some(committed_fingerprint.as_str()) {
             return Err(conflict);
         }
-        if !staged_matches_committed(&staged, content_ref) {
+        if !content_ref.matches_evidence(staged) {
             return Err(conflict);
         }
         Ok(CommitResponse {
@@ -919,78 +878,4 @@ fn maybe_auto_step_after_publish(
         .maintenance
         .handle()
         .nudge(MaintenanceJobId::METADATA, namespace_id);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{staged_matches_committed, StagedPayload};
-    use crate::{ContentId, ContentRef, ContentRefKind};
-    use loonfs_api::StorageChecksum;
-
-    /// A reference whose only full-object evidence is a CRC-32C, as a direct
-    /// transfer to Google Cloud Storage leaves behind.
-    fn crc32c_ref(bytes: &[u8]) -> ContentRef {
-        ContentRef {
-            kind: ContentRefKind::BlobV1,
-            content_id: ContentId::generate(),
-            size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc32c(bytes),
-            whole_file_sha256: None,
-        }
-    }
-
-    /// A CRC-32C-only commit is reconciled like any other: the staged bytes
-    /// recompute it, so a retry over the same payload proves it did this
-    /// work and a retry over different bytes does not.
-    #[test]
-    fn a_crc32c_committed_reference_is_compared_against_the_staged_bytes() {
-        let bytes = b"retried payload";
-        let committed = crc32c_ref(bytes);
-
-        assert!(staged_matches_committed(
-            &StagedPayload::Bytes(bytes),
-            &committed
-        ));
-        assert!(!staged_matches_committed(
-            &StagedPayload::Bytes(b"some other payload"),
-            &committed
-        ));
-    }
-
-    /// A streamed payload is gone by the time the retry asks, so it answers
-    /// only for the digests that were folded over it. Being asked for one
-    /// nobody computed is a refusal, and a refusal leaves the conflict
-    /// standing.
-    #[test]
-    fn a_digest_nobody_folded_over_the_streamed_payload_leaves_the_conflict_standing() {
-        let bytes = b"retried payload";
-        let committed = crc32c_ref(bytes);
-        let hashed = ContentRef::blob_v1(ContentId::generate(), bytes);
-        let staged = StagedPayload::Streamed(&hashed);
-
-        assert_eq!(
-            staged.matches(&committed.storage_checksum),
-            None,
-            "the fixture must reach the refusal, not a comparison"
-        );
-        assert!(!staged_matches_committed(&staged, &committed));
-
-        // The same streamed payload does answer for the digest it folded.
-        assert!(staged_matches_committed(&staged, &hashed));
-    }
-
-    #[test]
-    fn a_whole_file_digest_over_the_same_bytes_proves_the_retry_did_this_work() {
-        let bytes = b"retried payload";
-        let committed = ContentRef::blob_v1(ContentId::generate(), bytes);
-
-        assert!(staged_matches_committed(
-            &StagedPayload::Bytes(bytes),
-            &committed
-        ));
-        assert!(!staged_matches_committed(
-            &StagedPayload::Bytes(b"some other payload"),
-            &committed
-        ));
-    }
 }

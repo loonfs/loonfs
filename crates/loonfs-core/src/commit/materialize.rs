@@ -13,7 +13,7 @@ pub struct MaterializedCommitDelta {
     pub wal_delta: WalDelta,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaterializedCommit {
     pub prepared: PreparedCommit,
     /// Observational wall-clock stamp from the publishing request context,

@@ -4,10 +4,11 @@ use super::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, PresignedGetRequest,
     PresignedPartRequest, PresignedPutRequest, PresignedUrl,
 };
+use crate::crypto::hmac_sha256;
 use crate::keyspace::{normalize_key_prefix, parse_endpoint_url, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
-    canonical_query_string, hex_lower, hmac_sha256, normalize_header_value, percent_encode_path,
+    canonical_query_string, hex_lower, normalize_header_value, percent_encode_path,
     percent_encode_segment, signing_dates, unix_ms,
 };
 use crate::secret::SecretString;
