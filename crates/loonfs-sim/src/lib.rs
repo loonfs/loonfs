@@ -1,10 +1,8 @@
-//! Deterministic simulation primitives for LoonFS tests.
+//! Deterministic simulation tools for LoonFS tests.
 //!
-//! Seeded randomness ([`rng`]), a virtual clock ([`clock`]), and a
-//! fault-injecting object store ([`fault_store`]) that can lose put
-//! responses, serve stale reads, reject compare-and-swaps as stale, hide
-//! recent objects from listings, and corrupt bytes — plus trace and replay plumbing
-//! ([`trace`], [`replay`]) to reproduce any failing seed exactly.
+//! The crate provides seeded randomness, a virtual clock, object-store fault
+//! injection, and trace/replay support for reproducing failed simulation
+//! seeds.
 
 pub mod clock;
 pub mod failure;

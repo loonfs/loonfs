@@ -23,16 +23,12 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Background work belongs to the writer — publications, and the maintenance
-//! a publication schedules. One [`MaintenanceJob`] runner admits every
-//! background step: the writer nudges it, it decides when to run, and the
-//! executors re-read durable state each time. It covers the namespaces this
-//! process touches and the ones a host explicitly assigns to it, and it
-//! discovers none. LoonFS never creates a hidden maintenance runtime: that
-//! work is spawned on the writer's own owning runtime, and
-//! [`FsWriter::shutdown`] settles it in the one order that is correct.
-//! Readers and admins start no background work at all, so they have nothing
-//! to shut down.
+//! A writer owns publication and any automatically scheduled maintenance.
+//! One [`MaintenanceJob`] runner schedules work for namespaces touched or
+//! explicitly assigned to this process; it does not discover namespaces.
+//! Jobs run on the writer's Tokio runtime and re-read durable state before
+//! acting. [`FsWriter::shutdown`] drains this work. Readers and admins do not
+//! start background tasks.
 #![warn(missing_docs)]
 
 mod cache;
@@ -86,12 +82,12 @@ pub use loonfs_core::{
 };
 pub use publisher::PublishObserver;
 
-/// Integration seam: the vocabulary for handing classified commit work to
-/// the runtime's batch publication surface. The server's filesystem
-/// handlers build [`publish::CommitRequest`]s for the [`publisher`]
-/// front-end, which also accepts
-/// [`publish::CommitCandidate`]s directly. Most embedded users
-/// never need this module.
+/// Commit types used by integrations that submit classified mutations to
+/// the runtime publisher.
+///
+/// Server handlers build [`publish::CommitRequest`] values, and lower-level
+/// integrations may submit [`publish::CommitCandidate`] values directly.
+/// Most embedded applications do not need this module.
 pub mod publish {
     pub use loonfs_core::limits::{
         MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_MESSAGE_BYTES,
@@ -104,22 +100,22 @@ pub mod publish {
     };
 }
 
-/// Server-integration seam for producer-only content preparation proofs.
+/// Content-preparation proof types used by server integrations.
 ///
-/// A serving session mints short-lived wire tokens after durable preparation;
-/// [`FsWriter::prepare_content_token`] verifies them against the namespace's
-/// catalog binding. The resulting admission records accepted durability
-/// evidence and does not expire. Most embedded users never need this module.
+/// A server mints a short-lived token after durable upload completion.
+/// [`FsWriter::prepare_content_token`] verifies the token against the
+/// namespace catalog and returns process-local proof that remains valid.
+/// Most embedded applications do not need this module.
 pub mod content_tokens {
     pub use loonfs_core::content::{
         mint_content_token, CompletedUpload, CompletedUploadReceipt, ContentTokenError,
     };
 }
 
-/// Server-integration seam: the resolved direct upload targets a serving
-/// session turns into presigned URLs for client-side object writes — one
-/// whole-object PUT, or one PUT per multipart part. Most embedded users
-/// never need this module.
+/// Direct-upload target types used by servers to create presigned URLs.
+///
+/// Targets describe either one whole-object PUT or individual multipart
+/// part uploads. Most embedded applications do not need this module.
 pub mod uploads {
     pub use loonfs_core::{
         BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
@@ -128,20 +124,17 @@ pub mod uploads {
     };
 }
 
-/// Server-integration seam: the resolved direct download target a serving
-/// read turns into a presigned URL for a client-side object read. The
-/// mirror of [`uploads`], and most embedded users never need it either.
+/// Direct-download target type used by servers to create a presigned
+/// object-read URL. Most embedded applications do not need this module.
 pub mod downloads {
     pub use loonfs_core::DirectDownloadTarget;
 }
 
-/// White-box seam over the durable control plane: typed loaders for a
-/// namespace's head, metadata root, and catalog entry.
+/// Typed loaders for inspecting durable namespace control objects.
 ///
-/// These read durable control objects directly rather than going through a
-/// handle, which is what makes them useful for asserting on layout in tests
-/// and for operational inspection. Normal reads and writes go through
-/// [`FsReader`] and [`FsWriter`]; nothing here is needed to use the runtime.
+/// These functions bypass runtime handles and are intended for layout tests
+/// and operational inspection. Normal application reads and writes should
+/// use [`FsReader`] and [`FsWriter`].
 pub mod control {
     pub use loonfs_core::control::{
         load_namespace_catalog_entry, load_namespace_head_control,
@@ -176,7 +169,7 @@ pub type Result<T> = std::result::Result<T, RuntimeError>;
 
 pub use self::RuntimeError as Error;
 
-/// The embedded runtime's error type, also exported as [`Error`].
+/// The embedded runtime's error type, also exported as [`enum@Error`].
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum RuntimeError {

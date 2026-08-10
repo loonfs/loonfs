@@ -64,20 +64,12 @@ impl<'de> Deserialize<'de> for ContentRefKind {
     }
 }
 
-/// Algorithm of a stored full-object checksum.
+/// Supported algorithms for full-object checksums.
 ///
-/// Every algorithm here covers the complete object. There is deliberately no
-/// checksum-*type* field: full-object coverage is an invariant of this
-/// format, established when the object is written, never read back from a
-/// provider. (Cloudflare R2 never reports `x-amz-checksum-type` at all, so a
-/// type read back would be unavailable exactly where it would matter.)
-///
-/// Every algorithm here is producible by this build, and the vocabulary is
-/// closed: an algorithm spelling this build does not know fails to decode
-/// rather than decoding into a value nothing can recompute. So a
-/// `ChecksumAlgorithm` in hand always names evidence that can be checked,
-/// and the read, retry, and resume paths never have to carry a "cannot
-/// tell" answer. Adding a variant is therefore adding a producer for it.
+/// Full-object coverage is part of the LoonFS format, so no separate checksum
+/// type is stored. Unknown algorithms fail to decode because every in-memory
+/// `ChecksumAlgorithm` must be recomputable by this build. Adding a variant
+/// also requires adding its implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -163,13 +155,10 @@ impl StorageChecksum {
     }
 }
 
-/// One full-object checksum folded over a payload delivered in pieces.
+/// Incremental full-object checksum for streamed reads and writes.
 ///
-/// This is the streaming form of [`StorageChecksum::matches`], for a reader
-/// that verifies an object it never holds whole. Both cover the whole
-/// vocabulary, so a checksum a buffered read would judge is one a streaming
-/// read can fold — the two can never disagree about whether an object is
-/// checkable, only about what it hashes to.
+/// It supports every [`ChecksumAlgorithm`] used by buffered verification, so
+/// buffered and streaming paths differ only in how bytes are supplied.
 #[derive(Debug)]
 pub enum StreamingChecksum {
     /// SHA-256 folded over the payload.
@@ -252,14 +241,11 @@ impl fmt::Debug for Crc64Nvme {
     }
 }
 
-/// CRC-32C (Castagnoli) over a payload delivered in pieces.
+/// Incremental CRC-32C (Castagnoli) checksum.
 ///
-/// This is the full-object checksum Google Cloud Storage computes and
-/// reports, so a transfer that never passes through LoonFS is described by
-/// it and nothing else. A CRC folds forward from a running value, so the
-/// same digest serves a whole-object read and a resumed one: the prefix
-/// already on disk goes in first, the fetched remainder after it, and the
-/// closed value covers the object either way.
+/// Google Cloud Storage reports this checksum for direct transfers. Resumed
+/// reads first add the retained prefix and then the fetched remainder, which
+/// produces the same full-object checksum as an uninterrupted read.
 #[derive(Default)]
 pub struct Crc32c {
     crc: u32,
@@ -403,13 +389,11 @@ impl ContentRef {
         }
     }
 
-    /// Builds a reference from a digest folded over the payload as it was
-    /// written, for a write that never held the whole payload at once.
+    /// Builds a content reference from a SHA-256 computed while streaming the
+    /// payload.
     ///
-    /// Taking the digest itself rather than a checksum value is what keeps
-    /// the provenance rule structural: the only way to reach this
-    /// constructor is to have hashed the bytes here, on the LoonFS write
-    /// path, which is exactly what `whole_file_sha256` claims.
+    /// Accepting the digest object, rather than an arbitrary checksum string,
+    /// ensures that `whole_file_sha256` came from the LoonFS write path.
     pub fn blob_v1_streamed(content_id: ContentId, size_bytes: u64, digest: Sha256) -> Self {
         let storage_checksum = digest.finish();
         Self {
@@ -421,14 +405,11 @@ impl ContentRef {
         }
     }
 
-    /// The checksum this reference holds its bytes to.
+    /// Returns the checksum used to verify this content reference.
     ///
-    /// The trusted whole-file digest when one exists, and otherwise the
-    /// reference's own storage checksum — which for an object a provider
-    /// assembled or a client wrote directly is the only full-object evidence
-    /// there is. Reads, resumed reads, and retry reconciliation all judge
-    /// against this one answer, so no two of them can hold the same
-    /// reference to different evidence.
+    /// A trusted whole-file SHA-256 is preferred when present. Otherwise the
+    /// provider's full-object storage checksum is used. All verification paths
+    /// call this method so they use the same evidence.
     pub fn verifiable_checksum(&self) -> StorageChecksum {
         match &self.whole_file_sha256 {
             Some(digest) => StorageChecksum {
@@ -557,17 +538,12 @@ mod tests {
         }
     }
 
-    /// An algorithm spelling this build does not know is rejected at decode
-    /// rather than kept as an unknown value, unlike
-    /// [`ContentRefKind::Unsupported`], which exists so a relaying reader
-    /// cannot destroy a newer kind.
+    /// Unknown checksum algorithms are rejected during decoding.
     ///
-    /// The asymmetry is deliberate and load-bearing: nothing here relays a
-    /// checksum it did not verify, so an algorithm that survived decoding
-    /// would be evidence nothing could check. Rejecting at the boundary is
-    /// what makes every `ChecksumAlgorithm` value in memory recomputable,
-    /// and therefore what lets reads, retries, and resumes have no "cannot
-    /// tell" answer to carry.
+    /// Content kinds may be preserved by readers without interpretation, but a
+    /// checksum is accepted only when this build can verify it. This guarantees
+    /// that every decoded `ChecksumAlgorithm` is supported by buffered, streamed,
+    /// and resumed verification.
     #[test]
     fn an_unknown_checksum_algorithm_fails_to_decode() {
         assert!(serde_json::from_str::<ChecksumAlgorithm>("\"md5\"").is_err());

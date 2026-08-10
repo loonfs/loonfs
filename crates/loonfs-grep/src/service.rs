@@ -54,14 +54,10 @@ pub(crate) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
 /// cursor with them (see `reorganize_rejected_frontier`), so the next page
 /// continues past them instead of re-examining the same run.
 pub(crate) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
-/// Concurrent gram posting probes one grep query issues at a time: the
-/// (gram, segment) probes of an OR-set fan out in chunks of this size,
-/// each probe a handful of small ranged GETs (filter, index, and posting
-/// blocks). Deliberately below [`MAX_GREP_CONTENT_IO`]: probes multiply
-/// into many small requests per chunk, where a content read is one whole
-/// object. The read-side sibling of the maintenance path's
-/// `MAX_MAINTENANCE_TABLE_IO` (`checkpoint/runs.rs`), which stays at its
-/// own value.
+/// Maximum concurrent `(gram, segment)` posting probes.
+///
+/// Each probe may issue several small ranged reads, so this limit is lower
+/// than the whole-content read limit.
 pub(crate) const MAX_GREP_READ_IO: usize = 16;
 /// Commits one unindexed-tail page asks the change feed for. The tail is
 /// measured in files, not commits, so this is a transfer size rather than a
@@ -71,15 +67,11 @@ pub(crate) const TAIL_FEED_PAGE_COMMITS: usize = 256;
 /// Directory entries one plan-less scan page reads. The scan is bounded by
 /// [`MAX_GREP_SCAN_FILES`]; this only sizes the reads that reach it.
 pub(crate) const SCAN_DIRECTORY_PAGE_ENTRIES: usize = 1000;
-/// Concurrent candidate content reads one grep query issues at a time.
-/// Content verification is a whole-object GET of a small file (index
-/// eligibility caps candidates at `INDEX_GRAMS_MAX_FILE_BYTES`), so it
-/// tolerates a wider fan-out than the posting probes: 32 matches the
-/// content-object concurrency the ecosystem already runs against these
-/// stores (bulk content uploads fan out 32 wide). Each batch is
-/// additionally bounded by the remaining
-/// [`MAX_GREP_VERIFIED_FILES_PER_PAGE`] budget, so a page issues at most
-/// that many content reads however wide the batches are.
+/// Maximum concurrent content reads while verifying grep candidates.
+///
+/// Indexed files are size-limited, so content reads may use more concurrency
+/// than posting probes. The per-page verification budget still caps the total
+/// number of content reads.
 pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 
 /// The immutable gram-index state one query reads.
@@ -271,26 +263,14 @@ impl GrepCandidates {
     }
 }
 
-/// Evaluates the plan against every gram index segment: for each AND set,
-/// the union of its grams' postings; the candidates are the intersection.
-/// The probes of one AND set — one per surviving (gram, segment) pair —
-/// are independent, so they run concurrently in chunks of
-/// [`MAX_GREP_READ_IO`]; the sets union order-independently, so the
-/// result is identical to a serial evaluation, and an AND set whose
-/// running intersection empties still short-circuits the sets after it.
+/// Evaluates the gram plan against all index segments.
 ///
-/// Probing also stops once the running intersection fits the page's
-/// verification budget ([`MAX_GREP_VERIFIED_FILES_PER_PAGE`]): further AND
-/// sets could only shrink a candidate set the page can already afford to
-/// verify whole. The invariant that makes this sound: dropping AND
-/// constraints only WIDENS the candidate set, and verification runs the
-/// real pattern over every candidate, so grep results are byte-identical
-/// — the only effect is fewer cold posting reads (a rare literal's 16
-/// single-gram sets typically stop after the first few). The stop rule is
-/// deliberately this simple; a refinement that also stops when an AND set
-/// fails to shrink the intersection materially (common terms whose grams
-/// match nearly everything) is left out until evidence demands a
-/// heuristic.
+/// For each required set, postings for alternative grams are unioned; the
+/// results of required sets are intersected. Independent probes run in
+/// bounded concurrent batches. Evaluation stops when the intersection is
+/// empty or small enough to verify within the page budget. Stopping early
+/// may widen the candidate set, but final byte-level pattern verification
+/// preserves exact results.
 async fn indexed_candidates<S: ObjectStore + ?Sized>(
     store: &S,
     block_cache: &GrepBlockCache,
@@ -316,12 +296,10 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
                 probes.push((gram_lookup, descriptor));
             }
         }
-        // This union is the query's peak memory: worst case one
-        // (inode, revision) pair per indexed revision when a gram is
-        // common to every file — 16 bytes a pair, on the order of 16 MiB
-        // per million indexed revisions. A streamed merge-intersection
-        // would trade that ceiling for probe-ordering complexity; not
-        // taken until a profile shows these unions dominating.
+        // This union is the query's largest temporary allocation. In the worst
+        // case it holds one `(inode, revision)` pair per indexed revision. A
+        // streaming intersection would reduce memory but add probe-ordering
+        // complexity, so it is deferred until profiles show this allocation matters.
         let mut set_postings = BTreeSet::new();
         for chunk in probes.chunks(MAX_GREP_READ_IO) {
             let batches = try_join_all(chunk.iter().map(|(gram_lookup, descriptor)| {

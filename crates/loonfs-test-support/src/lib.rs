@@ -1,13 +1,10 @@
-//! Shared test helpers at the object-store boundary.
+//! Shared test helpers for the object-store boundary.
 //!
-//! This crate contains broadly reusable fault-injection stores, request
-//! instrumentation, runtime helpers, pagination constructors, and HTTP test
-//! setup. It depends only on `loonfs-api` and `loonfs-objectstore` among LoonFS
-//! crates so `loonfs-core` tests can use it without a development-dependency
-//! cycle. Helpers that require `loonfs-core`, `loonfs`, `loonfs-grep`, or
-//! `loonfs-server` types do not belong here; they stay canonicalized inside
-//! the crate that owns those types. Provider-specific conformance helpers also
-//! remain in `loonfs-objectstore`.
+//! This crate contains reusable fault-injection stores, instrumentation,
+//! runtime helpers, pagination constructors, and HTTP setup. It depends only
+//! on `loonfs-api` and `loonfs-objectstore`, which lets `loonfs-core` use it
+//! without a dependency cycle. Helpers that require higher-level crate types
+//! stay in the crate that owns those types.
 
 pub mod block_on;
 pub mod http;

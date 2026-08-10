@@ -149,10 +149,9 @@ impl EmbeddedTarget {
 
     /// Opens the runtime handles over a store the caller already holds.
     ///
-    /// [`Self::new`] opens the profile's configured store and hands it here.
-    /// It is a seam rather than an extension point: it exists so a caller
-    /// that has to watch what crosses the store boundary can hand in a store
-    /// it wrapped.
+    /// [`Self::new`] opens the profile's configured store and passes it here.
+    /// Callers that need to observe store operations may provide a wrapped
+    /// store directly.
     pub(crate) async fn over_store(
         store: SharedObjectStore,
         writer_id: Option<&str>,

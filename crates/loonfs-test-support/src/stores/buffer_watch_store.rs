@@ -1,19 +1,8 @@
-//! Watches how much of a payload a transfer path holds in memory at once.
+//! Measures payload buffers held by a transfer path.
 //!
-//! A streamed transfer's whole promise is that peak memory follows the chunk
-//! size rather than the object size, and that promise is easy to lose by
-//! accident: one `collect()` on the way through, one decorator that does not
-//! forward `put_streamed` and falls back to buffering, one read that asks for
-//! no range and gets the whole object — and a large transfer is materialized
-//! again with nothing failing.
-//!
-//! This wrapper makes the promise checkable without measuring the process.
-//! It sits above a store and watches every payload buffer that crosses the
-//! boundary in either direction — a whole-payload `put`, each chunk of a
-//! `put_streamed` stream, and each `get`, whole or ranged — recording the
-//! largest one and the most bytes alive at any instant. Liveness is exact:
-//! each buffer handed on carries a drop guard, so the counter falls when the
-//! consumer actually releases it, not when the wrapper guesses it has.
+//! The wrapper observes buffered puts, streamed chunks, and read results. It
+//! records the largest buffer and peak live bytes. Each observed buffer owns a
+//! drop guard, so live-byte counts fall when the consumer releases the buffer.
 
 use super::KeyPredicate;
 use async_trait::async_trait;
@@ -159,10 +148,10 @@ impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
         self.inner.get_with_metadata(key).await
     }
 
-    /// A read's answer is a payload buffer like any other: one whole object
-    /// for an unranged read, one range for a chunked one. The caller's drop
-    /// is what releases it, so a reader that accumulates chunks shows up as
-    /// bytes alive rather than as chunks that were merely handed out.
+    /// Tracks the returned read buffer until the caller drops it.
+    ///
+    /// Unranged reads count the whole object; ranged reads count the returned
+    /// range. Retained chunks therefore remain included in peak live memory.
     async fn get(
         &self,
         key: &str,

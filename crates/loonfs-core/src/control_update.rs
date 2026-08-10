@@ -14,9 +14,8 @@ use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 use thiserror::Error;
 
-/// The head a closure wants installed, plus what the caller receives once
-/// the compare-and-swap lands. Every head update replaces: a closure that
-/// must not write errors instead.
+/// Replacement head state and the value returned after its CAS succeeds.
+/// An update that should not write must return an error instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeadReplacement<T> {
     pub(crate) next: Box<HeadState>,
@@ -52,12 +51,10 @@ pub(crate) enum ControlUpdateError {
     RetryExhausted { attempts: usize },
 }
 
-/// Reads the head, lets `update` build the replacement, and publishes it by
-/// compare-and-swap on the loaded etag, retrying the whole
-/// read-decide-swap cycle on CAS conflict. Closure errors propagate
-/// immediately without retrying — that is the fencing hook: a closure that
-/// observes a disqualifying head (newer writer, changed manifest) must error,
-/// never clobber.
+/// Reads the head, asks `update` to build a replacement, and applies it with
+/// a CAS against the loaded ETag. CAS conflicts retry the complete
+/// read-update-CAS cycle. Errors returned by `update` are returned immediately,
+/// which prevents an invalid writer or stale manifest from being overwritten.
 pub(crate) async fn update_head<S, T, E, F>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -206,12 +203,8 @@ fn required_etag_core<'a>(
     })
 }
 
-/// Reads one upload session's durable state without holding an etag.
-///
-/// Callers that only need to know what a session says — status reads, and
-/// the terminal-state check a completion makes before it touches any
-/// provider object — take this instead of opening a compare-and-swap they
-/// may not use.
+/// Reads an upload session without retaining its ETag. Use this for status
+/// checks and other operations that do not need to update the session.
 pub(crate) async fn read_upload_session_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

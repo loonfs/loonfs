@@ -1,6 +1,6 @@
-//! [`NamespaceCommitEngine`]: publishes batches of classified mutation
-//! candidates — one WAL segment, one head compare-and-swap, one result per
-//! candidate.
+//! [`NamespaceCommitEngine`] publishes a batch of validated mutation
+//! candidates as one WAL segment and one head compare-and-swap, then returns
+//! one result per candidate.
 
 use crate::checkpoint::MetadataTableCache;
 use crate::commit::CommitFingerprint;
@@ -46,13 +46,9 @@ pub enum ContentPreparation {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ContentPreparationError {
-    /// Every wire token the request supplied was rejected before
-    /// publication, each paired with the content ref it was supplied for.
-    ///
-    /// One request may carry one token per ref, so all of the rejections
-    /// travel together: a caller that has to mint new tokens needs to know
-    /// which refs failed and why, not just that one of them did. The list is
-    /// never empty — a rejection exists because a token was refused.
+    /// Tokens rejected before publication, paired with their content IDs. The
+    /// list is non-empty and includes every rejection so the caller can replace
+    /// the correct tokens.
     #[error("content tokens were rejected: {}", rejected_token_reasons(.0))]
     ContentToken(Vec<(ContentId, ContentTokenError)>),
     /// No prepared proof covers the referenced content.
@@ -60,7 +56,7 @@ pub enum ContentPreparationError {
     ContentNotPrepared { content_id: ContentId },
 }
 
-/// Every rejected token as one message: each content ref beside its reason.
+/// Formats all token rejections as one message, pairing each content ID with its reason.
 fn rejected_token_reasons(rejections: &[(ContentId, ContentTokenError)]) -> String {
     rejections
         .iter()
@@ -119,8 +115,8 @@ impl CommitCandidate {
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
-        // The ceilings apply to the request as a whole: a batch occupies the
-        // serialized publisher for as long as all of its operations take.
+        // Apply limits to the complete request because the serialized publisher
+        // processes every operation before releasing the write path.
         if self.request.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {} operations; maximum is {}",
@@ -167,21 +163,18 @@ impl CommitCandidate {
     }
 }
 
-/// The WAL-tail maintenance policy: one authority for "when do we
-/// checkpoint?" and "when do we stop accepting writes?", so the two
-/// thresholds cannot drift apart.
+/// Defines the WAL-tail thresholds for checkpointing and write rejection.
+/// Keeping both values in one policy prevents inconsistent configuration.
 ///
-/// Reads never gate on tail length; the rejection only asks writers to wait
-/// for the maintenance a deployment failed to run (format spec,
-/// "Maintenance operations").
+/// Reads do not depend on tail length. Writes are rejected only when
+/// maintenance has fallen behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalTailPolicy {
     /// Visible WAL-tail length, in segments, at which a maintenance step
     /// publishes a checkpoint. The step fires at or past this length.
     pub checkpoint_at_segments: u64,
-    /// Visible WAL-tail length at which (at or past) every publish surface
-    /// rejects with `maintenance_required`, so a landed publication never
-    /// leaves a longer tail behind.
+    /// WAL-tail length at which all publish operations return
+    /// `maintenance_required` before adding another segment.
     pub reject_writes_at_segments: u64,
 }
 
@@ -200,8 +193,8 @@ impl Default for WalTailPolicy {
     }
 }
 
-// The ordering invariant `0 < checkpoint < reject` holds by construction:
-// a step must be able to relieve backpressure before writes stop.
+// Checkpointing must begin before the write-rejection threshold so
+// maintenance can reduce the tail before writes are blocked.
 const _: () = assert!(
     0 < WalTailPolicy::DEFAULT.checkpoint_at_segments
         && WalTailPolicy::DEFAULT.checkpoint_at_segments
@@ -214,9 +207,8 @@ pub struct NamespaceCommitEnginePublishResult {
     /// WAL tail length observed by this publish, for opportunistic
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
-    /// The read state this publish produced, present when the head CAS
-    /// landed unambiguously: callers can seed read caches with it instead
-    /// of invalidating them and rebuilding from the store.
+    /// Read state produced by a successful, unambiguous head CAS. Callers can
+    /// use it to update read caches without reloading from object storage.
     pub resulting_read_state: Option<ResultingReadState>,
 }
 
@@ -225,37 +217,32 @@ pub struct NamespaceCommitEnginePublishResult {
 pub struct ResultingReadState {
     pub head: HeadState,
     pub head_etag: String,
-    /// Basis the publish replayed over; the landed head still resolves to
-    /// it, so a seeded anchor pins the same pair the next read would.
+    /// Metadata basis used for replay. The published head still references this
+    /// basis, so a seeded read cache matches the next store-backed read.
     pub basis: MetadataBasis,
     pub manifest_id: ManifestId,
     pub manifest_head_seq: ChangeSeq,
     pub tail_rows: Arc<MetadataState>,
 }
 
-/// Writer-session state for one namespace: never acquired, holding the epoch
-/// this session acquired, or terminally fenced.
+/// Tracks writer state for one namespace session: unacquired, acquired, or
+/// permanently fenced.
 ///
-/// This is authoritative session state, not a cache of durable state —
-/// nothing in the store can rebuild "this session was fenced". Runtimes keep
-/// one shared instance per namespace in a registry that outlives every
-/// rebuildable cache (invalidation, LRU eviction, cache-disabled
-/// configurations) and hand it to each engine they build for the namespace.
-/// An engine built without one gets private state, which keeps the
-/// documented one-shot semantics: each one-shot commit is its own
-/// acquisition decision.
+/// Object storage cannot reconstruct whether the current session was fenced.
+/// Runtimes should therefore share one instance across engines for the same
+/// namespace and keep it outside rebuildable caches. An engine without shared
+/// state treats each one-shot commit as a separate session.
 #[derive(Debug, Default)]
 pub enum WriterSessionState {
     /// No epoch yet: the session's first publish acquires one.
     #[default]
     Unacquired,
-    /// Epoch acquired lazily on this session's first publish and reused for
-    /// its lifetime; no per-publish acquisition CAS.
+    /// Writer epoch acquired on the first publish and reused for the rest of
+    /// the session.
     Acquired(AcquiredWriter),
-    /// Terminal fencing record. Once another session supersedes our epoch,
-    /// every later publish fails with `writer_fenced` without touching the
-    /// store; the session never reacquires on its own. Reacquisition is an
-    /// explicit caller decision, left to a future takeover API.
+    /// Permanent fencing record for this session. Later publishes return
+    /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
+    /// requires an explicit caller action.
     Fenced(WriterFence),
 }
 
@@ -271,9 +258,9 @@ pub struct NamespaceCommitEngine {
     session: SharedWriterSessionState,
     /// Local monotonic source for the self-enforced publish budget.
     timer: Arc<dyn MonotonicTimer>,
-    /// Shared decoded-block cache for publish-view table reads. Blocks are
-    /// content-addressed by segment digest, so cached entries can never
-    /// serve stale state; freshness stays enforced by the head etag check.
+    /// Shared cache of decoded blocks used by publish-view reads. Blocks are
+    /// keyed by segment digest, while the head ETag check verifies that the view
+    /// is current.
     table_cache: Option<Arc<MetadataTableCache>>,
 }
 
@@ -288,17 +275,16 @@ impl NamespaceCommitEngine {
         }
     }
 
-    /// Attaches the runtime's session state for this namespace, so the
-    /// acquired epoch and fencing outlive this engine instance.
+    /// Uses runtime-managed session state so the writer epoch and fenced status
+    /// persist across engine instances.
     pub fn writer_session(mut self, session: SharedWriterSessionState) -> Self {
         self.session = session;
         self
     }
 
     fn lock_session(&self) -> std::sync::MutexGuard<'_, WriterSessionState> {
-        // Poisoning is propagated as a panic: every critical section is a
-        // plain field read or write, so a poisoned lock means another
-        // thread panicked mid-update.
+        // Treat a poisoned lock as fatal because another thread panicked while
+        // updating the session state.
         self.session
             .lock()
             .expect("writer session state lock should not be poisoned")
@@ -315,31 +301,24 @@ impl NamespaceCommitEngine {
         self
     }
 
-    /// Drops the rebuildable tail projection and nothing else. The acquired
-    /// epoch and fencing are session state, not cached state: the epoch's
-    /// validity is re-checked against the head on every publish view load,
-    /// and a fenced session stays fenced.
+    /// Clears only the rebuildable tail projection. Writer epoch and fencing
+    /// remain in session state and are not reset by cache invalidation.
     pub fn invalidate_projection(&mut self) {
         self.publish_tail_projection = None;
     }
 
-    /// What the tail projection this engine retains weighs, or `None` when
-    /// it retains none.
-    ///
-    /// A runtime holding one engine per namespace bounds its total retention
-    /// with this; the per-projection ceiling in [`PublishTailOptions`] only
-    /// bounds one.
+    /// Returns the retained tail projection's memory weight, or `None` when no
+    /// projection is cached. Runtimes can sum this value across namespace engines
+    /// to enforce a global cache limit.
     pub fn retained_tail_weight(&self) -> Option<PublishTailWeight> {
         self.publish_tail_projection
             .as_ref()
             .map(PublishTailProjection::weight)
     }
 
-    /// This session's writer epoch for the namespace, acquired on first use
-    /// and reused afterwards.
-    ///
-    /// Fencing is checked first and answered terminally: a superseded session
-    /// never touches the store again, and never reacquires on its own.
+    /// Returns the session's writer epoch, acquiring it on first use. A fenced
+    /// session fails immediately without accessing the store or acquiring a new
+    /// epoch.
     async fn session_writer_epoch<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
@@ -360,22 +339,21 @@ impl NamespaceCommitEngine {
             .map_err(CoreError::WriterEpoch)?;
         let mut session = self.lock_session();
         if let WriterSessionState::Fenced(fence) = &*session {
-            // Another engine sharing this session observed fencing while we
-            // were acquiring; the session stays fenced.
+            // Another engine fenced the shared session while this engine was acquiring
+            // the epoch. Preserve the fenced state.
             return Err(CoreError::WriterFenced(fence.clone()));
         }
         *session = WriterSessionState::Acquired(acquired_writer.clone());
         Ok(acquired_writer)
     }
 
-    /// Deletes the namespace through this session (format spec, "Tombstones
-    /// and deletion").
+    /// Deletes the namespace using this writer session (format spec,
+    /// "Tombstones and deletion").
     ///
-    /// Deletion is a head-advancing write, so it takes the same session gate
-    /// as [`Self::publish_batch`]: a fenced session is refused terminally
-    /// without touching the store, and the epoch acquired for publishing is
-    /// the epoch the tombstone swap is fenced by. A takeover observed by the
-    /// swap fences this session for good.
+    /// Deletion advances the head, so it uses the same writer-session checks as
+    /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
+    /// and a takeover detected during the tombstone CAS permanently fences the
+    /// session.
     pub async fn delete_namespace<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,

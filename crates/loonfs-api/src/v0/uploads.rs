@@ -30,20 +30,12 @@ pub struct DirectPutContentClaim {
     pub storage_checksum: StorageChecksum,
 }
 
-/// What a `direct_multipart` client says about the object it finished
-/// writing, supplied at completion rather than at begin.
+/// Final size and checksum claimed for a direct multipart upload.
 ///
-/// The claim arrives last because that is the only place a one-pass
-/// uploader can produce it: a client that had to declare the length and
-/// digest up front would have to read its payload twice, and a client
-/// reading from a pipe could not start at all. Nothing is lost by waiting —
-/// the claim was never trusted, only verified, and verification happens at
-/// completion either way.
-///
-/// The digest is CRC-64/NVME rather than SHA-256 because that is the
-/// checksum an S3-compatible provider computes over a multipart object: it
-/// is the only full-object evidence the provider will ever be able to show
-/// back, so it is the only thing worth claiming at all.
+/// The claim is supplied at completion so one-pass and streaming uploaders do
+/// not need to read the payload twice. LoonFS verifies the claim rather than
+/// trusting it. CRC-64/NVME is used because S3-compatible providers report it
+/// for the assembled full object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -91,23 +83,16 @@ pub enum UploadMode {
     DirectMultipart,
 }
 
-/// Request for starting an upload session, tagged by the transport it asks
-/// for.
+/// Request to start an upload session, tagged by transport mode.
 ///
-/// Each transport carries only what it needs, so the combinations a flat
-/// request could spell — a proxied begin carrying multipart geometry, a
-/// direct put with no claim to sign — are refused when the body is decoded
-/// rather than by a handler reading them back. `mode` is required: a
-/// request that does not say how it intends to move its bytes is not a
-/// request this API can answer.
+/// Each variant contains only fields valid for that transport, so invalid
+/// combinations are rejected during decoding. The `mode` field is required.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BeginUploadRequest {
-    // The empty braces are load-bearing: serde lets a *unit* variant of a
-    // tagged enum swallow whatever else the body carried, so spelling this
-    // as `ServiceProxied` would quietly accept a proxied begin holding
-    // another transport's fields. A variant with no fields refuses them.
+    // Empty braces make serde reject fields from another transport. A unit
+    // variant would silently ignore them.
     /// Send the bytes to the service, which writes the content object.
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadServiceProxied"))]
     ServiceProxied {},
@@ -176,16 +161,11 @@ pub struct DirectPutUpload {
     pub access: ObjectTransferAccess,
 }
 
-/// Direct multipart upload details: the geometry a client cuts its payload
-/// into parts with, and nothing else.
+/// Part geometry returned for a direct multipart upload.
 ///
-/// There is no content reference here, and no part count. The session has
-/// not been told what it is about to receive, so there is no identity to
-/// echo and no arithmetic to do — the server mints the content object
-/// behind the session and names it in the completion response. The
-/// provider's upload id is absent for the same reason it always was: a
-/// client asks this server for part URLs by part number and never talks to
-/// the provider's multipart API in its own words.
+/// The begin response does not include a content reference or part count
+/// because the final payload is not known yet. The server owns the provider
+/// upload id and returns the content reference only after completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectMultipartUpload {
@@ -270,14 +250,10 @@ pub struct ValidatedContentToken {
     pub token: String,
 }
 
-/// Response for starting an upload session, tagged by the transport the
-/// server settled on.
+/// Response to starting an upload session, tagged by transport mode.
 ///
-/// Each transport carries what its client needs next and nothing else, so
-/// the combinations a flat response could spell — a proxied session holding
-/// presigned access, a direct put with no capability to write through — are
-/// not values this type can hold. Unlike the request, unknown fields are
-/// accepted: a response reader tolerates what a later server adds.
+/// Each variant contains only the fields needed by that transport. Unknown
+/// response fields are accepted for forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case")]

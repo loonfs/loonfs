@@ -28,18 +28,12 @@ fn hints_in_gap(
         .collect()
 }
 
-/// Fetches the hinted segments covering the replay gap concurrently.
+/// Concurrently fetches hinted WAL segments in the replay range.
 ///
-/// Failures and misses do not stop the load: the chain walk fetches anything
-/// the prefetch did not deliver, and a real read error surfaces there as
-/// [`WalChainLoadError::ReadWal`]. Hints therefore change where the bytes
-/// come from, never what the load returns.
-///
-/// A failed request is still a request, so the caller counts it against the
-/// fetch budget and the walk's own fetch of that segment counts again. A
-/// flaky store then drains the budget faster than the chain is long, which
-/// an operator reads as a budget problem. The failures are reported here,
-/// once per load, so the store shows up as the cause.
+/// A miss or failed prefetch does not fail the load; the normal chain walk
+/// fetches the segment again and reports any final read error. Every
+/// prefetch request still counts against the caller's fetch budget, including
+/// failures.
 async fn prefetch_recent_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -112,13 +106,10 @@ impl WalkedChain {
     }
 }
 
-/// What a bounded chain load produced.
+/// Result of loading a WAL chain with a fetch limit.
 ///
-/// Both outcomes report `requests_issued`: how many `get` requests the load
-/// sent for segment bodies, prefetch included. A caller that meters its own
-/// reads charges for that number and nothing else, so its budget drains by
-/// what the store was actually asked for. It is never more than the limit
-/// the caller gave.
+/// `requests_issued` counts all segment-body requests, including prefetches,
+/// misses, and failed requests. It never exceeds the supplied limit.
 pub(crate) enum WalChainLoad {
     /// The whole chain was read inside the fetch limit.
     Complete {
@@ -213,19 +204,10 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
 
     let stop_after_seq = request.stop_after_seq.unwrap_or(request.chain_base_seq);
     let in_gap = hints_in_gap(request.recent_segments, stop_after_seq, request.head_seq);
-    // The invariant this function maintains: `fetches` counts every `get`
-    // request issued for a segment body, prefetch included, and it never
-    // exceeds `max_segment_fetches`.
-    //
-    // The prefetch issues its requests before the walk can decide it has
-    // read enough, so it takes its share of the budget up front and the
-    // walk spends what is left. Hints are newest first and the walk starts
-    // at the tip, so the prefix the budget covers is the part of the gap
-    // the walk reaches first. A hint list longer than the budget is cut
-    // down to the budget rather than refused: the walk reads what the
-    // budget covers and reports what it spent, so a caller that meters its
-    // reads is told where its budget went instead of being handed an empty
-    // answer that claims to have cost nothing.
+    // `fetches` counts every segment-body request, including prefetches, and
+    // never exceeds `max_segment_fetches`. Prefetch consumes its share first;
+    // the chain walk uses the remaining budget. Because hints are ordered from
+    // newest to oldest, a limited prefetch covers the segments nearest the tip.
     let prefetched_hints = in_gap.len().min(max_segment_fetches);
     let mut fetches = prefetched_hints;
     let mut prefetched = if prefetched_hints == 0 {
@@ -345,28 +327,16 @@ fn validate_pointer_matches_envelope(
     Ok(())
 }
 
-/// Counts the visible WAL tail segments above `chain_base_seq` from the
-/// head's chain pointers alone.
+/// Counts visible WAL-tail segments from the pointers stored in the head.
 ///
-/// Every head publish prepends its tip pointer to `recent_segments` under
-/// the same compare-and-swap that installs `visible_wal_tip`, so a hint run
-/// that is contiguous from the tip carries the same authority as the tip
-/// itself. The list holds every segment a legal unflushed tail can reach
-/// (see [`crate::limits::RECENT_SEGMENTS_LIMIT`]), so that run describes
-/// the whole tail and this takes no store parameter: the signature is the
-/// guarantee.
+/// Head publication updates `visible_wal_tip` and `recent_segments` in the
+/// same compare-and-swap, so a contiguous pointer list from the tip describes
+/// the complete legal tail. The function performs no object-store reads.
 ///
-/// A head that under-describes its own tail is corrupted, and is reported as
-/// [`WalChainLoadError::TailNotDescribedByHead`] rather than walked. This
-/// serves inspection surfaces (status, maintenance gating), and a serial
-/// chain walk of an unbounded tail is not something a foreground call
-/// should pay for silently. Replay consumers keep loading the validated
-/// chain, which does walk.
-///
-/// Unlike [`load_validated_wal_chain`], bodies are never fetched or
-/// checksum-verified, and the manifest boundary is accepted at
-/// `base <= chain_base_seq` rather than exact equality: callers here do not
-/// replay the tail.
+/// If the head does not describe its complete tail, the namespace is
+/// reported as corrupt rather than triggering an unbounded foreground chain
+/// walk. Segment bodies and checksums are not validated because this method
+/// only counts pointers; replay paths still load the full validated chain.
 #[tracing::instrument(
     level = "info",
     name = "loonfs.phase",

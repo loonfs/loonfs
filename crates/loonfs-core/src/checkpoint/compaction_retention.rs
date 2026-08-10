@@ -144,8 +144,11 @@ impl RetentionOperator {
     }
 }
 
-/// A receipt below the floor is indistinguishable from one never used, which
-/// is the idempotency horizon (format spec, section 3.3).
+/// Keeps commit receipts at or above the retention floor.
+///
+/// A commit ID is idempotent only while its receipt is retained. After a
+/// receipt below the floor is removed, retrying that commit ID creates a new
+/// mutation (format spec, section 3.3).
 fn keep_receipt(row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
     match &row {
         MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq < floor_seq => None,
@@ -153,14 +156,15 @@ fn keep_receipt(row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
     }
 }
 
-/// Attribute rows, one inode at a time.
+/// Retains all attribute revisions above the floor and the newest revision at
+/// or below the floor for each inode.
 ///
-/// Ascending row-key order within one inode is descending revision order:
-/// `lookup_keys::attributes_row_key` inverts the revision number, the commit
-/// sequence, and the delta index, which is what makes a prefix read answer
-/// with the newest state first. So the first row at or below the floor is the
-/// newest at or below it — the one row the rule keeps — and every later row of
-/// that inode is older and goes. The whole history is never held.
+/// Attribute row keys sort each inode's revisions newest first. The first row
+/// at or below the floor represents current state, including an empty map that
+/// records cleared attributes. Older revisions cannot be observed and may be
+/// removed. Deleted inodes keep their attribute rows so an undelete restores
+/// the prior attributes. The operator processes this order without retaining
+/// the complete history.
 #[derive(Debug, Default)]
 pub(super) struct AttributeRetention {
     /// Whether this inode has already kept its newest row at or below the
@@ -211,13 +215,12 @@ impl AttributeRetention {
     }
 }
 
-/// Active-deletion rows, one deletion identity at a time.
+/// Processes active-deletion rows one deletion identity at a time.
 ///
-/// The family holds current state, not history, so the floor has no say over
-/// it: a listed deletion stays recoverable however far the floor advances.
-/// The only rows that go are the pairs that cancelled each other, and the row
-/// key ranks the removal marker below the row it removes, so the marker
-/// always arrives first and one flag decides the pair.
+/// Active deletions represent current recoverable state, so the retention
+/// floor does not remove a listed deletion. The operator removes only a
+/// listed row paired with its removal marker. Row-key order places the marker
+/// first, allowing one flag to determine whether the listed row is retained.
 #[derive(Debug, Default)]
 pub(super) struct ActiveDeletionRetention {
     /// Whether this deletion's removal marker has already arrived.
@@ -338,17 +341,13 @@ impl BindingRetention {
         Ok(survives.then_some(row))
     }
 
-    /// Refuses a slot whose binds break the writer invariant the drop rests
-    /// on.
+    /// Verifies the writer invariant required for binding cleanup.
     ///
-    /// At the floor only the latest bind per slot is visible, and a bind is
-    /// only ever superseded by an operation that also unbinds it. So every
-    /// bind at or below the floor except the slot's latest must have been
-    /// retired. Generations arrive in ascending order, so a bind at or below
-    /// the floor arriving while an earlier un-retired one still stands proves
-    /// that earlier one was superseded without an unbind — and dropping by
-    /// [`bind_survives_frozen_floor`] would then keep a bind no read can
-    /// reach and call it live.
+    /// Superseding a bind also writes its unbind. Therefore every non-current
+    /// bind at or below the retention floor must have a matching unbind.
+    /// Generations arrive in ascending order, so a second unretired bind in
+    /// the same slot proves that the earlier bind was superseded without an
+    /// unbind. Cleanup is rejected when that occurs.
     fn check_the_slot_invariant(&mut self, generation: &BindingGeneration) -> Result<()> {
         let Some(previous) = self.unretired_at_floor.take() else {
             return Ok(());

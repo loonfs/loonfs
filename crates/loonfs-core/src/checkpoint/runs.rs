@@ -33,20 +33,16 @@ pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
     MetadataTableFamily::Attributes,
 ];
 
-/// One set of families whose rows merge in one reorganization unit.
+/// Metadata families merged together as one consistency unit.
 ///
-/// Families that read each other's rows to decide what to drop (see
-/// `super::compaction_retention`) must compact together, and a secondary index
-/// always travels with its canonical family.
+/// Families whose retention rules depend on each other are grouped, and each
+/// secondary index is grouped with its canonical family. The closed enum lets
+/// planning and validation use the group identity directly. Manifest loading
+/// also enforces the layout rule that each group has at most one base-tier
+/// run.
 ///
-/// This is a closed enum rather than a list of family slices because every
-/// caller wants the group itself, not a slice it has to recognize by
-/// comparing it against a table. The grouping is layout policy, not
-/// reorganization's alone: manifest load checks a per-group invariant — at
-/// most one base-tier run per group — so the loader reads it too.
-///
-/// Declaration order is group order, which is what resolves ties when two
-/// groups have equally much to fold.
+/// Declaration order determines which group is selected when multiple groups
+/// have the same amount of pending work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MetadataFamilyGroup {
     /// A directory binding, the reverse index that finds it by child, and the

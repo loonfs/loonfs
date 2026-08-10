@@ -1,13 +1,9 @@
-//! Producer-only content preparation proofs and short-lived wire tokens.
+//! Content preparation proofs and short-lived tokens used by producers.
 //!
-//! A content token is an upload's receipt: it is minted only from a durable
-//! upload session already observed in its terminal completed state, and it
-//! says that the content it names is durable and verified so a later commit
-//! does not have to look. A serving session verifies token expiry once when
-//! turning a signed wire token into an opaque [`PreparedContent`]. Its
-//! internal admission then remains valid for the process lifetime: it records
-//! accepted authoritative evidence that the identified content is durable,
-//! rather than carrying another clock.
+//! A token can be created only from a durable, completed upload session. It
+//! proves that the named content was verified before publication. Token
+//! expiry is checked once when converting it to [`PreparedContent`]. The
+//! resulting in-process proof remains valid for that process lifetime.
 
 use crate::limits::CONTENT_RECEIPT_TTL_MS;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -20,13 +16,11 @@ use thiserror::Error;
 
 const TOKEN_VERSION: &str = "vct0";
 
-/// Everything a receipt attests, read out of a durable upload session that
-/// was observed in its terminal completed state.
+/// Evidence read from a durable upload session in its completed state.
 ///
-/// The type has no public constructor on purpose. The only way to hold one
-/// is for the upload protocol to have loaded a completed session from the
-/// object store, so a receipt can never be minted from an in-memory
-/// expectation, a provider response, or a completion still in flight.
+/// The type has no public constructor. Only the upload protocol can create
+/// it after loading a completed session, so callers cannot create receipts
+/// from an in-memory expectation or an unverified provider response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUploadReceipt {
     namespace_id: NamespaceId,
@@ -132,12 +126,11 @@ pub enum ContentTokenError {
     TimeOverflow,
 }
 
-/// Mints one receipt for a completed upload.
+/// Creates a short-lived token for a completed upload.
 ///
-/// The receipt is short-lived because it does not have to be durable: the
-/// completed session is, so reading the session's status mints another one.
-/// That is what makes a lost publish response cost a request instead of a
-/// retransfer.
+/// The completed session remains durable, so a caller can obtain a new token
+/// by reading upload status. Losing a response therefore requires another
+/// status request, not another upload.
 pub fn mint_content_token(
     secret: &str,
     receipt: &CompletedUploadReceipt,

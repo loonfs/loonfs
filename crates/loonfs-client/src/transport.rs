@@ -22,11 +22,10 @@ pub(crate) const MAX_TRANSIENT_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// the caller forever.
 pub(crate) const IO_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// One outbound request, described rather than built.
+/// Reusable description of an outbound request.
 ///
-/// A retry must resend byte-identical content, and a `reqwest::RequestBuilder`
-/// is consumed by sending. Keeping the description lets every attempt build a
-/// fresh builder from the same parts.
+/// `reqwest::RequestBuilder` is consumed when sent. Storing the method, URL,
+/// and headers lets each retry build a fresh request with identical bytes.
 pub(crate) struct WireRequest {
     method: Method,
     url: String,
@@ -158,14 +157,11 @@ impl Client {
             .map_err(|attempt| attempt.error)
     }
 
-    /// Sends one request whose body arrives in pieces, and never resends it.
+    /// Sends a streaming request body exactly once.
     ///
-    /// A stream is consumed by the attempt that reads it, so there is no
-    /// second attempt to make: this is the one call whose failure is always
-    /// the caller's to handle. `size_bytes` declares the length when the
-    /// source knows it, and its absence is what puts the request on chunked
-    /// transfer encoding — which is the honest framing for a payload whose
-    /// length nobody knows yet.
+    /// A stream cannot be replayed after an attempt consumes it, so failures are
+    /// returned to the caller without retry. `size_bytes` sets `Content-Length`;
+    /// when absent, the request uses chunked transfer encoding.
     pub(crate) async fn call_streamed_once(
         &self,
         request: &WireRequest,
@@ -178,14 +174,11 @@ impl Client {
             .map_err(|attempt| attempt.error)
     }
 
-    /// Sends one request and hands its response body back as a stream, so
-    /// the answer is never held whole.
+    /// Sends one request and returns a streamed response body.
     ///
-    /// This is the read counterpart of [`Self::call_streamed_once`], and it
-    /// does not retry for the same reason: the caller consumes what arrives
-    /// as it arrives, so only the caller knows what it already did with the
-    /// first half. A non-success status is read and mapped here instead —
-    /// an error body is small, and it is the one response worth holding.
+    /// The method does not retry because the caller may already have consumed
+    /// part of the response. Non-success responses are buffered only long enough
+    /// to decode the small error body.
     pub(crate) async fn call_for_response_stream(
         &self,
         request: &WireRequest,
@@ -225,19 +218,14 @@ impl Client {
             .boxed())
     }
 
-    /// Sends one request, resending on quick-clearing transient failures —
-    /// the retryable-unavailability codes (`server_busy`,
-    /// `commit_queue_full`, `shutting_down`) and network-level transport
-    /// errors — with doubling backoff, bounded by
-    /// [`MAX_TRANSIENT_ATTEMPTS`]. Call sites opt into this path only for
-    /// reads, commits (which carry a durable replay identity), and operations whose
-    /// repeat semantics are idempotent. Lifecycle mutations and upload
-    /// session creation use [`Self::call_once`] so ambiguous success remains
-    /// visible to the caller. Other unavailability codes are excluded on
-    /// purpose — `maintenance_required` and `index_lagging` clear on a
-    /// maintenance step, not on a resend — and a served status with a
-    /// non-envelope body is not retried: only failures the network layer
-    /// itself reported count as transport.
+    /// Retries transient transport failures and selected temporary server
+    /// errors with bounded exponential backoff.
+    ///
+    /// Callers use this only for reads, replay-safe commits, and idempotent
+    /// operations. Lifecycle changes and upload-session creation use
+    /// [`Self::call_once`] so an ambiguous success is visible. Conditions that
+    /// require maintenance, such as `maintenance_required` or `index_lagging`,
+    /// are not retried.
     pub(crate) async fn call_with_transient_retry(
         &self,
         request: &WireRequest,
@@ -557,7 +545,8 @@ pub(crate) mod test_transport {
 
     // A thread-local is sound here because client tests run on the default
     // current-thread runtime: the future is polled only on the thread that
-    // installed the seam, so no attempt can observe another test's script.
+    // installed the scripted transport, so no attempt can observe another
+    // test's script.
     thread_local! {
         static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     }

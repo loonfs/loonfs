@@ -14,44 +14,22 @@ use http::Uri;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Endpoint families whose direct-transfer preconditions the live
-/// conformance suite has actually run against.
+/// Provider domain families validated by the live direct-transfer
+/// conformance suite.
 ///
-/// A presigned write hands a client a capability and then trusts the
-/// provider to have enforced the signed checksum and create-only
-/// precondition — completion never reads the bytes back. Only these
-/// endpoints have been run against that suite, so only they earn the trust.
-/// An endpoint override outside the provider's own domain family is some
-/// other implementation of the S3 API and is not covered by those runs.
+/// Direct completion depends on the provider enforcing the signed checksum and
+/// create-if-absent condition. Endpoint overrides outside these domain
+/// families are not covered by that validation.
 pub(crate) const AWS_S3_PROVEN_DOMAINS: &[&str] = &["amazonaws.com", "amazonaws.com.cn"];
 pub(crate) const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage.com"];
 
-/// Whether GCS's direct transfers have been proven against a live bucket.
+/// Enables GCS direct transfers after live provider validation.
 ///
-/// The two S3-compatible providers earned their place in the lists above by
-/// a credentialed run of the conformance suite; this is the same bar,
-/// spelled as one flag because GCS has no endpoint override to key it on.
-/// It is `false` because that run has not happened yet: the signer, the
-/// readback, and the whole path are implemented and covered by unit tests,
-/// but no test has yet watched Google itself refuse a tampered checksum or a
-/// replayed create-only write, and the trust direct transfers rest on is
-/// exactly that refusal.
-///
-/// Flipping this to `true` belongs to the change that records a passing
-/// live run — nothing else in the build needs to move, and until then GCS
-/// deployments advertise no direct transfer and proxy every byte.
-///
-/// The run comes first and the flip second, which means doing it in that
-/// order locally: the ignored GCS suite in
-/// `crates/loonfs-server/tests/it/direct_put_real_provider.rs` asks a
-/// deployment for capabilities it does not yet advertise, so flip this,
-/// run the suite against a real bucket, and commit the flip with what the
-/// run showed.
-///
-/// Proven 2026-08-02 against a real bucket:
-/// `gcp_gcs_real_provider_conformance` passed (13.25s), and both live
-/// direct-transfer tests passed (8.92s) — the signed round trip, and the
-/// scoped, bounded, single-use capability assertions.
+/// Set this only when the credentialed conformance suite has confirmed that
+/// GCS enforces signed checksums and create-if-absent requests. The current
+/// value is supported by the live validation recorded on 2026-08-02. Until a
+/// provider is validated, deployments must proxy transfers through the
+/// server.
 const GCS_DIRECT_TRANSFERS_PROVEN: bool = true;
 
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
@@ -83,19 +61,11 @@ impl ConfiguredObjectStoreKind {
     }
 }
 
-/// One validated runtime provider, plus the direct transfers it can
-/// authorize.
+/// Validated provider client and the direct-transfer issuers it supports.
 ///
-/// Construction is the only thing this type adds: it holds the provider
-/// client as the same shared trait object every handle takes, so callers
-/// dispatch through the provider's own [`ObjectStore`](crate::ObjectStore)
-/// implementation rather than through a copy of it here.
-///
-/// Building the bundle *is* the trust decision. A provider that cannot sign
-/// the preconditions direct transfers rest on, or an endpoint outside the
-/// families the live conformance suite has run against, produces no bundle
-/// at all — so nothing above this crate re-derives that judgement from
-/// configuration.
+/// Construction decides whether direct transfers are allowed. Unsupported
+/// signing behavior or an unvalidated endpoint produces no direct-transfer
+/// issuers, so higher layers do not need to interpret provider configuration.
 #[derive(Debug)]
 pub struct ConfiguredObjectStore {
     inner: SharedObjectStore,
@@ -174,9 +144,9 @@ impl ConfiguredObjectStore {
         })
     }
 
-    /// Builds a native GCS store, and the reads and whole-object writes it
-    /// can authorize once [`GCS_DIRECT_TRANSFERS_PROVEN`] says a live run
-    /// has watched the provider enforce them.
+    /// Builds a native GCS store. Direct reads and whole-object writes are
+    /// enabled only after live validation sets `GCS_DIRECT_TRANSFERS_PROVEN`
+    /// to confirm that the provider enforces them.
     ///
     /// This adapter implements no multipart signing for GCS, so the bundle's
     /// multipart slot stays empty rather than holding a signer that would
@@ -249,19 +219,12 @@ fn s3_compatible_transfers(presigner: S3CompatiblePresigner) -> DirectTransferIs
         .with_multipart(presigner)
 }
 
-/// Whether an endpoint sits in one of the domain families whose signed
-/// preconditions the live conformance suite has exercised, *and* is reached
-/// over TLS.
+/// Returns whether an endpoint uses TLS and belongs to a provider domain
+/// family validated by the live conformance suite.
 ///
-/// An absent endpoint is the provider's own default, which qualifies on both
-/// counts. TLS is not incidental here: a presigned URL is a bearer
-/// capability to write or read one object, so issuing one over `http` would
-/// put it, and the signed headers with it, on the wire in cleartext for
-/// anyone on the path to replay. An `http` override of a provider's own
-/// domain is a misconfiguration rather than a different provider, and
-/// [`StoreConfig::validate`](crate::StoreConfig::validate) rejects it by
-/// name; this is the second gate, for a configuration built in Rust that
-/// never passed through that validation.
+/// A missing override uses the provider's validated default endpoint.
+/// Presigned URLs are bearer capabilities, so explicit `http` endpoints are
+/// rejected even when their host belongs to a validated provider.
 fn endpoint_is_proven(endpoint_url: Option<&str>, domain_families: &[&str]) -> bool {
     let Some(endpoint_url) = endpoint_url else {
         return true;

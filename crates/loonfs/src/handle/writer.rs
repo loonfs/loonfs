@@ -14,22 +14,18 @@ use loonfs_core::cache::{MetadataTableCache, StoredMetadataBlockCache};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-/// Write-capable handle for normal application and server use.
+/// Write-capable runtime handle for applications and servers.
 ///
-/// `FsWriter` owns a writer identity and the full mutation surface:
-/// file and directory mutations, commit publication, uploads, and namespace
-/// lifecycle. With [`FsBackgroundWork::Enabled`] it also owns a maintenance
-/// runner, spawned on its owning runtime: metadata steps after writes that
-/// cross the WAL-tail threshold, and collection passes for the upload
-/// sessions it opened once their leases pass. Advancing the retention floor
-/// stays explicit [`FsAdmin`](crate::FsAdmin) work.
+/// `FsWriter` owns the writer identity, mutations, uploads, namespace
+/// lifecycle, and commit publication. With [`FsBackgroundWork::Enabled`], it
+/// also schedules metadata maintenance and upload garbage collection.
+/// Retention-floor advancement remains an explicit [`FsAdmin`](crate::FsAdmin)
+/// operation.
 ///
-/// The handle is runtime-bound: open it with `build().await` inside the
-/// long-lived Tokio runtime that will drive it, and do not share one writer
-/// across unrelated runtimes — open another from [`StoreConfig`] instead.
-/// `FsWriter` is cheap to clone; clones share the identity, caches, and
-/// background-work state — including its end, which is why
-/// [`Self::shutdown`] is one call rather than a sequence a host respells.
+/// Build the handle inside the Tokio runtime that will use it. Do not share a
+/// provider client across unrelated runtimes; build another handle from
+/// [`StoreConfig`]. Clones share identity, caches, background tasks, and
+/// shutdown state.
 #[derive(Clone)]
 pub struct FsWriter {
     pub(crate) core: ReadCore,
@@ -91,16 +87,11 @@ impl FsWriter {
         self.core.shared_store()
     }
 
-    /// This writer's publication service (see [`crate::publisher`]).
+    /// Returns this writer's shared publication service.
     ///
-    /// The direct mutation methods on this handle submit through the same
-    /// service; hosts that classify their own mutation candidates — the
-    /// reference server, for example — submit here directly. Clones share
-    /// the writer's per-namespace publishers.
-    ///
-    /// Lifecycle is not the caller's to drive here: [`Self::shutdown`] owns
-    /// closing this service, and [`Self::is_shutting_down`] answers the one
-    /// question a host asks about it from outside.
+    /// Direct mutation methods and integrations that submit classified
+    /// candidates use the same per-namespace publishers. [`Self::shutdown`]
+    /// closes the service; callers should not manage its lifecycle separately.
     pub fn publisher(&self) -> PublisherRegistry {
         self.publisher.clone()
     }
@@ -152,29 +143,22 @@ impl FsWriter {
         self.bits.maintenance.register(job)
     }
 
-    /// The executor registered under `job`, runtime-owned or extension-owned
-    /// alike, or `None` when nothing claims that id.
+    /// Returns the maintenance job registered under `job`.
     ///
-    /// For a host that drives bounded steps itself rather than through
-    /// admission: `loonfs admin run --drain` runs each key to a settled
-    /// conclusion under the operator's budget, and a caller with its own
-    /// budget needs the executor, not a nudge. What it gets is the same
-    /// bounded, compare-and-swap-published unit the runner admits — running
-    /// one here duplicates work at worst, because delivery is at-least-once
-    /// either way.
+    /// Hosts may call the job directly to run bounded steps under their own
+    /// budget. These are the same idempotent, compare-and-swap-based steps used
+    /// by the scheduler, so concurrent or repeated execution may duplicate work
+    /// but does not change correctness.
     pub fn maintenance_job(&self, job: MaintenanceJobId) -> Option<Arc<dyn MaintenanceJob>> {
         self.bits.maintenance.job(job)
     }
 
-    /// Waits until every writer-scheduled maintenance task has finished,
-    /// without closing anything. Panicked tasks surface as a runtime-task
-    /// error.
+    /// Waits for currently scheduled maintenance to finish without closing
+    /// admission.
     ///
-    /// Non-terminal: the writer keeps admitting work, so what this waits
-    /// for is quiet, not the end. A one-shot host calls it before exiting
-    /// so a step is never torn down mid-flight; a long-lived host calls it
-    /// to read durable state a step was about to leave. Callers await their
-    /// own publications, so a quiet runner is a quiet writer.
+    /// New work may still be scheduled while this method runs, so it waits for a
+    /// quiet point rather than performing terminal shutdown. Task panics are
+    /// returned as runtime errors.
     ///
     /// One task this waits for is not a bounded step. A family group that has
     /// outgrown one step is rebuilt by a streaming compaction paced by no
@@ -185,53 +169,25 @@ impl FsWriter {
         self.bits.maintenance.drain().await
     }
 
-    /// Terminal shutdown: closes maintenance admission, closes publication
-    /// admission, settles admitted publications, then settles in-flight
-    /// maintenance steps. Panicked tasks surface as a runtime-task error.
+    /// Gracefully shuts down writer-owned background work.
     ///
-    /// This is the only valid order, and it lives here so no host has to
-    /// respell it. Afterward, mutations fail with `shutting_down`, nudges
-    /// are dropped, and work that claimed a maintenance slot without
-    /// starting is refused rather than left running unobserved. Reads still
-    /// work: nothing here touches the read path.
+    /// Shutdown closes maintenance admission before its first await, then
+    /// closes publication admission, drains accepted publications, and waits
+    /// for maintenance tasks that were already running. Closing maintenance
+    /// first prevents completed publications from scheduling new work during
+    /// the drain. Maintenance jobs publish through [`FsAdmin`](crate::FsAdmin),
+    /// not the publication service, so the publication queue can only shrink.
     ///
-    /// Maintenance admission has to close first, and before this future's
-    /// first await — the publication drain below is that await. While it is
-    /// pending the runtime keeps polling the runner: its timer promotes
-    /// keys whose deadlines have arrived, each landing publication nudges
-    /// the jobs subscribed to publications, and a finishing step hands its
-    /// permit straight to the next queued key. Everything admitted in that
-    /// window is work this shutdown already decided to drop, and none of it
-    /// is free — a metadata step advances the metadata root, a collection
-    /// pass deletes provider objects, an index step writes segments, all
-    /// after the process was asked to stop, and all of it the drain then
-    /// has to sit through. Closing first leaves the window empty.
+    /// Closing maintenance admission also cancels streaming metadata
+    /// compactions. These jobs check for cancellation between block reads and
+    /// publish only after the complete merge finishes, so cancellation leaves
+    /// the current manifest unchanged. A later maintenance step can plan the
+    /// compaction again.
     ///
-    /// Closing maintenance admission also cancels every streaming metadata
-    /// compaction this writer is running. Such a job is background work with
-    /// no budget pacing it, so the drain below would otherwise wait for a
-    /// whole family group to be rebuilt. The job checks its token between
-    /// block fetches and stops, and it costs the work it had done and nothing
-    /// else: it publishes only at the end, so the metadata it was rebuilding
-    /// never moved and a later step plans the group again.
-    ///
-    /// Nor can the order wedge, for a reason worth stating because it is
-    /// not the obvious one: no maintenance step submits to the publication
-    /// service at all. Every job compare-and-swaps the namespace head
-    /// through [`FsAdmin`](crate::FsAdmin), so the publication drain waits
-    /// only on client work and its pending set can only shrink. A step
-    /// already running finishes normally, and its chain then ends rather
-    /// than passing its permit on, because a closed admission book releases
-    /// the permit instead of handing it to the next key.
-    ///
-    /// Takes `&self` because `FsWriter` is [`Clone`] and exclusivity is
-    /// therefore unenforceable: clones observe the shutdown rather than
-    /// being consumed by it, and [`Self::is_shutting_down`] is what they
-    /// see. Calling it again — from this handle or any clone — is safe: the
-    /// closes are idempotent and the drains are waits, so a later call
-    /// settles whatever a concurrent one has not and returns. Dropping
-    /// every clone without calling this is best-effort cleanup, not the
-    /// documented graceful shutdown path.
+    /// After shutdown, mutations return `shutting_down`, maintenance nudges
+    /// are ignored, and reads continue to work. The method is idempotent and
+    /// may be called from any clone because all clones share the same shutdown
+    /// state. Task panics are returned as runtime errors.
     pub async fn shutdown(&self) -> Result<()> {
         // Both closes belong above the first await, for the reason the doc
         // gives. Nothing may move below `drain`.

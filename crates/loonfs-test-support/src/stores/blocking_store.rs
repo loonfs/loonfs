@@ -17,21 +17,12 @@ use tokio::sync::Notify;
 
 type Predicate = dyn for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync;
 
-/// Waits for a latch flag that the other side sets before notifying.
+/// Waits until the latch flag is set.
 ///
-/// The waits here are deliberately unbounded. Whoever is on the other side
-/// of a gate is either the test itself or work the test just started, so a
-/// wall-clock deadline inside this helper is a race with the machine rather
-/// than a check on the code under test: the whole `loonfs` integration
-/// suite shares one binary and one runtime, and a deadline that holds on an
-/// idle laptop starts firing once the rest of the suite is competing for
-/// CPU. A gate nobody opens is a hang, and the harness timeout is what
-/// reports it.
-///
-/// `Notified` only registers with the `Notify` on its first poll, so
-/// checking the flag and then awaiting would drop a notification landing in
-/// between. `enable` registers up front, which makes check-then-wait
-/// race-free without polling.
+/// The helper has no local timeout because tests control both sides of the
+/// gate; the test harness reports gates that are never released. The
+/// notification future is registered before checking the flag, preventing a
+/// notification from being lost between the check and the wait.
 async fn wait_for_latch(flag: &AtomicBool, notify: &Notify) {
     loop {
         let mut notified = pin!(notify.notified());

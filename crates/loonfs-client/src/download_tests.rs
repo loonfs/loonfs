@@ -222,8 +222,8 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
     );
 }
 
-/// The happy path over the same seam: the declared length and digest both
-/// hold, every byte reaches the sink, and the count comes back.
+/// The successful path through the same transport: the declared length and
+/// digest both hold, every byte reaches the sink, and the count comes back.
 #[tokio::test]
 async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     let payload = b"exactly the bytes the grant described".to_vec();

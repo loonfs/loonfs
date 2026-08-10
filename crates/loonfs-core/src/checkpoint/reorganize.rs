@@ -1,62 +1,28 @@
-//! Bounded metadata reorganization: the background half of the
-//! checkpoint/compaction split.
+//! Plans and publishes bounded metadata merges.
 //!
-//! Checkpoint publication only ever appends an L0 delta run, so its cost
-//! follows the WAL delta, never the namespace. Folding those L0 runs into
-//! the base happens here instead, one **family group** at a time: the
-//! group's rows are merged from an oldest-first, budgeted subset of complete
-//! runs, rows no retained sequence can observe are dropped, new segments are
-//! written, and a manifest publishes that swaps just those references.
-//! Families whose rows must stay mutually consistent compact together —
-//! bind, child bind, and unbind rows form one group because their drop rules
-//! read each other; revisions travel with their descending index so index
-//! parity holds within every unit.
+//! Checkpoint publication appends L0 delta runs. Each maintenance step selects
+//! one metadata family group and either merges a budgeted, contiguous set of
+//! complete runs or returns a plan for a background compaction of the entire
+//! group. Bounded steps and background jobs use the same merge engine.
 //!
-//! The merging itself is not here. A step drives the same engine a background
-//! compaction drives ([`super::streaming_compaction`]), synchronously and with
-//! nothing around it: no lease, no job, no registry, no admission, and output
-//! written at ordinary table keys because the publication that names it is the
-//! step's own. What the step owns is choosing the window, publishing the
-//! result, and reporting what it did.
+//! A merge that includes the group's oldest run writes a base-tier run and may
+//! remove rows below the retention floor. A merge that starts above the base
+//! writes a delta-tier run at its newest input sequence and preserves every
+//! row. These rules keep at most one base run per family group and preserve
+//! run ordering.
 //!
-//! A merge writes a base-tier run when, and only when, its window starts at
-//! the group's oldest run. That is the same condition retention dropping
-//! needs, so the level a run carries and the rules that produced it say the
-//! same thing: a base run is a run some fold was allowed to drop rows from,
-//! a delta run is a run nothing has dropped from yet ([`MergePlacement`]). A
-//! merge that had to start above the group's base therefore writes a bigger
-//! delta run rather than a second base run, and a family group holds at most
-//! one base run at any time (manifest load refuses a manifest that says
-//! otherwise).
+//! Each bounded merge publishes a durable manifest, so no separate progress
+//! record is required. After interruption, the next step reloads the current
+//! manifest and selects another group. If a concurrent publication wins the
+//! root compare-and-swap, the merge output remains unreferenced for garbage
+//! collection and a later step retries from the new manifest.
 //!
-//! There is no progress record: each unit ends in a durable manifest, so a
-//! crashed or interrupted reorganization resumes by reading the live
-//! manifest and picking the next group that still has L0 rows. Unit
-//! selection is deterministic (most L0 rows first, then group order). A
-//! concurrent checkpoint racing a unit wins at the root compare-and-swap;
-//! the unit's segments are left unreferenced for garbage collection and the
-//! next step retries against the fresh manifest.
-//!
-//! The planner answers with one of two plans ([`ReorganizationPlan`]). A
-//! group with a window that fits the budgets and makes progress gets that
-//! window. A group with no such window gets a streaming compaction over
-//! every run it holds ([`super::streaming_compaction`]), which is what takes
-//! a frozen base off the step budgets entirely. The step does not run that
-//! job: it reports the plan, and the runtime starts the job in the
-//! background and hands its spec back to every step that follows, which is
-//! how a step knows to leave that group alone while it runs.
-//!
-//! One step cannot see whether a group is stuck. A group whose
-//! bottom-anchored window is blocked still has delta runs to merge, and under
-//! sustained writes there is always another pair of them, so a planner
-//! deciding from one step's view alone would take the delta merge every time
-//! and never start the job — the base would stay frozen and the group's
-//! retention would stay stopped. The caller therefore states a
-//! [`FrozenBasePolicy`]. A writer's own maintenance amortizes: it counts, per
-//! group, the delta merges it has published over that frozen base, and at
-//! [`DELTA_MERGES_OVER_A_FROZEN_BASE`] the planner stops taking the merge and
-//! plans the job. Everyone else asks for the job outright, because they are
-//! either reporting that the namespace needs one or running it.
+//! When the oldest run prevents a useful bounded merge, [`FrozenBasePolicy`]
+//! determines whether the step may merge newer delta runs or must request a
+//! full compaction. Writer maintenance permits a limited number of delta
+//! merges before requesting the background job. Explicit compaction requests
+//! select the job immediately. [`MetadataCompactionView`] identifies any group
+//! already being compacted so a bounded step does not select it again.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::error::ManifestLoadError;
@@ -104,7 +70,7 @@ pub(super) const DELTA_MERGES_OVER_A_FROZEN_BASE: u32 = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrozenBasePolicy {
     /// Amortize the rebuild: keep taking the delta merge above the frozen
-    /// base until [`DELTA_MERGES_OVER_A_FROZEN_BASE`] of them have published
+    /// base until `DELTA_MERGES_OVER_A_FROZEN_BASE` of them have published
     /// for the group, then plan the job. This is what a writer's own
     /// maintenance runs under, because upkeep that rebuilt the whole group
     /// for every eight delta runs would reread megabytes to fold in a sliver.
@@ -219,10 +185,9 @@ pub struct MetadataReorganizeReport {
     pub outcome: MetadataReorganizeOutcome,
 }
 
-/// Runs at most one reorganization unit against the namespace's current
-/// manifest. Callers (the maintenance step) invoke this repeatedly; each
-/// call re-reads durable state, so any two calls compose — including across
-/// process restarts.
+/// Runs at most one reorganization step against the current manifest. Each
+/// call reloads durable state, so callers may repeat it safely across process
+/// restarts.
 ///
 /// `compactions` is what this process knows about the namespace's streaming
 /// compactions: which group a job is rebuilding right now, and how long each
@@ -444,55 +409,22 @@ pub(super) struct ReorganizationInput {
     pub(super) placement: MergePlacement,
 }
 
-/// Where a merge's output stands in its family group.
+/// Determines a merge's output level, sequence, and retention behavior.
 ///
-/// **A merge's output is base-tier if and only if its window starts at the
-/// group's oldest run.** Base-tier means "rows a fold was allowed to drop
-/// from", so the level a run carries and the rules that produced it say the
-/// same thing. Both the output level and the right to drop rows are read off
-/// this one value; there is no separate flag either can disagree with.
+/// A merge that includes the group's oldest run writes a base-tier run at the
+/// manifest head. Its input includes the previous base run and all older rows
+/// needed by retention rules, so it may remove rows below the retention floor.
+/// Replacing the previous base leaves the group with at most one base run.
 ///
-/// A bottom-anchored merge writes the group's base run, stamped at the
-/// manifest head. Base-tier runs sort below every delta run whatever sequence
-/// they carry, so the output lands at the bottom where its inputs were, and
-/// the sequence is free to be the head's — which is also what keeps a file at
-/// `head_seq` in the manifest when the merge consumed the group's whole top.
-/// It replaces the group's previous base run, because a bottom-anchored
-/// window always contains it, so the group is left with exactly one.
-///
-/// A merge that had to start above the group's base rewrites delta runs into
-/// one bigger delta run. Two things follow from writing it at the delta level
-/// rather than the base level. It cannot mint a second base run, so a group's
-/// base never fragments and nothing ever hides an over-budget bottom behind
-/// fragments that each fit. And its rows stay counted as delta pressure, so
-/// the L0 run count reports what is really waiting.
-///
-/// Its sequence is its newest input's, not the manifest head's, so the output
-/// stands exactly where that run stood: above every run the window left below
-/// it and below every run it left above. The head would put it above runs the
-/// window never reached, and moving merged rows above newer runs is what a
-/// later bottom-anchored fold must never see — it could then drop an unbind
-/// whose bind had moved out of the window and put a deleted file back. The
-/// head is also shared by consecutive maintenance steps on a quiet namespace,
-/// so head-stamped outputs of different merges collide at one identity.
-///
-/// Nothing else in the manifest already holds that identity for these
-/// families: the newest input run's segments for this group leave
-/// `metadata_files` in the same publication the output's enter it. Segments
-/// of other families at that identity stay where they are, which is ordinary
-/// — a run is a set of families, and each family in it has one producer.
+/// A merge that starts above the base writes a delta-tier run and preserves
+/// every input row. The output uses its newest input sequence so it remains in
+/// the same position relative to runs outside the selected window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MergePlacement {
-    /// The window started at the group's oldest run. The output is the
-    /// group's base run at the manifest head, and retention may drop rows.
-    ///
-    /// Retention dropping reads across the merged rows: an unbind cancels the
-    /// bind it names, and a removal marker cancels the listed deletion it
-    /// repeats. Dropping one half of such a pair is only visibility-preserving
-    /// when the other half is in the same merge, and what guarantees that is
-    /// starting the merge at the group's oldest run — the cancelling row is
-    /// always the newer of the two, so every row it can cancel is already in
-    /// the window (format spec, "Compaction").
+    /// The window includes the group's oldest run. The output is the base run,
+    /// and retention may remove related row pairs because both the older row
+    /// and its newer cancellation row are included (format spec,
+    /// "Compaction").
     Base { output_seq: ChangeSeq },
     /// The window started above the group's oldest run. The output is a delta
     /// run at the newest input's sequence, and nothing is dropped.
@@ -537,12 +469,10 @@ fn merge_placement(
     }
 }
 
-/// What one selection attempt found.
+/// Result of selecting input runs for one reorganization step.
 ///
-/// The saturation record travels beside the input because the caller
-/// reports it on both paths: a group whose oldest run has outgrown one
-/// step's budget still folds its newer runs, and that is exactly when an
-/// operator needs to hear that the run underneath them is frozen.
+/// `group_bottom_over_budget` is reported for status and logging even when the
+/// plan can merge newer delta runs or start a full compaction.
 pub(super) struct ReorganizationSelection {
     /// What the step should do, or `None` when the group holds no runs at
     /// all and there is nothing to do either way.
@@ -566,57 +496,24 @@ pub(super) struct OverBudgetRun {
     pub(super) decoded_bytes: Option<u64>,
 }
 
-/// Selects a contiguous window of complete runs to merge, oldest-first.
+/// Selects bounded merge input or plans a full compaction for one family
+/// group.
 ///
-/// **The order.** The comparator below is the group's recency order, oldest
-/// first. Base-tier runs hold rows an earlier fold already absorbed, so they
-/// sit under every L0 run whatever their `run_seq` says: a bottom-anchored
-/// fold stamps its output at the manifest head, which can leave a base run
-/// carrying a higher `run_seq` than an L0 run some other group has not folded
-/// yet (see [`manifest_has_partial_reorganization`]). Within one tier the
-/// lower `run_seq` is the older run.
+/// Runs are ordered oldest first. Base-tier runs sort before delta-tier runs
+/// regardless of `run_seq`; within a tier, lower sequences are older. The
+/// selector first tries a contiguous window beginning at the oldest run. If
+/// that cannot make progress, it may try a window beginning at the oldest
+/// delta run. It never skips a delta run.
 ///
-/// **The invariant.** A merge writes its inputs back as one run standing
-/// where the window stood: at the bottom of the group when the window is
-/// bottom-anchored, and at its newest input's identity otherwise
-/// ([`MergePlacement`]). Either way the output may not carry a row newer than
-/// a run it left above the window — otherwise a later fold could drop a row
-/// while the row it cancels sits outside that fold's window. What keeps that
-/// true is that the window is a *contiguous* slice of the order: every run it
-/// leaves out sits wholly below it or wholly above it, never interleaved, so
-/// the output can stand in for the whole window without moving any row past
-/// any other. When the window starts at the very bottom nothing is left out
-/// below it at all, and that is the stronger property retention dropping
-/// needs — see [`MergePlacement::Base`].
+/// A bottom-anchored merge makes progress when it moves at least one delta run
+/// into the base tier. A delta-only merge must combine at least two runs. If
+/// neither bounded window works, or `frozen_base` requires a full compaction,
+/// the result contains a plan covering every run in the group.
 ///
-/// **There are two windows to try.** A manifest holds at most one base-tier
-/// run per family group, so the search is short: the window starting at the
-/// group's oldest run, and — when a base run blocks that one — the window
-/// starting at the oldest delta run above it. A delta run is never stepped
-/// over.
-///
-/// **The budgets pace the work; they never end it.** When no window starting
-/// at the group's oldest run can fit the budgets, the start moves past the
-/// base run that blocks it and the step merges the L0 runs above it on their
-/// own. The group keeps shedding runs even while the run at its bottom stays
-/// too large to fold. When not even that is left — no window at all makes
-/// progress inside the budgets — the group is handed to a streaming
-/// compaction, which merges every run it holds and is paced by nothing.
-///
-/// Index sections are read before row payloads so the decoded-byte budget is
-/// known exactly from each data block's durable `decoded_len`; a run that
-/// would cross a budget is not decoded or partially included.
-///
-/// `frozen_floor_seq` is the live retention floor. A bounded merge reads it
-/// again at drop time; a compaction spec carries it, because the floor a job
-/// judges every row against is fixed when the job is planned.
-///
-/// `frozen_base` is the caller's answer to the one thing this function cannot
-/// see: whether the delta merge above a base no window can reach is still the
-/// work this group needs. When the policy says it is not, a blocked
-/// bottom-anchored window goes straight to the job rather than taking that
-/// merge — the merge would make progress, but not the progress the group
-/// needs.
+/// Block indexes are read before row data so the row and decoded-byte budgets
+/// can be enforced without partially including a run. A bounded merge resolves
+/// the current retention floor before applying retention. A full-compaction
+/// plan records `frozen_floor_seq` so the background job uses one fixed floor.
 pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     group: MetadataFamilyGroup,
@@ -721,18 +618,9 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             runs.push(run.clone());
         }
 
-        // A merge must leave the group with less to fold than it found, or
-        // the same window would be chosen again forever. What counts as less
-        // follows from where the output lands.
-        //
-        // A bottom-anchored merge writes a base run, so every L0 run it takes
-        // leaves L0 for good: one L0 run in the window is enough, and a
-        // window holding none would only rewrite base rows where they stand.
-        //
-        // A merge above the base writes another delta run, so it only gains
-        // by merging two or more into one. A single-run window there would
-        // rewrite that run as itself, at its own identity, having read and
-        // written every row for nothing.
+        // A bottom-anchored merge makes progress when it moves at least one
+        // L0 run into the base tier. A delta-only merge must combine at least
+        // two runs; rewriting one delta run would not reduce pending work.
         let bottom_anchored = window_start == 0;
         let makes_progress = if bottom_anchored {
             runs.iter().any(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
@@ -793,21 +681,13 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Says out loud that a family group's oldest run no longer fits one
-/// reorganization step.
+/// Reports that the oldest run in a family group exceeds one step's input
+/// budget.
 ///
-/// Nothing is corrupt when this fires and no work stops. Steps keep merging
-/// the newer runs above the run named here, into one bigger delta run each
-/// time. Once that merge has nothing left to take, the group has no window
-/// that makes progress, and the step hands the whole group to a background
-/// streaming compaction that rebuilds it in one pass under no budget at all.
-/// The group's rows are reclaimed when that job publishes. So this line says
-/// what a namespace has grown into, and that the rebuild of the group has
-/// moved off the step; there is nothing for an operator to do about it.
-///
-/// One line per step until the job starts: a step is already the unit
-/// maintenance schedules, so the cadence of the warning is the cadence of
-/// maintenance.
+/// Bounded steps may continue merging newer delta runs. When no bounded merge
+/// can make the required progress, maintenance plans a streaming compaction
+/// of the complete group. The warning is emitted once per step until that job
+/// starts.
 fn report_group_bottom_over_budget(
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,

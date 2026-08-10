@@ -1,9 +1,8 @@
-//! The seam a node-local cache of encoded metadata SST blocks plugs into.
+//! Interface for a node-local cache of encoded metadata SST blocks.
 //!
-//! This tier sits beneath the decoded [`MetadataTableCache`] and above
-//! object storage. It holds stored section bytes — the same bytes the
-//! segment object holds — so a hit still has to be decoded and verified
-//! before any caller sees a row.
+//! This cache sits between the decoded [`MetadataTableCache`] and object
+//! storage. It stores the original encoded section bytes, which are decoded
+//! and verified before any rows are returned.
 //!
 //! [`MetadataTableCache`]: super::MetadataTableCache
 
@@ -13,22 +12,15 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use thiserror::Error;
 
-/// Identifies one encoded stored section of one metadata SST segment.
+/// Identifies one encoded section of an immutable metadata SST segment.
 ///
-/// The identity mirrors the decoded cache's. `payload_checksum` is the
-/// segment's `sha256:<hex>` digest, which names immutable bytes, so an entry
-/// can never go stale; `kind` and `offset` locate the section inside that
-/// segment, so sections of one segment cannot collide.
+/// `payload_checksum` identifies the segment bytes. `kind` and `offset`
+/// identify the section within that segment. Lengths and CRCs are validated by
+/// the decoder and therefore are not part of the cache key.
 ///
-/// Nothing else belongs in the identity. Stored lengths and CRCs are
-/// validation inputs carried by the segment's block handles, and the decoder
-/// checks them whether the bytes came from this tier or from the store.
-/// There is no version field either: an implementation versions its own
-/// on-disk directory instead.
-///
-/// Namespace manifests are deliberately not representable. The decoded cache
-/// keys them by object key rather than by content digest, and they stay out
-/// of this tier.
+/// Implementations may version their own on-disk format. Namespace manifests
+/// are excluded because they are keyed by object path rather than content
+/// digest.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct StoredMetadataBlockKey {
     pub payload_checksum: String,
@@ -44,11 +36,8 @@ pub enum StoredMetadataBlockKind {
     Filter,
 }
 
-/// A cache that failed to shut down cleanly.
-///
-/// Shutdown is the one operation whose failure a caller can observe. The
-/// bytes are a cache, so nothing durable is lost, but a host draining on its
-/// way out should still be able to report why.
+/// Error returned when the cache cannot shut down cleanly. Cached bytes are
+/// rebuildable, but the host may report this failure during shutdown.
 #[derive(Debug, Error)]
 #[error("stored metadata block cache failed to close: {0}")]
 pub struct StoredMetadataBlockCacheCloseError(String);
@@ -60,21 +49,15 @@ impl StoredMetadataBlockCacheCloseError {
     }
 }
 
-/// A node-local cache of encoded, stored metadata SST sections.
+/// Node-local cache of encoded metadata SST sections.
 ///
-/// Object storage remains the only authority. This tier holds a copy of
-/// bytes the store already holds, addressed by [`StoredMetadataBlockKey`],
-/// and every hit is decoded and verified by the ordinary segment decoder
-/// before a caller sees a row. A hit is therefore evidence that the bytes
-/// were available locally and nothing more.
+/// Object storage remains authoritative. Every cache hit is decoded and
+/// verified before rows are returned. Cache operations are best effort:
+/// lookup failures return `None`, and insert failures are ignored, so the
+/// system falls back to object-storage reads.
 ///
-/// Lookups and inserts are best effort. An implementation records its own
-/// failures and answers a failed lookup with `None` and a failed insert by
-/// doing nothing, so a full, broken, or unreachable cache degrades to plain
-/// object-store reads.
-///
-/// After [`close`](Self::close) the cache is inert: `get` returns `None`,
-/// and `insert` and `invalidate` do nothing. `close` is idempotent.
+/// After [`close`](Self::close), `get` returns `None` and mutation methods do
+/// nothing. Calling `close` more than once is allowed.
 #[async_trait]
 pub trait StoredMetadataBlockCache: Send + Sync + Debug {
     /// Returns the stored bytes held for `key`, or `None` on a miss.

@@ -202,14 +202,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
-    /// A view of exactly one manifest's tables at the sequence they
-    /// materialize, with nothing layered over them.
+    /// Creates a view containing only one manifest at its materialized sequence.
     ///
-    /// [`Self::from_loaded_head`] answers "the namespace as of its live
-    /// head" by replaying the WAL tail over a basis; this answers "the
-    /// namespace exactly as this manifest recorded it". Callers that pin an
-    /// immutable manifest — a checkpoint's basis — read through this, so no
-    /// row committed after the manifest can leak into the answer.
+    /// Unlike [`Self::from_loaded_head`], this view does not replay the current
+    /// WAL tail. It is used for pinned manifests such as checkpoints, so later
+    /// commits cannot affect the result.
     pub(crate) fn over_manifest_tables(
         tables: &'a VerifiedMetadataTables<'store, S>,
         materialized_seq: ChangeSeq,
@@ -249,10 +246,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.snapshot.visible_seq
     }
 
-    /// Attaches a batch-scoped durable-layer memo. Only attach where every
-    /// composed view's `visible_seq` stays at or above the seq the durable
-    /// layers were loaded at, so memoized durable answers never go stale;
-    /// overlay rows are composed per lookup either way.
+    /// Attaches a cache for durable lookups performed during one batch.
+    ///
+    /// Use it only when every derived view has a `visible_seq` at or after the
+    /// sequence used to load the durable layers. Overlay rows are still applied
+    /// separately for each lookup.
     pub(crate) fn with_durable_cache(
         mut self,
         durable_cache: &'a DurableVisibilityCache,
@@ -287,17 +285,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 }
 
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
-    /// Adapter presenting this view's primitive lookups as the
-    /// [`MetadataVisibilityReads`] contract, so the composite rules are
-    /// decided once in [`super::visibility`]. The view is `Copy`, so the
-    /// adapter owns a copy and needs no borrow of `self`.
+    /// Adapts this view to [`MetadataVisibilityReads`] so composite visibility
+    /// rules remain centralized in [`super::visibility`].
+    ///
+    /// `MetadataView` is `Copy`, so the adapter owns a copy instead of borrowing
+    /// `self`.
     fn reads(&self) -> MetadataViewReads<'a, 'store, S> {
         MetadataViewReads { view: *self }
     }
 
-    /// Whether the directory currently has at least one visible child,
-    /// answered by a limit-1 page through a fresh session so the cost stays
-    /// bounded no matter how wide the directory is.
+    /// Returns whether the directory has at least one visible child.
+    ///
+    /// The lookup requests a single-entry page, so its work does not grow with
+    /// the directory's total size.
     pub(crate) async fn has_visible_children(
         &self,
         parent_inode_id: InodeId,
