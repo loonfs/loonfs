@@ -17,6 +17,34 @@ use crate::{
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_core::cache::{load_namespace_fold_basis, load_namespace_head_summary};
 
+/// What one explicit [`FsAdmin::compact_metadata`] call did.
+///
+/// The job's own endings are [`loonfs_core::MetadataCompactionJobOutcome`],
+/// unchanged from what background work reports for the same job. The two
+/// variants beside it are the two ways a call runs no job at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataCompactionOutcome {
+    /// The planner found no family group that has outgrown a bounded
+    /// reorganization step, so this call ran no job. It may have folded one
+    /// bounded unit instead, or lost the race for one, exactly as an ordinary
+    /// maintenance step does.
+    NotNeeded,
+    /// A job already holds this namespace's compaction slot. One runs at a
+    /// time per namespace, so this call ran none.
+    AlreadyRunning,
+    /// A job ran here, and this is how it ended.
+    Ran(loonfs_core::MetadataCompactionJobOutcome),
+}
+
+/// What one reorganization unit left for its caller.
+enum ReorganizationStep {
+    /// The unit is finished, and this is what it did.
+    Concluded(ReorganizeStepOutcome),
+    /// A family group has outgrown a bounded step. The caller starts the job
+    /// as background work, or runs it in its own task.
+    CompactionPlanned(loonfs_core::MetadataCompactionSpec),
+}
+
 impl FsAdmin {
     /// A mutating engine under this handle's actor identity.
     fn engine(
@@ -215,6 +243,23 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<ReorganizeStepOutcome> {
+        Ok(match self.reorganize_once(namespace_id).await? {
+            ReorganizationStep::Concluded(outcome) => outcome,
+            ReorganizationStep::CompactionPlanned(spec) => {
+                self.start_streaming_compaction(namespace_id, spec)
+            }
+        })
+    }
+
+    /// The one reorganization unit both paths run, and what it left for its
+    /// caller.
+    ///
+    /// A step starts the planned job as background work; an explicit
+    /// [`Self::compact_metadata`] runs it here. Everything before that point
+    /// is the same call, so the bookkeeping a published unit leaves behind —
+    /// the cache invalidation, the engagement count — happens once, whichever
+    /// path asked.
+    async fn reorganize_once(&self, namespace_id: &NamespaceId) -> Result<ReorganizationStep> {
         // A handle with no runner has no jobs and no counts, which reads to
         // the planner exactly as a namespace nothing is stuck on. It could
         // not start a job either way.
@@ -229,9 +274,9 @@ impl FsAdmin {
             .reorganize_metadata(pressure.view(&engagements))
             .await
             .map_err(RuntimeError::Core)?;
-        match report.outcome {
+        Ok(ReorganizationStep::Concluded(match report.outcome {
             loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
-                Ok(ReorganizeStepOutcome::NotNeeded)
+                ReorganizeStepOutcome::NotNeeded
             }
             loonfs_core::MetadataReorganizeOutcome::UnitPublished {
                 families,
@@ -260,16 +305,16 @@ impl FsAdmin {
                     bottom_anchored_merge_blocked,
                     "metadata reorganization unit published"
                 );
-                Ok(ReorganizeStepOutcome::UnitPublished)
+                ReorganizeStepOutcome::UnitPublished
             }
             loonfs_core::MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => {
-                Ok(self.start_streaming_compaction(namespace_id, spec))
+                return Ok(ReorganizationStep::CompactionPlanned(spec))
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
                 tracing::info!("metadata reorganization unit superseded; will retry");
-                Ok(ReorganizeStepOutcome::Superseded)
+                ReorganizeStepOutcome::Superseded
             }
-        }
+        }))
     }
 
     /// Starts the job a step planned, unless something already owns the
@@ -297,42 +342,110 @@ impl FsAdmin {
                 );
                 ReorganizeStepOutcome::CompactionStarted
             }
+            CompactionStart::Queued => {
+                tracing::info!(
+                    families = ?families,
+                    input_runs,
+                    input_rows,
+                    "a family group outgrew one reorganization step; its streaming metadata \
+                     compaction is waiting for a process compaction permit"
+                );
+                ReorganizeStepOutcome::CompactionAtCapacity
+            }
             CompactionStart::AlreadyRunning => {
                 tracing::info!(
                     families = ?families,
                     "a streaming metadata compaction is already running for this namespace; this \
                      group waits for it to finish"
                 );
-                ReorganizeStepOutcome::CompactionPending
+                ReorganizeStepOutcome::CompactionRunning
             }
             CompactionStart::NoRunner => {
                 tracing::warn!(
                     families = ?families,
                     "a family group needs a streaming metadata compaction, and this handle \
-                     schedules no background work; the group is unchanged"
+                     schedules no background work; run `FsAdmin::compact_metadata` to rebuild it"
                 );
-                ReorganizeStepOutcome::CompactionPending
+                ReorganizeStepOutcome::CompactionRequired
             }
         }
     }
 
+    /// Runs one planned streaming metadata compaction to its end, in the
+    /// caller's own task.
+    ///
+    /// This is the whole of metadata maintenance for a deployment that
+    /// schedules none: bounded steps run through
+    /// [`Self::maintenance_step_namespace`], and the one piece of upkeep that
+    /// does not fit a step runs here. It plans exactly as a step does, so a
+    /// step reporting [`ReorganizeStepOutcome::CompactionRequired`] is what
+    /// says a call here has work to do.
+    ///
+    /// The job is the same one background work runs: the same executor, the
+    /// same finalizer, and no durable record that it is running. Dropping the
+    /// returned future stops it, at the cost of the work it had done. A
+    /// handle attached to a writer's background work shares that writer's
+    /// namespace slots and compaction permits, so this waits its turn beside
+    /// the writer's own jobs and is cancelled by that writer's shutdown. A
+    /// standalone handle has neither, and the caller's own call rate is the
+    /// only limit on how many of these run at once.
+    pub async fn compact_metadata(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<MetadataCompactionOutcome> {
+        let ReorganizationStep::CompactionPlanned(spec) =
+            self.reorganize_once(namespace_id).await?
+        else {
+            return Ok(MetadataCompactionOutcome::NotNeeded);
+        };
+        let Some(compactions) = &self.compactions else {
+            // No runner behind this handle, so there is no slot to claim and
+            // no permit to wait for.
+            let cancellation = loonfs_core::MetadataCompactionCancellation::default();
+            return Ok(MetadataCompactionOutcome::Ran(
+                self.run_streaming_compaction(namespace_id, &spec, &cancellation)
+                    .await?,
+            ));
+        };
+        let Some(mut claim) = compactions.claim(namespace_id, &spec) else {
+            return Ok(MetadataCompactionOutcome::AlreadyRunning);
+        };
+        if !claim.admitted().await {
+            return Ok(MetadataCompactionOutcome::Ran(
+                loonfs_core::MetadataCompactionJobOutcome::Cancelled,
+            ));
+        }
+        let outcome = self
+            .run_streaming_compaction(namespace_id, &spec, claim.cancellation())
+            .await;
+        claim.finished(matches!(
+            outcome,
+            Ok(loonfs_core::MetadataCompactionJobOutcome::Published { .. })
+        ));
+        Ok(MetadataCompactionOutcome::Ran(outcome?))
+    }
+
     /// Runs one streaming compaction to its end and says what that end was.
     ///
-    /// The maintenance runner spawns this; nothing awaits it. Every ending
-    /// short of a publication leaves the manifest where it was and the
-    /// segments the job wrote unreferenced, so there is nothing to undo and
-    /// nothing to retry here — a later step plans the group again.
+    /// Both paths reach this: the background task the maintenance runner
+    /// spawns, which awaits nothing and reads the ending from the log, and
+    /// [`Self::compact_metadata`], which hands the ending to its caller.
+    /// Every ending short of a publication leaves the manifest where it was
+    /// and the segments the job wrote unreferenced, so there is nothing to
+    /// undo here — the caller gives its claim back and a later step plans the
+    /// group again.
     pub(crate) async fn run_streaming_compaction(
         &self,
         namespace_id: &NamespaceId,
         spec: &loonfs_core::MetadataCompactionSpec,
         cancellation: &loonfs_core::MetadataCompactionCancellation,
-    ) {
-        match self
+    ) -> Result<loonfs_core::MetadataCompactionJobOutcome> {
+        let outcome = self
             .engine(namespace_id)
             .run_metadata_compaction(spec, cancellation)
             .await
-        {
+            .map_err(RuntimeError::Core);
+        match &outcome {
             Ok(loonfs_core::MetadataCompactionJobOutcome::Published {
                 manifest_id,
                 rows_read,
@@ -372,6 +485,7 @@ impl FsAdmin {
                 "streaming metadata compaction failed; a later step plans it again"
             ),
         }
+        outcome
     }
 
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.

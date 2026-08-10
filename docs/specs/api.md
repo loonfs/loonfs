@@ -683,14 +683,20 @@ reclaimable state is collected; naming anything else is refused with
 `namespace_deleted`, because a tombstone has nothing to flush, reorganize,
 or retain.
 
-One reorganize outcome describes work the step did not do itself. A family
+Four reorganize outcomes describe work the step did not do itself. A family
 group that has outgrown one step is rebuilt by a background streaming
-compaction, and `reorganize.kind` reports `compaction_started` when the step
-started that job. The step publishes nothing in that case: the job publishes
-once, when it finishes. `compaction_pending` says the group needs one and
-this step started none, because a job is already running for the namespace —
-one runs at a time — or because the process serving the request schedules no
-background work. The server log says which.
+compaction, and the step publishes nothing in that case: the job publishes
+once, when it finishes. `reorganize.kind` says what became of that job.
+
+`compaction_started` means this step started one. `compaction_at_capacity`
+means this step's job claimed the namespace but is waiting for a process
+compaction permit, because the process is already running its limit of them;
+it starts when one frees. `compaction_running` means a job was already
+running for this namespace, which runs one at a time, so this step started
+none and a later step plans the group again. `compaction_required` means the
+group needs a job and the handle serving the request has no background work
+behind it at all, so nothing will run one until an operator does; the
+self-hosting guide names the call.
 
 Inside `metadata`, `max_wal_tail_segments` overrides the flush threshold;
 zero, and any value above the write-rejection threshold, are rejected as

@@ -470,8 +470,16 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                         ReorganizeStepOutcome::CompactionStarted => {
                             "started a background compaction of one family group"
                         }
-                        ReorganizeStepOutcome::CompactionPending => {
+                        ReorganizeStepOutcome::CompactionAtCapacity => {
+                            "queued a background compaction of one family group behind the \
+                             server's compaction limit"
+                        }
+                        ReorganizeStepOutcome::CompactionRunning => {
                             "one family group is waiting on a background compaction"
+                        }
+                        ReorganizeStepOutcome::CompactionRequired => {
+                            "one family group needs a compaction this server will not run on its \
+                             own"
                         }
                         ReorganizeStepOutcome::Superseded => "reorganize superseded",
                     }

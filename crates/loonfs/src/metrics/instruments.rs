@@ -57,6 +57,7 @@ struct Installed {
     recorder: Arc<dyn MetricsRecorder>,
     object_store: Mutex<HashMap<&'static str, ObjectStoreOperationInstruments>>,
     maintenance: Mutex<HashMap<&'static str, MaintenanceJobInstruments>>,
+    compactions: CompactionInstruments,
     publisher: PublisherInstruments,
     gc: GcInstruments,
 }
@@ -67,6 +68,7 @@ impl RuntimeInstruments {
     pub(crate) fn new(recorder: Option<Arc<dyn MetricsRecorder>>) -> Arc<Self> {
         Arc::new(Self {
             installed: recorder.map(|recorder| Installed {
+                compactions: CompactionInstruments::register(recorder.as_ref()),
                 publisher: PublisherInstruments::register(recorder.as_ref()),
                 gc: GcInstruments::register(recorder.as_ref()),
                 object_store: Mutex::new(HashMap::new()),
@@ -127,6 +129,26 @@ impl RuntimeInstruments {
             return;
         };
         installed.maintenance_job(job).probe_failures.increment(1);
+    }
+
+    /// Reports the streaming metadata compactions this process is running and
+    /// the ones holding a namespace slot while they wait for a permit.
+    ///
+    /// Queued is the number that matters on its own: jobs take as long as
+    /// they take, so a queue that never empties is a process serving more
+    /// namespaces than its compaction limit admits.
+    pub(crate) fn compactions(&self, running: usize, queued: usize) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed
+            .compactions
+            .running
+            .set(i64::try_from(running).unwrap_or(i64::MAX));
+        installed
+            .compactions
+            .queued
+            .set(i64::try_from(queued).unwrap_or(i64::MAX));
     }
 
     /// Reports the candidates a namespace has admitted but not yet taken.
@@ -419,6 +441,31 @@ impl MaintenanceJobInstruments {
             MaintenanceStepConclusion::Blocked => &self.blocked,
             MaintenanceStepConclusion::Superseded => &self.superseded,
             MaintenanceStepConclusion::NotEnabled => &self.not_enabled,
+        }
+    }
+}
+
+/// The two numbers that describe this process's streaming metadata
+/// compactions: how many are running, and how many are waiting to.
+struct CompactionInstruments {
+    running: Arc<dyn GaugeHandle>,
+    queued: Arc<dyn GaugeHandle>,
+}
+
+impl CompactionInstruments {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
+        Self {
+            running: recorder.register_gauge(
+                "loonfs.maintenance.compactions_running",
+                "Streaming metadata compactions this process is running",
+                &[],
+            ),
+            queued: recorder.register_gauge(
+                "loonfs.maintenance.compactions_queued",
+                "Streaming metadata compactions holding a namespace slot while they wait for a \
+                 process permit",
+                &[],
+            ),
         }
     }
 }

@@ -24,7 +24,7 @@
 //! its rows are decided one at a time by a point read into the job's snapshot
 //! ([`super::streaming_compaction`]) and it holds no state here at all.
 
-use super::reorganize::{bind_survives_frozen_floor, BindingGeneration};
+use super::frozen_floor::{bind_survives_frozen_floor, BindingGeneration};
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataTableFamily};
 use loonfs_api::{AttributeRevisionNo, ChangeSeq};

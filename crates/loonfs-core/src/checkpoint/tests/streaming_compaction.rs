@@ -657,15 +657,35 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     snapshot_keys: &BTreeSet<String>,
     result: &MetadataCompactionResult,
 ) -> Finalization {
+    finalize_streaming_compaction_under(
+        store,
+        namespace_id,
+        spec,
+        snapshot_keys,
+        result,
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+}
+
+/// The same, with the token the tests that cancel a finalization set.
+async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    snapshot_keys: &BTreeSet<String>,
+    result: &MetadataCompactionResult,
+    cancellation: &MetadataCompactionCancellation,
+) -> Finalization {
     let timer = StdMonotonicTimer::default();
     let mut lease = test_lease(namespace_id, spec, &timer);
     finalize_metadata_compaction(
         store,
         namespace_id,
-        &test_context(),
         spec,
         snapshot_keys,
         result.clone(),
+        cancellation,
         &mut lease,
     )
     .await
@@ -2478,5 +2498,266 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     assert!(
         visible_after.last().expect("the flush's file").visible,
         "the file the flush published must be visible after the swap"
+    );
+}
+
+/// When the namespace's root was last published.
+async fn root_updated_at_ms<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
+    read_metadata_root_object(store, namespace_id)
+        .await
+        .expect("read metadata root")
+        .envelope
+        .state
+        .updated_at_ms
+}
+
+/// The root's timestamp says when the publication landed, not when the job
+/// that produced it started.
+///
+/// A job holds its writer identity for as long as it runs, and a long one
+/// finishes hours after the context it was planned under was built. Stamping
+/// the root with that context would make a job that rebases over a newer
+/// flush move the namespace's `updated_at_ms` backwards.
+#[tokio::test]
+async fn a_rebased_publication_never_moves_the_root_timestamp_backward() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    else {
+        panic!("nothing cancelled this job");
+    };
+
+    // A flush lands while the job runs, stamping the root a minute past the
+    // context the job carries.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/landed-while-the-job-ran.txt",
+        b"landed while the job ran\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write a file the flush will publish");
+    let later = mutation_context(&context.writer_id, context.now_ms + 60_000);
+    flush::flush_wal(&store, &namespace_id, &later)
+        .await
+        .expect("the flush must publish");
+    let flushed_at_ms = root_updated_at_ms(&store, &namespace_id).await;
+    assert!(
+        flushed_at_ms >= later.now_ms,
+        "the flush must stamp the root with its own time"
+    );
+
+    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+
+    let published_at_ms = root_updated_at_ms(&store, &namespace_id).await;
+    assert!(
+        published_at_ms > context.now_ms,
+        "the root must carry publication time, not the time the job was planned at"
+    );
+    assert!(
+        published_at_ms >= flushed_at_ms,
+        "a job rebased over a newer flush must not move the root's timestamp backwards"
+    );
+}
+
+/// A token set after the last row costs the job its publication.
+///
+/// The executor finished, so there is a whole rebuilt group in memory and
+/// staged output on the store. None of it lands: the manifest stays where it
+/// was, and the staged segments stay orphans a later pass reclaims.
+#[tokio::test]
+async fn a_cancellation_after_the_last_row_publishes_nothing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let cancellation = MetadataCompactionCancellation::default();
+    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        small_segment_policy(),
+        &cancellation,
+    )
+    .await
+    else {
+        panic!("nothing cancelled this job while it read");
+    };
+    let manifest_before = current_manifest_object_id(&store, &namespace_id).await;
+    let visible_before = visible_namespace(&store, &namespace_id).await;
+
+    cancellation.cancel();
+    let finalization = finalize_streaming_compaction_under(
+        &store,
+        &namespace_id,
+        &spec,
+        &snapshot_keys,
+        &result,
+        &cancellation,
+    )
+    .await;
+
+    assert!(
+        matches!(finalization, Finalization::Cancelled),
+        "a cancelled finalization must publish nothing, got {finalization:?}"
+    );
+    assert_eq!(
+        current_manifest_object_id(&store, &namespace_id).await,
+        manifest_before,
+        "the manifest must be where the job found it"
+    );
+    assert_eq!(
+        visible_namespace(&store, &namespace_id).await,
+        visible_before,
+        "and a read must answer exactly what it answered before"
+    );
+    let staged = staged_object_keys(&store, &namespace_id).await;
+    let referenced = referenced_segment_keys(&store, &namespace_id).await;
+    assert!(
+        !staged.is_empty(),
+        "the job wrote segments before it was cancelled"
+    );
+    assert!(
+        staged.is_disjoint(&referenced),
+        "and nothing may reference them"
+    );
+}
+
+/// Fails every root compare-and-swap, and cancels the job the first time it
+/// tries one.
+///
+/// That is the shape a shutdown takes during finalization: attempts are still
+/// available, the races are still there to take, and the job must stop taking
+/// them.
+#[derive(Debug)]
+struct CancelAtTheFirstPublicationStore {
+    inner: LocalFsStore,
+    cancellation: MetadataCompactionCancellation,
+    manifests: AtomicUsize,
+}
+
+#[async_trait]
+impl ObjectStore for CancelAtTheFirstPublicationStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key.ends_with(".manifest.json") {
+            self.manifests.fetch_add(1, Ordering::SeqCst);
+        }
+        if matches!(mode, PutMode::CompareAndSwap { .. }) {
+            self.cancellation.cancel();
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+/// A shutdown during finalization does not wait out the attempts it has left.
+///
+/// The first attempt loses its race and the token is set while it does. The
+/// attempts after it are exactly the wait a shutdown must not sit through, so
+/// the job stops at the top of the next one rather than building three more
+/// manifests to lose three more races with.
+#[tokio::test]
+async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let cancellation = MetadataCompactionCancellation::default();
+    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        small_segment_policy(),
+        &cancellation,
+    )
+    .await
+    else {
+        panic!("nothing cancelled this job while it read");
+    };
+    let manifest_before = current_manifest_object_id(&store, &namespace_id).await;
+
+    let cancelling_store = CancelAtTheFirstPublicationStore {
+        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
+        cancellation: cancellation.clone(),
+        manifests: AtomicUsize::new(0),
+    };
+    let finalization = finalize_streaming_compaction_under(
+        &cancelling_store,
+        &namespace_id,
+        &spec,
+        &snapshot_keys,
+        &result,
+        &cancellation,
+    )
+    .await;
+
+    assert!(
+        matches!(finalization, Finalization::Cancelled),
+        "the cancelled attempt must not be retried, got {finalization:?}"
+    );
+    assert_eq!(
+        cancelling_store.manifests.load(Ordering::SeqCst),
+        1,
+        "only the attempt that was running when the token was set may build a manifest"
+    );
+    assert_eq!(
+        current_manifest_object_id(&store, &namespace_id).await,
+        manifest_before,
+        "and nothing may be published"
     );
 }

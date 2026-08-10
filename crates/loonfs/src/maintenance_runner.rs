@@ -463,10 +463,14 @@ pub(crate) struct RunnerInner {
     /// The streaming metadata compactions running under this runner, one per
     /// namespace at most, and the pressure that decides when one has to
     /// start. Held here rather than beside the admission book because a
-    /// compaction is not a bounded step: it takes no permit, it runs for as
-    /// long as it needs, and what the runner owes it is a spawn, a
-    /// cancellation at shutdown, and the drain every spawned task gets.
+    /// compaction is not a bounded step: it takes no admission permit, it
+    /// runs for as long as it needs, and what the runner owes it is a spawn,
+    /// a cancellation at shutdown, and the drain every spawned task gets.
     compactions: Arc<Mutex<BTreeMap<NamespaceId, compaction::NamespaceCompactions>>>,
+    /// What caps compactions across every namespace this process serves. The
+    /// map above stops two jobs sharing a namespace; this stops one process
+    /// holding a job's worth of memory per namespace it has touched.
+    compaction_permits: Arc<tokio::sync::Semaphore>,
 }
 
 struct RunnerState {
@@ -519,6 +523,9 @@ impl MaintenanceRunner {
                 counters: RunnerCounters::default(),
                 instruments,
                 compactions: Arc::new(Mutex::new(BTreeMap::new())),
+                compaction_permits: Arc::new(tokio::sync::Semaphore::new(
+                    compaction::MAX_CONCURRENT_COMPACTIONS,
+                )),
             }),
         }
     }
@@ -535,9 +542,9 @@ impl MaintenanceRunner {
     ///
     /// Every handle whose maintenance steps may plan one holds this, which is
     /// what makes the runner's own steps and an operator's explicit step see
-    /// the same jobs.
+    /// the same jobs and share the same permits.
     pub(crate) fn compactions(&self) -> BackgroundCompactions {
-        BackgroundCompactions::new(Arc::clone(&self.inner.compactions), &self.inner)
+        BackgroundCompactions::new(&self.inner)
     }
 
     /// The executor registered under `id`.

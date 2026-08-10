@@ -947,3 +947,219 @@ async fn the_runtime_registers_its_metadata_and_gc_jobs() {
         "an id may only be registered once"
     );
 }
+
+/// A plan for a job these tests never let read anything: what they assert on
+/// is the slot, the permit, and the token.
+fn compaction_plan() -> loonfs_core::MetadataCompactionSpec {
+    loonfs_core::MetadataCompactionSpec::planned_over_no_runs()
+}
+
+/// Claims the compaction slots of `count` namespaces named `job-0`, `job-1`,
+/// and so on, in order.
+fn claim_all(
+    compactions: &BackgroundCompactions,
+    count: usize,
+) -> Vec<compaction::CompactionClaim> {
+    (0..count)
+        .map(|index| {
+            compactions
+                .claim(&namespace_id(&format!("job-{index}")), &compaction_plan())
+                .expect("each namespace claims its own slot")
+        })
+        .collect()
+}
+
+/// The process limit is what bounds compactions, not the namespace count.
+///
+/// Every namespace that plans one claims its own slot, so the map cannot
+/// bound them: a process serving a hundred namespaces would run a hundred
+/// jobs. The permits are what stop that, and a job that cannot have one is
+/// queued rather than refused — its group is claimed either way, so nothing
+/// re-plans it and nothing merges it underneath.
+#[tokio::test]
+async fn at_most_the_process_limit_of_compactions_run_however_many_namespaces_plan_one() {
+    let runner = enabled_runner(TestJob::idle());
+    let compactions = runner.compactions();
+    let claims = claim_all(&compactions, compaction::MAX_CONCURRENT_COMPACTIONS + 2);
+
+    assert_eq!(
+        claims.iter().filter(|claim| !claim.is_queued()).count(),
+        compaction::MAX_CONCURRENT_COMPACTIONS,
+        "the permits are what decide how many run"
+    );
+
+    // The queued claims wait, and each one starts as a permit frees.
+    let mut claims = claims.into_iter();
+    let running: Vec<_> = claims
+        .by_ref()
+        .take(compaction::MAX_CONCURRENT_COMPACTIONS)
+        .collect();
+    let admitted = Arc::new(AtomicU64::new(0));
+    let waiting: Vec<_> = claims
+        .map(|mut claim| {
+            let admitted = Arc::clone(&admitted);
+            tokio::spawn(async move {
+                assert!(claim.admitted().await, "a freed permit admits this job");
+                admitted.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        admitted.load(Ordering::SeqCst),
+        0,
+        "a queued job runs nothing while every permit is held"
+    );
+
+    for (freed, claim) in running.into_iter().enumerate() {
+        drop(claim);
+        wait_for(
+            || admitted.load(Ordering::SeqCst) as usize > freed,
+            "the next queued compaction to start",
+        )
+        .await;
+    }
+    for task in waiting {
+        task.await.expect("the queued jobs settle");
+    }
+}
+
+/// One namespace, one job — whether the job is running or still queued.
+///
+/// The plan is in the map from the claim, which is also what leaves the
+/// group alone: a step that read a queued job's group and merged it would
+/// waste that job at finalization.
+#[tokio::test]
+async fn a_queued_job_still_holds_its_namespace_and_still_excludes_its_group() {
+    let runner = enabled_runner(TestJob::idle());
+    let compactions = runner.compactions();
+    let _running = claim_all(&compactions, compaction::MAX_CONCURRENT_COMPACTIONS);
+
+    let queued_namespace = namespace_id("queued");
+    let queued = compactions
+        .claim(&queued_namespace, &compaction_plan())
+        .expect("a namespace with no job claims its slot");
+    assert!(queued.is_queued(), "every permit is held");
+    assert!(
+        compactions
+            .claim(&queued_namespace, &compaction_plan())
+            .is_none(),
+        "a second job for one namespace is refused while the first waits"
+    );
+
+    let pressure = compactions.pressure(&queued_namespace);
+    let engagements = pressure.engagements();
+    assert!(
+        pressure.view(&engagements).active.is_some(),
+        "a queued job's group is left alone exactly as a running job's is"
+    );
+
+    drop(queued);
+    let pressure = compactions.pressure(&queued_namespace);
+    let engagements = pressure.engagements();
+    assert!(
+        pressure.view(&engagements).active.is_none(),
+        "and the slot goes back when the claim does"
+    );
+}
+
+/// A shutdown stops a job that is waiting for a permit, not only one that is
+/// reading rows.
+///
+/// A queued job has no block fetch to check its token between, so without
+/// this the drain would wait for a permit it is trying to stop needing.
+#[tokio::test]
+async fn cancellation_reaches_a_job_that_is_still_waiting_for_a_permit() {
+    let runner = enabled_runner(TestJob::idle());
+    let compactions = runner.compactions();
+    let _running = claim_all(&compactions, compaction::MAX_CONCURRENT_COMPACTIONS);
+    let mut queued = compactions
+        .claim(&namespace_id("queued"), &compaction_plan())
+        .expect("a namespace with no job claims its slot");
+    assert!(queued.is_queued());
+
+    let ran = Arc::new(AtomicU64::new(0));
+    let waiting = tokio::spawn({
+        let ran = Arc::clone(&ran);
+        async move {
+            let admitted = queued.admitted().await;
+            if admitted {
+                ran.fetch_add(1, Ordering::SeqCst);
+            }
+            admitted
+        }
+    });
+    tokio::task::yield_now().await;
+
+    compactions.cancel_all();
+
+    assert!(
+        !waiting.await.expect("the queued job settles"),
+        "a cancelled job must not be admitted by a permit that frees later"
+    );
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        0,
+        "and it must run nothing, so it stages nothing"
+    );
+}
+
+/// A published job puts its namespace's metadata maintenance back in the
+/// queue at once, and gives its slot back first.
+///
+/// A delta run that arrived while the job ran is exactly what a group blocked
+/// behind that job could not fold. Nothing durable reports that it can now,
+/// so without this nudge the fold waits for the next reconciliation sweep —
+/// and a nudge that arrived while the slot was still held would wake a step
+/// that leaves that group alone. A job that ended without publishing is
+/// planned again instead, and waits a sweep's worth of time so it does not
+/// start the same long job at once.
+#[tokio::test]
+async fn a_job_that_ends_frees_its_slot_and_requeues_its_namespace() {
+    let job = TestJob::gated([], StepAnswer::Conclude(MaintenanceStepConclusion::Idle));
+    let clock = ManualClock::at(1_700_000_000_000);
+    let runner = runner_with(FsBackgroundWork::Enabled, clock.clone(), job.clone());
+    let compactions = runner.compactions();
+    // The one admission permit is held by a step that never finishes, so a
+    // nudged key stays where the nudge put it.
+    runner
+        .handle()
+        .nudge(TEST_JOB, &namespace_id("holds-the-permit"));
+    job.gate().wait_entered(1).await;
+
+    let published = namespace_id("published");
+    compactions
+        .claim(&published, &compaction_plan())
+        .expect("the namespace claims its slot")
+        .finished(true);
+    assert!(
+        runner.is_pending(MaintenanceJobId::METADATA, &published),
+        "a published job hands the namespace straight back to metadata maintenance"
+    );
+    assert_eq!(
+        runner.not_before_ms(MaintenanceJobId::METADATA, &published),
+        None,
+        "and it waits for nothing"
+    );
+    let pressure = compactions.pressure(&published);
+    let engagements = pressure.engagements();
+    assert!(
+        pressure.view(&engagements).active.is_none(),
+        "the slot is back before the nudge, so the step it wakes may fold the rebuilt group"
+    );
+
+    let abandoned = namespace_id("abandoned");
+    compactions
+        .claim(&abandoned, &compaction_plan())
+        .expect("the namespace claims its slot")
+        .finished(false);
+    assert_eq!(
+        runner.not_before_ms(MaintenanceJobId::METADATA, &abandoned),
+        Some(clock.now_ms() + RECONCILE_INTERVAL_MS),
+        "a job that published nothing is planned again after a backoff, not at once"
+    );
+
+    job.gate().release(8);
+    runner.close_admission();
+    runner.drain().await.expect("the held step settles");
+}

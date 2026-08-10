@@ -22,9 +22,13 @@
 //!   [`row`] handles manifest-row encoding.
 //! - [`reorganize`] compacts bounded family groups into new base runs, and
 //!   [`streaming_compaction`] rebuilds a group whose bottom-anchored window
-//!   no longer fits one of those steps — with [`compaction_retention`]
-//!   holding the frozen floor's rules as streaming state and
-//!   [`compaction_lease`] holding the running job's claim on its own output.
+//!   no longer fits one of those steps. The job's own parts are split by what
+//!   they do: [`compaction_merge`] reads its input, [`compaction_retention`]
+//!   holds the frozen floor's rules as streaming state,
+//!   [`compaction_output`] writes its segments, and [`compaction_lease`]
+//!   holds its claim on them. [`frozen_floor`] holds the drop rules the
+//!   bounded merge and the streaming job both read, because neither owns
+//!   them.
 //! - [`retention`] advances the retention floor behind verified progress.
 //! - [`runs`] models the LSM run layout shared by all of the above,
 //!   [`cache`] holds decoded SST blocks keyed by content digest, and
@@ -36,12 +40,15 @@ mod block_load;
 mod build;
 mod cache;
 mod compaction_lease;
+mod compaction_merge;
+mod compaction_output;
 mod compaction_retention;
 mod create;
 mod data_block_load;
 mod error;
 mod files;
 mod flush;
+mod frozen_floor;
 mod list;
 mod load;
 mod publish;
