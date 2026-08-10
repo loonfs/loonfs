@@ -12,6 +12,13 @@
 //! read each other; revisions travel with their descending index so index
 //! parity holds within every unit.
 //!
+//! The merging itself is not here. A step drives the same engine a background
+//! compaction drives ([`super::streaming_compaction`]), synchronously and with
+//! nothing around it: no lease, no job, no registry, no admission, and output
+//! written at ordinary table keys because the publication that names it is the
+//! step's own. What the step owns is choosing the window, publishing the
+//! result, and reporting what it did.
+//!
 //! A merge writes a base-tier run when, and only when, its window starts at
 //! the group's oldest run. That is the same condition retention dropping
 //! needs, so the level a run carries and the rules that produced it say the
@@ -52,42 +59,28 @@
 //! either reporting that the namespace needs one or running it.
 
 use super::block_fetch::load_segment_index_for_reorganization;
-use super::build::{
-    build_manifest_tables_from_rows, debug_assert_manifest_table_segments_do_not_overlap,
-    MetadataTableSegmentation,
-};
 use super::error::ManifestLoadError;
 use super::flush::{ensure_metadata_publication_budget, next_manifest_id_after};
-use super::frozen_floor::{
-    bind_survives_frozen_floor, unbindings_at_or_below_floor, BindingGeneration,
-};
-use super::load::{
-    load_verified_manifest_tables, validate_direntry_child_bind_index,
-    validate_revision_by_inode_desc_index,
-};
+use super::load::load_verified_manifest_tables;
 use super::publish::{
     manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
 };
 use super::runs::{
-    flatten_manifest_tables, l0_run_count, MetadataFamilyGroup, MetadataLsmPolicy,
-    MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
-    REORGANIZE_FAMILY_GROUPS,
+    l0_run_count, MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest,
+    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, REORGANIZE_FAMILY_GROUPS,
 };
 use super::scan::VerifiedMetadataTables;
-use super::streaming_compaction::MetadataCompactionSpec;
+use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{read_head_object, read_metadata_root_object_if_present};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
-    ActiveDeletionRowAction, MetadataFileRef, MetadataRow, MetadataTableFamily,
-    NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MetadataFileRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{
-    AttributeRevisionNo, ChangeSeq, InodeId, ManifestId, ManifestObjectId, NamespaceId,
-};
+use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -344,69 +337,22 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         }
     };
 
-    // Merge only the selected complete runs. The scan reads exactly the
-    // manifest's tables — never the WAL tail — and the unselected
-    // descriptors remain in the replacement manifest unchanged.
-    let mut rows_by_family = BTreeMap::<MetadataTableFamily, Vec<MetadataRow>>::new();
-    for family in group.families() {
-        let rows = tables
-            .scan_prefix_in_runs(&input.runs, *family, "")
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-        rows_by_family.insert(*family, rows);
-    }
-    // The paired groups exist to preserve index parity; verify it on the
-    // selected complete runs before writing anything.
-    if group.contains(MetadataTableFamily::DirentryBinds) {
-        validate_direntry_child_bind_index(
-            root.manifest_object_id.as_ref(),
-            rows_by_family
-                .get(&MetadataTableFamily::DirentryBinds)
-                .map_or(&[], Vec::as_slice),
-            rows_by_family
-                .get(&MetadataTableFamily::DirentryChildBinds)
-                .map_or(&[], Vec::as_slice),
-        )
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
-    }
-    if group.contains(MetadataTableFamily::Revisions) {
-        validate_revision_by_inode_desc_index(
-            root.manifest_object_id.as_ref(),
-            rows_by_family
-                .get(&MetadataTableFamily::Revisions)
-                .map_or(&[], Vec::as_slice),
-            rows_by_family
-                .get(&MetadataTableFamily::RevisionsByInodeDesc)
-                .map_or(&[], Vec::as_slice),
-        )
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
-    }
-    // Dropping is only visibility-preserving over a merge that starts at the
-    // group's oldest run, which is what the placement records. A window that
-    // had to skip older runs merges them exactly as they are, so its output
-    // holds every row its inputs held.
-    if input.placement.may_drop_rows_below_the_retention_floor() {
-        drop_rows_below_retention_floor(&mut rows_by_family, floor_seq)?;
-    }
-
-    let run_tables = build_manifest_tables_from_rows(
+    // Merge only the selected complete runs, through the one engine both
+    // reorganization paths run ([`super::streaming_compaction`]). It reads
+    // exactly the manifest's tables — never the WAL tail — and the unselected
+    // descriptors remain in the replacement manifest unchanged. Whether it
+    // drops rows follows from the placement, and its segments go to ordinary
+    // table keys because this step publishes them below.
+    let merged = merge_group_in_step(
         store,
         namespace_id,
-        input.placement.output_seq(),
-        input.placement.output_level(),
-        |family| rows_by_family.remove(&family).unwrap_or_default(),
-        MetadataTableSegmentation::Base {
-            max_rows_per_segment: policy.max_rows_per_segment,
-        },
+        group,
+        &input.runs,
+        input.placement,
+        floor_seq,
+        policy,
     )
     .await?;
-    debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
 
     let mut metadata_files: Vec<_> = previous
         .payload
@@ -420,7 +366,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         })
         .cloned()
         .collect();
-    metadata_files.extend(flatten_manifest_tables(run_tables));
+    metadata_files.extend(merged.output_segments);
     // `base_seq` is the manifest's oldest-run marker: every referenced run
     // must sit at or above it, including L0 runs other groups have not
     // folded yet.
@@ -1018,252 +964,4 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_write_failure)?;
     Ok(manifest)
-}
-
-/// Drops rows that no retained sequence can observe (format spec,
-/// "Compaction"). Conservative subset: superseded or unbound bindings and
-/// spent unbind markers at or below the retention floor, and cancelled
-/// active-deletion pairs. Revision rows are never dropped — file history is
-/// durable data retained independently of the replay floor — and tombstone
-/// and inode rows are always retained until reachability-based dropping is
-/// designed.
-///
-/// A bounded merge holds every row of its window, so this reads them all at
-/// once. A streaming compaction cannot hold them, and runs the same rules as
-/// streaming operators instead ([`super::compaction_retention`]); the
-/// equivalence oracle in the tests is what says the two reach the same rows.
-pub(super) fn drop_rows_below_retention_floor(
-    rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
-    retention_floor_seq: ChangeSeq,
-) -> Result<()> {
-    let unbound_at_floor = unbindings_at_or_below_floor(
-        rows_by_family
-            .get(&MetadataTableFamily::DirentryUnbinds)
-            .map_or(&[], Vec::as_slice),
-        retention_floor_seq,
-    );
-    drop_rows_below_frozen_floor(rows_by_family, retention_floor_seq, &unbound_at_floor)
-}
-
-/// [`drop_rows_below_retention_floor`] against an unbind set the caller
-/// already built, so the retention floor and the unbind set that goes with it
-/// are stated once for the whole window.
-fn drop_rows_below_frozen_floor(
-    rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
-    retention_floor_seq: ChangeSeq,
-    unbound_at_floor: &BTreeSet<BindingGeneration>,
-) -> Result<()> {
-    refuse_superseded_bind_without_unbind(
-        rows_by_family
-            .get(&MetadataTableFamily::DirentryBinds)
-            .map_or(&[], Vec::as_slice),
-        retention_floor_seq,
-        unbound_at_floor,
-    )?;
-    for family in [
-        MetadataTableFamily::DirentryBinds,
-        MetadataTableFamily::DirentryChildBinds,
-    ] {
-        if let Some(rows) = rows_by_family.get_mut(&family) {
-            rows.retain(|row| {
-                bind_survives_frozen_floor(row, retention_floor_seq, unbound_at_floor)
-            });
-        }
-    }
-    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::DirentryUnbinds) {
-        rows.retain(|row| match row {
-            MetadataRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq > retention_floor_seq,
-            _ => true,
-        });
-    }
-
-    // Active deletions are current state, not history, so the retention
-    // floor has NO say over them: a deletion stays listed and recoverable
-    // however far the floor advances — that is the product promise, and
-    // dropping a row at the floor would silently retire a recoverable
-    // deletion. The only rows that go are the pairs that cancelled each
-    // other. A removal marker's listed row is always in the same merged set:
-    // the deletion commits before the undelete, runs merge oldest-first, and
-    // the selected subset is a prefix of that order, so a marker can never
-    // outlive the row it names. A streaming compaction groups the family by
-    // deletion identity, which is the pair's shared key prefix, so the pair
-    // lands in one group there too.
-    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::ActiveDeletions) {
-        let revoked: BTreeSet<(ChangeSeq, InodeId)> = rows
-            .iter()
-            .filter_map(|row| match row {
-                MetadataRow::ActiveDeletion {
-                    root_inode_id,
-                    deleted_at_seq,
-                    action: ActiveDeletionRowAction::Removed { .. },
-                } => Some((*deleted_at_seq, *root_inode_id)),
-                _ => None,
-            })
-            .collect();
-        rows.retain(|row| match row {
-            MetadataRow::ActiveDeletion {
-                root_inode_id,
-                deleted_at_seq,
-                action,
-            } => match action {
-                ActiveDeletionRowAction::Removed { .. } => false,
-                ActiveDeletionRowAction::Listed { .. } => {
-                    !revoked.contains(&(*deleted_at_seq, *root_inode_id))
-                }
-            },
-            _ => true,
-        });
-    }
-
-    // The idempotency horizon is the retention floor: a receipt dropped
-    // here makes its id indistinguishable from one never used, so a commit
-    // retried from below the floor commits AGAIN as a new mutation (format
-    // spec §3.3; pinned by `a_retry_past_the_receipt_horizon_commits_again`).
-    // Replay is guaranteed exactly as long as retained history.
-    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::CommitReceipts) {
-        rows.retain(|row| match row {
-            MetadataRow::CommitReceipt { committed_seq, .. } => {
-                *committed_seq >= retention_floor_seq
-            }
-            _ => true,
-        });
-    }
-
-    drop_superseded_attribute_revisions(rows_by_family, retention_floor_seq)?;
-    Ok(())
-}
-
-/// Refuses to compact bind rows that break the writer invariant the drop
-/// rests on.
-///
-/// At the floor only the latest bind per (parent, name) slot is visible, and a
-/// bind is only ever superseded by an operation that also unbinds it. So every
-/// non-latest bind at or below the floor must have a matching unbind at or
-/// below the floor. Where that does not hold, dropping by
-/// [`bind_survives_frozen_floor`] would keep a bind no read can reach and call
-/// it live, so the compaction stops instead.
-fn refuse_superseded_bind_without_unbind(
-    bind_rows: &[MetadataRow],
-    retention_floor_seq: ChangeSeq,
-    unbound_at_floor: &BTreeSet<BindingGeneration>,
-) -> Result<()> {
-    let mut latest_bind_at_floor = BTreeMap::new();
-    for row in bind_rows {
-        if let MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } = row
-        {
-            if *bind_seq <= retention_floor_seq {
-                let candidate = (*bind_seq, *bind_delta_index);
-                let latest = latest_bind_at_floor
-                    .entry((*parent_inode_id, name_key.clone()))
-                    .or_insert(candidate);
-                if candidate > *latest {
-                    *latest = candidate;
-                }
-            }
-        }
-    }
-    for row in bind_rows {
-        if let MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } = row
-        {
-            if *bind_seq <= retention_floor_seq
-                && latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
-                    != Some(&(*bind_seq, *bind_delta_index))
-                && !unbound_at_floor.contains(&(
-                    *parent_inode_id,
-                    name_key.clone(),
-                    *bind_seq,
-                    *bind_delta_index,
-                ))
-            {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "bind at seq `{bind_seq}` delta {bind_delta_index} for parent `{parent_inode_id}` is superseded at or below the retention floor without an unbind; refusing to drop rows"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Keeps every attribute revision above the retention floor, plus the newest
-/// revision at or below it per inode, and drops the rest.
-///
-/// An attribute revision is current state, not history: the newest one for an
-/// inode is what every read answers with, and no retained sequence can
-/// observe an older one once a newer one is at or below the floor. The
-/// newest-at-floor row is kept even when its map is empty, because an empty
-/// map is the cleared state — dropping it would let an older non-empty map
-/// become the newest row and resurrect attributes a caller cleared.
-///
-/// Attributes are never dropped for being unreachable. A deleted inode keeps
-/// its rows, the same posture inode and tombstone rows take, and that is what
-/// makes an undelete give back the map the inode had.
-///
-/// The rule reads one inode's rows and no others, and reads them newest
-/// first, so a streaming compaction reaches the same answer holding two
-/// fields instead of the inode's history.
-fn drop_superseded_attribute_revisions(
-    rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
-    retention_floor_seq: ChangeSeq,
-) -> Result<()> {
-    let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::Attributes) else {
-        return Ok(());
-    };
-    // Writer invariant: one inode's attribute revisions are
-    // numbered without gaps or repeats, so "the newest at or below the floor"
-    // names exactly one row. Two rows sharing a number would make the choice
-    // arbitrary and the drop unsafe; refuse to compact state that violates
-    // it.
-    let mut newest_at_floor = BTreeMap::<InodeId, AttributeRevisionNo>::new();
-    let mut seen_at_floor = BTreeSet::<(InodeId, AttributeRevisionNo)>::new();
-    for row in rows.iter() {
-        let MetadataRow::AttributesRevision {
-            inode_id,
-            attributes_revision_no,
-            committed_seq,
-            ..
-        } = row
-        else {
-            continue;
-        };
-        if *committed_seq > retention_floor_seq {
-            continue;
-        }
-        if !seen_at_floor.insert((*inode_id, *attributes_revision_no)) {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "inode `{inode_id}` has two attribute rows at revision `{attributes_revision_no}` at or below the retention floor; refusing to drop rows"
-            )));
-        }
-        let newest = newest_at_floor
-            .entry(*inode_id)
-            .or_insert(*attributes_revision_no);
-        if attributes_revision_no > newest {
-            *newest = *attributes_revision_no;
-        }
-    }
-
-    rows.retain(|row| match row {
-        MetadataRow::AttributesRevision {
-            inode_id,
-            attributes_revision_no,
-            committed_seq,
-            ..
-        } => {
-            *committed_seq > retention_floor_seq
-                || newest_at_floor.get(inode_id) == Some(attributes_revision_no)
-        }
-        _ => true,
-    });
-    Ok(())
 }

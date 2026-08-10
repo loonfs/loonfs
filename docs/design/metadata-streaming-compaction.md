@@ -37,6 +37,16 @@ Merges above the base can continue reducing delta-run count, but they cannot app
 - Changes to the metadata segment format.
 - Configurable process-wide concurrency. The maintenance runner uses a fixed limit of two concurrent jobs.
 
+## One engine, two orchestrations
+
+Both reorganization paths merge with the same code. A maintenance step runs it synchronously over the window its budgets selected, and a background job runs it over every run a group holds. The merge itself does not know which one is driving it: it reads sorted iterators, applies the retention operators, writes segments, and reports what it wrote. Rows are dropped when, and only when, the merge placement is base-tier, which is the same rule that decides the output level.
+
+The two orchestrations exist because the work has two shapes. A step-contained merge is the frequent small case. It is bounded by the step's input budgets, it publishes inside the step that ran it, and paying for a lease, a staging prefix, a registry entry, and an admission permit on every one of them would be pure overhead. It also preserves the step contract that `ManualOnly` deployments drive: one call does one unit of work and either publishes it or reports that there was nothing to do.
+
+The background job exists because work of unbounded duration cannot be done that way. A job may run for minutes or hours, so its output has to be staged where a lease can speak for it, its concurrency has to be admitted, and its publication has to revalidate the input it read. Those costs buy nothing for a merge that finishes inside its own step.
+
+One thing inside the merge follows the same split, and only one: how a reverse bind row is resolved. The two resource contracts genuinely differ there, and the section on reverse-index resolution below says how. Everything else — iteration, retention, segment writing, index parity, and what the merge reports — is the same code for both.
+
 ## Compaction flow
 
 Normal bounded merges remain the preferred path. Streaming compaction is selected when a family group has repeatedly required work while its bottom-anchored merge cannot fit within one maintenance step.
@@ -90,9 +100,9 @@ Runs published after the snapshot was captured are not part of the compaction in
 
 ## Streaming executor
 
-Each family is read through a sorted iterator over its selected runs. A k-way merge selects the next row in family key order. Completed output segments are written as soon as they reach the normal segment target size.
+This is the engine both paths run. Each family is read through a sorted iterator over its selected runs. A k-way merge selects the next row in family key order. Completed output segments are written as soon as they reach the normal segment target size. A background job writes them under its own prefix; a step-contained merge writes them at ordinary table keys, because the publication that names them lands in the same step and the ordinary write-time grace already covers them.
 
-The following resources have explicit limits:
+The following resources have explicit limits, and they bound both paths:
 
 - Decoded input blocks held by each iterator.
 - Concurrent object-store fetches.
@@ -113,11 +123,29 @@ Rows are processed as follows:
 - Attribute rows arrive newest first for each inode. The operator tracks whether it has retained the newest row at or below the floor and detects repeated revision numbers without retaining the complete history.
 - Active-deletion rows are ordered so a removal marker arrives before the row it removes. One flag is enough to remove the pair together.
 - Forward binding rows are grouped by binding generation. The operator holds at most one bind row until the matching unbind rows arrive, and it retains one generation identity to validate the parent-and-name slot.
-- Reverse child-binding rows use bloom-filtered point lookups against the snapshot's unbind rows because their key order differs from the forward binding table.
+- Reverse child-binding rows are resolved against the same below-floor unbound generations, reached by one of two routes because their key order differs from the forward binding table. The next section says which route and why.
 
-Bindings and revisions have secondary indexes that must remain equivalent to their canonical families. The executor computes order-independent digests for the canonical and index rows selected for output. A mismatch fails the job before publication.
+Bindings and revisions have secondary indexes that must remain equivalent to their canonical families. The executor computes order-independent digests for the canonical and index rows selected for output, and a mismatch fails the merge before publication. This is the only index-parity check either path makes. It covers the rows a merge wrote rather than the rows it read, so it states that the two families dropped in lockstep and not only that their inputs matched.
+
+Every metadata row key identifies one row, and nothing downstream re-establishes that: reads concatenate runs rather than deduplicating them, and the segment writer rejects a descending key but not a repeated one. The executor therefore holds the last input row key it saw for each family and requires the next one to be strictly greater. An equal key is namespace corruption and names the family and the key; a smaller key is an internal error against the merge itself. The check runs over the merge's input, so it sees a duplicate that retention would have dropped, one split across two runs, and one split across two segments. It is separate from the digests and catches a different fault: a duplicate present in both families of an index pair leaves both multisets equal, so the digests pass it.
 
 The executor reports its peak retained-row count. Resource tests use heavily reused inodes and binding slots to verify that this value remains constant.
+
+## Reverse-index resolution
+
+A reverse child-binding row is keyed by child while the unbind that retires its binding is keyed by parent, so no grouping of the merged stream holds the two together. Both paths decide such a row with the same rule against the same set of below-floor unbound generations. They build that set differently, because their resource contracts differ.
+
+A background job reads the unbinds of one binding out of its snapshot, one bloom-filtered point lookup per reverse row at or below the floor, behind a bounded decoded-block cache. A job has no bound on the group it rebuilds, so it must not hold a set that grows with that group.
+
+A merge inside a maintenance step collects the below-floor unbound generations while the forward binding cluster streams the unbind family, and the reverse cluster consults that set. The set holds one generation identity per below-floor unbind row in the window, so it is capped by the same row and decoded-byte budgets that capped the window, and it costs no reads at all.
+
+The step does not use point lookups because their cost is not bounded by those budgets. The lookups are one per reverse row, and each becomes a separate round trip once the cache can no longer hold the window's unbind family. The step's row budget admits about 43,000 unbind rows in a bindings window, so that family reaches the 16 MiB cache at roughly 380 bytes a row, which is an ordinary name length; the decoded-byte budget is four times the cache and allows more still.
+
+Measured on a window whose unbind family just fills the cache, with the reverse index walking it out of order, 65,536 reverse rows cost 27,427 data-block reads and 309 MB transferred against 16 MB of priced input. Doubling the family to twice the cache doubled it again: 131,072 reverse rows, 54,819 data-block reads, 707 MB. The cost per reverse row does not settle, because each row is decided on its own.
+
+The same 65,536-row window resolved from the collected set costs 386 data-block reads and 3.7 MB, which is the window read once. The collected set is also the smaller resident structure: one generation identity per below-floor unbind is well under the 16 MiB cache it replaces.
+
+Step budgets therefore price the selected logical input, and a step-contained merge reads exactly that: each selected segment's index once and its data once. Reverse resolution adds no store work to it.
 
 ## Job leases and garbage collection
 
@@ -159,7 +187,10 @@ Lifecycle logging covers job selection, start, progress, publication, cancellati
 
 The implementation is validated with the following tests:
 
-- Compare streaming output with a whole-group fold over the same snapshot.
+- Compare a background job's output with a synchronous merge in a maintenance step over the same snapshot. Both run the same engine, so this test guards the orchestration split rather than two merge implementations.
+- Confirm that a step-contained merge holds the same bounded input blocks, fetch width, and retention state the background job holds.
+- Confirm that a step-contained merge reads each selected segment's index once and its data once, and makes no reverse-index lookup, while a background job over the same window makes one lookup per reverse row the floor covers.
+- Reject a row key repeated in both families of a secondary-index pair, on both paths, without publishing.
 - Confirm that new runs published during execution survive finalization.
 - Confirm that changed input causes abandonment without publication.
 - Exercise compare-and-swap retries after unrelated manifest updates.
@@ -174,6 +205,7 @@ The implementation is validated with the following tests:
 - Verify that explicit compaction and maintenance without a background runner select full compaction immediately for a frozen base.
 - Process large attribute histories and heavily reused binding slots while holding at most one row in retention state.
 - Reject canonical-family and secondary-index mismatches before publication.
+- Reject a metadata family whose merge input repeats a row key.
 - Load a published manifest whose descriptors still use compaction-prefix object keys.
 
 ## Deferred work

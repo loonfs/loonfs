@@ -1,22 +1,21 @@
-//! Rebuilding a family group in one streaming job: the plan split, the
-//! oracle that says a streaming job and a whole-group fold reach the same
-//! place, restart equivalence, and the resource bounds that make the job
-//! independent of the size of what it rebuilds.
+//! Rebuilding a family group in one background job: the plan split, the
+//! oracle that says the job's orchestration and a maintenance step's reach the
+//! same place, restart equivalence, and the resource bounds that make a merge
+//! independent of the size of what it merges.
 
 use super::super::compaction_lease::{
     claim_compaction_prefix, CompactionLease, CompactionPrefixOwner, LeaseHold,
 };
 use super::super::reorganize::{
-    drop_rows_below_retention_floor, select_reorganization_input, FrozenBasePolicy,
-    ReorganizationPlan,
+    group_run_descriptors, select_reorganization_input, FrozenBasePolicy, ReorganizationPlan,
 };
 use super::super::row::manifest_row_commit_seq;
 use super::super::runs::MetadataFamilyGroup;
 use super::super::scan::VerifiedMetadataTables;
 use super::super::streaming_compaction::{
-    finalize_metadata_compaction, run_metadata_compaction, snapshot_segment_keys, Finalization,
-    MetadataCompactionCancellation, MetadataCompactionOutcome, MetadataCompactionResult,
-    MetadataCompactionSpec,
+    finalize_metadata_compaction, merge_group_in_step, run_metadata_compaction,
+    snapshot_segment_keys, Finalization, MetadataCompactionCancellation, MetadataCompactionOutcome,
+    MetadataCompactionSpec, MetadataMergeResult,
 };
 use super::*;
 use crate::limits::METADATA_COMPACTION_LEASE_EXPIRY_MS;
@@ -676,7 +675,7 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     snapshot_keys: &BTreeSet<String>,
-    result: &MetadataCompactionResult,
+    result: &MetadataMergeResult,
 ) -> Finalization {
     finalize_streaming_compaction_under(
         store,
@@ -695,7 +694,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     snapshot_keys: &BTreeSet<String>,
-    result: &MetadataCompactionResult,
+    result: &MetadataMergeResult,
     cancellation: &MetadataCompactionCancellation,
 ) -> Finalization {
     let timer = StdMonotonicTimer::default();
@@ -719,7 +718,7 @@ async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     snapshot_keys: &BTreeSet<String>,
-    result: &MetadataCompactionResult,
+    result: &MetadataMergeResult,
 ) -> ManifestId {
     match finalize_streaming_compaction(store, namespace_id, spec, snapshot_keys, result).await {
         Finalization::Published(manifest_id) => manifest_id,
@@ -801,8 +800,8 @@ async fn staged_object_keys<S: ObjectStore + ?Sized>(
         .await
 }
 
-/// Runs the whole-group fold with the budgets raised, which is the other way
-/// of doing what the streaming job does.
+/// Merges the group inside one maintenance step with the budgets raised, which
+/// is the other way of running the same engine.
 async fn fold_group_whole<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1183,12 +1182,21 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
 // The oracle
 // -------------------------------------------------------------------------
 
-/// A streaming compaction and a whole-group fold with the budgets raised are
-/// two ways of doing the same thing, so they must land in the same place: the
-/// same surviving rows in every family of the group, the same materialized
-/// namespace, and the same rows dropped.
+/// A background compaction and a synchronous merge inside a maintenance step
+/// with the budgets raised must land in the same place: the same surviving rows
+/// in every family of the group, the same materialized namespace, and the same
+/// rows dropped.
+///
+/// Both paths run one engine, so this no longer bridges two implementations of
+/// the merge. What it guards now is the orchestration split. The background job
+/// resolves its input from a spec captured before it started, stages its output
+/// under its own prefix behind a lease, and swaps it in with a separate
+/// publication much later; the step chooses its window from the manifest it
+/// just read, writes at ordinary table keys, and publishes in the same step.
+/// Those are different enough that a change to either one can move the rows a
+/// reader ends up with, and this is what says it did not.
 #[tokio::test]
-async fn a_streaming_compaction_and_a_whole_group_fold_reach_the_same_rows() {
+async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows() {
     let job_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(job_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1248,7 +1256,7 @@ async fn a_streaming_compaction_and_a_whole_group_fold_reach_the_same_rows() {
 
     assert_eq!(
         compacted, folded,
-        "a streaming compaction and a whole-group fold must keep the same rows"
+        "a background compaction and a step-contained merge must keep the same rows"
     );
     assert!(
         metadata_states_equivalent(
@@ -1318,9 +1326,9 @@ async fn a_streaming_compaction_and_a_whole_group_fold_reach_the_same_rows() {
     }
 }
 
-/// The oracle has teeth only if the retention operators are what make the two
+/// The oracle has teeth only if the retention rules are what make the two
 /// rebuilds agree. A floor of zero is above nothing, so every rule that reads
-/// the floor keeps every row, and the job must then disagree with the fold.
+/// the floor keeps every row, and the job must then disagree with the step.
 #[tokio::test]
 async fn a_compaction_that_drops_nothing_fails_the_oracle() {
     let job_dir = tempdir().expect("tempdir");
@@ -1356,12 +1364,12 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
     let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
     assert_ne!(
         compacted, folded,
-        "with the floor rules keeping everything, the job must not reach the fold's rows"
+        "with the floor rules keeping everything, the job must not reach the step's rows"
     );
     assert!(
         compacted.values().map(Vec::len).sum::<usize>()
             > folded.values().map(Vec::len).sum::<usize>(),
-        "and must keep strictly more rows than the fold kept"
+        "and must keep strictly more rows than the step kept"
     );
 }
 
@@ -1403,6 +1411,622 @@ async fn a_compaction_of_the_revisions_group_rewrites_every_row_it_reads() {
         group_rows_of_current_manifest(&store, &namespace_id, group).await,
         before,
         "revision rows are durable history and are never dropped"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Duplicate row keys
+// -------------------------------------------------------------------------
+
+/// The object keys the current manifest holds for `group`.
+async fn group_segment_keys<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    group: MetadataFamilyGroup,
+) -> BTreeSet<String> {
+    let tables = load_current_manifest_tables(store, namespace_id).await;
+    snapshot_runs_for_group(tables.manifest(), group)
+        .iter()
+        .flat_map(|run| group_run_descriptors(run, group))
+        .map(|descriptor| descriptor.object_key.clone())
+        .collect()
+}
+
+/// Rewrites the group's base-run segment for `family` with `rows`, updating
+/// the descriptor in `manifest` to match.
+async fn rewrite_base_segment(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    manifest: &mut NamespaceManifestEnvelope,
+    family: ApiMetadataTableFamily,
+    mut rows: Vec<MetadataRow>,
+) {
+    rows.sort_by_key(|row| row.row_key_for_family(family));
+    let head_seq = manifest.payload.head_seq;
+    let descriptor = manifest
+        .payload
+        .metadata_files
+        .iter_mut()
+        .find(|metadata_file| {
+            metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL && metadata_file.family == family
+        })
+        .expect("the folded base run holds this family");
+    super::index_parity::rewrite_manifest_segment(
+        store,
+        namespace_id,
+        head_seq,
+        family,
+        descriptor,
+        rows,
+        NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).expect("the default target is positive"),
+    )
+    .await;
+}
+
+/// A run whose canonical family and secondary index both hold the same row
+/// twice is refused by both orchestration paths, and neither publishes.
+///
+/// The duplicate has to be on both sides. The output digests compare the two
+/// families against each other, so a one-sided duplicate only re-proves what
+/// the digests already catch; a duplicate present on both sides leaves both
+/// multisets equal and passes them. The segment builder does not catch it
+/// either — it refuses a descending row key, not a repeated one — so without
+/// the input-key guard the duplicate reaches a published run, where reads that
+/// concatenate runs would answer the same revision twice.
+#[tokio::test]
+async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_bindings_workload(&store, &namespace_id).await;
+    let group = MetadataFamilyGroup::Revisions;
+
+    // Fold everything into one base run, then repeat one revision inside both
+    // families of the pair.
+    drain_reorganization(&store, &namespace_id, &context, fold_everything_policy()).await;
+    let mut manifest = load_current_manifest_tables(&store, &namespace_id)
+        .await
+        .manifest()
+        .clone();
+    let rows = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    let repeated = rows[&ApiMetadataTableFamily::Revisions]
+        .first()
+        .expect("the namespace has revisions")
+        .clone();
+    let duplicated_key = repeated.row_key_for_family(ApiMetadataTableFamily::Revisions);
+    for family in [
+        ApiMetadataTableFamily::Revisions,
+        ApiMetadataTableFamily::RevisionsByInodeDesc,
+    ] {
+        let mut family_rows = rows[&family].clone();
+        family_rows.push(repeated.clone());
+        rewrite_base_segment(&store, &namespace_id, &mut manifest, family, family_rows).await;
+    }
+    super::index_parity::overwrite_manifest(&store, &namespace_id, manifest).await;
+    // One delta run above the doctored base, so a bottom-anchored window makes
+    // progress and the merge reads the base.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/late.txt",
+        b"late\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write a late file");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the late write");
+
+    // A doctored run still loads: the two families hold the same rows as each
+    // other, so descriptor counts and the digests agree.
+    let keys_before = group_segment_keys(&store, &namespace_id, group).await;
+    let floor_seq = read_floor_seq(&store, &namespace_id).await;
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let Some(ReorganizationPlan::BoundedMerge(input)) = select_reorganization_input(
+        &tables,
+        group,
+        fold_everything_policy(),
+        floor_seq,
+        &FrozenBasePolicy::default(),
+    )
+    .await
+    .expect("plan the group")
+    .plan
+    else {
+        panic!("raised budgets must admit a bounded merge");
+    };
+    drop(tables);
+
+    let step_error = merge_group_in_step(
+        &store,
+        &namespace_id,
+        group,
+        &input.runs,
+        input.placement,
+        floor_seq,
+        fold_everything_policy(),
+    )
+    .await
+    .expect_err("a step-contained merge must refuse the duplicate");
+    assert_duplicate_row_key(&step_error, &duplicated_key);
+
+    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
+    let timer = StdMonotonicTimer::default();
+    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let job_error = run_metadata_compaction(
+        &tables,
+        &namespace_id,
+        &spec,
+        fold_everything_policy(),
+        &MetadataCompactionCancellation::default(),
+        &mut lease,
+    )
+    .await
+    .expect_err("a background compaction must refuse the duplicate");
+    assert_duplicate_row_key(&job_error, &duplicated_key);
+    drop(tables);
+
+    assert_eq!(
+        group_segment_keys(&store, &namespace_id, group).await,
+        keys_before,
+        "neither path may publish a run built from a duplicated key"
+    );
+}
+
+fn assert_duplicate_row_key(error: &CoreError, duplicated_key: &str) {
+    let CoreError::NamespaceCorrupt(message) = error else {
+        panic!("a duplicate row key is namespace corruption, got {error:?}");
+    };
+    assert!(
+        message.contains("Revisions") && message.contains(duplicated_key),
+        "the error must name the family and the duplicated key, got: {message}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Reverse-bind resolution cost
+// -------------------------------------------------------------------------
+
+/// Records every ranged read so a test can classify it against the manifest's
+/// descriptors: a read at a segment's filter offset is a filter read, one at
+/// its index offset is an index read, and anything else is data.
+#[derive(Debug)]
+struct ReadRecorderStore {
+    inner: LocalFsStore,
+    reads: Mutex<Vec<(String, u64, u64)>>,
+}
+
+impl ReadRecorderStore {
+    fn new(inner: LocalFsStore) -> Self {
+        Self {
+            inner,
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take_reads(&self) -> Vec<(String, u64, u64)> {
+        std::mem::take(&mut self.reads.lock().expect("read log"))
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ReadRecorderStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        let result = self.inner.get(key, range.clone()).await;
+        if let Ok(Some(bytes)) = &result {
+            let start = range.as_ref().map_or(0, |range| range.start_inclusive);
+            self.reads
+                .lock()
+                .expect("read log")
+                .push((key.to_owned(), start, bytes.len() as u64));
+        }
+        result
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        let result = self.inner.get_with_metadata(key).await;
+        if let Ok(Some(body)) = &result {
+            self.reads
+                .lock()
+                .expect("read log")
+                .push((key.to_owned(), 0, body.bytes.len() as u64));
+        }
+        result
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+/// What one merge cost the store, by section.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ReadProfile {
+    filter_reads: usize,
+    index_reads: usize,
+    data_reads: usize,
+    other_reads: usize,
+    stored_bytes: u64,
+}
+
+impl ReadProfile {
+    fn requests(&self) -> usize {
+        self.filter_reads + self.index_reads + self.data_reads + self.other_reads
+    }
+}
+
+/// Classifies a read log against the segment descriptors it touched.
+fn classify_reads(reads: &[(String, u64, u64)], descriptors: &[MetadataFileRef]) -> ReadProfile {
+    let mut profile = ReadProfile::default();
+    for (key, start, bytes) in reads {
+        profile.stored_bytes += bytes;
+        let Some(descriptor) = descriptors
+            .iter()
+            .find(|descriptor| descriptor.object_key == *key)
+        else {
+            profile.other_reads += 1;
+            continue;
+        };
+        if *start == descriptor.filter_block.offset {
+            profile.filter_reads += 1;
+        } else if *start == descriptor.index_block.offset {
+            profile.index_reads += 1;
+        } else {
+            profile.data_reads += 1;
+        }
+    }
+    profile
+}
+
+/// A namespace whose reverse-bind index walks the unbind keyspace out of
+/// order.
+///
+/// Files are created round-robin across many parents, so child inode ids
+/// ascend across parents rather than within one. The reverse index is keyed by
+/// child and the unbind family by parent, so reading the reverse index in its
+/// own key order jumps between parents on every row. Every file is then
+/// deleted and the floor advanced past the deletions, which is what makes each
+/// reverse row cost a probe.
+async fn seed_reverse_binds_that_jump_the_unbind_keyspace(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    parents: u64,
+    rounds: u64,
+) {
+    let context = test_context();
+    bootstrap_namespace(store, namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for round in 0..rounds {
+        for parent in 0..parents {
+            write_file_bytes(
+                store,
+                namespace_id,
+                &format!("/d{parent}/f{round}.txt"),
+                b"body\n",
+                &context,
+                None,
+            )
+            .await
+            .expect("write file");
+        }
+        // The WAL tail is capped, so each round is checkpointed as it is made.
+        create_checkpoint(store, namespace_id, &context)
+            .await
+            .expect("checkpoint the writes");
+    }
+    for round in 0..rounds {
+        for parent in 0..parents {
+            delete_path(
+                store,
+                namespace_id,
+                &format!("/d{parent}/f{round}.txt"),
+                &context,
+                None,
+            )
+            .await
+            .expect("delete file");
+        }
+        create_checkpoint(store, namespace_id, &context)
+            .await
+            .expect("checkpoint the deletions");
+    }
+    // Small segments, so the unbind family spans many segments and a probe
+    // that jumps parents lands in a different one.
+    drain_reorganization(
+        store,
+        namespace_id,
+        &context,
+        MetadataLsmPolicy {
+            max_rows_per_segment: NonZeroUsize::new(16).expect("nonzero"),
+            ..fold_everything_policy()
+        },
+    )
+    .await;
+    advance_retention_floor(store, namespace_id, &context)
+        .await
+        .expect("advance the floor past the deletions");
+    write_file_bytes(store, namespace_id, "/late.txt", b"late\n", &context, None)
+        .await
+        .expect("write a late file");
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint the late write");
+}
+
+/// Replaces the bindings families of the namespace's base run with `count`
+/// synthetic generations, each bound and unbound below the retention floor.
+///
+/// The point is the ordering. The reverse index is keyed by child and the
+/// unbind family by parent and name, so a generation's name is scrambled
+/// against its child id: reading the reverse index in its own order walks the
+/// unbind keyspace in a pseudo-random permutation, which is the worst case for
+/// a cache that holds a bounded slice of it. `count` must be a power of two,
+/// which makes the odd multiplier below a bijection.
+///
+/// Going through the write path for a working set this size would take hours,
+/// and the merge only ever sees durable segments, so they are built directly.
+async fn install_synthetic_bindings_base(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    count: u64,
+    rows_per_segment: NonZeroUsize,
+) -> u64 {
+    assert!(
+        count.is_power_of_two(),
+        "the scrambling multiplier is only a permutation over a power of two"
+    );
+    let mut binds = Vec::with_capacity(count as usize);
+    let mut unbinds = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let parent = InodeId(1_000);
+        // Odd multiplier, power-of-two modulus: a bijection, so every name is
+        // distinct and the name order is scattered against the child order.
+        let scrambled = index.wrapping_mul(2_654_435_761) % count;
+        let name = format!("g{scrambled:012}");
+        let delta = u32::try_from(index).expect("test generation counts are small");
+        binds.push(MetadataRow::DirentryBind {
+            parent_inode_id: parent,
+            name_key: NameKey::parse(&name).expect("name key"),
+            display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+            child_inode_id: InodeId(100_000 + index),
+            bind_seq: ChangeSeq(1),
+            bind_delta_index: delta,
+        });
+        unbinds.push(MetadataRow::DirentryUnbind {
+            parent_inode_id: parent,
+            name_key: NameKey::parse(&name).expect("name key"),
+            display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+            child_inode_id: InodeId(100_000 + index),
+            bind_seq: ChangeSeq(1),
+            bind_delta_index: delta,
+            unbind_seq: ChangeSeq(2),
+            unbind_delta_index: delta,
+        });
+    }
+
+    let mut manifest = load_current_manifest_tables(store, namespace_id)
+        .await
+        .manifest()
+        .clone();
+    let base_run_seq = manifest
+        .payload
+        .metadata_files
+        .iter()
+        .find(|descriptor| descriptor.level == CHECKPOINT_BASE_RUN_LEVEL)
+        .expect("the namespace has been folded into a base run")
+        .run_seq;
+    let mut rows_by_family = BTreeMap::from([
+        (ApiMetadataTableFamily::DirentryBinds, binds.clone()),
+        (ApiMetadataTableFamily::DirentryChildBinds, binds),
+        (ApiMetadataTableFamily::DirentryUnbinds, unbinds),
+    ]);
+    let run_tables = build_manifest_tables_from_rows(
+        store,
+        namespace_id,
+        base_run_seq,
+        CHECKPOINT_BASE_RUN_LEVEL,
+        |family| {
+            let mut rows = rows_by_family.remove(&family).unwrap_or_default();
+            rows.sort_by_key(|row| row.row_key_for_family(family));
+            rows
+        },
+        MetadataTableSegmentation::Base {
+            max_rows_per_segment: rows_per_segment,
+        },
+    )
+    .await
+    .expect("build the synthetic bindings run");
+
+    // Only the base tier is replaced: the delta run above it is what gives a
+    // bottom-anchored window something to fold.
+    manifest.payload.metadata_files.retain(|descriptor| {
+        !MetadataFamilyGroup::Bindings.contains(descriptor.family)
+            || descriptor.level != CHECKPOINT_BASE_RUN_LEVEL
+    });
+    manifest
+        .payload
+        .metadata_files
+        .extend(flatten_manifest_tables(run_tables));
+    // What the probe cache would have to hold to serve every probe without
+    // refetching: the decoded data blocks of the unbind family.
+    let mut unbind_decoded_bytes = 0u64;
+    for descriptor in manifest
+        .payload
+        .metadata_files
+        .iter()
+        .filter(|descriptor| descriptor.family == ApiMetadataTableFamily::DirentryUnbinds)
+    {
+        let index = block_fetch::load_segment_index_for_reorganization(
+            store,
+            None,
+            &Default::default(),
+            descriptor,
+        )
+        .await
+        .expect("load a synthetic segment index");
+        unbind_decoded_bytes += index
+            .iter()
+            .map(|entry| u64::from(entry.block.decoded_len))
+            .sum::<u64>();
+    }
+    super::index_parity::overwrite_manifest(store, namespace_id, manifest).await;
+    unbind_decoded_bytes
+}
+
+/// A merge inside a maintenance step reads its window once, whatever order the
+/// reverse index walks the unbind keyspace in.
+///
+/// This is the total-work half of the resource contract. The other resource
+/// tests bound what a merge holds and how wide it fans out at any instant;
+/// neither of them sees a merge that reads the same block over and over.
+///
+/// The window here is the shape that used to cost the most: every reverse bind
+/// row is below the floor, so every one needs a verdict, and the names are
+/// scrambled against the child ids so consecutive reverse rows land in
+/// unrelated parts of the parent-ordered unbind family. Resolving those from
+/// the store costs one round trip per row once the probe cache can no longer
+/// hold the window's unbind family, which the step's budgets allow. Measured on
+/// a window whose unbind family just fills the cache, 65,536 reverse rows cost
+/// 27,427 data reads and 309 MB transferred against 16 MB of priced input, and
+/// doubling the family doubled both; the same window resolved from the
+/// collected set costs 386 data reads and 3.7 MB.
+///
+/// So the assertion is the contract rather than a number: the step reads each
+/// segment's index once and its data once, and makes no probe at all. A
+/// background job keeps the probes, because its memory must not follow the
+/// group it rebuilds, and this pins that split too.
+#[tokio::test]
+async fn a_step_contained_merge_reads_its_window_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    seed_reverse_binds_that_jump_the_unbind_keyspace(&inner, &namespace_id, 4, 2).await;
+    let generations = 4_096;
+    install_synthetic_bindings_base(
+        &inner,
+        &namespace_id,
+        generations,
+        NonZeroUsize::new(512).expect("nonzero"),
+    )
+    .await;
+
+    let store = ReadRecorderStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let group = MetadataFamilyGroup::Bindings;
+    let floor_seq = read_floor_seq(&store, &namespace_id).await;
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let descriptors: Vec<MetadataFileRef> = tables.manifest().payload.metadata_files.clone();
+    let Some(ReorganizationPlan::BoundedMerge(input)) = select_reorganization_input(
+        &tables,
+        group,
+        fold_everything_policy(),
+        floor_seq,
+        &FrozenBasePolicy::default(),
+    )
+    .await
+    .expect("plan the group")
+    .plan
+    else {
+        panic!("raised budgets must admit a bounded merge");
+    };
+    drop(tables);
+    let window_segments = input
+        .runs
+        .iter()
+        .flat_map(|run| group_run_descriptors(run, group))
+        .count();
+    let unbinds_below_floor = descriptors
+        .iter()
+        .filter(|descriptor| descriptor.family == ApiMetadataTableFamily::DirentryUnbinds)
+        .map(|descriptor| descriptor.row_count)
+        .sum::<u64>();
+    let _ = store.take_reads();
+
+    let merged = merge_group_in_step(
+        &store,
+        &namespace_id,
+        group,
+        &input.runs,
+        input.placement,
+        floor_seq,
+        fold_everything_policy(),
+    )
+    .await
+    .expect("merge the window");
+    let profile = classify_reads(&store.take_reads(), &descriptors);
+
+    assert_eq!(
+        merged.unbind_probes, 0,
+        "a step-contained merge resolves the reverse index from what it streamed"
+    );
+    assert_eq!(
+        merged.collected_unbind_generations as u64, unbinds_below_floor,
+        "the collected set holds one identity per below-floor unbind in the window, and no more"
+    );
+    // One index read and one span of data reads per segment. Data blocks are
+    // fetched two at a time, so a segment costs at most its block count; the
+    // bound that matters is that neither follows the row count.
+    assert!(
+        profile.index_reads <= window_segments,
+        "the merge read {} indexes for {window_segments} segments",
+        profile.index_reads
+    );
+    assert!(
+        profile.requests() < merged.rows_read as usize / 8,
+        "total work must follow the window's segments, not its rows: {} requests for {} rows",
+        profile.requests(),
+        merged.rows_read
+    );
+
+    // The background job keeps the probe, because it has no budget capping
+    // what it would otherwise collect.
+    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
+    let MetadataCompactionOutcome::Completed(job) = run_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        fold_everything_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    else {
+        panic!("nothing cancelled this job");
+    };
+    assert_eq!(
+        job.unbind_probes, unbinds_below_floor,
+        "a background compaction probes once per reverse row the floor covers"
+    );
+    assert_eq!(
+        job.collected_unbind_generations, 0,
+        "and collects nothing, so its memory does not follow the group"
     );
 }
 
@@ -1892,10 +2516,11 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
 // Resource discipline
 // -------------------------------------------------------------------------
 
-/// The job's reads never overlap wider than its fetch bound, and the decoded
-/// blocks it holds never follow the size of what it is rebuilding.
+/// A merge's reads never overlap wider than its fetch bound, and the decoded
+/// blocks it holds never follow the size of what it is merging. Both hold for
+/// the background job and for the same engine run inside a maintenance step.
 #[tokio::test]
-async fn a_compaction_keeps_its_reads_and_its_decoded_blocks_bounded() {
+async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = ConcurrencyWatchStore::new(
@@ -1957,6 +2582,61 @@ async fn a_compaction_keeps_its_reads_and_its_decoded_blocks_bounded() {
         result.peak_operator_rows <= 1,
         "a retention operator held {} rows",
         result.peak_operator_rows
+    );
+
+    // The same bounds hold for the same engine run inside a maintenance step.
+    // The step's input budgets cap what a window may hold, but they say nothing
+    // about what merging it costs, and the old path read every row of the
+    // window into vectors.
+    let store = ConcurrencyWatchStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::metadata_table(),
+    );
+    let floor_seq = read_floor_seq(&store, &namespace_id).await;
+    let tables = load_current_manifest_tables(&store, &namespace_id).await;
+    let Some(ReorganizationPlan::BoundedMerge(input)) = select_reorganization_input(
+        &tables,
+        group,
+        small_segment_policy(),
+        floor_seq,
+        &FrozenBasePolicy::default(),
+    )
+    .await
+    .expect("plan the group")
+    .plan
+    else {
+        panic!("raised budgets must admit a bounded merge");
+    };
+    drop(tables);
+    let merged = merge_group_in_step(
+        &store,
+        &namespace_id,
+        group,
+        &input.runs,
+        input.placement,
+        floor_seq,
+        small_segment_policy(),
+    )
+    .await
+    .expect("merge the window inside a step");
+    assert!(
+        store.reads().peak_in_flight <= 8,
+        "the step's merge overlapped {} reads at once",
+        store.reads().peak_in_flight
+    );
+    assert!(
+        merged.peak_resident_blocks <= input.runs.len() * 2 * 2,
+        "the step's merge held {} decoded blocks at once",
+        merged.peak_resident_blocks
+    );
+    assert!(
+        merged.peak_operator_rows <= 1,
+        "a retention operator held {} rows in the step's merge",
+        merged.peak_operator_rows
+    );
+    assert_eq!(
+        merged.rows_read, result.rows_read,
+        "both paths read the same window"
     );
 }
 
@@ -2049,7 +2729,8 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
 }
 
 /// Every group of a namespace whose churn all lands on one hot locality
-/// rebuilds to the fold's rows while its operators hold at most one row.
+/// rebuilds to the same rows a step-contained merge reaches, while its
+/// operators hold at most one row.
 ///
 /// The wide-directory case above proves that distinct localities do not
 /// accumulate together. This proves the other half: one inode's attribute
@@ -2067,26 +2748,31 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
     copy_store_tree(job_dir.path(), fold_dir.path());
     let fold_store = LocalFsStore::new(fold_dir.path()).expect("store");
 
+    // What both stores hold before either of them rebuilds anything. The trees
+    // are byte-identical here, so one read stands for both.
+    let mut rows_before = BTreeMap::new();
     for group in REORGANIZE_FAMILY_GROUPS {
-        let before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+        rows_before.insert(
+            group,
+            group_rows_of_current_manifest(&store, &namespace_id, group).await,
+        );
+    }
+    // The same durable bytes, rebuilt the other way: synchronous merges inside
+    // maintenance steps, with the budgets raised so each group folds whole.
+    drain_reorganization(
+        &fold_store,
+        &namespace_id,
+        &test_context(),
+        fold_everything_policy(),
+    )
+    .await;
+
+    for group in REORGANIZE_FAMILY_GROUPS {
+        let before = rows_before[&group].clone();
         if before.values().all(Vec::is_empty) {
             continue;
         }
-        // The same durable bytes, folded the ordinary way.
-        let folded_before = group_rows_of_current_manifest(&fold_store, &namespace_id, group).await;
-        assert_eq!(
-            folded_before, before,
-            "both rebuilds must start from the same rows"
-        );
-        let mut folded = folded_before.clone();
-        for family in group.families() {
-            folded.entry(*family).or_default();
-        }
-        drop_rows_below_retention_floor(&mut folded, frozen_floor_seq)
-            .expect("fold the group whole");
-        for (family, rows) in &mut folded {
-            rows.sort_by_key(|row| row.row_key_for_family(*family));
-        }
+        let folded = group_rows_of_current_manifest(&fold_store, &namespace_id, group).await;
 
         let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
         let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
@@ -2111,7 +2797,7 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
         let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
         assert_eq!(
             compacted, folded,
-            "a streaming rebuild of {group:?} must keep the rows a whole-group fold keeps"
+            "a background rebuild of {group:?} must keep the rows a step-contained merge keeps"
         );
         // Nothing above the floor may go, whatever the rules dropped below it.
         for (family, rows) in &before {

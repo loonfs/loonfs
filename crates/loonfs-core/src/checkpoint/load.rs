@@ -46,9 +46,6 @@ pub(crate) use super::tests::inspection_materialization::{
     load_manifest_materialization_for_inspection,
     load_manifest_metadata_state_for_inspection_from_manifest,
 };
-pub(super) use super::validate::{
-    validate_direntry_child_bind_index, validate_revision_by_inode_desc_index,
-};
 
 pub(super) fn ensure_root_matches_manifest(
     namespace_id: &NamespaceId,

@@ -18,8 +18,11 @@ use super::build::{
     build_manifest_tables, build_manifest_tables_from_rows, MetadataTableSegmentation,
 };
 use super::cache::{MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheConfig};
+use super::compaction_merge::locality_of;
+use super::compaction_retention::RetentionRule;
 use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
+use super::frozen_floor::{bind_survives_frozen_floor, unbindings_at_or_below_floor};
 use super::load::load_verified_manifest_tables_with_cache;
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
@@ -38,8 +41,8 @@ use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 use super::streaming_compaction::{
-    run_metadata_compaction_job, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionSpec,
+    retention_clusters, run_metadata_compaction_job, MetadataCompactionCancellation,
+    MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 use super::{
     block_fetch, create, data_block_load, flush, load, record, reorganize,
@@ -93,7 +96,7 @@ use loonfs_objectstore::{
 use loonfs_test_support::stores::{
     CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
@@ -229,6 +232,81 @@ async fn checkpoint_then_reorganize<S: ObjectStore + ?Sized>(
         .await
         .expect("create checkpoint");
     drain_reorganization(store, namespace_id, context, policy).await
+}
+
+/// Runs the merge engine's retention operators over rows a test holds in
+/// memory, so a rule test can state a handful of rows and a floor and assert
+/// what survives without a namespace, a manifest, or segments.
+///
+/// It is a harness, not a second implementation: the clusters, the locality
+/// grouping, and the operators are the engine's own. The one thing it does
+/// differently is the reverse bind index, which a merge decides by point-reading
+/// the unbinds of one binding out of its snapshot. Here the whole unbind family
+/// is in hand, so the shared rules are applied to it directly — which is what
+/// the point read does with the rows it fetched.
+fn fold_rows_with_retention(
+    group: MetadataFamilyGroup,
+    rows_by_family: &mut BTreeMap<ApiMetadataTableFamily, Vec<MetadataRow>>,
+    floor_seq: ChangeSeq,
+) -> crate::error::Result<()> {
+    // Built from the input rows, before any cluster replaces them: a merge's
+    // point reads go to its immutable snapshot, never to what it has written.
+    let unbound_at_floor = unbindings_at_or_below_floor(
+        rows_by_family
+            .get(&ApiMetadataTableFamily::DirentryUnbinds)
+            .map_or(&[][..], Vec::as_slice),
+        floor_seq,
+    );
+    for cluster in retention_clusters(group) {
+        // The stream a merge sees: the cluster's rows by locality, then family,
+        // then row key.
+        let mut merged: Vec<(ApiMetadataTableFamily, String, MetadataRow)> = Vec::new();
+        for family in cluster.families {
+            for row in rows_by_family.get(family).map_or(&[][..], Vec::as_slice) {
+                merged.push((*family, row.row_key_for_family(*family), row.clone()));
+            }
+        }
+        merged.sort_by(|left, right| {
+            locality_of(left.0, &left.1, cluster.locality)
+                .cmp(locality_of(right.0, &right.1, cluster.locality))
+                .then(left.0.cmp(&right.0))
+                .then(left.1.cmp(&right.1))
+        });
+
+        let mut kept: BTreeMap<ApiMetadataTableFamily, Vec<MetadataRow>> = cluster
+            .families
+            .iter()
+            .map(|family| (*family, Vec::new()))
+            .collect();
+        let mut operator = cluster.rule.operator();
+        let mut locality: Option<String> = None;
+        for (family, row_key, row) in merged {
+            let row_locality = locality_of(family, &row_key, cluster.locality);
+            if locality.as_deref() != Some(row_locality) {
+                if let Some((family, row)) = operator.close_group(floor_seq)? {
+                    kept.entry(family).or_default().push(row);
+                }
+                locality = Some(row_locality.to_owned());
+            }
+            let survivor = match cluster.rule {
+                RetentionRule::ReverseBindProbe => {
+                    bind_survives_frozen_floor(&row, floor_seq, &unbound_at_floor)
+                        .then_some((family, row))
+                }
+                _ => operator.push(family, row, floor_seq)?,
+            };
+            if let Some((family, row)) = survivor {
+                kept.entry(family).or_default().push(row);
+            }
+        }
+        if let Some((family, row)) = operator.close_group(floor_seq)? {
+            kept.entry(family).or_default().push(row);
+        }
+        for (family, rows) in kept {
+            rows_by_family.insert(family, rows);
+        }
+    }
+    Ok(())
 }
 
 /// Runs reorganization units until nothing is left to fold, with the

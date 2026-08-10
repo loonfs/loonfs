@@ -97,8 +97,12 @@ fn the_fold_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
     ]);
     let mut rows_by_family = attribute_rows(&state);
 
-    reorganize::drop_rows_below_retention_floor(&mut rows_by_family, ChangeSeq(6))
-        .expect("fold attributes");
+    fold_rows_with_retention(
+        MetadataFamilyGroup::Attributes,
+        &mut rows_by_family,
+        ChangeSeq(6),
+    )
+    .expect("fold attributes");
 
     assert_eq!(
         kept_revisions(&rows_by_family),
@@ -125,8 +129,12 @@ fn the_fold_keeps_a_latest_empty_revision() {
     ]);
     let mut rows_by_family = attribute_rows(&state);
 
-    reorganize::drop_rows_below_retention_floor(&mut rows_by_family, ChangeSeq(9))
-        .expect("fold attributes");
+    fold_rows_with_retention(
+        MetadataFamilyGroup::Attributes,
+        &mut rows_by_family,
+        ChangeSeq(9),
+    )
+    .expect("fold attributes");
 
     let kept = rows_by_family
         .remove(&ApiMetadataTableFamily::Attributes)
@@ -157,8 +165,12 @@ fn the_fold_never_drops_attributes_for_being_unreachable() {
     let mut rows_by_family = attribute_rows(&state);
     // No inode or bind rows travel with the attribute group, so nothing here
     // could establish reachability even if the rule wanted to.
-    reorganize::drop_rows_below_retention_floor(&mut rows_by_family, ChangeSeq(10_000))
-        .expect("fold attributes");
+    fold_rows_with_retention(
+        MetadataFamilyGroup::Attributes,
+        &mut rows_by_family,
+        ChangeSeq(10_000),
+    )
+    .expect("fold attributes");
 
     assert_eq!(kept_revisions(&rows_by_family), vec![(7, 1)]);
 }
@@ -175,8 +187,12 @@ fn the_fold_refuses_to_compact_repeated_revision_numbers() {
     ]);
     let mut rows_by_family = attribute_rows(&state);
 
-    let error = reorganize::drop_rows_below_retention_floor(&mut rows_by_family, ChangeSeq(9))
-        .expect_err("repeated revision numbers are corruption");
+    let error = fold_rows_with_retention(
+        MetadataFamilyGroup::Attributes,
+        &mut rows_by_family,
+        ChangeSeq(9),
+    )
+    .expect_err("repeated revision numbers are corruption");
 
     assert!(
         matches!(&error, CoreError::NamespaceCorrupt(_)),
