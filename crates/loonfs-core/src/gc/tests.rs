@@ -9,12 +9,14 @@ use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::tests::{
     compact_a_family_group_into_staging, create_checkpoint, mutation_context, write_test_file,
 };
+use crate::checkpoint::MetadataCompactionView;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::limits::{
     CONTENT_RECLAMATION_GRACE_MS, FORK_CHECKPOINT_LEASE_MS, GC_MIN_GRACE_WINDOW_MS,
-    METADATA_COMPACTION_STAGING_GRACE_MS, UPLOAD_SESSION_LEASE_MS,
+    METADATA_COMPACTION_LEASE_EXPIRY_MS, METADATA_COMPACTION_STAGING_GRACE_MS,
+    UPLOAD_SESSION_LEASE_MS,
 };
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
@@ -24,9 +26,9 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_compaction_staging_table, metadata_manifest_object,
-    metadata_manifest_prefix, metadata_root, metadata_table, metadata_table_prefix, wal_head,
-    wal_segment, wal_segment_prefix,
+    checkpoint_prefix, metadata_compaction_lease, metadata_compaction_table,
+    metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_table,
+    metadata_table_prefix, wal_head, wal_segment, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1874,7 +1876,7 @@ async fn fold_metadata<S: ObjectStore + ?Sized>(
             namespace_id,
             context,
             fold_policy,
-            None,
+            MetadataCompactionView::default(),
         )
         .await
         .expect("reorganize step");
@@ -1969,80 +1971,226 @@ fn reason_total(report: &GcResponse) -> u64 {
         .sum()
 }
 
-/// A streaming compaction's staged segments age under a window of their own.
-///
-/// The job publishes nothing until it finishes and it has no time budget, so
-/// its output is unreferenced for as long as it runs. Under the ordinary
-/// window the collector would reap a job's segments while it was still writing
-/// them. Under the staging window it reaps them only once no job could still
-/// be alive, and a job that died leaves exactly those orphans.
-#[tokio::test]
-async fn a_staged_compaction_segment_ages_under_the_staging_window() {
-    let temp_dir = tempdir().expect("tempdir");
+/// A namespace with one staged segment under `job_id`, aged so the pass has a
+/// reference anchor, and the lease key that job would hold.
+async fn namespace_with_staged_output(
+    temp_dir: &tempfile::TempDir,
+    namespace_id: &NamespaceId,
+    job_id: &str,
+) -> (MetadataMapStore<LocalFsStore>, String, String) {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+    bootstrap_namespace(&inner, namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_test_file(&inner, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+    write_test_file(&inner, namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    crate::checkpoint::flush_wal(&inner, namespace_id, &setup)
         .await
         .expect("flush wal");
 
     // The namespace ages past the window, so the pass has an anchor. The
     // staged segment below is written after it, the way a job's output is.
-    let published = namespace_key_set(&inner, &namespace_id).await;
+    let published = namespace_key_set(&inner, namespace_id).await;
     let store = aged_before_now(inner, published);
-    let staged_key = metadata_compaction_staging_table(
+    let staged_key = metadata_compaction_table(
         namespace_id.as_str(),
+        job_id,
         "tbl_0123456789abcdef0123456789abcdef",
     );
     store
         .put_if_absent(&staged_key, Bytes::from_static(b"staged segment"))
         .await
         .expect("write a staged segment");
+    let lease_key = metadata_compaction_lease(namespace_id.as_str(), job_id);
+    (store, staged_key, lease_key)
+}
 
-    // Long past the ordinary window, which is where a job would still be
-    // running and this segment would still be its output.
-    let running =
-        context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &running)
+/// Writes the lease a job holding `job_id` would have written at
+/// `heartbeat_at_ms`.
+async fn write_compaction_lease<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    job_id: &str,
+    heartbeat_at_ms: u64,
+) {
+    let envelope = loonfs_api::wire::control::MetadataCompactionLeaseEnvelope::from_state(
+        loonfs_api::wire::control::ControlObjectKind::CompactionLease,
+        loonfs_api::wire::control::MetadataCompactionLeaseState {
+            job_id: loonfs_api::MetadataCompactionId::parse(job_id).expect("job id"),
+            namespace_id: namespace_id.clone(),
+            owner_id: "writer".to_owned(),
+            started_at_ms: 1_000,
+            heartbeat_at_ms,
+        },
+    )
+    .expect("build a lease");
+    let bytes =
+        loonfs_api::wire::control::encode_control_object(&envelope).expect("encode a lease");
+    store
+        .put(
+            &metadata_compaction_lease(namespace_id.as_str(), job_id),
+            Bytes::from(bytes),
+            PutMode::Overwrite,
+        )
         .await
-        .expect("gc pass while a job could still be running");
+        .expect("write a lease");
+}
+
+const TEST_JOB_ID: &str = "cmp_0123456789abcdef0123456789abcdef";
+
+/// A running job's output survives however old it is, because its lease says
+/// the job that wrote it is still running.
+///
+/// This is the case a fixed window could not express: a job publishes nothing
+/// until it finishes and is paced by no budget, so its first segment can be
+/// arbitrarily older than any window a collector applies to it.
+#[tokio::test]
+async fn a_live_jobs_staged_output_survives_however_old_it_is() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let (store, staged_key, lease_key) =
+        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+
+    // A day past the window the design used to apply here, with the job's
+    // lease refreshed a moment ago.
+    let now_ms = now_after_newest_object(store.inner(), &namespace_id, 24 * 60 * 60 * 1000).await;
+    write_compaction_lease(&store, &namespace_id, TEST_JOB_ID, now_ms).await;
+
+    let report = gc_namespace(&store, &namespace_id, &config(), &context(now_ms))
+        .await
+        .expect("gc pass while the job holds its lease");
     assert_eq!(
         report.deleted_metadata_tables, 0,
         "a running job's output must not be reaped"
     );
-    assert_eq!(report.retained.grace_window, 1);
+    assert_eq!(
+        report.retained.grace_window, 2,
+        "the segment and the lease are both retained by the lease"
+    );
+    for key in [&staged_key, &lease_key] {
+        assert!(store
+            .head(key)
+            .await
+            .expect("head a staged object")
+            .is_some());
+    }
+}
+
+/// A job whose lease went stale loses its prefix: the segments and the lease
+/// are ordinary orphans once the staging window has passed on them.
+#[tokio::test]
+async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let (store, staged_key, lease_key) =
+        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+
+    // The job's last heartbeat, and then a pass one lease expiry later. The
+    // lease is stale, but the objects are still inside the staging window.
+    let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
+    write_compaction_lease(&store, &namespace_id, TEST_JOB_ID, died_at_ms).await;
+    let expired_ms = died_at_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS + 1;
+    let report = gc_namespace(&store, &namespace_id, &config(), &context(expired_ms))
+        .await
+        .expect("gc pass once the lease expired");
+    assert_eq!(
+        report.deleted_metadata_tables, 0,
+        "an expired lease still leaves the objects their own window"
+    );
     assert!(store
         .head(&staged_key)
         .await
         .expect("head the staged segment")
         .is_some());
 
-    // Past the staging window, where no job can still be alive, the same
-    // object is the orphan a dead job left.
-    let dead = context(
-        now_after_newest_object(
-            store.inner(),
-            &namespace_id,
-            METADATA_COMPACTION_STAGING_GRACE_MS + 1,
-        )
-        .await,
-    );
-    let report = gc_namespace(&store, &namespace_id, &config(), &dead)
+    // Past the staging window, the same objects are the orphans a dead job
+    // left. Only the segment counts as a metadata table; the lease is a
+    // control object.
+    let reclaimable_ms = now_after_newest_object(
+        store.inner(),
+        &namespace_id,
+        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
+    )
+    .await;
+    let report = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
         .await
         .expect("gc pass once no job could still be running");
     assert_eq!(
         report.deleted_metadata_tables, 1,
         "a dead job's orphan must be reaped"
     );
+    for key in [&staged_key, &lease_key] {
+        assert!(store
+            .head(key)
+            .await
+            .expect("head a staged object")
+            .is_none());
+    }
+}
+
+/// A job that died before writing a lease at all leaves output no lease
+/// claims, and the same window reclaims it.
+#[tokio::test]
+async fn staged_output_with_no_lease_at_all_is_reclaimed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let (store, staged_key, _) =
+        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+
+    let reclaimable_ms = now_after_newest_object(
+        store.inner(),
+        &namespace_id,
+        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
+    )
+    .await;
+    let report = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
+        .await
+        .expect("gc pass over an unclaimed prefix");
+    assert_eq!(report.deleted_metadata_tables, 1);
     assert!(store
         .head(&staged_key)
         .await
         .expect("head the staged segment")
         .is_none());
+}
+
+/// A lease that does not decode is treated as missing.
+///
+/// Nothing else reads this object, so believing a corrupt one would keep its
+/// prefix alive forever and nothing would ever say why. It is said out loud
+/// instead, and the prefix is collected like any other unclaimed one.
+#[tokio::test]
+async fn a_lease_that_does_not_decode_does_not_immortalize_its_prefix() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let (store, staged_key, lease_key) =
+        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+    store
+        .put(
+            &lease_key,
+            Bytes::from_static(b"{\"kind\":\"compaction_lease\",\"payload\":"),
+            PutMode::Overwrite,
+        )
+        .await
+        .expect("write a corrupt lease");
+
+    let reclaimable_ms = now_after_newest_object(
+        store.inner(),
+        &namespace_id,
+        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
+    )
+    .await;
+    let report = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
+        .await
+        .expect("a corrupt lease must not fail the pass");
+    assert_eq!(report.deleted_metadata_tables, 1);
+    for key in [&staged_key, &lease_key] {
+        assert!(store
+            .head(key)
+            .await
+            .expect("head a staged object")
+            .is_none());
+    }
 }
 
 /// A published job's output is an ordinary referenced table. The manifest
@@ -2527,7 +2675,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
             &namespace_id,
             &setup,
             fold_policy,
-            None,
+            MetadataCompactionView::default(),
         )
         .await
         .expect("reorganize step");

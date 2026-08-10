@@ -15,6 +15,7 @@
 //! anchor in `live_set.rs` is what dates that moment.
 
 mod budget;
+mod compaction_staging;
 mod config;
 mod cursor;
 mod fork_checkpoints;

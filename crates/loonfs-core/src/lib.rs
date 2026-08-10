@@ -178,8 +178,8 @@ pub mod publish {
 // because it is the return type of `NamespaceEngine::reorganize_metadata`.
 pub use checkpoint::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, MetadataCompactionCancellation,
-    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataReorganizeOutcome,
-    MetadataReorganizeReport,
+    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataCompactionView,
+    MetadataReorganizeOutcome, MetadataReorganizeReport,
 };
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;

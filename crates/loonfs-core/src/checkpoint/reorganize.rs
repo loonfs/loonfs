@@ -38,6 +38,18 @@
 //! job: it reports the plan, and the runtime starts the job in the
 //! background and hands its spec back to every step that follows, which is
 //! how a step knows to leave that group alone while it runs.
+//!
+//! One step cannot see whether a group is stuck. A group whose
+//! bottom-anchored window is blocked still has delta runs to merge, and under
+//! sustained writes there is always another pair of them, so a planner
+//! deciding from one step's view alone would take the delta merge every time
+//! and never start the job — the base would stay frozen and the group's
+//! retention would stay stopped. The runtime therefore counts, per group, the
+//! engagements that planned work while the bottom-anchored window was
+//! blocked, and hands that count back through
+//! [`MetadataCompactionView`]. At
+//! [`DELTA_MERGES_OVER_A_FROZEN_BASE`] the planner stops taking the merge and
+//! starts the job.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::build::{
@@ -76,6 +88,47 @@ use loonfs_api::{
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Maintenance engagements that may plan a delta merge over a frozen base
+/// before the planner insists on the job that unfreezes it.
+///
+/// Delta merges between jobs are how a stuck group amortizes: a job rereads
+/// the whole group, so running one for every eight delta runs would reread
+/// megabytes to fold in a sliver. Two engagements is the smallest count that
+/// still lets the ordinary merge do that work, and it bounds how long
+/// retention for the group can stay stopped — the job starts within two
+/// maintenance engagements of the block, whatever the write rate is.
+pub(super) const DELTA_MERGES_OVER_A_FROZEN_BASE: u32 = 2;
+
+/// What the process running maintenance knows about one namespace's
+/// streaming compactions, which one step's read of durable state cannot see.
+///
+/// Both fields are in-memory process state, and both are safe to lose: a
+/// restart forgets the active job (a later step plans it again) and forgets
+/// the engagement counts (the next two engagements rebuild them, delaying one
+/// cycle).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MetadataCompactionView<'a> {
+    /// The plan of the job running for this namespace, or `None` when it is
+    /// running none. The step leaves that job's group alone and folds
+    /// another, because every run of that group is in the job's snapshot and
+    /// merging one would waste the whole job at finalization.
+    pub active: Option<&'a MetadataCompactionSpec>,
+    /// Per family group, how many maintenance engagements have planned work
+    /// for it while its bottom-anchored merge was blocked, since that group's
+    /// last completed job. Keyed by the group's families, which is the
+    /// group's identity outside this crate.
+    pub blocked_engagements: &'a [(&'a [MetadataTableFamily], u32)],
+}
+
+impl MetadataCompactionView<'_> {
+    fn engagements(&self, group: MetadataFamilyGroup) -> u32 {
+        self.blocked_engagements
+            .iter()
+            .find(|(families, _)| *families == group.families())
+            .map_or(0, |(_, engagements)| *engagements)
+    }
+}
+
 /// What one reorganization step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataReorganizeOutcome {
@@ -93,6 +146,14 @@ pub enum MetadataReorganizeOutcome {
         decoded_input_rows: u64,
         decoded_input_bytes: u64,
         manifest_id: ManifestId,
+        /// True when the window starting at the group's oldest run could not
+        /// reach an L0 run, so this merge ran above a frozen base and the
+        /// group's retention is still stopped. The runtime counts these per
+        /// group and hands the count back through
+        /// [`MetadataCompactionView::blocked_engagements`], which is what
+        /// decides when the planner stops merging deltas over that base and
+        /// starts the job that unfreezes it.
+        bottom_anchored_merge_blocked: bool,
     },
     /// No oldest-first subset that would make progress fits the hard
     /// per-step input budgets, so the group is rebuilt by a streaming
@@ -119,10 +180,9 @@ pub struct MetadataReorganizeReport {
 /// call re-reads durable state, so any two calls compose — including across
 /// process restarts.
 ///
-/// `active_compaction` is the plan of the streaming compaction this process
-/// is running for the namespace, or `None` when it is running none. The step
-/// leaves that job's group alone and works on another; see
-/// [`select_family_group`].
+/// `compactions` is what this process knows about the namespace's streaming
+/// compactions: which group a job is rebuilding right now, and how long each
+/// group has been merging deltas over a frozen base.
 #[tracing::instrument(
     level = "info",
     name = "loonfs.phase",
@@ -135,18 +195,11 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
-    active_compaction: Option<&MetadataCompactionSpec>,
+    compactions: MetadataCompactionView<'_>,
 ) -> Result<MetadataReorganizeReport> {
     let timer = StdMonotonicTimer::default();
-    reorganize_metadata_step_with_timer(
-        store,
-        namespace_id,
-        context,
-        policy,
-        active_compaction,
-        &timer,
-    )
-    .await
+    reorganize_metadata_step_with_timer(store, namespace_id, context, policy, compactions, &timer)
+        .await
 }
 
 pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>(
@@ -154,7 +207,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
-    active_compaction: Option<&MetadataCompactionSpec>,
+    compactions: MetadataCompactionView<'_>,
     timer: &dyn MonotonicTimer,
 ) -> Result<MetadataReorganizeReport> {
     // The publication budget covers the whole unit: measurement starts
@@ -191,7 +244,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     }
     let Some(group) = select_family_group(
         &previous.payload,
-        active_compaction.map(MetadataCompactionSpec::group),
+        compactions.active.map(MetadataCompactionSpec::group),
     ) else {
         // L0 runs exist but hold no rows (empty families), or the only group
         // with rows is the one a job is rebuilding; nothing to fold here.
@@ -212,14 +265,21 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
-    let selection = select_reorganization_input(&tables, group, policy, floor_seq)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
+    let selection = select_reorganization_input(
+        &tables,
+        group,
+        policy,
+        floor_seq,
+        compactions.engagements(group) >= DELTA_MERGES_OVER_A_FROZEN_BASE,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
     if let Some(bottom) = selection.group_bottom_over_budget {
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
     }
+    let bottom_anchored_merge_blocked = selection.bottom_anchored_merge_blocked;
     let input = match selection.plan {
         Some(ReorganizationPlan::BoundedMerge(input)) => input,
         Some(ReorganizationPlan::FullCompaction(spec)) => {
@@ -356,6 +416,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
                 decoded_input_rows: input.decoded_rows,
                 decoded_input_bytes: input.decoded_bytes,
                 manifest_id: manifest.payload.manifest_id,
+                bottom_anchored_merge_blocked,
             },
         }),
         ManifestPublicationOutcome::Superseded(_) | ManifestPublicationOutcome::RootCasRaceLost => {
@@ -498,6 +559,11 @@ pub(super) struct ReorganizationSelection {
     /// all and there is nothing to do either way.
     pub(super) plan: Option<ReorganizationPlan>,
     pub(super) group_bottom_over_budget: Option<OverBudgetRun>,
+    /// True when the window starting at the group's oldest run could not
+    /// reach an L0 run inside the budgets. The group's base is frozen while
+    /// that holds, and only a streaming compaction unfreezes it, so this is
+    /// what the runtime counts to decide when to stop merging deltas over it.
+    pub(super) bottom_anchored_merge_blocked: bool,
 }
 
 /// A run that does not fit one step's budgets on its own.
@@ -555,11 +621,18 @@ pub(super) struct OverBudgetRun {
 /// `frozen_floor_seq` is the live retention floor. A bounded merge reads it
 /// again at drop time; a compaction spec carries it, because the floor a job
 /// judges every row against is fixed when the job is planned.
+///
+/// `compact_a_frozen_base` is the runtime's answer to the one thing this
+/// function cannot see: how long this group has already been merging deltas
+/// over a base no window can reach. When it is set, a blocked bottom-anchored
+/// window goes straight to the job rather than taking the delta merge above
+/// it — the merge would make progress, but not the progress the group needs.
 pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     group: MetadataFamilyGroup,
     policy: MetadataLsmPolicy,
     frozen_floor_seq: ChangeSeq,
+    compact_a_frozen_base: bool,
 ) -> std::result::Result<ReorganizationSelection, ManifestLoadError> {
     let mut candidates = tables
         .scan_runs
@@ -595,8 +668,19 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     // candidate's total is read at most once however many windows weigh it.
     let mut decoded_bytes_by_candidate = vec![None::<u64>; candidate_count];
     let mut group_bottom_over_budget = None;
+    let mut bottom_anchored_merge_blocked = false;
 
     for window_start in std::iter::once(0).chain(delta_only_start) {
+        // Reaching a window above the bottom means the bottom-anchored one
+        // made no progress, so the group's base is frozen and its retention
+        // has stopped. A delta merge still helps — it keeps the run count
+        // down while the base waits — but only the job unfreezes the base, and
+        // under sustained writes there is always another pair of delta runs to
+        // merge. So after the runtime has watched this group take that merge
+        // enough times, the planner stops taking it.
+        if window_start > 0 && compact_a_frozen_base {
+            break;
+        }
         let mut runs = Vec::new();
         let mut decoded_rows = 0u64;
         let mut decoded_bytes = 0u64;
@@ -666,6 +750,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             runs.len() > 1
         };
         if !makes_progress {
+            bottom_anchored_merge_blocked |= bottom_anchored;
             continue;
         }
         let run_ids = runs.iter().map(|run| (run.run_seq, run.level)).collect();
@@ -680,17 +765,19 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
                 placement,
             })),
             group_bottom_over_budget,
+            bottom_anchored_merge_blocked,
         });
     }
 
-    // No window makes progress inside the budgets. That is the whole of the
-    // stuck case: the bottom-anchored window cannot reach an L0 run, so
-    // retention for the group has stopped, and the delta runs above the
-    // bottom are down to one or blocked as well, so nothing shrinks the run
-    // count either. A streaming compaction takes the whole group. Its input
-    // is every run the group holds, which is bottom-anchored by
-    // construction, so its output is the group's base run and it may drop
-    // what the floor allows.
+    // Nothing above got taken. Either no window makes progress inside the
+    // budgets — the bottom-anchored window cannot reach an L0 run, so
+    // retention for the group has stopped, and the delta runs above the bottom
+    // are down to one or blocked as well — or the delta merge was available
+    // and the runtime said this group has taken enough of them. Both end the
+    // same way: a streaming compaction takes the whole group. Its input is
+    // every run the group holds, which is bottom-anchored by construction, so
+    // its output is the group's base run and it may drop what the floor
+    // allows.
     let spec = (!candidates.is_empty()).then(|| {
         MetadataCompactionSpec::new(
             group,
@@ -712,6 +799,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     Ok(ReorganizationSelection {
         plan: spec.map(ReorganizationPlan::FullCompaction),
         group_bottom_over_budget,
+        bottom_anchored_merge_blocked,
     })
 }
 
@@ -895,6 +983,11 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
 /// durable data retained independently of the replay floor — and tombstone
 /// and inode rows are always retained until reachability-based dropping is
 /// designed.
+///
+/// A bounded merge holds every row of its window, so this reads them all at
+/// once. A streaming compaction cannot hold them, and runs the same rules as
+/// streaming operators instead ([`super::compaction_retention`]); the
+/// equivalence oracle in the tests is what says the two reach the same rows.
 pub(super) fn drop_rows_below_retention_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,
@@ -920,9 +1013,10 @@ pub(super) type BindingGeneration = (InodeId, NameKey, ChangeSeq, u32);
 /// retires.
 ///
 /// A whole-group fold builds this from every unbind row it merged. A
-/// streaming compaction builds it per slot, from the unbind rows of that one
-/// (parent, name) slot: an unbind and the bind it cancels share a slot, so
-/// the rows of one slot hold both halves of every pair they belong to.
+/// streaming compaction builds it one binding generation at a time, from that
+/// generation's own unbinds: a bind's row key is its generation and an
+/// unbind's key leads with the generation it retires, so the rows of one
+/// generation hold both halves of the pair.
 pub(super) fn unbindings_at_or_below_floor(
     unbind_rows: &[MetadataRow],
     retention_floor_seq: ChangeSeq,
@@ -961,8 +1055,9 @@ pub(super) fn unbindings_at_or_below_floor(
 /// Both bind families read this same rule, which is what keeps them dropping
 /// in lockstep: the format gives every bind row exactly one reverse row, and a
 /// run whose two counts disagree does not load. They reach the rule by
-/// different routes — the forward row's unbinds share its slot, the reverse
-/// row's do not — but the rule is one function and the answer is one answer.
+/// different routes — the forward row's unbinds arrive in its own locality
+/// group, the reverse row's do not and are point-read instead — but the rule
+/// is one function and the answer is one answer.
 pub(super) fn bind_survives_frozen_floor(
     row: &MetadataRow,
     retention_floor_seq: ChangeSeq,
@@ -987,17 +1082,10 @@ pub(super) fn bind_survives_frozen_floor(
         ))
 }
 
-/// [`drop_rows_below_retention_floor`] against a floor and an unbind set the
-/// caller froze, rather than against rows it can see right now.
-///
-/// A streaming compaction calls this per locality group: the floor is fixed
-/// for the whole job, so every group and every attempt decides identically.
-/// Families the caller leaves out of `rows_by_family` are untouched, which is
-/// how a compaction keeps the reverse bind index out of this pass — its rows
-/// are keyed by child, so the group holding one does not hold the forward
-/// binds the invariant check below reads, and the compaction decides those
-/// rows with a point read instead.
-pub(super) fn drop_rows_below_frozen_floor(
+/// [`drop_rows_below_retention_floor`] against an unbind set the caller
+/// already built, so the retention floor and the unbind set that goes with it
+/// are stated once for the whole window.
+fn drop_rows_below_frozen_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,
     unbound_at_floor: &BTreeSet<BindingGeneration>,
@@ -1035,7 +1123,7 @@ pub(super) fn drop_rows_below_frozen_floor(
     // the deletion commits before the undelete, runs merge oldest-first, and
     // the selected subset is a prefix of that order, so a marker can never
     // outlive the row it names. A streaming compaction groups the family by
-    // deletion generation, which is the pair's shared key prefix, so the pair
+    // deletion identity, which is the pair's shared key prefix, so the pair
     // lands in one group there too.
     if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::ActiveDeletions) {
         let revoked: BTreeSet<(ChangeSeq, InodeId)> = rows
@@ -1159,8 +1247,9 @@ fn refuse_superseded_bind_without_unbind(
 /// its rows, the same posture inode and tombstone rows take, and that is what
 /// makes an undelete give back the map the inode had.
 ///
-/// The rule reads one inode's rows and no others, so a streaming compaction
-/// runs it over one inode's rows at a time and reaches the same answer.
+/// The rule reads one inode's rows and no others, and reads them newest
+/// first, so a streaming compaction reaches the same answer holding two
+/// fields instead of the inode's history.
 fn drop_superseded_attribute_revisions(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,

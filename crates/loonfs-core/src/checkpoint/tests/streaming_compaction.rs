@@ -3,7 +3,10 @@
 //! place, restart equivalence, and the resource bounds that make the job
 //! independent of the size of what it rebuilds.
 
-use super::super::reorganize::{select_reorganization_input, ReorganizationPlan};
+use super::super::compaction_lease::CompactionLease;
+use super::super::reorganize::{
+    drop_rows_below_retention_floor, select_reorganization_input, ReorganizationPlan,
+};
 use super::super::row::manifest_row_commit_seq;
 use super::super::runs::MetadataFamilyGroup;
 use super::super::scan::VerifiedMetadataTables;
@@ -14,7 +17,8 @@ use super::super::streaming_compaction::{
 };
 use super::*;
 use crate::timing::StdMonotonicTimer;
-use loonfs_objectstore::keys::metadata_compaction_staging_prefix;
+use loonfs_api::wire::manifest::ActiveDeletionRowAction;
+use loonfs_objectstore::keys::{metadata_compaction_lease, metadata_compaction_prefix};
 use loonfs_test_support::stores::ConcurrencyWatchStore;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -236,9 +240,236 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
         .expect("checkpoint the late write");
 }
 
+/// A namespace whose churn all lands on one locality of each kind: one
+/// inode's attribute history, one parent-and-name slot's binding
+/// generations, and one path deleted and undeleted over and over.
+///
+/// This is the shape the wide-directory seed does not produce. Many distinct
+/// names prove that distinct localities do not accumulate together; only one
+/// hot locality proves that the rules inside one do not accumulate either.
+async fn seed_one_hot_locality_of_each_kind(store: &LocalFsStore, namespace_id: &NamespaceId) {
+    let context = test_context();
+    bootstrap_namespace(store, namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        store,
+        namespace_id,
+        "/hot/annotated.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write the annotated file");
+    // One inode, many attribute revisions. Every one supersedes the last, so
+    // the whole history below the floor collapses to one row. The tail is
+    // flushed along the way because a namespace may only carry so many
+    // unpublished WAL segments.
+    for revision in 0..48u64 {
+        update_attributes(
+            store,
+            namespace_id,
+            "/hot/annotated.txt",
+            "loon.round",
+            &revision.to_string(),
+            &context,
+        )
+        .await;
+        if revision % 16 == 15 {
+            flush::flush_wal(store, namespace_id, &context)
+                .await
+                .expect("flush the tail");
+        }
+    }
+    // One parent-and-name slot, many binding generations: the same path
+    // created and deleted over and over.
+    for round in 0..48u64 {
+        write_file_bytes(
+            store,
+            namespace_id,
+            "/hot/recreated.txt",
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("recreate the file");
+        delete_path(store, namespace_id, "/hot/recreated.txt", &context, None)
+            .await
+            .expect("delete the file");
+        if round % 8 == 7 {
+            flush::flush_wal(store, namespace_id, &context)
+                .await
+                .expect("flush the tail");
+        }
+    }
+    // One deletion generation cancelled by an undelete, which is the pair the
+    // active-deletion rule drops together.
+    write_file_bytes(
+        store,
+        namespace_id,
+        "/hot/undeleted.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write the undeleted file");
+    delete_path(store, namespace_id, "/hot/undeleted.txt", &context, None)
+        .await
+        .expect("delete the file to undelete");
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint the deletion so its listed row is readable");
+    undelete_newest_deletion(store, namespace_id, &context).await;
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint the churn");
+    drain_reorganization(
+        store,
+        namespace_id,
+        &context,
+        MetadataLsmPolicy {
+            max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
+    advance_retention_floor(store, namespace_id, &context)
+        .await
+        .expect("advance the floor past the churn");
+
+    // A little above the floor, so the job has rows it may not drop.
+    write_file_bytes(
+        store,
+        namespace_id,
+        "/hot/late.txt",
+        b"late body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write a late file");
+    update_attributes(
+        store,
+        namespace_id,
+        "/hot/annotated.txt",
+        "loon.round",
+        "late",
+        &context,
+    )
+    .await;
+    create_checkpoint(store, namespace_id, &context)
+        .await
+        .expect("checkpoint the late writes");
+}
+
+/// Publishes one attribute update, which is one more revision for the
+/// inode the path resolves to.
+async fn update_attributes<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    path: &str,
+    key: &str,
+    value: &str,
+    context: &MutationContext,
+) {
+    publish_one_operation(
+        store,
+        namespace_id,
+        FilesystemOperation::UpdateAttributes {
+            path: AbsolutePath::parse(path).expect("path"),
+            set: [(
+                loonfs_api::AttributeKey::parse(key).expect("attribute key"),
+                loonfs_api::AttributeValue::String {
+                    value: value.to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            remove: Vec::new(),
+            expected_inode_id: None,
+            expected_attributes_revision_no: None,
+        },
+        context,
+    )
+    .await;
+}
+
+/// Cancels the namespace's newest recoverable deletion, which writes the
+/// removal marker the active-deletion rule pairs with the listed row.
+///
+/// The deletion is read back out of the manifest rather than remembered from
+/// the commit response, because the row is what names the generation the
+/// undelete has to cancel.
+async fn undelete_newest_deletion<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) {
+    let rows =
+        group_rows_of_current_manifest(store, namespace_id, MetadataFamilyGroup::ActiveDeletions)
+            .await;
+    let (root_inode_id, deleted_at_seq) = rows[&ApiMetadataTableFamily::ActiveDeletions]
+        .iter()
+        .filter_map(|row| match row {
+            MetadataRow::ActiveDeletion {
+                root_inode_id,
+                deleted_at_seq,
+                action: ActiveDeletionRowAction::Listed { .. },
+            } => Some((*root_inode_id, *deleted_at_seq)),
+            _ => None,
+        })
+        .max_by_key(|(_, deleted_at_seq)| *deleted_at_seq)
+        .expect("the namespace holds a recoverable deletion");
+    publish_one_operation(
+        store,
+        namespace_id,
+        FilesystemOperation::Undelete {
+            inode_id: root_inode_id,
+            deleted_at_seq,
+            path: None,
+        },
+        context,
+    )
+    .await;
+}
+
+async fn publish_one_operation<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    operation: FilesystemOperation,
+    context: &MutationContext,
+) {
+    NamespaceCommitEngine::new(namespace_id.clone())
+        .publish_batch(
+            store,
+            vec![CommitCandidate::prepared(
+                CommitRequest::single(CommitId::generate(), None, operation),
+                Vec::new(),
+            )],
+            context,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("publish the operation");
+}
+
 // -------------------------------------------------------------------------
 // Driving a job
 // -------------------------------------------------------------------------
+
+/// The view a step sees while `spec`'s job is rebuilding its group.
+fn rebuilding(spec: &MetadataCompactionSpec) -> MetadataCompactionView<'_> {
+    MetadataCompactionView {
+        active: Some(spec),
+        blocked_engagements: &[],
+    }
+}
 
 /// A budget that admits the whole group in one step, so the ordinary fold can
 /// rebuild in one unit whatever the streaming job did incrementally.
@@ -353,6 +584,7 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
             ..MetadataLsmPolicy::default()
         },
         frozen_floor_seq,
+        false,
     )
     .await
     .expect("plan the group");
@@ -360,6 +592,24 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
         Some(ReorganizationPlan::FullCompaction(spec)) => spec,
         _ => panic!("a group no budget admits must plan as a streaming compaction"),
     }
+}
+
+/// The claim a job holds while it runs, built the way the job driver builds
+/// it. These tests split the rebuild from the driver, so they open the claim
+/// themselves.
+fn test_lease<'a>(
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    timer: &'a StdMonotonicTimer,
+) -> CompactionLease<'a> {
+    let context = test_context();
+    CompactionLease::new(
+        namespace_id,
+        spec.job_id(),
+        &context.writer_id,
+        context.now_ms,
+        timer,
+    )
 }
 
 async fn run_compaction<S: ObjectStore + ?Sized>(
@@ -370,9 +620,18 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
     cancellation: &MetadataCompactionCancellation,
 ) -> MetadataCompactionOutcome {
     let tables = load_current_manifest_tables(store, namespace_id).await;
-    run_metadata_compaction(&tables, namespace_id, spec, policy, cancellation)
-        .await
-        .expect("run the streaming compaction")
+    let timer = StdMonotonicTimer::default();
+    let mut lease = test_lease(namespace_id, spec, &timer);
+    run_metadata_compaction(
+        &tables,
+        namespace_id,
+        spec,
+        policy,
+        cancellation,
+        &mut lease,
+    )
+    .await
+    .expect("run the streaming compaction")
 }
 
 /// The segments the group's snapshot runs hold right now, which is what
@@ -398,6 +657,8 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     snapshot_keys: &BTreeSet<String>,
     result: &MetadataCompactionResult,
 ) -> Finalization {
+    let timer = StdMonotonicTimer::default();
+    let mut lease = test_lease(namespace_id, spec, &timer);
     finalize_metadata_compaction(
         store,
         namespace_id,
@@ -405,7 +666,7 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
         spec,
         snapshot_keys,
         result.clone(),
-        &StdMonotonicTimer::default(),
+        &mut lease,
     )
     .await
     .expect("finalize the streaming compaction")
@@ -493,7 +754,7 @@ async fn staged_object_keys<S: ObjectStore + ?Sized>(
 ) -> BTreeSet<String> {
     use futures::StreamExt;
     store
-        .list_prefix_stream(&metadata_compaction_staging_prefix(namespace_id.as_str()))
+        .list_prefix_stream(&metadata_compaction_prefix(namespace_id.as_str()))
         .map(|key| key.expect("list staged objects"))
         .collect()
         .await
@@ -511,7 +772,7 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
         namespace_id,
         &test_context(),
         fold_everything_policy(),
-        None,
+        MetadataCompactionView::default(),
     )
     .await
     .expect("fold the group whole");
@@ -542,9 +803,10 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let tables = load_current_manifest_tables(&store, &namespace_id).await;
 
-    let generous = select_reorganization_input(&tables, group, fold_everything_policy(), floor_seq)
-        .await
-        .expect("plan under generous budgets");
+    let generous =
+        select_reorganization_input(&tables, group, fold_everything_policy(), floor_seq, false)
+            .await
+            .expect("plan under generous budgets");
     assert!(
         matches!(generous.plan, Some(ReorganizationPlan::BoundedMerge(_))),
         "a window that fits is a bounded merge"
@@ -560,6 +822,7 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
             ..MetadataLsmPolicy::default()
         },
         floor_seq,
+        false,
     )
     .await
     .expect("plan under budgets nothing fits");
@@ -602,7 +865,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
         &namespace_id,
         &test_context(),
         starving_policy(),
-        None,
+        MetadataCompactionView::default(),
     )
     .await
     .expect("budgeted step");
@@ -650,7 +913,7 @@ async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
         &namespace_id,
         &test_context(),
         policy,
-        None,
+        MetadataCompactionView::default(),
     )
     .await
     .expect("step with no job running");
@@ -672,7 +935,7 @@ async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
             &namespace_id,
             &test_context(),
             policy,
-            Some(&spec),
+            rebuilding(&spec),
         )
         .await
         .expect("step with the job running");
@@ -698,6 +961,182 @@ async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
         snapshot_keys,
         "the job's input must be exactly what it was when the job was planned"
     );
+}
+
+/// A group whose bottom-anchored window is blocked still merges the delta
+/// runs above the frozen base — and under sustained writes there is always
+/// another pair of them, so a planner reading one step's view alone would take
+/// that merge forever and never start the job.
+///
+/// The runtime counts those engagements, and after
+/// `DELTA_MERGES_OVER_A_FROZEN_BASE` of them the planner starts the job
+/// regardless of what delta window is available. Here every step publishes a
+/// fresh delta run before the next one plans, which is the write pattern that
+/// used to postpone the job indefinitely.
+#[tokio::test]
+async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_one_wide_directory(&store, &namespace_id).await;
+    let group = MetadataFamilyGroup::Bindings;
+    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
+
+    let mut engagements = 0u32;
+    let mut delta_merges_over_the_frozen_base = 0usize;
+    let mut planned: Option<MetadataCompactionSpec> = None;
+    for round in 0..16u64 {
+        // A new delta run before every step, so the planner always has two
+        // runs above the base to merge.
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/wide/arrival-{round}.txt"),
+            b"arrival\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write a file");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the write");
+
+        let blocked = [(group.families(), engagements)];
+        let report = super::super::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &context,
+            policy,
+            MetadataCompactionView {
+                active: None,
+                blocked_engagements: &blocked,
+            },
+        )
+        .await
+        .expect("maintenance step");
+        match report.outcome {
+            MetadataReorganizeOutcome::CompactionPlanned { ref families, .. } => {
+                assert_eq!(families.as_slice(), group.families());
+                planned = match report.outcome {
+                    MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => Some(spec),
+                    _ => unreachable!(),
+                };
+                break;
+            }
+            MetadataReorganizeOutcome::UnitPublished {
+                ref families,
+                bottom_anchored_merge_blocked,
+                ..
+            } if families.as_slice() == group.families() => {
+                assert!(
+                    bottom_anchored_merge_blocked,
+                    "this budget starves the group's base, so every merge of it runs above one"
+                );
+                engagements += 1;
+                delta_merges_over_the_frozen_base += 1;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        planned.is_some(),
+        "the job must start while delta runs keep arriving"
+    );
+    assert_eq!(
+        delta_merges_over_the_frozen_base,
+        super::super::reorganize::DELTA_MERGES_OVER_A_FROZEN_BASE as usize,
+        "the group merges deltas over its frozen base exactly that many times before the job"
+    );
+}
+
+/// Between jobs, the ordinary delta merge is what consolidates new runs.
+///
+/// Starting a job for every batch of delta runs would reread the whole group
+/// to fold in a sliver, which is the amortization the counter exists to keep.
+/// A group whose base is not frozen never counts an engagement at all, and a
+/// group whose base is frozen spends its budget on merges first.
+#[tokio::test]
+async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_bindings_workload(&store, &namespace_id).await;
+    let group = MetadataFamilyGroup::Bindings;
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        ..MetadataLsmPolicy::default()
+    };
+
+    // Budgets this group fits: every merge starts at the group's oldest run,
+    // so nothing is ever blocked and no engagement is ever counted.
+    let mut merges = 0usize;
+    for _ in 0..16 {
+        let report = super::super::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &context,
+            policy,
+            MetadataCompactionView::default(),
+        )
+        .await
+        .expect("maintenance step");
+        match report.outcome {
+            MetadataReorganizeOutcome::UnitPublished {
+                ref families,
+                bottom_anchored_merge_blocked,
+                ..
+            } => {
+                if families.as_slice() == group.families() {
+                    assert!(
+                        !bottom_anchored_merge_blocked,
+                        "a group whose window fits is never merging over a frozen base"
+                    );
+                    merges += 1;
+                }
+            }
+            MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            other => panic!("unexpected outcome {other:?}"),
+        }
+    }
+    assert!(merges > 0, "the ordinary merge must do this group's work");
+
+    // A fresh delta batch arrives. It folds through the ordinary merge, and
+    // the planner never reaches for a job.
+    for round in 0..3u64 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/steady-{round}.txt"),
+            b"steady\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write a file");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the write");
+    }
+    for _ in 0..16 {
+        let report = super::super::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &context,
+            policy,
+            MetadataCompactionView::default(),
+        )
+        .await
+        .expect("maintenance step");
+        match report.outcome {
+            MetadataReorganizeOutcome::UnitPublished { .. } => {}
+            MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            other => panic!("a group whose window fits must never plan a job, got {other:?}"),
+        }
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -747,7 +1186,7 @@ async fn a_streaming_compaction_and_a_whole_group_fold_reach_the_same_rows() {
     assert!(
         result.output_segments.iter().all(|descriptor| descriptor
             .object_key
-            .starts_with(&metadata_compaction_staging_prefix(namespace_id.as_str()))),
+            .starts_with(&metadata_compaction_prefix(namespace_id.as_str()))),
         "every output segment is written to the staging directory"
     );
     // Every reverse row the floor covers costs one point read, and no other
@@ -1139,6 +1578,118 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
 }
 
 // -------------------------------------------------------------------------
+// The job's claim on its own output
+// -------------------------------------------------------------------------
+
+/// A job writes its lease before its first output object and deletes it after
+/// publishing, and the segments it published stay where they are.
+///
+/// The lease is what tells a collector that an unreferenced staged object
+/// belongs to a job that is still running. Once the manifest names those
+/// objects they are live wherever they sit, so the claim has nothing left to
+/// protect.
+#[tokio::test]
+async fn a_job_claims_its_prefix_while_it_runs_and_drops_the_claim_when_it_publishes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_bindings_workload(&store, &namespace_id).await;
+    let group = MetadataFamilyGroup::Bindings;
+    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
+    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
+    let lease_key = metadata_compaction_lease(namespace_id.as_str(), spec.job_id().as_str());
+
+    let outcome = run_metadata_compaction_job(
+        &store,
+        &namespace_id,
+        &context,
+        policy,
+        &spec,
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("run the job");
+    assert!(matches!(
+        outcome,
+        MetadataCompactionJobOutcome::Published { .. }
+    ));
+
+    // Every object the job wrote sits under its own prefix, and the manifest
+    // now names the segments.
+    let staged = staged_object_keys(&store, &namespace_id).await;
+    let referenced = referenced_segment_keys(&store, &namespace_id).await;
+    let job_prefix = format!(
+        "{}{}/",
+        metadata_compaction_prefix(namespace_id.as_str()),
+        spec.job_id().as_str()
+    );
+    assert!(
+        staged.iter().all(|key| key.starts_with(&job_prefix)),
+        "every object a job writes belongs to that job's prefix: {staged:?}"
+    );
+    assert!(
+        !staged.is_empty() && staged.iter().all(|key| referenced.contains(key)),
+        "the manifest must name the segments the job published"
+    );
+    assert!(
+        !staged.contains(&lease_key),
+        "a published job deletes its own lease"
+    );
+    assert!(store
+        .head(&lease_key)
+        .await
+        .expect("head the lease")
+        .is_none());
+}
+
+/// A cancelled job leaves its lease behind, which is what keeps a collector
+/// off the segments it had written until the lease expires.
+#[tokio::test]
+async fn a_cancelled_job_leaves_its_claim_standing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    seed_bindings_workload(
+        &LocalFsStore::new(temp_dir.path()).expect("store"),
+        &namespace_id,
+    )
+    .await;
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let group = MetadataFamilyGroup::Bindings;
+    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
+    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
+    let lease_key = metadata_compaction_lease(namespace_id.as_str(), spec.job_id().as_str());
+
+    let cancellation = MetadataCompactionCancellation::default();
+    let dying_store = CancelAfterReadsStore {
+        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
+        cancellation: cancellation.clone(),
+        reads_before_cancel: 8,
+        reads: AtomicUsize::new(0),
+    };
+    let outcome = run_metadata_compaction_job(
+        &dying_store,
+        &namespace_id,
+        &context,
+        policy,
+        &spec,
+        &cancellation,
+    )
+    .await
+    .expect("run the job");
+    assert_eq!(outcome, MetadataCompactionJobOutcome::Cancelled);
+    assert!(
+        store
+            .head(&lease_key)
+            .await
+            .expect("head the lease")
+            .is_some(),
+        "a cancelled job's claim stands until it expires"
+    );
+}
+
+// -------------------------------------------------------------------------
 // Resource discipline
 // -------------------------------------------------------------------------
 
@@ -1200,21 +1751,22 @@ async fn a_compaction_keeps_its_reads_and_its_decoded_blocks_bounded() {
         result.rows_read > (rows_in_group / 2) as u64,
         "this assertion means nothing unless the job read most of the group"
     );
-    // No locality group is a family: the rules read one name slot, and a slot
-    // holds the generations of one binding.
+    // The retention operators hold answers, not rows. The bindings operator
+    // holds one bind row until its generation's unbinds have arrived, and no
+    // other operator holds a row at all.
     assert!(
-        result.peak_locality_rows <= 8,
-        "one locality group held {} rows",
-        result.peak_locality_rows
+        result.peak_operator_rows <= 1,
+        "a retention operator held {} rows",
+        result.peak_operator_rows
     );
 }
 
 /// One directory far past the old per-step row budget streams through with
 /// the same bounded state. The case that needed a durable offset inside a
-/// partition needs nothing now: the rules read one name slot, so the peak
-/// tracks a slot's rows and not the directory's.
+/// partition needs nothing now: the operators hold one row at most, whatever
+/// the directory holds.
 #[tokio::test]
-async fn one_directory_far_past_the_row_budget_streams_a_slot_at_a_time() {
+async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     let job_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(job_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1271,9 +1823,9 @@ async fn one_directory_far_past_the_row_budget_streams_a_slot_at_a_time() {
         panic!("nothing cancelled this job");
     };
     assert!(
-        result.peak_locality_rows * 4 < widest,
-        "the peak locality held {} rows against a directory of {widest}",
-        result.peak_locality_rows
+        result.peak_operator_rows <= 1,
+        "a retention operator held {} rows against a directory of {widest}",
+        result.peak_operator_rows
     );
 
     publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
@@ -1294,6 +1846,111 @@ async fn one_directory_far_past_the_row_budget_streams_a_slot_at_a_time() {
         snapshot_runs_for_group(tables.manifest(), group).len(),
         1,
         "the job must leave the group in one run"
+    );
+}
+
+/// Every group of a namespace whose churn all lands on one hot locality
+/// rebuilds to the fold's rows while its operators hold at most one row.
+///
+/// The wide-directory case above proves that distinct localities do not
+/// accumulate together. This proves the other half: one inode's attribute
+/// history, one name slot's binding generations, and one deletion's markers
+/// are each decided by fixed state rather than by holding the locality.
+#[tokio::test]
+async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
+    let job_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(job_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_one_hot_locality_of_each_kind(&store, &namespace_id).await;
+    let frozen_floor_seq = read_floor_seq(&store, &namespace_id).await;
+
+    let fold_dir = tempdir().expect("tempdir");
+    copy_store_tree(job_dir.path(), fold_dir.path());
+    let fold_store = LocalFsStore::new(fold_dir.path()).expect("store");
+
+    for group in REORGANIZE_FAMILY_GROUPS {
+        let before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+        if before.values().all(Vec::is_empty) {
+            continue;
+        }
+        // The same durable bytes, folded the ordinary way.
+        let folded_before = group_rows_of_current_manifest(&fold_store, &namespace_id, group).await;
+        assert_eq!(
+            folded_before, before,
+            "both rebuilds must start from the same rows"
+        );
+        let mut folded = folded_before.clone();
+        for family in group.families() {
+            folded.entry(*family).or_default();
+        }
+        drop_rows_below_retention_floor(&mut folded, frozen_floor_seq)
+            .expect("fold the group whole");
+        for (family, rows) in &mut folded {
+            rows.sort_by_key(|row| row.row_key_for_family(*family));
+        }
+
+        let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
+        let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+        let MetadataCompactionOutcome::Completed(result) = run_compaction(
+            &store,
+            &namespace_id,
+            &spec,
+            small_segment_policy(),
+            &MetadataCompactionCancellation::default(),
+        )
+        .await
+        else {
+            panic!("nothing cancelled this job");
+        };
+        assert!(
+            result.peak_operator_rows <= 1,
+            "a {group:?} retention operator held {} rows",
+            result.peak_operator_rows
+        );
+        publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+
+        let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+        assert_eq!(
+            compacted, folded,
+            "a streaming rebuild of {group:?} must keep the rows a whole-group fold keeps"
+        );
+        // Nothing above the floor may go, whatever the rules dropped below it.
+        for (family, rows) in &before {
+            let survivors: BTreeSet<String> = compacted[family]
+                .iter()
+                .map(|row| row.row_key_for_family(*family))
+                .collect();
+            for row in rows {
+                if manifest_row_commit_seq(row) > frozen_floor_seq {
+                    assert!(
+                        survivors.contains(&row.row_key_for_family(*family)),
+                        "the job dropped a {family:?} row above the retention floor"
+                    );
+                }
+            }
+        }
+    }
+
+    // The hot localities really did collapse: the group with an attribute
+    // history and the group with a name slot both hold fewer rows than they
+    // did, and the two bind families stayed in lockstep.
+    let attributes =
+        group_rows_of_current_manifest(&store, &namespace_id, MetadataFamilyGroup::Attributes)
+            .await;
+    assert_eq!(
+        attributes[&ApiMetadataTableFamily::Attributes].len(),
+        2,
+        "one inode's history must collapse to the newest row at the floor plus the late one"
+    );
+    let bindings =
+        group_rows_of_current_manifest(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    assert_eq!(
+        bindings[&ApiMetadataTableFamily::DirentryBinds].len(),
+        bindings[&ApiMetadataTableFamily::DirentryChildBinds].len(),
+    );
+    assert!(
+        bindings[&ApiMetadataTableFamily::DirentryUnbinds].is_empty(),
+        "every unbind the floor covered must be gone"
     );
 }
 
@@ -1397,7 +2054,10 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             &namespace_id,
             &context,
             policy,
-            active.as_ref(),
+            active.as_ref().map_or_else(
+                MetadataCompactionView::default,
+                |spec: &MetadataCompactionSpec| rebuilding(spec),
+            ),
         )
         .await
         .expect("maintenance step");
@@ -1537,10 +2197,15 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
 ) -> MetadataCompactionSpec {
     for _step in 0..64 {
-        let report =
-            super::super::reorganize_metadata_step(store, namespace_id, context, policy, None)
-                .await
-                .expect("maintenance step");
+        let report = super::super::reorganize_metadata_step(
+            store,
+            namespace_id,
+            context,
+            policy,
+            MetadataCompactionView::default(),
+        )
+        .await
+        .expect("maintenance step");
         match report.outcome {
             MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => return spec,
             MetadataReorganizeOutcome::UnitPublished { .. } => {}

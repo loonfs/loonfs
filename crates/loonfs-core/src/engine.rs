@@ -832,18 +832,21 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// A group whose oldest run no longer fits one unit is reported as
     /// [`MetadataReorganizeOutcome::CompactionPlanned`] instead. The caller
     /// runs that plan with [`Self::run_metadata_compaction`] as a background
-    /// job and hands its spec back here as `active_compaction` for as long as
-    /// the job runs, so no unit merges the group underneath it.
+    /// job and hands its spec back here in `compactions` for as long as the
+    /// job runs, so no unit merges the group underneath it. `compactions`
+    /// also carries how long each group has been merging deltas over a base
+    /// no window can reach, which is what decides when the planner stops
+    /// taking that merge and starts the job.
     pub async fn reorganize_metadata(
         &self,
-        active_compaction: Option<&crate::checkpoint::MetadataCompactionSpec>,
+        compactions: crate::checkpoint::MetadataCompactionView<'_>,
     ) -> Result<crate::checkpoint::MetadataReorganizeReport> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
             crate::checkpoint::MetadataLsmPolicy::default(),
-            active_compaction,
+            compactions,
         )
         .await
     }

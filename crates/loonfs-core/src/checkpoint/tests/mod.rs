@@ -43,7 +43,7 @@ use super::streaming_compaction::{
 };
 use super::{
     block_fetch, create, data_block_load, flush, load, record, reorganize,
-    reorganize_metadata_step, row, scan, MetadataReorganizeOutcome,
+    reorganize_metadata_step, row, scan, MetadataCompactionView, MetadataReorganizeOutcome,
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
@@ -244,10 +244,15 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
         ..policy
     };
     loop {
-        let report =
-            super::reorganize_metadata_step(store, namespace_id, context, fold_policy, None)
-                .await
-                .expect("reorganization step");
+        let report = super::reorganize_metadata_step(
+            store,
+            namespace_id,
+            context,
+            fold_policy,
+            MetadataCompactionView::default(),
+        )
+        .await
+        .expect("reorganization step");
         match report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { .. }
             | super::MetadataReorganizeOutcome::Superseded => continue,
@@ -341,16 +346,22 @@ pub(crate) async fn compact_a_family_group_into_staging<S: ObjectStore + ?Sized>
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
-    let report = reorganize_metadata_step(store, namespace_id, context, policy, None)
-        .await
-        .expect("plan a streaming compaction");
+    let report = reorganize_metadata_step(
+        store,
+        namespace_id,
+        context,
+        policy,
+        MetadataCompactionView::default(),
+    )
+    .await
+    .expect("plan a streaming compaction");
     let MetadataReorganizeOutcome::CompactionPlanned { spec, .. } = report.outcome else {
         panic!("a budget that admits no run whole must plan a streaming compaction");
     };
     publish_planned_compaction(store, namespace_id, context, policy, &spec).await;
 
     let staging_prefix =
-        loonfs_objectstore::keys::metadata_compaction_staging_prefix(namespace_id.as_str());
+        loonfs_objectstore::keys::metadata_compaction_prefix(namespace_id.as_str());
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
     let staged: BTreeSet<String> =
         load_verified_manifest_tables(store, namespace_id, &manifest_object_id)

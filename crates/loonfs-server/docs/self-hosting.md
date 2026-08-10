@@ -392,9 +392,15 @@ no longer fits one reorganization step. It names the group, the run, how many
 rows and bytes that run holds, and the two per-step budgets it did not fit. It
 means the namespace has grown, not that anything is wrong.
 
-What follows it is `a family group outgrew one reorganization step; a
-streaming metadata compaction is rebuilding it`. That is a background job the
-server starts and does not wait for. It reads every file the group holds,
+The warning may repeat once or twice before the rebuild starts. A group in
+this state still has newer metadata files above the frozen ones, and folding
+those together is cheaper than rebuilding the whole group, so maintenance does
+that first. After a couple of rounds it stops waiting and starts the rebuild,
+whether or not more files have arrived meanwhile.
+
+What follows is `a family group outgrew one reorganization step; a streaming
+metadata compaction is rebuilding it`. That is a background job the server
+starts and does not wait for. It reads every file the group holds,
 writes the rebuilt group as it goes, and publishes the result in one step at
 the end. A large group can keep it busy for a long time, and it logs
 `streaming metadata compaction progress` as it works so you can see it moving.
@@ -408,15 +414,21 @@ job runs at a time per namespace, so a second group in the same state waits
 its turn and says so.
 
 A restart during a rebuild loses that rebuild's work, and this is expected.
-Nothing durable records that a job was running: the published metadata never
+Nothing durable records the rebuild's progress: the published metadata never
 moved, the files the job had written are referenced by nothing, and the next
 maintenance step starts the job again from what the namespace holds by then.
-The abandoned files sit under
-`namespaces/{namespace}/metadata/compaction-staging/` and garbage collection
-reclaims them a day later, which is a deliberately generous wait so that a
-collection pass can never delete the output of a job that is still running.
 The same is true of a graceful shutdown, which cancels a running job rather
 than waiting for it.
+
+Each job writes its files under
+`namespaces/{namespace}/metadata/compactions/{job}/tables/` and keeps a small
+`lease.json` beside them that it rewrites every few minutes while it runs.
+That lease is how a collection pass tells a job that is still writing from
+one that died: a job holding its lease keeps its files however old they are,
+and a job whose lease has gone stale leaves them to be reclaimed within the
+hour. The lease says only who owns the files and when the job last touched
+them; it records nothing about the rebuild's progress, so it cannot make a
+restart resume anything.
 
 Two lines mean the job did not land and will be run again: `streaming metadata
 compaction abandoned` (something else rewrote the group underneath it) and

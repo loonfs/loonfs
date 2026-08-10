@@ -461,11 +461,12 @@ pub(crate) struct RunnerInner {
     /// pipeline at all.
     instruments: Arc<RuntimeInstruments>,
     /// The streaming metadata compactions running under this runner, one per
-    /// namespace at most. Held here rather than beside the admission book
-    /// because a compaction is not a bounded step: it takes no permit, it
-    /// runs for as long as it needs, and what the runner owes it is a spawn,
-    /// a cancellation at shutdown, and the drain every spawned task gets.
-    compactions: Arc<Mutex<BTreeMap<NamespaceId, compaction::ActiveCompaction>>>,
+    /// namespace at most, and the pressure that decides when one has to
+    /// start. Held here rather than beside the admission book because a
+    /// compaction is not a bounded step: it takes no permit, it runs for as
+    /// long as it needs, and what the runner owes it is a spawn, a
+    /// cancellation at shutdown, and the drain every spawned task gets.
+    compactions: Arc<Mutex<BTreeMap<NamespaceId, compaction::NamespaceCompactions>>>,
 }
 
 struct RunnerState {

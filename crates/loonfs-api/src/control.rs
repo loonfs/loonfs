@@ -6,8 +6,8 @@ use crate::envelope::EnvelopeCodecError;
 use crate::WriterEpoch;
 use crate::{
     ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
-    ContentStoreId, InodeId, ManifestId, ManifestObjectId, NamespaceId, StorageChecksum, UploadId,
-    WalSegmentId, ROOT_INODE_ID,
+    ContentStoreId, InodeId, ManifestId, ManifestObjectId, MetadataCompactionId, NamespaceId,
+    StorageChecksum, UploadId, WalSegmentId, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -30,16 +30,20 @@ pub enum ControlObjectKind {
     CheckpointRecord,
     /// Tracks staged content through upload completion or cleanup.
     UploadSession,
+    /// Marks one streaming metadata compaction's output as owned by a job
+    /// that is still running.
+    CompactionLease,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::WalHead,
         Self::WalFloor,
         Self::MetadataRoot,
         Self::CheckpointRecord,
         Self::UploadSession,
+        Self::CompactionLease,
     ];
 
     /// Durable format version for this control object kind.
@@ -55,6 +59,7 @@ impl ControlObjectKind {
             Self::MetadataRoot => 1,
             Self::CheckpointRecord => 1,
             Self::UploadSession => 1,
+            Self::CompactionLease => 1,
         }
     }
 
@@ -66,6 +71,7 @@ impl ControlObjectKind {
             Self::MetadataRoot => "metadata_root",
             Self::CheckpointRecord => "checkpoint_record",
             Self::UploadSession => "upload_session",
+            Self::CompactionLease => "compaction_lease",
         }
     }
 
@@ -119,6 +125,34 @@ pub struct MetadataRootState {
     pub manifest_payload_checksum: String,
     /// Unix-millisecond wall-clock stamp for observability and GC grace policy, not ordering.
     pub updated_at_ms: u64,
+}
+
+/// Says that one streaming metadata compaction is still running, so the
+/// objects under its job prefix belong to it.
+///
+/// The lease carries lifecycle ownership and nothing else: no cursor, no
+/// output descriptor, no offset, no progress. Its only reader is garbage
+/// collection, which retains a job prefix whose lease was refreshed recently
+/// and reclaims one whose lease is stale or gone (format spec, "Garbage
+/// collection", rule 12). Nothing about a job's correctness depends on it —
+/// a job that loses its lease loses its output to a later pass and runs
+/// again, which is what every other way a job can end already costs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataCompactionLeaseState {
+    /// Job this lease belongs to, which is also the prefix its output sits
+    /// under.
+    pub job_id: MetadataCompactionId,
+    /// Namespace whose family group the job is rebuilding.
+    pub namespace_id: NamespaceId,
+    /// Writer identity the job runs under, for an operator reading the
+    /// object.
+    pub owner_id: String,
+    /// Unix-millisecond stamp of the job's first lease write.
+    pub started_at_ms: u64,
+    /// Unix-millisecond stamp of the most recent lease write, and the only
+    /// input to whether the job still owns its prefix.
+    pub heartbeat_at_ms: u64,
 }
 
 /// Lifecycle of a durable checkpoint record: monotonic, with exactly two
@@ -1068,6 +1102,9 @@ pub type MetadataRootEnvelope = ControlObjectEnvelope<MetadataRootState>;
 pub type WalFloorEnvelope = ControlObjectEnvelope<WalFloorState>;
 /// Specializes a control envelope for a durable manifest pin.
 pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>;
+/// Specializes a control envelope for a running compaction's ownership of
+/// its staged output.
+pub type MetadataCompactionLeaseEnvelope = ControlObjectEnvelope<MetadataCompactionLeaseState>;
 
 /// Computes the checksum stored beside canonical JSON for a control state.
 ///

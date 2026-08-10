@@ -124,9 +124,9 @@ pub use ids::{
     generated_id, manifest_object_id_manifest_id, wal_segment_id_start_seq, ChangeSeq,
     CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
     GeneratedIdValidationError, IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId,
-    MetadataTableId, NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError,
-    RevisionNo, UploadId, WalSegmentId, WriterEpoch, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
-    ROOT_INODE_ID,
+    MetadataCompactionId, MetadataTableId, NameKey, NameKeyValidationError, NamespaceId,
+    NamespaceIdValidationError, RevisionNo, UploadId, WalSegmentId, WriterEpoch, MAX_ID_BYTES,
+    MAX_NAME_KEY_BYTES, ROOT_INODE_ID,
 };
 pub use name_policy::name_key_for_display_name;
 pub use pagination::{

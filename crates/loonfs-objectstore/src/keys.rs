@@ -81,19 +81,37 @@ pub fn metadata_table(namespace: &str, table_id: &str) -> String {
     ObjectLayout::new().metadata_table(namespace, table_id)
 }
 
-/// Builds the immutable staging key a streaming compaction writes one
+/// Builds the immutable staging key one streaming compaction job writes a
 /// metadata segment to before any manifest references it.
 ///
 /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn metadata_compaction_staging_table(namespace: &str, table_id: &str) -> String {
-    ObjectLayout::new().metadata_compaction_staging_table(namespace, table_id)
+pub fn metadata_compaction_table(namespace: &str, job_id: &str, table_id: &str) -> String {
+    ObjectLayout::new().metadata_compaction_table(namespace, job_id, table_id)
 }
 
-/// Builds the listing prefix containing staged compaction segments for one namespace.
+/// Builds the mutable lease key one streaming compaction job holds over its
+/// own prefix.
 ///
 /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn metadata_compaction_staging_prefix(namespace: &str) -> String {
-    ObjectLayout::new().metadata_compaction_staging_prefix(namespace)
+pub fn metadata_compaction_lease(namespace: &str, job_id: &str) -> String {
+    ObjectLayout::new().metadata_compaction_lease(namespace, job_id)
+}
+
+/// Builds the listing prefix containing every streaming compaction job's
+/// objects for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+pub fn metadata_compaction_prefix(namespace: &str) -> String {
+    ObjectLayout::new().metadata_compaction_prefix(namespace)
+}
+
+/// Extracts the job id from a key under one namespace's compaction prefix.
+///
+/// Returns `None` for a key under the prefix that is neither a job's lease
+/// nor one of its staged segments. See
+/// [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+pub fn metadata_compaction_job_id_from_key(key: &str) -> Option<&str> {
+    ObjectLayout::new().metadata_compaction_job_id_from_key(key)
 }
 
 /// Builds the mutable lifecycle key for one checkpoint record.
@@ -134,8 +152,8 @@ pub fn content_blob(content_store: &str, content_id: &ContentId) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, metadata_compaction_staging_prefix,
-        metadata_compaction_staging_table, metadata_manifest_object, metadata_root, metadata_table,
+        checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_prefix,
+        metadata_compaction_table, metadata_manifest_object, metadata_root, metadata_table,
         namespace_prefix, upload_session, wal_floor, wal_head, wal_segment,
         wal_segment_id_from_key, wal_segment_prefix,
     };
@@ -210,6 +228,7 @@ mod tests {
                     "00000000000000000400-0123456789abcdef",
                 )
                 .replace("{checkpoint_id}", "chk-1")
+                .replace("{job_id}", "cmp-1")
                 .replace("{table_id}", "tbl-1")
                 .replace("{upload_id}", "up-1")
                 .replace("{content_id[4..6]}", &CONTENT_ID[4..6])
@@ -235,7 +254,11 @@ mod tests {
             ("Metadata tables", metadata_table("ns-1", "tbl-1")),
             (
                 "Compaction staging",
-                metadata_compaction_staging_table("ns-1", "tbl-1"),
+                metadata_compaction_table("ns-1", "cmp-1", "tbl-1"),
+            ),
+            (
+                "Compaction leases",
+                metadata_compaction_lease("ns-1", "cmp-1"),
             ),
             ("Upload sessions", upload_session("ns-1", "up-1")),
             ("Metadata root", metadata_root("ns-1")),
@@ -294,12 +317,20 @@ mod tests {
             "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
-            metadata_compaction_staging_prefix("ns-1"),
-            "namespaces/ns-1/metadata/compaction-staging/"
+            metadata_compaction_prefix("ns-1"),
+            "namespaces/ns-1/metadata/compactions/"
         );
         assert_eq!(
-            metadata_compaction_staging_table("ns-1", "tbl_00000000000000000000000000000001"),
-            "namespaces/ns-1/metadata/compaction-staging/tbl_00000000000000000000000000000001.sst.zst"
+            metadata_compaction_table(
+                "ns-1",
+                "cmp_00000000000000000000000000000001",
+                "tbl_00000000000000000000000000000001"
+            ),
+            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/tables/tbl_00000000000000000000000000000001.sst.zst"
+        );
+        assert_eq!(
+            metadata_compaction_lease("ns-1", "cmp_00000000000000000000000000000001"),
+            "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/lease.json"
         );
         assert_eq!(
             checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
