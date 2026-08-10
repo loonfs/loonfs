@@ -286,9 +286,13 @@ fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
 ///
 /// Starting a streaming compaction is progress of the useful kind: the step
 /// that started it did no folding, and the steps behind it now have the
-/// group's peers to fold while the job runs. A group waiting on a job that is
-/// already running is a block — there is work and this step cannot make it —
-/// so the key parks and comes back on the next nudge or sweep.
+/// group's peers to fold while the job runs. A job queued behind the process
+/// compaction limit reads the same way — the group is claimed, so the steps
+/// behind it have the same peers to fold, and nothing is needed to make the
+/// job run. A group waiting on a job already running, and a group needing one
+/// this handle cannot run at all, are blocks: there is work and this step
+/// cannot make it, so the key parks and comes back on the next nudge or
+/// sweep. The job's own ending nudges the key back when it lands.
 fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceStepConclusion {
     let flush = match step.wal_flush {
         WalFlushStepOutcome::Flushed { .. } => Some(MaintenanceStepConclusion::Progressed),
@@ -298,11 +302,15 @@ fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceStepCon
         WalFlushStepOutcome::NotNeeded => None,
     };
     let reorganize = match step.reorganize {
-        ReorganizeStepOutcome::UnitPublished | ReorganizeStepOutcome::CompactionStarted => {
+        ReorganizeStepOutcome::UnitPublished
+        | ReorganizeStepOutcome::CompactionStarted
+        | ReorganizeStepOutcome::CompactionAtCapacity => {
             Some(MaintenanceStepConclusion::Progressed)
         }
         ReorganizeStepOutcome::Superseded => Some(MaintenanceStepConclusion::Superseded),
-        ReorganizeStepOutcome::CompactionPending => Some(MaintenanceStepConclusion::Blocked),
+        ReorganizeStepOutcome::CompactionRunning | ReorganizeStepOutcome::CompactionRequired => {
+            Some(MaintenanceStepConclusion::Blocked)
+        }
         ReorganizeStepOutcome::NotNeeded => None,
     };
     [flush, reorganize]
@@ -463,7 +471,7 @@ mod tests {
         );
         let blocked = step_response(
             WalFlushStepOutcome::NotNeeded,
-            ReorganizeStepOutcome::CompactionPending,
+            ReorganizeStepOutcome::CompactionRunning,
         );
         assert_eq!(
             metadata_conclusion(&blocked),
@@ -473,9 +481,10 @@ mod tests {
 
     /// Starting a background rebuild is progress: the step that started it
     /// folded nothing, and the steps behind it have the group's peers to fold
-    /// while the job runs.
+    /// while the job runs. A job queued behind the process limit reads the
+    /// same way, because the group is claimed either way.
     #[test]
-    fn starting_a_compaction_progresses_and_waiting_on_one_blocks() {
+    fn a_started_or_queued_compaction_progresses_and_the_other_two_block() {
         let started = step_response(
             WalFlushStepOutcome::NotNeeded,
             ReorganizeStepOutcome::CompactionStarted,
@@ -484,14 +493,32 @@ mod tests {
             metadata_conclusion(&started),
             MaintenanceStepConclusion::Progressed
         );
+        let queued = step_response(
+            WalFlushStepOutcome::NotNeeded,
+            ReorganizeStepOutcome::CompactionAtCapacity,
+        );
+        assert_eq!(
+            metadata_conclusion(&queued),
+            MaintenanceStepConclusion::Progressed,
+            "a queued job owns its group already, so the step behind it folds the peers"
+        );
         let waiting = step_response(
             WalFlushStepOutcome::NotNeeded,
-            ReorganizeStepOutcome::CompactionPending,
+            ReorganizeStepOutcome::CompactionRunning,
         );
         assert_eq!(
             metadata_conclusion(&waiting),
             MaintenanceStepConclusion::Blocked,
             "a group waiting on a job already running has nothing to gain from an immediate retry"
+        );
+        let unschedulable = step_response(
+            WalFlushStepOutcome::NotNeeded,
+            ReorganizeStepOutcome::CompactionRequired,
+        );
+        assert_eq!(
+            metadata_conclusion(&unschedulable),
+            MaintenanceStepConclusion::Blocked,
+            "a handle that cannot run the job gains nothing from being asked again at once"
         );
     }
 
@@ -501,7 +528,7 @@ mod tests {
             WalFlushStepOutcome::Flushed {
                 manifest_head_seq: ChangeSeq(7),
             },
-            ReorganizeStepOutcome::CompactionPending,
+            ReorganizeStepOutcome::CompactionRunning,
         );
         assert_eq!(
             metadata_conclusion(&step),

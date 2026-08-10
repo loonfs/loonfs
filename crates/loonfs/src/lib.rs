@@ -80,8 +80,9 @@ pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
     delete_if_aged, AgedSweep, BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage,
     CheckpointFilesPageCursor, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
-    ErrorCode, ErrorKind, FileContentStream, GcConfig, MetadataViewError, PassBudget,
-    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    ErrorCode, ErrorKind, FileContentStream, GcConfig, MetadataCompactionJobOutcome,
+    MetadataViewError, PassBudget, StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES,
+    MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::PublishObserver;
 
@@ -155,6 +156,7 @@ pub use loonfs_objectstore::{
 
 pub use cache::RuntimeCacheStats;
 pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
+pub use fs::MetadataCompactionOutcome;
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use maintenance_runner::{
     FsBackgroundWork, MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,

@@ -11,6 +11,8 @@ mod tests;
 mod uploads;
 mod writes;
 
+pub use maintenance::MetadataCompactionOutcome;
+
 pub(crate) use core::{should_invalidate_after_result, ReadCore, WriterBits, WriterIdentity};
 pub(crate) use namespaces::delete_namespace_with_engine;
 pub(crate) use writes::publish_batch_with_engine;

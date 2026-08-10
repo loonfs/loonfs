@@ -7,8 +7,8 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, ErrorCode, MaintenancePlan, ManifestId,
-    NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeError, SharedObjectStore,
-    WalFlushStepOutcome,
+    MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeError,
+    SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectEnvelope, ControlObjectKind,
@@ -560,6 +560,61 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     assert!(l0_files
         .iter()
         .any(|metadata_file| metadata_file.run_seq == ChangeSeq(2)));
+}
+
+/// A handle with no background work behind it can still run the one piece of
+/// upkeep a bounded step cannot do itself.
+///
+/// This is the manual deployment story: an operator drives bounded steps and
+/// then drives this, and neither needs a scheduler. The call plans exactly as
+/// a step does — including folding one bounded unit when that is what the
+/// namespace needs — and reports what it ran.
+#[test]
+fn a_standalone_admin_drives_metadata_compaction_itself() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "manual-compaction-test");
+    let namespace_id = namespace_id("demo");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    // A namespace that has published no manifest has no runs to rebuild.
+    assert_eq!(
+        block_on(fs.admin.compact_metadata(&namespace_id)).expect("compact an empty namespace"),
+        MetadataCompactionOutcome::NotNeeded
+    );
+
+    // Enough flushes to put the manifest's L0 run count over the fold
+    // trigger, which is what makes the planner select a group at all.
+    for index in 0..9 {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            &format!("/docs/file-{index}.txt"),
+            format!("file {index}").as_bytes(),
+            PutFileOptions::default(),
+        )
+        .expect("put a file");
+        fs.flush_wal_blocking(&namespace_id)
+            .expect("flush the tail");
+    }
+    let manifest_before = fs
+        .namespace_status_blocking(&namespace_id)
+        .expect("status before the call")
+        .current_manifest_id;
+
+    // Nothing here has outgrown a bounded step, so the plan is a merge and
+    // this call reports that it ran no job — having folded the unit the
+    // planner chose, exactly as the next maintenance step would have.
+    assert_eq!(
+        block_on(fs.admin.compact_metadata(&namespace_id)).expect("plan a compaction"),
+        MetadataCompactionOutcome::NotNeeded
+    );
+    assert_ne!(
+        fs.namespace_status_blocking(&namespace_id)
+            .expect("status after the call")
+            .current_manifest_id,
+        manifest_before,
+        "the call must run the same planner a maintenance step runs, and publish what it chose"
+    );
 }
 
 fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitRequest {

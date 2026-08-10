@@ -411,7 +411,34 @@ Nothing needs doing about any of this. While the job runs, ordinary
 maintenance carries on: the WAL still flushes, the other groups still fold,
 and reads answer exactly the same thing from the first line to the last. One
 job runs at a time per namespace, so a second group in the same state waits
-its turn and says so.
+its turn and says so. The server also runs at most two of these jobs at once
+across every namespace it serves, so a third namespace that needs one waits
+for a permit. That wait is not a stall: the group is claimed from the moment
+it is planned, so nothing re-plans it and nothing rewrites it underneath, and
+the job starts as soon as a permit frees.
+
+A maintenance step reports which of those four states its group is in, so a
+step run by hand answers the question too:
+
+| `reorganize.kind` | What it means | What to do |
+| --- | --- | --- |
+| `compaction_started` | This step started the rebuild. | Nothing. Watch for the progress lines. |
+| `compaction_at_capacity` | The rebuild is waiting for one of the server's two compaction permits. | Nothing. It starts when a running job finishes. |
+| `compaction_running` | A rebuild is already running for this namespace. | Nothing. This group's turn comes when that one lands. |
+| `compaction_required` | The group needs a rebuild and the handle that ran the step has no background work behind it. | Run one explicitly. Nothing else will. |
+
+The last row is the only one that asks anything of you, and this server does
+not report it: its admin handle shares the writer's background work, so a step
+you run by hand starts the job itself even with `maintenance = "manual"`.
+It is for embedded deployments whose admin handle has no writer behind it.
+Those call `FsAdmin::compact_metadata`, which runs one rebuild in the caller's
+own task and returns when it lands; cancelling it is dropping the future.
+
+Two metrics say what the limit is doing:
+`loonfs.maintenance.compactions_running` and
+`loonfs.maintenance.compactions_queued`. A queue that never empties is a
+process serving more namespaces than two concurrent rebuilds can keep up
+with.
 
 A restart during a rebuild loses that rebuild's work, and this is expected.
 Nothing durable records the rebuild's progress: the published metadata never
@@ -435,12 +462,13 @@ compaction abandoned` (something else rewrote the group underneath it) and
 `streaming metadata compaction superseded` (writes kept landing during its
 final publication). Both are safe and both are self-correcting. `streaming
 metadata compaction failed` carries the error and is worth reading; the next
-step still tries again.
+step still tries again, about a minute later.
 
-This build does not expose the per-step budgets in the config, so the lever for
-everything a step does — flushing, folding, collecting — remains how often
-maintenance runs, not how much each run may do. The rebuild above is the one
-piece of upkeep that lever does not pace, because it is not paced at all.
+This build does not expose the per-step budgets in the config, and it does not
+expose the two-job limit either, so the lever for everything a step does —
+flushing, folding, collecting — remains how often maintenance runs, not how
+much each run may do. The rebuild above is the one piece of upkeep that lever
+does not pace, because it is not paced at all.
 
 ## The optional local cache
 

@@ -5609,7 +5609,35 @@
               "kind": {
                 "type": "string",
                 "enum": [
-                  "compaction_pending"
+                  "compaction_running"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "compaction_at_capacity"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "compaction_required"
                 ]
               }
             }

@@ -966,11 +966,18 @@ pub enum ReorganizeStepOutcome {
     /// streaming compaction that rebuilds it. The step published nothing;
     /// the job publishes once, when it finishes.
     CompactionStarted,
-    /// A group needs a streaming compaction and this step did not start one,
-    /// because one is already running for this namespace or because the
-    /// handle this step ran through schedules no background work. The server
-    /// log says which.
-    CompactionPending,
+    /// A job for this namespace is already running, so this step started
+    /// none. One runs at a time per namespace; a later step plans this group
+    /// again.
+    CompactionRunning,
+    /// This step's job holds the namespace's slot and is waiting for a
+    /// process compaction permit. It starts when one frees; nothing is
+    /// needed to make it.
+    CompactionAtCapacity,
+    /// A group needs a streaming compaction and this handle schedules no
+    /// background work, so nothing will run one until an operator does. The
+    /// self-hosting guide names the call.
+    CompactionRequired,
     /// Another publisher advanced the root first; a later step retries.
     Superseded,
 }
