@@ -14,6 +14,8 @@
 pub mod abs;
 mod attempts;
 mod configured;
+#[doc(hidden)]
+pub mod crypto;
 pub mod gcs;
 mod immutable_write;
 pub mod keys;

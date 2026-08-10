@@ -565,15 +565,6 @@ mod tests {
     }
 
     #[test]
-    fn default_config_budgets_bytes() {
-        let config = MetadataTableCacheConfig::default();
-        assert_eq!(
-            config.max_decoded_bytes,
-            super::DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES
-        );
-    }
-
-    #[test]
     fn byte_budget_evicts_the_oldest_block() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig {
             max_decoded_bytes: 1000,

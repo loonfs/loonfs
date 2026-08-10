@@ -249,15 +249,17 @@ fn debug_assert_parents_are_allocated(ops: &[PlannedOp], next_inode_id: InodeId)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitPrecondition;
+    use crate::commit::{
+        build_commit_plan_for_publish, CommitIr, CommitPlan, CommitValidationError,
+        PublishCommitValidationContext,
+    };
+    use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{delete_path, put_file_bytes};
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
-    use loonfs_api::{
-        AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, RevisionNo,
-    };
+    use loonfs_api::{AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -382,74 +384,118 @@ mod tests {
             .expect("plan")
     }
 
+    async fn validate_planned_against_current_state(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        commit_id: &str,
+        planned: PlannedCommit,
+    ) -> Result<CommitPlan> {
+        let (view, _projection) = load_publish_metadata_view(
+            store,
+            None,
+            namespace_id,
+            None,
+            None,
+            &PublishTailOptions::default(),
+        )
+        .await?;
+        let empty_overlay = MetadataState::default();
+        build_commit_plan_for_publish(
+            &CommitIr {
+                namespace_id: namespace_id.clone(),
+                commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+                writer_epoch: view.head().writer_epoch,
+                ops: planned.ops,
+                message: None,
+            },
+            1,
+            &PublishCommitValidationContext {
+                head: view.head(),
+                metadata_view: view.metadata_view(),
+                accepted_rows: &empty_overlay,
+            },
+        )
+        .await
+    }
+
+    async fn publish_operation(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        commit_id: &str,
+        operation: FilesystemOperation,
+        context: &MutationContext,
+    ) -> Result<loonfs_api::CommitResponse> {
+        let candidate = CommitCandidate::new(CommitRequest::single(
+            CommitId::parse(commit_id).expect("valid commit id"),
+            None,
+            operation,
+        ));
+        publish_namespace_commits_batch(store, namespace_id, vec![candidate], context)
+            .await
+            .pop()
+            .expect("one candidate produces one outcome")
+    }
+
     #[tokio::test]
-    async fn create_directory_plan_contains_semantic_op_and_target_absence_precondition() {
-        let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
+    async fn a_planned_directory_create_loses_if_another_commit_claims_the_name() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         let planned =
             plan_against_current_state(&store, &namespace_id, &request(create_dir("/docs"))).await;
-
-        assert_eq!(planned.ops.len(), 1);
-        assert_eq!(
-            planned.ops[0].op,
-            CommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-            }
-        );
-        assert!(planned.ops[0]
-            .preconditions
-            .iter()
-            .any(|precondition| matches!(
-                precondition,
-                CommitPrecondition::ChildNameAbsent {
-                    parent_inode_id: InodeId(1),
-                    name_key,
-                } if name_key.as_str() == "docs"
-            )));
-    }
-
-    #[tokio::test]
-    async fn put_file_plan_auto_creates_missing_parent_directories() {
-        let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
-        let staged = store_bytes_as_content(&store, &namespace_id, b"hello")
-            .await
-            .expect("stage");
-        let planned = plan_against_current_state(
+        publish_operation(
             &store,
             &namespace_id,
-            &request(FilesystemOperation::PutFile {
-                path: AbsolutePath::parse("/docs/nested/a.txt").expect("path"),
-                content_ref: staged.content_ref.clone(),
-                behavior: DestinationBehavior::NoReplace,
-                expected_revision_no: None,
-            }),
+            "competing-mkdir",
+            create_dir("/docs"),
+            &context,
         )
-        .await;
+        .await
+        .expect("competing create");
 
-        assert_eq!(planned.ops.len(), 3);
+        let error =
+            validate_planned_against_current_state(&store, &namespace_id, "stale-mkdir", planned)
+                .await
+                .expect_err("the planned name is no longer free");
         assert!(matches!(
-            &planned.ops[0].op,
-            CommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name,
-            } if display_name.as_str() == "docs"
-        ));
-        assert!(matches!(
-            &planned.ops[1].op,
-            CommitOp::CreateDirectory { display_name, .. } if display_name.as_str() == "nested"
-        ));
-        assert!(matches!(
-            &planned.ops[2].op,
-            CommitOp::CreateFile {
-                display_name,
-                content_ref,
-                ..
-            } if display_name.as_str() == "a.txt" && content_ref == &staged.content_ref
+            error,
+            CoreError::CommitValidation(CommitValidationError::CreateChildNameCollision { .. })
         ));
     }
 
     #[tokio::test]
-    async fn move_path_plan_contains_binding_and_target_absence_preconditions() {
+    async fn put_file_creates_missing_parent_directories() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/nested/a.txt",
+            b"hello",
+            DestinationBehavior::NoReplace,
+            &context,
+            Some(&CommitId::parse("put-with-parents").expect("valid commit id")),
+        )
+        .await
+        .expect("put file");
+
+        let (view, _projection) = load_publish_metadata_view(
+            &store,
+            None,
+            &namespace_id,
+            None,
+            None,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .expect("publish view");
+        let resolved = view
+            .metadata_view()
+            .resolve_visible_path(&AbsolutePath::parse("/docs/nested/a.txt").expect("path"))
+            .await
+            .expect("resolve created file");
+        assert_eq!(resolved.absolute_path, "/docs/nested/a.txt");
+    }
+
+    #[tokio::test]
+    async fn a_planned_move_loses_if_the_source_is_rebound() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         let seed_commit_id = CommitId::parse("seed-file").expect("valid commit id");
         put_file_bytes(
@@ -474,32 +520,29 @@ mod tests {
             }),
         )
         .await;
+        crate::path::write::ops::move_path(
+            &store,
+            &namespace_id,
+            "/docs/a.txt",
+            "/docs/c.txt",
+            &context,
+            Some(&CommitId::parse("competing-move").expect("valid commit id")),
+        )
+        .await
+        .expect("competing move");
 
+        let error =
+            validate_planned_against_current_state(&store, &namespace_id, "stale-move", planned)
+                .await
+                .expect_err("the source binding changed");
         assert!(matches!(
-            planned.ops.as_slice(),
-            [PlannedOp {
-                op: CommitOp::Rename {
-                    new_display_name,
-                    ..
-                },
-                ..
-            }] if new_display_name.as_str() == "b.txt"
+            error,
+            CoreError::CommitValidation(CommitValidationError::BindingPreconditionMissing { .. })
         ));
-        assert!(planned.ops[0]
-            .preconditions
-            .iter()
-            .any(|precondition| matches!(precondition, CommitPrecondition::BindingIs { .. })));
-        assert!(planned.ops[0]
-            .preconditions
-            .iter()
-            .any(|precondition| matches!(
-                precondition,
-                CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key.as_str() == "b.txt"
-            )));
     }
 
     #[tokio::test]
-    async fn copy_file_plan_validates_source_revision_and_target_absence() {
+    async fn a_planned_copy_loses_if_the_source_revision_changes() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         let seed_commit_id = CommitId::parse("seed-copy-source").expect("valid commit id");
         put_file_bytes(
@@ -524,38 +567,32 @@ mod tests {
             }),
         )
         .await;
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/a.txt",
+            b"new contents",
+            DestinationBehavior::Replace,
+            &context,
+            Some(&CommitId::parse("competing-replace").expect("valid commit id")),
+        )
+        .await
+        .expect("competing replace");
 
+        let error =
+            validate_planned_against_current_state(&store, &namespace_id, "stale-copy", planned)
+                .await
+                .expect_err("the source revision changed");
         assert!(matches!(
-            planned.ops.as_slice(),
-            [PlannedOp {
-                op: CommitOp::CreateFile { display_name, .. },
-                ..
-            }] if display_name.as_str() == "copy.txt"
+            error,
+            CoreError::CommitValidation(
+                CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
+            )
         ));
-        assert!(planned.ops[0]
-            .preconditions
-            .iter()
-            .any(|precondition| matches!(
-                precondition,
-                CommitPrecondition::InodeRevisionIs {
-                    revision_no: RevisionNo(1),
-                    ..
-                }
-            )));
-        assert!(planned.ops[0]
-            .preconditions
-            .iter()
-            .any(|precondition| matches!(
-                precondition,
-                CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key.as_str() == "copy.txt"
-            )));
     }
 
-    /// The update's plan carries the binding the path resolved through, and
-    /// the op states the attribute revision the planner read, so a raced
-    /// rebind and a raced update are both rejected under the publish lock.
     #[tokio::test]
-    async fn update_attributes_plan_carries_the_binding_and_revision_guards() {
+    async fn a_planned_attribute_update_loses_if_another_update_publishes_first() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         put_file_bytes(
             &store,
@@ -586,28 +623,41 @@ mod tests {
             }),
         )
         .await;
+        publish_operation(
+            &store,
+            &namespace_id,
+            "competing-attributes",
+            FilesystemOperation::UpdateAttributes {
+                path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                set: std::collections::BTreeMap::from([(
+                    loonfs_api::AttributeKey::parse("owner").expect("valid attribute key"),
+                    loonfs_api::AttributeValue::String {
+                        value: "grace".to_owned(),
+                    },
+                )]),
+                remove: Vec::new(),
+                expected_inode_id: None,
+                expected_attributes_revision_no: None,
+            },
+            &context,
+        )
+        .await
+        .expect("competing attribute update");
 
+        let error = validate_planned_against_current_state(
+            &store,
+            &namespace_id,
+            "stale-attributes",
+            planned,
+        )
+        .await
+        .expect_err("the attribute revision changed");
         assert!(matches!(
-            planned.ops.as_slice(),
-            [PlannedOp {
-                op: CommitOp::UpdateAttributes {
-                    base_attributes_revision_no: loonfs_api::AttributeRevisionNo(0),
-                    ..
-                },
-                ..
-            }]
+            error,
+            CoreError::CommitValidation(
+                CommitValidationError::UpdateAttributesBaseRevisionMismatch { .. }
+            )
         ));
-        assert!(planned.ops[0]
-            .preconditions
-            .iter()
-            .any(|precondition| matches!(precondition, CommitPrecondition::BindingIs { .. })));
-        assert!(planned.ops[0]
-            .preconditions
-            .iter()
-            .any(|precondition| matches!(
-                precondition,
-                CommitPrecondition::AncestorsNotSubtreeDeleted { .. }
-            )));
     }
 
     #[tokio::test]

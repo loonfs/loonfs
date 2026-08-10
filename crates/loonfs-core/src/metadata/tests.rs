@@ -199,54 +199,6 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
 }
 
 #[test]
-fn rebuilt_indexes_answer_current_head_queries_after_deserialize() {
-    let metadata_state = MetadataState::from_rows(
-        vec![
-            InodeRecord {
-                inode_id: InodeId(1),
-                inode_kind: InodeKind::Directory,
-                created_seq: ChangeSeq(0),
-            },
-            InodeRecord {
-                inode_id: InodeId(2),
-                inode_kind: InodeKind::File,
-                created_seq: ChangeSeq(1),
-            },
-        ],
-        vec![DirentryBindRecord {
-            parent_inode_id: InodeId(1),
-            name_key: NameKey::parse("file.txt").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("file.txt").expect("valid display name"),
-            child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
-        }],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-
-    let encoded = serde_json::to_string(&metadata_state).expect("encode metadata");
-    assert!(!encoded.contains("indexes"));
-    assert!(!encoded.contains("row_count"));
-    assert!(!encoded.contains("decoded_bytes"));
-    let decoded: MetadataState = serde_json::from_str(&encoded).expect("decode metadata");
-
-    assert_eq!(decoded.row_count(), metadata_state.row_count());
-    assert_eq!(decoded.decoded_bytes(), metadata_state.decoded_bytes());
-    assert_eq!(decoded.indexed_seq(), ChangeSeq(1));
-    assert_eq!(
-        decoded
-            .visible_child_at_head(InodeId(1), &name_key("file.txt"))
-            .expect("indexed child")
-            .child_inode_id,
-        InodeId(2)
-    );
-}
-
-#[test]
 fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
     let metadata_state = MetadataState::from_rows(
         vec![
@@ -346,65 +298,6 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
 }
 
 #[test]
-fn metadata_state_serialized_shape_preserves_row_field_names() {
-    let metadata_state = MetadataState::from_rows(
-        vec![InodeRecord {
-            inode_id: InodeId(1),
-            inode_kind: InodeKind::Directory,
-            created_seq: ChangeSeq(0),
-        }],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-
-    let encoded = serde_json::to_value(&metadata_state).expect("encode metadata state");
-    assert_eq!(
-        encoded,
-        serde_json::json!({
-            "inodes": [{
-                "inode_id": 1,
-                "inode_kind": "dir",
-                "created_seq": 0
-            }],
-            "direntry_binds": [],
-            "direntry_unbinds": [],
-            "revisions": [],
-            "subtree_tombstones": [],
-            "commit_receipts": [],
-            "attributes_revisions": []
-        })
-    );
-}
-
-#[test]
-fn metadata_state_accessors_expose_rows_read_only() {
-    let metadata_state = MetadataState::from_rows(
-        vec![InodeRecord {
-            inode_id: InodeId(1),
-            inode_kind: InodeKind::Directory,
-            created_seq: ChangeSeq(0),
-        }],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-
-    assert_eq!(metadata_state.inodes().len(), 1);
-    assert!(metadata_state.direntry_binds().is_empty());
-    assert!(metadata_state.direntry_unbinds().is_empty());
-    assert!(metadata_state.revisions().is_empty());
-    assert!(metadata_state.subtree_tombstones().is_empty());
-    assert!(metadata_state.commit_receipts().is_empty());
-}
-
-#[test]
 fn find_commit_receipt_returns_latest_matching_receipt() {
     let commit_id = CommitId::parse("same-commit").expect("valid commit id");
     let metadata_state = MetadataState::from_rows(
@@ -448,9 +341,9 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 
 /// Revision rows keep no in-memory index — reads scan the tail-sized rows —
 /// but they must still advance the indexed-seq watermark that gates at-head
-/// query routing, and the receipt index must survive a serde round trip.
+/// query routing.
 #[test]
-fn revisions_advance_watermark_and_receipt_index_round_trips() {
+fn revisions_advance_watermark_and_receipt_index() {
     let commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
     let content_ref = ContentRef::blob_v1(ContentId::generate(), b"first revision bytes");
     let replacement_ref = ContentRef::blob_v1(ContentId::generate(), b"second revision bytes");
@@ -505,14 +398,10 @@ fn revisions_advance_watermark_and_receipt_index_round_trips() {
         ChangeSeq(3)
     );
 
-    let decoded: MetadataState =
-        serde_json::from_value(serde_json::to_value(&metadata_state).expect("encode"))
-            .expect("decode");
-    assert_eq!(decoded.indexed_seq(), ChangeSeq(3));
     assert_eq!(
-        decoded
+        metadata_state
             .find_commit_receipt(&commit_id)
-            .expect("receipt after decode")
+            .expect("indexed receipt")
             .semantic_commit_fingerprint,
         "fingerprint"
     );
@@ -579,16 +468,6 @@ fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
     assert!(cleared.attributes.is_empty());
     assert_eq!(cleared.committed_seq, ChangeSeq(4));
     assert_eq!(metadata_state.indexed_seq(), ChangeSeq(4));
-
-    // Round trip: the rows and the rebuilt watermark survive encoding.
-    let decoded: MetadataState =
-        serde_json::from_value(serde_json::to_value(&metadata_state).expect("encode"))
-            .expect("decode");
-    assert_eq!(
-        decoded.attributes_revisions(),
-        metadata_state.attributes_revisions()
-    );
-    assert_eq!(decoded.indexed_seq(), ChangeSeq(4));
 }
 
 /// A read at a sequence below the head answers with the map that sequence

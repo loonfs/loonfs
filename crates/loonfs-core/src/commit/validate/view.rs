@@ -1,269 +1,14 @@
-//! The metadata lookup contract the commit validator consults.
-//!
-//! Both commit entry points validate against the same op-validation loop in
-//! [`super::checks`]; they differ only in which metadata view backs each
-//! lookup and in the error surface each reports. This module defines the
-//! [`CommitValidationView`] contract that unifies them and the two adapters
-//! that implement it: [`InMemoryValidationView`] over the in-memory
-//! [`InMemoryMetadataView`] and [`PublishValidationView`] over the
-//! object-store-backed [`MetadataView`].
-//!
-//! The associated error type preserves each entry point's error surface. The
-//! in-memory view never reaches an object store, so its lookups cannot fail
-//! for IO reasons; it surfaces plain [`CommitValidationError`]s (mapping the
-//! [`CoreError`] the shared view produces through
-//! [`commit_validation_from_core`]). The publish view threads [`CoreError`]
-//! so object-store failures propagate. Validation failures themselves are
-//! always constructed as [`CommitValidationError`] and converted through the
-//! `From` bound.
+//! The metadata view used while validating a commit for publication.
 
 use super::super::metadata_overlay::CommitOverlayRows;
-use super::super::{CommitValidationError, ValidatedOp};
+use super::super::ValidatedOp;
 use crate::error::CoreError;
-#[cfg(test)]
-use crate::metadata::InMemoryMetadataView;
 use crate::metadata::{
     DirentryBindRecord, InodeRecord, MetadataState, MetadataView, RevisionRecord,
     SubtreeTombstoneRecord,
 };
 use loonfs_api::{AttributeRevisionNo, Attributes, ChangeSeq, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
-
-/// Seq-scoped metadata lookups the commit validator performs, implemented by
-/// the in-memory [`InMemoryValidationView`] and the publish-path
-/// [`PublishValidationView`].
-///
-/// Every method observes the accumulating commit overlay: the loop applies
-/// each validated op through [`Self::apply_validated_op_mut`] so later ops in
-/// a batch see the rows earlier ops would persist.
-pub(crate) trait CommitValidationView {
-    type Error: From<CommitValidationError>;
-
-    async fn inode_at_seq(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error>;
-
-    async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error>;
-
-    async fn visible_child(
-        &self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error>;
-
-    /// Whether the directory has at least one visible child — the
-    /// directory-empty checks need only existence, so implementations answer
-    /// with a bounded probe instead of materializing the child list.
-    async fn has_visible_children(&self, parent_inode_id: InodeId) -> Result<bool, Self::Error>;
-
-    async fn latest_revision_record(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<Option<RevisionRecord>, Self::Error>;
-
-    async fn revision_at_head(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> Result<Option<RevisionRecord>, Self::Error>;
-
-    async fn current_parent_binding_for_child(
-        &self,
-        child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error>;
-
-    async fn covering_subtree_tombstone(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error>;
-
-    /// The live tombstone rooted exactly at `root_inode_id`, if any —
-    /// undelete's target check, distinct from the ancestor-walking
-    /// [`Self::covering_subtree_tombstone`].
-    async fn active_subtree_tombstone(
-        &self,
-        root_inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error>;
-
-    async fn would_create_directory_cycle(
-        &self,
-        inode_id: InodeId,
-        new_parent_inode_id: InodeId,
-    ) -> Result<bool, Self::Error>;
-
-    /// The inode's attribute revision and complete map at the commit's
-    /// sequence. An inode that has never had attributes written answers
-    /// revision 0 with an empty map.
-    async fn attributes_at_seq(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<(AttributeRevisionNo, Attributes), Self::Error>;
-
-    fn apply_validated_op_mut(
-        &mut self,
-        committed_seq: ChangeSeq,
-        committed_at_ms: u64,
-        op: &ValidatedOp,
-    );
-}
-
-/// Bridges the shared [`MetadataView`] error surface into the plain
-/// [`CommitValidationError`] the in-memory entry point returns.
-#[cfg(test)]
-fn commit_validation_from_core(error: CoreError) -> CommitValidationError {
-    match error {
-        CoreError::CommitValidation(error) => error,
-        error => CommitValidationError::ValidatedPreviewApplyFailed(error.to_string()),
-    }
-}
-
-/// The in-memory view: it holds the base metadata rows plus the accumulating
-/// commit overlay, rebuilding an [`InMemoryMetadataView`] over both for each
-/// lookup. Every such lookup completes without awaiting an object store — the
-/// view has no manifest tables — which is what lets [`super::build_commit_plan`]
-/// stay synchronous (its future is resolved by a single poll).
-#[cfg(test)]
-pub(crate) struct InMemoryValidationView<'a> {
-    metadata_state: &'a MetadataState,
-    committed_seq: ChangeSeq,
-    overlay: CommitOverlayRows,
-}
-
-#[cfg(test)]
-impl<'a> InMemoryValidationView<'a> {
-    pub(crate) fn new(metadata_state: &'a MetadataState, committed_seq: ChangeSeq) -> Self {
-        Self {
-            metadata_state,
-            committed_seq,
-            overlay: CommitOverlayRows::new(),
-        }
-    }
-
-    fn view(&self) -> InMemoryMetadataView<'_> {
-        InMemoryMetadataView::in_memory(
-            self.metadata_state,
-            Some(self.overlay.rows()),
-            self.committed_seq,
-        )
-    }
-}
-
-#[cfg(test)]
-impl CommitValidationView for InMemoryValidationView<'_> {
-    type Error = CommitValidationError;
-
-    async fn inode_at_seq(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
-        self.view()
-            .inode_at_seq(inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
-        self.view()
-            .visible_inode(inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn visible_child(
-        &self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        self.view()
-            .visible_child(parent_inode_id, name_key)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn has_visible_children(&self, parent_inode_id: InodeId) -> Result<bool, Self::Error> {
-        self.view()
-            .has_visible_children(parent_inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn latest_revision_record(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<Option<RevisionRecord>, Self::Error> {
-        self.view()
-            .latest_revision_record(inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn revision_at_head(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> Result<Option<RevisionRecord>, Self::Error> {
-        self.view()
-            .revision_at_head(inode_id, revision_no)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn current_parent_binding_for_child(
-        &self,
-        child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
-        self.view()
-            .current_parent_binding_for_child(child_inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn covering_subtree_tombstone(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
-        self.view()
-            .covering_subtree_tombstone(inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn active_subtree_tombstone(
-        &self,
-        root_inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
-        self.view()
-            .active_subtree_tombstone(root_inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn would_create_directory_cycle(
-        &self,
-        inode_id: InodeId,
-        new_parent_inode_id: InodeId,
-    ) -> Result<bool, Self::Error> {
-        self.view()
-            .would_create_directory_cycle(inode_id, new_parent_inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    async fn attributes_at_seq(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<(AttributeRevisionNo, Attributes), Self::Error> {
-        self.view()
-            .attributes_at_visible_seq(inode_id)
-            .await
-            .map_err(commit_validation_from_core)
-    }
-
-    fn apply_validated_op_mut(
-        &mut self,
-        committed_seq: ChangeSeq,
-        committed_at_ms: u64,
-        op: &ValidatedOp,
-    ) {
-        self.overlay
-            .apply_validated_op_mut(committed_seq, committed_at_ms, op);
-    }
-}
 
 /// The publish view: it holds the loaded [`MetadataView`] plus the
 /// accumulating commit overlay (seeded from the rows already accepted earlier
@@ -298,85 +43,92 @@ impl<'a, S: ObjectStore + ?Sized> PublishValidationView<'a, S> {
     }
 }
 
-impl<S: ObjectStore + ?Sized> CommitValidationView for PublishValidationView<'_, S> {
-    type Error = CoreError;
-
-    async fn inode_at_seq(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
+impl<S: ObjectStore + ?Sized> PublishValidationView<'_, S> {
+    pub(crate) async fn inode_at_seq(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<Option<InodeRecord>, CoreError> {
         self.view().inode_at_seq(inode_id).await
     }
 
-    async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
+    pub(crate) async fn visible_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<Option<InodeRecord>, CoreError> {
         self.view().visible_inode(inode_id).await
     }
 
-    async fn visible_child(
+    pub(crate) async fn visible_child(
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
         self.view().visible_child(parent_inode_id, name_key).await
     }
 
-    async fn has_visible_children(&self, parent_inode_id: InodeId) -> Result<bool, Self::Error> {
+    pub(crate) async fn has_visible_children(
+        &self,
+        parent_inode_id: InodeId,
+    ) -> Result<bool, CoreError> {
         self.view().has_visible_children(parent_inode_id).await
     }
 
-    async fn latest_revision_record(
+    pub(crate) async fn latest_revision_record(
         &self,
         inode_id: InodeId,
-    ) -> Result<Option<RevisionRecord>, Self::Error> {
+    ) -> Result<Option<RevisionRecord>, CoreError> {
         self.view().latest_revision_record(inode_id).await
     }
 
-    async fn revision_at_head(
+    pub(crate) async fn revision_at_head(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
-    ) -> Result<Option<RevisionRecord>, Self::Error> {
+    ) -> Result<Option<RevisionRecord>, CoreError> {
         self.view().revision_at_head(inode_id, revision_no).await
     }
 
-    async fn current_parent_binding_for_child(
+    pub(crate) async fn current_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
         self.view()
             .current_parent_binding_for_child(child_inode_id)
             .await
     }
 
-    async fn covering_subtree_tombstone(
+    pub(crate) async fn covering_subtree_tombstone(
         &self,
         inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+    ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
         self.view().covering_subtree_tombstone(inode_id).await
     }
 
-    async fn active_subtree_tombstone(
+    pub(crate) async fn active_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+    ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
         self.view().active_subtree_tombstone(root_inode_id).await
     }
 
-    async fn would_create_directory_cycle(
+    pub(crate) async fn would_create_directory_cycle(
         &self,
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<bool, CoreError> {
         self.view()
             .would_create_directory_cycle(inode_id, new_parent_inode_id)
             .await
     }
 
-    async fn attributes_at_seq(
+    pub(crate) async fn attributes_at_seq(
         &self,
         inode_id: InodeId,
-    ) -> Result<(AttributeRevisionNo, Attributes), Self::Error> {
+    ) -> Result<(AttributeRevisionNo, Attributes), CoreError> {
         self.view().attributes_at_visible_seq(inode_id).await
     }
 
-    fn apply_validated_op_mut(
+    pub(crate) fn apply_validated_op_mut(
         &mut self,
         committed_seq: ChangeSeq,
         committed_at_ms: u64,

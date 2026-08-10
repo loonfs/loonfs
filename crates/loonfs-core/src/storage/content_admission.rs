@@ -11,7 +11,6 @@ use base64::Engine as _;
 use loonfs_api::v0::ValidatedContentToken;
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use thiserror::Error;
 
 const TOKEN_VERSION: &str = "vct0";
@@ -149,7 +148,10 @@ pub fn mint_content_token(
     let payload_json = serde_json::to_vec(&payload)
         .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
     let payload_part = base64_url(&payload_json);
-    let signature_part = base64_url(&hmac_sha256(secret.as_bytes(), payload_part.as_bytes()));
+    let signature_part = base64_url(&loonfs_objectstore::crypto::hmac_sha256(
+        secret.as_bytes(),
+        payload_part.as_bytes(),
+    ));
     Ok(format!("{payload_part}.{signature_part}"))
 }
 
@@ -166,7 +168,8 @@ pub fn verify_content_token(
     let actual_signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(signature_part)
         .map_err(|_| ContentTokenError::Malformed)?;
-    let expected_signature = hmac_sha256(secret.as_bytes(), payload_part.as_bytes());
+    let expected_signature =
+        loonfs_objectstore::crypto::hmac_sha256(secret.as_bytes(), payload_part.as_bytes());
     if !constant_time_eq(&actual_signature, &expected_signature) {
         return Err(ContentTokenError::BadSignature);
     }
@@ -201,14 +204,6 @@ fn base64_url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
-    use hmac::{Hmac, Mac};
-    let mut mac =
-        <Hmac<Sha256>>::new_from_slice(key).expect("HMAC should accept keys of any length");
-    mac.update(value);
-    mac.finalize().into_bytes().to_vec()
-}
-
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -224,21 +219,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    /// RFC 4231 test vectors pin the HMAC-SHA256 construction across
-    /// implementation changes.
-    #[test]
-    fn hmac_sha256_matches_rfc_4231_vectors() {
-        let case_one = hmac_sha256(&[0x0b; 20], b"Hi There");
-        assert_eq!(
-            loonfs_api::wire::hex::hex_encode_bytes(&case_one),
-            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
-        );
-        let case_two = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
-        assert_eq!(
-            loonfs_api::wire::hex::hex_encode_bytes(&case_two),
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-    }
     use super::{mint_content_token, verify_content_token, CompletedUploadReceipt};
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use loonfs_api::v0::ValidatedContentToken;

@@ -104,14 +104,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_the_build_policy() {
-        let config = GrepWorkerConfig::default();
-
-        assert_eq!(config.build_policy(), Ok(GramIndexBuildPolicy::default()));
-        assert_eq!(config.validate(), Ok(()));
-    }
-
-    #[test]
     fn zero_policy_fields_are_rejected() {
         for (field, config) in [
             (

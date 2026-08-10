@@ -14,12 +14,6 @@ use crate::metadata::{
     InodeRecord, MetadataState, RecoverableDeletion, ResolvedVisiblePath, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-#[cfg(test)]
-use async_trait::async_trait;
-#[cfg(test)]
-use bytes::Bytes;
-#[cfg(test)]
-use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
@@ -27,9 +21,9 @@ use loonfs_api::{
     AbsolutePath, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, InodeId, InodeKind,
     NameKey, RevisionNo,
 };
-use loonfs_objectstore::ObjectStore;
 #[cfg(test)]
-use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStore;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -87,14 +81,8 @@ pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
     sources: MetadataSourceStack<'a, 'store, S>,
 }
 
-/// A metadata view with no object store behind it: the crate's commit
-/// validation tests drive the shared validation loop over plain rows.
 #[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct InMemoryMetadataViewStore;
-
-#[cfg(test)]
-pub(crate) type InMemoryMetadataView<'a> = MetadataView<'a, 'a, InMemoryMetadataViewStore>;
+pub(crate) type InMemoryMetadataView<'a> = MetadataView<'a, 'a, LocalFsStore>;
 
 impl<S: ObjectStore + ?Sized> Copy for MetadataSourceStack<'_, '_, S> {}
 
@@ -109,56 +97,6 @@ impl<S: ObjectStore + ?Sized> Copy for MetadataView<'_, '_, S> {}
 impl<S: ObjectStore + ?Sized> Clone for MetadataView<'_, '_, S> {
     fn clone(&self) -> Self {
         *self
-    }
-}
-
-#[cfg(test)]
-#[async_trait]
-impl ObjectStore for InMemoryMetadataViewStore {
-    async fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        Err(ObjectStoreError::Unsupported(
-            "in-memory metadata view store",
-        ))
-    }
-
-    async fn get_with_metadata(&self, _key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        Err(ObjectStoreError::Unsupported(
-            "in-memory metadata view store",
-        ))
-    }
-
-    async fn get(
-        &self,
-        _key: &str,
-        _range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        Err(ObjectStoreError::Unsupported(
-            "in-memory metadata view store",
-        ))
-    }
-
-    async fn put(
-        &self,
-        _key: &str,
-        _bytes: Bytes,
-        _mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        Err(ObjectStoreError::Unsupported(
-            "in-memory metadata view store",
-        ))
-    }
-
-    async fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
-        Err(ObjectStoreError::Unsupported(
-            "in-memory metadata view store",
-        ))
-    }
-
-    fn list_prefix_stream(
-        &self,
-        _prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        Box::pin(stream::empty())
     }
 }
 

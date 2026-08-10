@@ -32,15 +32,15 @@ use loonfs_api::{
         ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
-    ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
-    CreateCheckpointResponse, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo, StorageChecksum, StreamingChecksum,
-    UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef, Crc64Nvme,
+    CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
+    DeleteNamespaceResponse, ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest,
+    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
+    StorageChecksum, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
@@ -63,48 +63,6 @@ const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 /// the part's URL, because the first thing that goes stale about a part is
 /// its signature.
 const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
-
-/// Evidence retained for comparing a new upload with an earlier commit.
-///
-/// Buffered bytes can be hashed with any supported algorithm. A one-pass
-/// upload retains only the verified content reference returned by the
-/// server, so unavailable checksum algorithms cannot be compared.
-#[derive(Debug, Clone, Copy)]
-enum UploadedContent<'a> {
-    /// The payload itself, which can produce any digest this build knows.
-    Bytes(&'a [u8]),
-    /// The reference the server minted for a payload that was streamed
-    /// past: its length, and the digest whoever hashed it reported.
-    Streamed(&'a ContentRef),
-}
-
-impl UploadedContent<'_> {
-    /// Whether the upload's bytes produce this checksum.
-    ///
-    /// `None` is a refusal to answer, and a caller must never read it as
-    /// agreement. Held bytes never refuse — every algorithm in the
-    /// vocabulary is one this client can recompute — so the only refusal
-    /// left is a streamed payload being asked for a digest nobody folded
-    /// over it.
-    fn matches(&self, expected: &StorageChecksum) -> Option<bool> {
-        match self {
-            Self::Bytes(bytes) => Some(expected.matches(bytes)),
-            Self::Streamed(content_ref) => {
-                Some(content_ref.digest_under(expected.algorithm)? == expected.value)
-            }
-        }
-    }
-}
-
-/// Whether the committed reference provably holds the bytes just uploaded.
-///
-/// The evidence is whatever the reference holds its own bytes to. Only that
-/// digest, over an upload that can answer for it and agrees, proves
-/// anything: a digest that disagrees and a digest the upload cannot answer
-/// for are both unproven, and both leave the conflict standing.
-fn uploaded_matches_committed(uploaded: &UploadedContent<'_>, content_ref: &ContentRef) -> bool {
-    uploaded.matches(&content_ref.verifiable_checksum()) == Some(true)
-}
 
 /// What a reuse conflict says the commit id already landed as: where, and
 /// the semantic identity of the mutation that landed there.
@@ -2100,7 +2058,7 @@ impl Client {
         let staged = self
             .stage_bytes_as_content_ref(spec.namespace(), bytes)
             .await?;
-        self.commit_staged_file(spec, staged, options, UploadedContent::Bytes(bytes))
+        self.commit_staged_file(spec, staged, options, ContentEvidence::Bytes(bytes))
             .await
     }
 
@@ -2187,8 +2145,13 @@ impl Client {
         // that just went past, and with the payload gone it is the only
         // description of them that still exists.
         let uploaded = staged.content_ref.clone();
-        self.commit_staged_file(spec, staged, options, UploadedContent::Streamed(&uploaded))
-            .await
+        self.commit_staged_file(
+            spec,
+            staged,
+            options,
+            ContentEvidence::ContentRef(&uploaded),
+        )
+        .await
     }
 
     /// Commits content an upload session already completed, for a caller
@@ -2213,8 +2176,13 @@ impl Client {
             }),
             content_ref,
         };
-        self.commit_staged_file(spec, staged, options, UploadedContent::Streamed(&uploaded))
-            .await
+        self.commit_staged_file(
+            spec,
+            staged,
+            options,
+            ContentEvidence::ContentRef(&uploaded),
+        )
+        .await
     }
 
     /// Commits one staged payload at a path, reconciling a reused commit id
@@ -2224,7 +2192,7 @@ impl Client {
         spec: &NamespacePath,
         staged: StagedContent,
         options: &PutFileOptions,
-        uploaded: UploadedContent<'_>,
+        uploaded: ContentEvidence<'_>,
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
@@ -2275,7 +2243,7 @@ impl Client {
         spec: &NamespacePath,
         commit_id: &CommitId,
         options: &PutFileOptions,
-        uploaded: UploadedContent<'_>,
+        uploaded: ContentEvidence<'_>,
         conflict: ClientError,
     ) -> Result<ApiCommitResponse> {
         let namespace_id = spec.namespace();
@@ -2303,7 +2271,7 @@ impl Client {
         if retried.ok().as_deref() != Some(committed_fingerprint.as_str()) {
             return Err(conflict);
         }
-        if !uploaded_matches_committed(&uploaded, content_ref) {
+        if !content_ref.matches_evidence(uploaded) {
             return Err(conflict);
         }
         Ok(ApiCommitResponse {
@@ -2743,73 +2711,6 @@ mod tests {
             size_bytes: content_ref.size_bytes,
             storage_checksum: content_ref.storage_checksum,
         }
-    }
-
-    /// A reference whose only full-object evidence is a CRC-32C, as a direct
-    /// transfer to Google Cloud Storage leaves behind.
-    fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
-        ContentRef {
-            kind: loonfs_api::ContentRefKind::BlobV1,
-            content_id: ContentId::generate(),
-            size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc32c(bytes),
-            whole_file_sha256: None,
-        }
-    }
-
-    /// A CRC-32C-only commit is reconciled like any other: the uploaded
-    /// bytes recompute it, so a retry over the same payload proves it did
-    /// this work and a retry over different bytes does not.
-    #[test]
-    fn a_crc32c_committed_reference_is_compared_against_the_uploaded_bytes() {
-        let bytes = b"retried payload";
-        let committed = crc32c_content_ref(bytes);
-
-        assert!(uploaded_matches_committed(
-            &UploadedContent::Bytes(bytes),
-            &committed
-        ));
-        assert!(!uploaded_matches_committed(
-            &UploadedContent::Bytes(b"some other payload"),
-            &committed
-        ));
-    }
-
-    /// A one-pass payload is gone by the time the retry asks, so it answers
-    /// only for the digests that were folded over it. Being asked for one
-    /// nobody computed is a refusal, and a refusal leaves the conflict
-    /// standing.
-    #[test]
-    fn a_digest_nobody_folded_over_the_streamed_payload_leaves_the_conflict_standing() {
-        let bytes = b"retried payload";
-        let committed = crc32c_content_ref(bytes);
-        let hashed = test_content_ref(bytes);
-        let uploaded = UploadedContent::Streamed(&hashed);
-
-        assert_eq!(
-            uploaded.matches(&committed.storage_checksum),
-            None,
-            "the fixture must reach the refusal, not a comparison"
-        );
-        assert!(!uploaded_matches_committed(&uploaded, &committed));
-
-        // The same one-pass payload does answer for the digest it folded.
-        assert!(uploaded_matches_committed(&uploaded, &hashed));
-    }
-
-    #[test]
-    fn a_whole_file_digest_over_the_same_bytes_proves_the_retry_did_this_work() {
-        let bytes = b"retried payload";
-        let committed = test_content_ref(bytes);
-
-        assert!(uploaded_matches_committed(
-            &UploadedContent::Bytes(bytes),
-            &committed
-        ));
-        assert!(!uploaded_matches_committed(
-            &UploadedContent::Bytes(b"some other payload"),
-            &committed
-        ));
     }
 
     /// `Client::new` runs the same validation as `ClientConfig::load`, so a

@@ -1459,7 +1459,6 @@ dependencies = [
  "base64",
  "bytes",
  "futures",
- "hmac",
  "loonfs-api",
  "loonfs-model",
  "loonfs-objectstore",

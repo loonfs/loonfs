@@ -373,6 +373,16 @@ pub struct ContentRef {
     pub whole_file_sha256: Option<String>,
 }
 
+/// Available proof that a payload matches a committed content reference.
+#[derive(Debug, Clone, Copy)]
+pub enum ContentEvidence<'a> {
+    /// Bytes that can be hashed with the committed reference's algorithm.
+    Bytes(&'a [u8]),
+    /// A reference that carries only the checksums computed while its payload
+    /// was available.
+    ContentRef(&'a ContentRef),
+}
+
 impl ContentRef {
     /// Builds a reference to a freshly minted content object holding these bytes.
     ///
@@ -439,6 +449,22 @@ impl ContentRef {
         }
     }
 
+    /// Whether `evidence` proves that a payload has the same bytes as this
+    /// reference.
+    ///
+    /// Reference evidence returns `false` when it does not carry this
+    /// reference's verification algorithm. A checksum that was never
+    /// computed is not evidence of a match.
+    pub fn matches_evidence(&self, evidence: ContentEvidence<'_>) -> bool {
+        let expected = self.verifiable_checksum();
+        match evidence {
+            ContentEvidence::Bytes(bytes) => expected.matches(bytes),
+            ContentEvidence::ContentRef(reference) => {
+                reference.digest_under(expected.algorithm) == Some(expected.value.as_str())
+            }
+        }
+    }
+
     /// Reports whether the reference is well formed enough to publish.
     ///
     /// This is a shape check on the reference itself; proving that the
@@ -494,8 +520,8 @@ fn validate_checksum_value(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc32c,
-        Crc64Nvme, StorageChecksum, StreamingChecksum,
+        ChecksumAlgorithm, ContentEvidence, ContentRef, ContentRefKind, ContentRefValidationError,
+        Crc32c, Crc64Nvme, StorageChecksum, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -729,6 +755,44 @@ mod tests {
             crc_only.verifiable_checksum(),
             StorageChecksum::crc32c(b"hello")
         );
+    }
+
+    #[test]
+    fn a_reference_compares_bytes_using_its_verifiable_checksum() {
+        let bytes = b"retried payload";
+        let reference = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: content_id(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::crc32c(bytes),
+            whole_file_sha256: None,
+        };
+
+        assert!(reference.matches_evidence(ContentEvidence::Bytes(bytes)));
+        assert!(!reference.matches_evidence(ContentEvidence::Bytes(b"different payload")));
+    }
+
+    #[test]
+    fn a_reference_requires_the_other_reference_to_carry_its_checksum_algorithm() {
+        let bytes = b"retried payload";
+        let crc_reference = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: content_id(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::crc32c(bytes),
+            whole_file_sha256: None,
+        };
+        let sha_reference = ContentRef::blob_v1(content_id(), bytes);
+        let matching_crc_reference = ContentRef {
+            content_id: content_id(),
+            ..crc_reference.clone()
+        };
+
+        assert!(!crc_reference.matches_evidence(ContentEvidence::ContentRef(&sha_reference)));
+        assert!(
+            crc_reference.matches_evidence(ContentEvidence::ContentRef(&matching_crc_reference))
+        );
+        assert!(sha_reference.matches_evidence(ContentEvidence::ContentRef(&sha_reference)));
     }
 
     #[test]

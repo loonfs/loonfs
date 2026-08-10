@@ -192,7 +192,7 @@ pub enum WalChainLoadError {
     Replay(#[from] WalReplayError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReplayedWalTail {
     pub resulting_head: HeadState,
     pub resulting_metadata_state: crate::metadata::MetadataState,

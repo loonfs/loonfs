@@ -1,10 +1,6 @@
 //! [`CommitPlan`]: the output of validation — every op checked and
 //! resolved, ready to materialize into WAL deltas.
 
-#[cfg(test)]
-use crate::metadata::MetadataState;
-#[cfg(test)]
-use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
@@ -112,12 +108,4 @@ pub(crate) enum ValidatedOp {
         attributes: Attributes,
         attributes_delta_index: u32,
     },
-}
-
-/// The base state a store-free validation pass runs against.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct CommitValidationContext<'a> {
-    pub head: HeadState,
-    pub metadata_state: &'a MetadataState,
 }

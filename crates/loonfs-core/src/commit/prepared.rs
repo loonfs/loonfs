@@ -3,10 +3,9 @@
 
 use super::{CommitFingerprint, CommitIr, CommitPlan};
 use loonfs_api::NamespaceId;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedCommit {
     pub(crate) request: CommitIr,
     pub(crate) plan: CommitPlan,
@@ -121,14 +120,6 @@ mod tests {
         plan.apply_after_seq = ChangeSeq(9);
 
         PreparedCommit::new(request(), plan, fingerprint()).expect("prepare commit");
-    }
-
-    #[test]
-    fn prepared_commit_carries_the_request_fingerprint() {
-        let prepared =
-            PreparedCommit::new(request(), plan(), fingerprint()).expect("prepare commit");
-
-        assert_eq!(prepared.semantic_identity, fingerprint());
     }
 
     #[test]

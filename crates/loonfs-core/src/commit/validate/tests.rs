@@ -1,5 +1,5 @@
-//! Store-free validation tests: the shared op-validation loop driven over
-//! plain metadata rows, with no object store behind it.
+//! Commit validation tests using the production plan-building entry point
+//! over an in-memory metadata view.
 //!
 //! These exercise the planning IR directly, so they live in the crate rather
 //! than in an integration test: the IR is internal, and callers reach it only
@@ -7,11 +7,13 @@
 
 #![allow(clippy::panic)]
 
-use super::super::{CommitIr, CommitOp, CommitValidationContext, PlannedOp};
-use super::build_commit_plan;
-use crate::commit::{materialize_commit, CommitFingerprint, CommitValidationError, PreparedCommit};
+use super::super::{CommitIr, CommitOp, PlannedOp};
+use super::{build_commit_plan_for_publish, PublishCommitValidationContext};
+use crate::commit::{
+    materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, PreparedCommit,
+};
 use crate::error::{CoreError, ErrorCode};
-use crate::metadata::MetadataState;
+use crate::metadata::{InMemoryMetadataView, MetadataState};
 use loonfs_api::wire::control::{HeadState, WriterBlock};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
@@ -165,11 +167,16 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     state
 }
 
+struct TestValidationContext<'a> {
+    head: HeadState,
+    metadata_state: &'a MetadataState,
+}
+
 fn validation_context(
     metadata_state: &MetadataState,
     seq: ChangeSeq,
     next_inode_id: InodeId,
-) -> CommitValidationContext<'_> {
+) -> TestValidationContext<'_> {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let head = HeadState {
         content_store_id: loonfs_api::ContentStoreId::generate(),
@@ -187,10 +194,37 @@ fn validation_context(
         recent_segments: Vec::new(),
         state: Default::default(),
     };
-    CommitValidationContext {
+    TestValidationContext {
         head,
         metadata_state,
     }
+}
+
+async fn build_commit_plan(
+    request: &CommitIr,
+    committed_at_ms: u64,
+    context: &TestValidationContext<'_>,
+) -> Result<CommitPlan, CommitValidationError> {
+    let accepted_rows = MetadataState::default();
+    let result = build_commit_plan_for_publish(
+        request,
+        committed_at_ms,
+        &PublishCommitValidationContext {
+            head: &context.head,
+            metadata_view: InMemoryMetadataView::in_memory(
+                context.metadata_state,
+                None,
+                context.head.seq,
+            ),
+            accepted_rows: &accepted_rows,
+        },
+    )
+    .await;
+
+    result.map_err(|error| match error {
+        CoreError::CommitValidation(error) => error,
+        error => panic!("unexpected validation dependency error: {error}"),
+    })
 }
 
 /// Every attribute update carries its own revision guard, whether or not the

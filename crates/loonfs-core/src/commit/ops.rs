@@ -10,7 +10,6 @@ use loonfs_api::{
     AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName, InodeId, NameKey,
     RevisionNo,
 };
-use serde::{Deserialize, Serialize};
 
 /// One planned inode-level operation together with the race checks that must
 /// hold immediately before it runs.
@@ -19,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// because a commit's operations observe each other: a check written against
 /// what operation `k` saw is only meaningful once operations `0..k` have been
 /// applied.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlannedOp {
     /// Race checks evaluated immediately before [`Self::op`].
     pub(crate) preconditions: Vec<CommitPrecondition>,
@@ -39,8 +38,7 @@ impl PlannedOp {
 }
 
 /// Semantic operation inside a planned commit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommitOp {
     /// Create a directory under a parent inode.
     CreateDirectory {
@@ -137,8 +135,7 @@ pub(crate) enum CommitOp {
 }
 
 /// Race check evaluated immediately before the operation that carries it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommitPrecondition {
     /// File inode is still at this revision.
     InodeRevisionIs {
@@ -177,51 +174,4 @@ pub(crate) enum CommitPrecondition {
         /// Visible directory that must have no active child bindings.
         inode_id: InodeId,
     },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CommitOp, CommitPrecondition};
-    use loonfs_api::{InodeId, NameKey};
-
-    #[test]
-    fn commit_precondition_name_key_serializes_as_plain_string() {
-        let precondition = CommitPrecondition::ChildNameAbsent {
-            parent_inode_id: InodeId(1),
-            name_key: NameKey::parse("report.txt").expect("valid name key"),
-        };
-
-        assert_eq!(
-            serde_json::to_string(&precondition).expect("serialize precondition"),
-            r#"{"kind":"child_name_absent","parent_inode_id":1,"name_key":"report.txt"}"#
-        );
-    }
-
-    #[test]
-    fn commit_precondition_rejects_invalid_name_key() {
-        let encoded = r#"{
-            "kind":"child_name_absent",
-            "parent_inode_id":1,
-            "name_key":"invalid/name"
-        }"#;
-
-        assert!(serde_json::from_str::<CommitPrecondition>(encoded).is_err());
-    }
-
-    #[test]
-    fn commit_create_directory_uses_directory_wire_name() {
-        let op = CommitOp::CreateDirectory {
-            parent_inode_id: InodeId(1),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-        };
-
-        assert_eq!(
-            serde_json::to_value(&op).expect("create directory op json"),
-            serde_json::json!({
-                "kind": "create_directory",
-                "parent_inode_id": 1,
-                "display_name": "docs"
-            })
-        );
-    }
 }
