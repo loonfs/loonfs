@@ -37,6 +37,11 @@ pub struct FsAdmin {
     /// writer behind it holds `None`, schedules no background work of any
     /// kind, and reports the plan instead of starting it.
     pub(crate) compactions: Option<BackgroundCompactions>,
+    /// A narrowed per-step row budget for the tests that need a family group
+    /// whose base run no bounded step can fold. See
+    /// [`Self::starve_reorganization_row_budget`].
+    #[cfg(test)]
+    pub(crate) reorganization_row_budget: Option<std::num::NonZeroUsize>,
 }
 
 impl FsAdmin {
@@ -71,7 +76,26 @@ impl FsAdmin {
             actor,
             publisher: Some(publisher),
             compactions: Some(compactions),
+            #[cfg(test)]
+            reorganization_row_budget: None,
         }
+    }
+
+    /// Narrows the rows one reorganization step this handle drives may
+    /// decode, so a namespace a test can build in seconds ends up with a base
+    /// run no bounded step can fold.
+    ///
+    /// Test-only, and the one shipped number that has to move to reach that
+    /// state: planning, running, and publishing the job are the shipped path
+    /// either way.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn starve_reorganization_row_budget(
+        mut self,
+        max_decoded_input_rows_per_step: std::num::NonZeroUsize,
+    ) -> Self {
+        self.reorganization_row_budget = Some(max_decoded_input_rows_per_step);
+        self
     }
 
     /// Snapshots the runtime cache counters, so maintenance work driven
@@ -190,6 +214,8 @@ impl FsAdminBuilder {
             actor,
             publisher: None,
             compactions: self.compactions,
+            #[cfg(test)]
+            reorganization_row_budget: None,
         })
     }
 }

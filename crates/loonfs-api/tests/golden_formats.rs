@@ -21,8 +21,9 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
     CheckpointRecordState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HeadState,
-    MetadataCompactionLeaseState, MetadataRootState, NamespaceState, UploadSessionLifecycle,
-    UploadSessionState, UploadSessionTransport, WalFloorState, WalSegmentPointer, WriterBlock,
+    MetadataCompactionLeaseState, MetadataCompactionLeaseStatus, MetadataRootState, NamespaceState,
+    UploadSessionLifecycle, UploadSessionState, UploadSessionTransport, WalFloorState,
+    WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -603,10 +604,11 @@ fn control_objects_match_golden_bytes() {
             state: CheckpointRecordLifecycle::Active {},
         },
     );
-    // The lease is a control object of its own family, and the only thing
-    // that reads it is garbage collection. Its bytes are pinned like every
-    // other family's so a field rename cannot silently change what a
-    // collector reads a running job's claim out of.
+    // The lease is a control object of its own family, and the two things
+    // that write it — the job and the collector that fences it — decide
+    // ownership by compare-and-swapping this document. Its bytes are pinned
+    // like every other family's so a field rename cannot silently change what
+    // either party reads that claim out of.
     check_control_golden(
         "control_compaction_lease.v1.json",
         ControlObjectKind::CompactionLease,
@@ -615,6 +617,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid compaction id"),
             namespace_id: namespace_id(),
             owner_id: "writer-1".to_owned(),
+            status: MetadataCompactionLeaseStatus::Active,
             started_at_ms: 1_000,
             heartbeat_at_ms: 3_000,
         },

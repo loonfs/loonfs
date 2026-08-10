@@ -138,9 +138,44 @@ pub struct NamespaceEngine<S> {
     store: S,
     namespace_id: NamespaceId,
     writer: Option<EngineWriter>,
+    /// A narrowed per-step row budget, so a test can reach a frozen base
+    /// without writing the hundred thousand rows the shipped budget admits.
+    /// See [`Self::starve_reorganization_row_budget`].
+    #[cfg(any(test, feature = "test-support"))]
+    reorganization_row_budget: Option<std::num::NonZeroUsize>,
 }
 
 impl<S: ObjectStore> NamespaceEngine<S> {
+    /// The reorganization budgets this engine plans and compacts under.
+    fn metadata_lsm_policy(&self) -> crate::checkpoint::MetadataLsmPolicy {
+        let policy = crate::checkpoint::MetadataLsmPolicy::default();
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(max_decoded_input_rows_per_step) = self.reorganization_row_budget {
+            return crate::checkpoint::MetadataLsmPolicy {
+                max_decoded_input_rows_per_step,
+                ..policy
+            };
+        }
+        policy
+    }
+
+    /// Narrows the rows one reorganization step may decode, so a namespace a
+    /// test can build in seconds has a base run no step can fold.
+    ///
+    /// That state — a frozen base with delta runs piling up above it — is what
+    /// the streaming compaction exists for, and the shipped budget only
+    /// reaches it at a scale no test can write. Test-only, and the one budget
+    /// that has to move to get there: everything else about planning, running,
+    /// and publishing the job is the shipped path.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn starve_reorganization_row_budget(
+        mut self,
+        max_decoded_input_rows_per_step: std::num::NonZeroUsize,
+    ) -> Self {
+        self.reorganization_row_budget = Some(max_decoded_input_rows_per_step);
+        self
+    }
     /// Starts an engine builder for the supplied object store.
     ///
     /// The builder requires a namespace id, and a writer id unless it is
@@ -845,7 +880,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
-            crate::checkpoint::MetadataLsmPolicy::default(),
+            self.metadata_lsm_policy(),
             compactions,
         )
         .await
@@ -869,7 +904,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
-            crate::checkpoint::MetadataLsmPolicy::default(),
+            self.metadata_lsm_policy(),
             spec,
             cancellation,
         )
@@ -945,6 +980,8 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
             store: self.store,
             namespace_id,
             writer: Some(EngineWriter { writer_id }),
+            #[cfg(any(test, feature = "test-support"))]
+            reorganization_row_budget: None,
         })
     }
 
@@ -962,6 +999,8 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
             store: self.store,
             namespace_id,
             writer: None,
+            #[cfg(any(test, feature = "test-support"))]
+            reorganization_row_budget: None,
         })
     }
 }

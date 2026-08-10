@@ -80,7 +80,7 @@ The required durable object families and standard key patterns are:
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The lifecycle is monotonic: a record is created active under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
 | **Compaction staging** | Immutable | Hold metadata segments one streaming compaction job has written before any manifest references them ("Compaction"). The object is an ordinary metadata segment; only the directory differs. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/tables/{table_id}.sst.zst` |
-| **Compaction leases** | Mutable | Say that one streaming compaction job is still running, so the objects under its prefix belong to it. Carries lifecycle ownership only — job, namespace, owner, start, and last heartbeat — and is rewritten on a heartbeat interval and deleted after publication. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
+| **Compaction leases** | Mutable lifecycle | Say who owns the objects under one streaming compaction job's prefix. Carries lifecycle ownership only — job, namespace, owner, status, start, and last heartbeat. The lifecycle is monotonic: the job creates the lease `active` and refreshes it by compare-and-swap on a heartbeat interval, garbage collection moves an expired lease once to `reaping` by compare-and-swap, and `reaping` is terminal. A published job stops refreshing its lease and leaves it to expire. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The lifecycle is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
@@ -2382,22 +2382,48 @@ publishing CAS) — under these rules:
    and no fixed window can replace it: any such window is a guess at how long
    a job may run, which is exactly what the design refuses to bound.
 
-   The job says so instead. Every job owns the prefix
+   The lease says so instead. Every job owns the prefix
    `namespaces/{namespace_id}/metadata/compactions/{job_id}/`, writes its
    output under `tables/` inside it, and holds a lease at `lease.json` beside
    that directory. The lease carries lifecycle ownership only — job,
-   namespace, owner, `started_at_ms`, `heartbeat_at_ms` — and never a cursor,
-   an output descriptor, an offset, or resumable progress. The job writes it
-   before its first output object, rewrites it every
+   namespace, owner, `status`, `started_at_ms`, `heartbeat_at_ms` — and never
+   a cursor, an output descriptor, an offset, or resumable progress. The job
+   creates it `active` with create-if-absent before its first output object,
+   and refreshes it by compare-and-swap on the etag it last observed, every
    `METADATA_COMPACTION_HEARTBEAT_INTERVAL` while it runs and at the top of
-   every finalization attempt, and deletes it after publishing.
+   every finalization attempt.
+
+   The lease is a fence, not a timestamp. An expired lease alone proves
+   nothing — the job may be resuming from a long stall — so a pass claims one
+   by compare-and-swapping its `status` from `active` to `reaping`, and only
+   the winner of that compare-and-swap may act:
+
+   ```
+   the job's heartbeat wins    -> the pass retains the prefix
+   the pass's claim wins       -> the job is fenced: its next heartbeat fails,
+                                  it publishes nothing, and the prefix is the
+                                  pass's to reclaim
+   ```
+
+   `reaping` is terminal. Nothing returns a lease to `active`, so a job that
+   lost ownership never regains it, and a `reaping` lease a later pass finds
+   means an unfinished reap to carry on with.
+
+   A published job stops heartbeating and leaves its final lease in place; it
+   never deletes it. Deleting it would open the hole the lease exists to
+   close: a pass that collected its live set before the publication would find
+   output objects far older than any grace window and no lease saying who
+   owns them. The fresh lease covers that pass, a later pass reads a root that
+   already references the objects, and that pass removes the expired lease.
 
    A pass decides one of the prefix's objects as follows. An object the
    manifest references is live, like every other referenced object. Otherwise,
-   if the owning job's lease decodes and its `heartbeat_at_ms` is within
-   `METADATA_COMPACTION_LEASE_EXPIRY`, the object is retained whatever its
-   age. Otherwise it ages as an ordinary unreferenced orphan under
-   `METADATA_COMPACTION_STAGING_GRACE`, which is derived rather than tuned:
+   if the owning job's lease decodes, is `active`, and its `heartbeat_at_ms`
+   is within `METADATA_COMPACTION_LEASE_EXPIRY`, the object is retained
+   whatever its age; so is one whose expired lease the pass tried and failed
+   to claim. Otherwise the prefix is orphaned and the object ages as an
+   ordinary unreferenced orphan under `METADATA_COMPACTION_STAGING_GRACE`,
+   which is derived rather than tuned:
 
    ```
    METADATA_COMPACTION_STAGING_GRACE
@@ -2409,6 +2435,14 @@ publishing CAS) — under these rules:
    interval, and it must itself be at least `T`: a job's last heartbeat before
    its output becomes referenced is at the top of a finalization attempt, and
    that attempt's compare-and-swap lands within one publication bound of it.
+   That inequality is also what completes the fence — a job that heartbeated
+   at the top of an attempt cannot have its prefix claimed before that
+   attempt's root compare-and-swap.
+
+   Deletion within a claimed prefix runs objects first and the lease last, for
+   the same reason deletion runs data before records everywhere else: a pass
+   that stops in between leaves a `reaping` lease saying the reap is
+   unfinished, rather than nothing at all.
 
    The lease is a mutable control object and decodes strictly like every
    other. A lease that does not decode, or that names another job or another

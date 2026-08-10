@@ -1047,18 +1047,14 @@ async fn a_queued_job_still_holds_its_namespace_and_still_excludes_its_group() {
         "a second job for one namespace is refused while the first waits"
     );
 
-    let pressure = compactions.pressure(&queued_namespace);
-    let engagements = pressure.engagements();
     assert!(
-        pressure.view(&engagements).active.is_some(),
+        compactions.active_spec(&queued_namespace).is_some(),
         "a queued job's group is left alone exactly as a running job's is"
     );
 
     drop(queued);
-    let pressure = compactions.pressure(&queued_namespace);
-    let engagements = pressure.engagements();
     assert!(
-        pressure.view(&engagements).active.is_none(),
+        compactions.active_spec(&queued_namespace).is_none(),
         "and the slot goes back when the claim does"
     );
 }
@@ -1141,10 +1137,8 @@ async fn a_job_that_ends_frees_its_slot_and_requeues_its_namespace() {
         None,
         "and it waits for nothing"
     );
-    let pressure = compactions.pressure(&published);
-    let engagements = pressure.engagements();
     assert!(
-        pressure.view(&engagements).active.is_none(),
+        compactions.active_spec(&published).is_none(),
         "the slot is back before the nudge, so the step it wakes may fold the rebuilt group"
     );
 

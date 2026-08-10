@@ -2006,12 +2006,30 @@ async fn namespace_with_staged_output(
 }
 
 /// Writes the lease a job holding `job_id` would have written at
-/// `heartbeat_at_ms`.
+/// `heartbeat_at_ms`, in the state a running job leaves it in.
 async fn write_compaction_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     job_id: &str,
     heartbeat_at_ms: u64,
+) {
+    write_compaction_lease_in_state(
+        store,
+        namespace_id,
+        job_id,
+        heartbeat_at_ms,
+        loonfs_api::wire::control::MetadataCompactionLeaseStatus::Active,
+    )
+    .await;
+}
+
+/// The same, in whichever lifecycle state the test needs.
+async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    job_id: &str,
+    heartbeat_at_ms: u64,
+    status: loonfs_api::wire::control::MetadataCompactionLeaseStatus,
 ) {
     let envelope = loonfs_api::wire::control::MetadataCompactionLeaseEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::CompactionLease,
@@ -2019,6 +2037,7 @@ async fn write_compaction_lease<S: ObjectStore + ?Sized>(
             job_id: loonfs_api::MetadataCompactionId::parse(job_id).expect("job id"),
             namespace_id: namespace_id.clone(),
             owner_id: "writer".to_owned(),
+            status,
             started_at_ms: 1_000,
             heartbeat_at_ms,
         },
@@ -2247,6 +2266,175 @@ async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
                 .expect("head a staged segment")
                 .is_some(),
             "a published job's segment must survive every window"
+        );
+    }
+}
+
+/// A publication that lands mid-pass does not cost the job its output.
+///
+/// This is the handoff a fixed grace window cannot express. A pass collects
+/// its live set, the compaction publishes a manifest naming its staged
+/// segments, and the pass reaches the compaction prefix still holding the
+/// older live set — in which those segments are referenced by nothing and are
+/// older than any window a collector applies. The lease the job leaves behind
+/// is what the pass reads instead, and it says the objects are owned.
+///
+/// The pass is gated at the first listing it makes after collecting its roots,
+/// which is where the whole job runs underneath it on a second store handle.
+#[tokio::test]
+async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    let seed = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&seed, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..4 {
+        write_test_file(
+            &seed,
+            &namespace_id,
+            &format!("/docs/{index}.txt"),
+            &format!("gc-body-{index}"),
+            &setup,
+        )
+        .await;
+        crate::checkpoint::flush_wal(&seed, &namespace_id, &setup)
+            .await
+            .expect("flush wal");
+    }
+    // One clock for the job and the pass: the job stamps its lease at the same
+    // instant the pass reads it by, which is what a running job's lease looks
+    // like to a collector.
+    let pass_clock = context(now_after_newest_object(&seed, &namespace_id, GRACE_MS + 1).await);
+    let (policy, spec) =
+        crate::checkpoint::tests::plan_a_family_group_compaction(&seed, &namespace_id, &pass_clock)
+            .await;
+
+    // The pass parks at its first listing, which is after it has collected the
+    // roots and long before it reaches the compaction prefix. Everything the
+    // job does happens in that gap, on a store the gate does not hold.
+    let gated = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        OperationClass::List,
+    );
+    gated.block_next();
+    let pass_config = config();
+    let (report, staged) = tokio::join!(
+        gc_namespace(&gated, &namespace_id, &pass_config, &pass_clock),
+        async {
+            gated.wait_until_blocked().await;
+            crate::checkpoint::tests::publish_planned_compaction(
+                &seed,
+                &namespace_id,
+                &pass_clock,
+                policy,
+                &spec,
+            )
+            .await;
+            let staged =
+                crate::checkpoint::tests::staged_keys_of_the_current_manifest(&seed, &namespace_id)
+                    .await;
+            gated.release();
+            staged
+        }
+    );
+    report.expect("the pass must finish");
+
+    for key in &staged {
+        assert!(
+            seed.head(key)
+                .await
+                .expect("head a staged segment")
+                .is_some(),
+            "a segment the manifest names must survive a pass whose live set predates it"
+        );
+    }
+}
+
+/// A published job's lease outlives it, and the pass that finds it expired
+/// removes the lease and nothing else.
+///
+/// The job stops heartbeating at publication rather than deleting the object,
+/// so a later pass is the one that cleans it up. By then that pass reads a
+/// root that names every staged segment, so the reap it performs has nothing
+/// to take but the lease.
+#[tokio::test]
+async fn a_published_jobs_lease_expires_and_the_pass_removes_only_the_lease() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..4 {
+        write_test_file(
+            &store,
+            &namespace_id,
+            &format!("/docs/{index}.txt"),
+            &format!("gc-body-{index}"),
+            &setup,
+        )
+        .await;
+        crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+            .await
+            .expect("flush wal");
+    }
+    let (policy, spec) =
+        crate::checkpoint::tests::plan_a_family_group_compaction(&store, &namespace_id, &setup)
+            .await;
+    crate::checkpoint::tests::publish_planned_compaction(
+        &store,
+        &namespace_id,
+        &setup,
+        policy,
+        &spec,
+    )
+    .await;
+    let staged =
+        crate::checkpoint::tests::staged_keys_of_the_current_manifest(&store, &namespace_id).await;
+    let lease_key = metadata_compaction_lease(namespace_id.as_str(), spec.job_id().as_str());
+    assert!(
+        store
+            .head(&lease_key)
+            .await
+            .expect("head the lease")
+            .is_some(),
+        "a published job leaves its lease standing"
+    );
+
+    // Past the lease's own expiry, with the root that names the segments long
+    // since published.
+    let expired = context(
+        now_after_newest_object(
+            &store,
+            &namespace_id,
+            METADATA_COMPACTION_LEASE_EXPIRY_MS + GRACE_MS + 1,
+        )
+        .await,
+    );
+    gc_namespace(&store, &namespace_id, &config(), &expired)
+        .await
+        .expect("gc pass once the published job's lease expired");
+
+    assert!(
+        store
+            .head(&lease_key)
+            .await
+            .expect("head the lease")
+            .is_none(),
+        "the expired lease of a published job is what the pass reclaims"
+    );
+    for key in &staged {
+        assert!(
+            store
+                .head(key)
+                .await
+                .expect("head a staged segment")
+                .is_some(),
+            "and every segment the manifest names stays exactly where it is"
         );
     }
 }

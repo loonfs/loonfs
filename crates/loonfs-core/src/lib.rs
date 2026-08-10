@@ -177,9 +177,10 @@ pub mod publish {
 // `MetadataReorganizeReport` has no caller that names it; it stays public
 // because it is the return type of `NamespaceEngine::reorganize_metadata`.
 pub use checkpoint::{
-    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, MetadataCompactionCancellation,
-    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataCompactionView,
-    MetadataReorganizeOutcome, MetadataReorganizeReport,
+    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, FrozenBasePolicy,
+    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
+    MetadataCompactionView, MetadataFamilyGroup, MetadataReorganizeOutcome,
+    MetadataReorganizeReport,
 };
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;

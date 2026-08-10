@@ -3,9 +3,12 @@
 //! place, restart equivalence, and the resource bounds that make the job
 //! independent of the size of what it rebuilds.
 
-use super::super::compaction_lease::CompactionLease;
+use super::super::compaction_lease::{
+    claim_compaction_prefix, CompactionLease, CompactionPrefixOwner, LeaseHold,
+};
 use super::super::reorganize::{
-    drop_rows_below_retention_floor, select_reorganization_input, ReorganizationPlan,
+    drop_rows_below_retention_floor, select_reorganization_input, FrozenBasePolicy,
+    ReorganizationPlan,
 };
 use super::super::row::manifest_row_commit_seq;
 use super::super::runs::MetadataFamilyGroup;
@@ -16,13 +19,16 @@ use super::super::streaming_compaction::{
     MetadataCompactionSpec,
 };
 use super::*;
-use crate::timing::StdMonotonicTimer;
+use crate::limits::METADATA_COMPACTION_LEASE_EXPIRY_MS;
+use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::ActiveDeletionRowAction;
 use loonfs_objectstore::keys::{metadata_compaction_lease, metadata_compaction_prefix};
-use loonfs_test_support::stores::ConcurrencyWatchStore;
+use loonfs_test_support::stores::{
+    BlockingStore, ConcurrencyWatchStore, KeyPredicate, OperationClass,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 // -------------------------------------------------------------------------
 // The family-group table
@@ -467,7 +473,15 @@ async fn publish_one_operation<S: ObjectStore + ?Sized>(
 fn rebuilding(spec: &MetadataCompactionSpec) -> MetadataCompactionView<'_> {
     MetadataCompactionView {
         active: Some(spec),
-        blocked_engagements: &[],
+        frozen_base: FrozenBasePolicy::default(),
+    }
+}
+
+/// The policy an amortizing runtime hands the planner once `group` has
+/// published `merges` delta runs over its frozen base.
+fn amortized(group: MetadataFamilyGroup, merges: u32) -> FrozenBasePolicy {
+    FrozenBasePolicy::Amortized {
+        published_delta_merges_over_frozen_base: BTreeMap::from([(group, merges)]),
     }
 }
 
@@ -584,7 +598,7 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
             ..MetadataLsmPolicy::default()
         },
         frozen_floor_seq,
-        false,
+        &FrozenBasePolicy::default(),
     )
     .await
     .expect("plan the group");
@@ -594,22 +608,29 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
     }
 }
 
-/// The claim a job holds while it runs, built the way the job driver builds
-/// it. These tests split the rebuild from the driver, so they open the claim
-/// themselves.
-fn test_lease<'a>(
+/// The claim a job holds while it runs, opened the way the job driver opens
+/// it. These tests split the rebuild from the driver, so they create the
+/// lease themselves — every later write compare-and-swaps against the etag
+/// this one returns, so a lease that was never created cannot heartbeat.
+async fn test_lease<'a, S: ObjectStore + ?Sized>(
+    store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    timer: &'a StdMonotonicTimer,
+    timer: &'a dyn MonotonicTimer,
 ) -> CompactionLease<'a> {
     let context = test_context();
-    CompactionLease::new(
+    let mut lease = CompactionLease::new(
         namespace_id,
         spec.job_id(),
         &context.writer_id,
         context.now_ms,
         timer,
-    )
+    );
+    lease
+        .open_for_test(store)
+        .await
+        .expect("open the job's lease");
+    lease
 }
 
 async fn run_compaction<S: ObjectStore + ?Sized>(
@@ -621,7 +642,7 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
 ) -> MetadataCompactionOutcome {
     let tables = load_current_manifest_tables(store, namespace_id).await;
     let timer = StdMonotonicTimer::default();
-    let mut lease = test_lease(namespace_id, spec, &timer);
+    let mut lease = test_lease(store, namespace_id, spec, &timer).await;
     run_metadata_compaction(
         &tables,
         namespace_id,
@@ -678,7 +699,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     cancellation: &MetadataCompactionCancellation,
 ) -> Finalization {
     let timer = StdMonotonicTimer::default();
-    let mut lease = test_lease(namespace_id, spec, &timer);
+    let mut lease = test_lease(store, namespace_id, spec, &timer).await;
     finalize_metadata_compaction(
         store,
         namespace_id,
@@ -796,12 +817,11 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("fold the group whole");
-    let MetadataReorganizeOutcome::UnitPublished { families, .. } = report.outcome else {
+    let MetadataReorganizeOutcome::UnitPublished { group: folded, .. } = report.outcome else {
         panic!("the whole-group fold must publish a unit");
     };
     assert_eq!(
-        families,
-        group.families(),
+        folded, group,
         "both rebuilds must work on the same family group"
     );
 }
@@ -823,10 +843,15 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let tables = load_current_manifest_tables(&store, &namespace_id).await;
 
-    let generous =
-        select_reorganization_input(&tables, group, fold_everything_policy(), floor_seq, false)
-            .await
-            .expect("plan under generous budgets");
+    let generous = select_reorganization_input(
+        &tables,
+        group,
+        fold_everything_policy(),
+        floor_seq,
+        &FrozenBasePolicy::default(),
+    )
+    .await
+    .expect("plan under generous budgets");
     assert!(
         matches!(generous.plan, Some(ReorganizationPlan::BoundedMerge(_))),
         "a window that fits is a bounded merge"
@@ -842,7 +867,7 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
             ..MetadataLsmPolicy::default()
         },
         floor_seq,
-        false,
+        &FrozenBasePolicy::default(),
     )
     .await
     .expect("plan under budgets nothing fits");
@@ -889,10 +914,10 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     )
     .await
     .expect("budgeted step");
-    let MetadataReorganizeOutcome::CompactionPlanned { families, spec } = report.outcome else {
+    let MetadataReorganizeOutcome::CompactionPlanned { group, spec } = report.outcome else {
         panic!("a group no window fits must plan a streaming compaction");
     };
-    assert_eq!(families, MetadataFamilyGroup::Bindings.families());
+    assert_eq!(group, MetadataFamilyGroup::Bindings);
     assert!(spec.input_rows() > 0, "the plan must report what it reads");
     assert_eq!(
         current_manifest_object_id(&store, &namespace_id).await,
@@ -937,12 +962,11 @@ async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
     )
     .await
     .expect("step with no job running");
-    let MetadataReorganizeOutcome::UnitPublished { families, .. } = without.outcome else {
+    let MetadataReorganizeOutcome::UnitPublished { group: folded, .. } = without.outcome else {
         panic!("expected a merge, got {:?}", without.outcome);
     };
     assert_eq!(
-        families,
-        group.families(),
+        folded, group,
         "the seed must leave this group the one a step would take"
     );
 
@@ -960,10 +984,9 @@ async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
         .await
         .expect("step with the job running");
         match report.outcome {
-            MetadataReorganizeOutcome::UnitPublished { families, .. } => {
+            MetadataReorganizeOutcome::UnitPublished { group: folded, .. } => {
                 assert_ne!(
-                    families,
-                    group.families(),
+                    folded, group,
                     "a step must not merge the group a job is rebuilding"
                 );
                 other_groups_folded += 1;
@@ -988,7 +1011,7 @@ async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
 /// another pair of them, so a planner reading one step's view alone would take
 /// that merge forever and never start the job.
 ///
-/// The runtime counts those engagements, and after
+/// An amortizing runtime counts those published merges, and after
 /// `DELTA_MERGES_OVER_A_FROZEN_BASE` of them the planner starts the job
 /// regardless of what delta window is available. Here every step publishes a
 /// fresh delta run before the next one plans, which is the write pattern that
@@ -1003,8 +1026,7 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
     let group = MetadataFamilyGroup::Bindings;
     let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
 
-    let mut engagements = 0u32;
-    let mut delta_merges_over_the_frozen_base = 0usize;
+    let mut delta_merges_over_the_frozen_base = 0u32;
     let mut planned: Option<MetadataCompactionSpec> = None;
     for round in 0..16u64 {
         // A new delta run before every step, so the planner always has two
@@ -1023,7 +1045,6 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
             .await
             .expect("checkpoint the write");
 
-        let blocked = [(group.families(), engagements)];
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
@@ -1031,30 +1052,29 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
             policy,
             MetadataCompactionView {
                 active: None,
-                blocked_engagements: &blocked,
+                frozen_base: amortized(group, delta_merges_over_the_frozen_base),
             },
         )
         .await
         .expect("maintenance step");
         match report.outcome {
-            MetadataReorganizeOutcome::CompactionPlanned { ref families, .. } => {
-                assert_eq!(families.as_slice(), group.families());
-                planned = match report.outcome {
-                    MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => Some(spec),
-                    _ => unreachable!(),
-                };
+            MetadataReorganizeOutcome::CompactionPlanned {
+                group: planned_group,
+                spec,
+            } => {
+                assert_eq!(planned_group, group);
+                planned = Some(spec);
                 break;
             }
             MetadataReorganizeOutcome::UnitPublished {
-                ref families,
+                group: folded,
                 bottom_anchored_merge_blocked,
                 ..
-            } if families.as_slice() == group.families() => {
+            } if folded == group => {
                 assert!(
                     bottom_anchored_merge_blocked,
                     "this budget starves the group's base, so every merge of it runs above one"
                 );
-                engagements += 1;
                 delta_merges_over_the_frozen_base += 1;
             }
             _ => {}
@@ -1067,7 +1087,7 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
     );
     assert_eq!(
         delta_merges_over_the_frozen_base,
-        super::super::reorganize::DELTA_MERGES_OVER_A_FROZEN_BASE as usize,
+        super::super::reorganize::DELTA_MERGES_OVER_A_FROZEN_BASE,
         "the group merges deltas over its frozen base exactly that many times before the job"
     );
 }
@@ -1076,8 +1096,8 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
 ///
 /// Starting a job for every batch of delta runs would reread the whole group
 /// to fold in a sliver, which is the amortization the counter exists to keep.
-/// A group whose base is not frozen never counts an engagement at all, and a
-/// group whose base is frozen spends its budget on merges first.
+/// A group whose base is not frozen never counts a merge at all, and a group
+/// whose base is frozen spends its budget on merges first.
 #[tokio::test]
 async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1092,7 +1112,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
     };
 
     // Budgets this group fits: every merge starts at the group's oldest run,
-    // so nothing is ever blocked and no engagement is ever counted.
+    // so nothing is ever blocked and no merge over a frozen base is counted.
     let mut merges = 0usize;
     for _ in 0..16 {
         let report = super::super::reorganize_metadata_step(
@@ -1106,11 +1126,11 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         .expect("maintenance step");
         match report.outcome {
             MetadataReorganizeOutcome::UnitPublished {
-                ref families,
+                group: folded,
                 bottom_anchored_merge_blocked,
                 ..
             } => {
-                if families.as_slice() == group.families() {
+                if folded == group {
                     assert!(
                         !bottom_anchored_merge_blocked,
                         "a group whose window fits is never merging over a frozen base"
@@ -1601,15 +1621,16 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
 // The job's claim on its own output
 // -------------------------------------------------------------------------
 
-/// A job writes its lease before its first output object and deletes it after
-/// publishing, and the segments it published stay where they are.
+/// A job writes its lease before its first output object and leaves it in
+/// place after publishing, and the segments it published stay where they are.
 ///
-/// The lease is what tells a collector that an unreferenced staged object
-/// belongs to a job that is still running. Once the manifest names those
-/// objects they are live wherever they sit, so the claim has nothing left to
-/// protect.
+/// The lease is what tells a collector who owns an unreferenced staged
+/// object. Deleting it at publication would open the one hole it exists to
+/// close: a collection pass that captured its live set a moment earlier would
+/// find segments far older than any grace window and nothing saying who wrote
+/// them. So the job stops heartbeating and lets the lease expire instead.
 #[tokio::test]
-async fn a_job_claims_its_prefix_while_it_runs_and_drops_the_claim_when_it_publishes() {
+async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_when_it_publishes() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1649,18 +1670,17 @@ async fn a_job_claims_its_prefix_while_it_runs_and_drops_the_claim_when_it_publi
         "every object a job writes belongs to that job's prefix: {staged:?}"
     );
     assert!(
-        !staged.is_empty() && staged.iter().all(|key| referenced.contains(key)),
-        "the manifest must name the segments the job published"
+        !staged.is_empty()
+            && staged
+                .iter()
+                .all(|key| key == &lease_key || referenced.contains(key)),
+        "the manifest must name every segment the job published"
     );
     assert!(
-        !staged.contains(&lease_key),
-        "a published job deletes its own lease"
+        staged.contains(&lease_key),
+        "a published job leaves its final lease standing for the pass that has not seen the new \
+         root yet"
     );
-    assert!(store
-        .head(&lease_key)
-        .await
-        .expect("head the lease")
-        .is_none());
 }
 
 /// A cancelled job leaves its lease behind, which is what keeps a collector
@@ -1706,6 +1726,165 @@ async fn a_cancelled_job_leaves_its_claim_standing() {
             .expect("head the lease")
             .is_some(),
         "a cancelled job's claim stands until it expires"
+    );
+}
+
+/// A worker whose lease expired and was claimed cannot take its prefix back,
+/// and cannot publish.
+///
+/// This is the revival a timestamp-only lease allowed. A job that stalled long
+/// enough for its lease to expire — a suspended process, a starved runtime —
+/// used to be able to resume, overwrite the lease with a fresh heartbeat, and
+/// go on to publish descriptors naming segments the collector had already
+/// decided to reap. The claim is a compare-and-swap, so the worker's next
+/// heartbeat finds an etag it does not hold and stops there.
+#[tokio::test]
+async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    else {
+        panic!("nothing cancelled this job while it read");
+    };
+    let manifest_before = current_manifest_object_id(&store, &namespace_id).await;
+
+    // The claim the worker holds, taken before the collector's. That is the
+    // whole shape of the race: the worker's etag is the one it last wrote,
+    // and the collector is about to replace it.
+    let timer = StdMonotonicTimer::default();
+    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
+
+    // Well past the expiry rather than one millisecond past it: the job
+    // stamped its lease off a real clock, so the pass's clock has to clear
+    // whatever it spent running.
+    let expired_ms = test_context().now_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS * 2;
+    let owner = claim_compaction_prefix(&store, &namespace_id, spec.job_id().as_str(), expired_ms)
+        .await
+        .expect("claim the expired prefix");
+    assert_eq!(
+        owner,
+        CompactionPrefixOwner::ThisCollector,
+        "an expired lease is claimed, and only the winner may reap the prefix"
+    );
+
+    assert_eq!(
+        lease.heartbeat(&store).await.expect("heartbeat the lease"),
+        LeaseHold::Fenced,
+        "the worker's next heartbeat must find the claim and stop"
+    );
+    let finalization = finalize_metadata_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        &snapshot_keys,
+        result,
+        &MetadataCompactionCancellation::default(),
+        &mut lease,
+    )
+    .await
+    .expect("finalize the fenced job");
+    assert!(
+        matches!(finalization, Finalization::Fenced),
+        "a fenced job reports it rather than publishing, got {finalization:?}"
+    );
+    assert_eq!(
+        current_manifest_object_id(&store, &namespace_id).await,
+        manifest_before,
+        "and the root must not have moved"
+    );
+}
+
+/// A monotonic clock that advances a second per reading.
+#[derive(Debug, Default)]
+struct SteppingTimer(AtomicU64);
+
+impl MonotonicTimer for SteppingTimer {
+    fn monotonic_now_ms(&self) -> u64 {
+        self.0.fetch_add(1_000, Ordering::SeqCst)
+    }
+}
+
+/// The heartbeat and the reaping claim are the same compare-and-swap on the
+/// same object, so whichever lands first wins and the other is refused.
+///
+/// The interesting order is the collector reading an expired lease and the
+/// worker heartbeating before the claim lands — the exact window in which a
+/// timestamp-only lease would have let both parties believe they owned the
+/// prefix. Here the claim is gated at its compare-and-swap, the worker's
+/// heartbeat goes through underneath it, and the claim is refused. The other
+/// order follows on the same store: once the claim wins, the heartbeat behind
+/// it is the one refused.
+#[tokio::test]
+async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let lease_key = metadata_compaction_lease(namespace_id.as_str(), spec.job_id().as_str());
+    // The stepping clock below moves each heartbeat's stamp forward a few
+    // seconds, so the pass's clock is set well past the expiry rather than one
+    // millisecond past it.
+    let expired_ms = test_context().now_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS * 2;
+    // The local store's etags are content hashes, so two lease writes inside
+    // one millisecond would carry identical bytes under an identical etag and
+    // the race under test would not be one. A stepping clock makes every
+    // heartbeat a distinct document, which is what a provider etag gives for
+    // free.
+    let timer = SteppingTimer::default();
+    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
+
+    let gated = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(lease_key),
+        OperationClass::CompareAndSwap,
+    );
+    gated.block_next();
+    let (claimed, beat) = tokio::join!(
+        claim_compaction_prefix(&gated, &namespace_id, spec.job_id().as_str(), expired_ms),
+        async {
+            gated.wait_until_blocked().await;
+            let beat = lease.heartbeat(&store).await.expect("heartbeat the lease");
+            gated.release();
+            beat
+        }
+    );
+    assert_eq!(
+        beat,
+        LeaseHold::Held,
+        "the worker got there first, so it keeps its prefix"
+    );
+    assert_eq!(
+        claimed.expect("claim the prefix"),
+        CompactionPrefixOwner::ALiveJob,
+        "and the claim behind it is refused, so exactly one of the two won"
+    );
+
+    // The other order, on the same lease: the claim lands, and the heartbeat
+    // behind it finds an etag it does not hold.
+    assert_eq!(
+        claim_compaction_prefix(&store, &namespace_id, spec.job_id().as_str(), expired_ms)
+            .await
+            .expect("claim the prefix"),
+        CompactionPrefixOwner::ThisCollector
+    );
+    assert_eq!(
+        lease.heartbeat(&store).await.expect("heartbeat the lease"),
+        LeaseHold::Fenced,
+        "exactly one of the two compare-and-swaps may win"
     );
 }
 
@@ -2082,29 +2261,24 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
         .await
         .expect("maintenance step");
         match report.outcome {
-            MetadataReorganizeOutcome::UnitPublished { ref families, .. } => {
+            MetadataReorganizeOutcome::UnitPublished { group: folded, .. } => {
                 if active.is_some() {
                     assert_ne!(
-                        families.as_slice(),
-                        group.families(),
+                        folded, group,
                         "no step may merge the group a job is rebuilding"
                     );
                     other_groups_folded += 1;
                 }
             }
             MetadataReorganizeOutcome::CompactionPlanned {
-                ref families,
+                group: planned_group,
                 ref spec,
             } => {
                 // One job at a time per namespace: a plan that arrives while
                 // one runs is reported and skipped, which is what the runner
                 // does with it.
                 if active.is_none() {
-                    assert_eq!(
-                        families.as_slice(),
-                        group.families(),
-                        "this budget starves this group first"
-                    );
+                    assert_eq!(planned_group, group, "this budget starves this group first");
                     active = Some(spec.clone());
                     if arrived_keys.is_empty() {
                         // A run arrives while the first job runs. It is
@@ -2642,7 +2816,8 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
 }
 
 /// Fails every root compare-and-swap, and cancels the job the first time it
-/// tries one.
+/// tries one. Every other compare-and-swap — the job's own lease heartbeat —
+/// goes through, because losing that one would fence the job instead.
 ///
 /// That is the shape a shutdown takes during finalization: attempts are still
 /// available, the races are still there to take, and the job must stop taking
@@ -2681,7 +2856,7 @@ impl ObjectStore for CancelAtTheFirstPublicationStore {
         if key.ends_with(".manifest.json") {
             self.manifests.fetch_add(1, Ordering::SeqCst);
         }
-        if matches!(mode, PutMode::CompareAndSwap { .. }) {
+        if key.ends_with("/metadata/root.json") && matches!(mode, PutMode::CompareAndSwap { .. }) {
             self.cancellation.cancel();
             return Err(ObjectStoreError::PreconditionFailed {
                 object_key: key.to_owned(),

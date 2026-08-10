@@ -23,23 +23,22 @@
 //! so a queued job's group is left alone exactly as a running job's is — and
 //! because it is left alone, no merge is published for it, so the count below
 //! neither climbs nor resets while the job waits. And a count per family
-//! group of the maintenance engagements that planned work for that group
-//! while its bottom-anchored merge was blocked, which is the one thing a
-//! single step cannot see: under sustained writes there is always another
-//! pair of delta runs to merge, so a planner deciding from one step's view
-//! would take that merge forever and never start the job that unfreezes the
-//! group's base.
+//! group of the delta merges that have published over that group's frozen
+//! base, which is the one thing a single step cannot see: under sustained
+//! writes there is always another pair of delta runs to merge, so a planner
+//! deciding from one step's view would take that merge forever and never
+//! start the job that unfreezes the group's base.
 //!
 //! Both are in-memory and single-writer, and both are safe to lose. A restart
 //! forgets the running job, and a later step plans it again. A restart
-//! forgets the counts, and the next two engagements rebuild them, which
+//! forgets the counts, and the next two published merges rebuild them, which
 //! delays one cycle and nothing else.
 
 use super::{MaintenanceJobId, RunnerInner};
 use crate::{FsAdmin, NamespaceId};
-use loonfs_api::wire::manifest::MetadataTableFamily;
 use loonfs_core::{
-    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
+    FrozenBasePolicy, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
+    MetadataCompactionSpec, MetadataFamilyGroup,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -68,16 +67,16 @@ struct ActiveCompaction {
 #[derive(Default)]
 pub(super) struct NamespaceCompactions {
     active: Option<ActiveCompaction>,
-    /// Engagements that planned work for a family group while its
-    /// bottom-anchored merge was blocked, since that group's last completed
-    /// job. A group is listed here only while it is blocked, so the map holds
-    /// the groups that are stuck and nothing else.
-    blocked_engagements: BTreeMap<Vec<MetadataTableFamily>, u32>,
+    /// Delta merges that have published over a family group's frozen base,
+    /// since that group's last completed job. A group is listed here only
+    /// while it is blocked, so the map holds the groups that are stuck and
+    /// nothing else.
+    published_delta_merges_over_frozen_base: BTreeMap<MetadataFamilyGroup, u32>,
 }
 
 impl NamespaceCompactions {
     fn is_empty(&self) -> bool {
-        self.active.is_none() && self.blocked_engagements.is_empty()
+        self.active.is_none() && self.published_delta_merges_over_frozen_base.is_empty()
     }
 }
 
@@ -113,41 +112,6 @@ pub(crate) enum CompactionStart {
     NoRunner,
 }
 
-/// What one namespace's planner needs to know, in the shape
-/// [`loonfs_core::MetadataCompactionView`] borrows from.
-///
-/// Owned rather than borrowed because the lock is released before the step
-/// runs: a step reads durable state and publishes, which is far too long to
-/// hold a map every other step consults. The default is what a namespace
-/// nothing is running for reads as.
-#[derive(Default)]
-pub(crate) struct CompactionPressure {
-    active: Option<MetadataCompactionSpec>,
-    blocked_engagements: Vec<(Vec<MetadataTableFamily>, u32)>,
-}
-
-impl CompactionPressure {
-    /// Borrows this as the view a maintenance step reads.
-    pub(crate) fn view<'a>(
-        &'a self,
-        families: &'a [(&'a [MetadataTableFamily], u32)],
-    ) -> loonfs_core::MetadataCompactionView<'a> {
-        loonfs_core::MetadataCompactionView {
-            active: self.active.as_ref(),
-            blocked_engagements: families,
-        }
-    }
-
-    /// The engagement counts as borrowed slices, which is what
-    /// [`Self::view`] needs and what the caller has to keep alive around it.
-    pub(crate) fn engagements(&self) -> Vec<(&[MetadataTableFamily], u32)> {
-        self.blocked_engagements
-            .iter()
-            .map(|(families, engagements)| (families.as_slice(), *engagements))
-            .collect()
-    }
-}
-
 impl BackgroundCompactions {
     pub(super) fn new(runner: &Arc<RunnerInner>) -> Self {
         Self {
@@ -157,67 +121,70 @@ impl BackgroundCompactions {
         }
     }
 
-    /// Everything a step's planner needs about this namespace: the job it
-    /// must leave alone, and how long each group has been stuck.
-    pub(crate) fn pressure(&self, namespace_id: &NamespaceId) -> CompactionPressure {
-        let namespaces = self.lock();
-        let Some(entry) = namespaces.get(namespace_id) else {
-            return CompactionPressure::default();
-        };
-        CompactionPressure {
-            active: entry.active.as_ref().map(|active| active.spec.clone()),
-            blocked_engagements: entry
-                .blocked_engagements
-                .iter()
-                .map(|(families, engagements)| (families.clone(), *engagements))
-                .collect(),
+    /// The plan of the job this namespace has running or queued, which is the
+    /// group every step must leave alone.
+    ///
+    /// Cloned rather than borrowed because the lock is released before the
+    /// step runs: a step reads durable state and publishes, which is far too
+    /// long to hold a map every other step consults.
+    pub(crate) fn active_spec(&self, namespace_id: &NamespaceId) -> Option<MetadataCompactionSpec> {
+        self.lock()
+            .get(namespace_id)?
+            .active
+            .as_ref()
+            .map(|active| active.spec.clone())
+    }
+
+    /// The amortization this process has watched the namespace's stuck groups
+    /// spend, as the policy a planner runs under.
+    pub(crate) fn amortization(&self, namespace_id: &NamespaceId) -> FrozenBasePolicy {
+        FrozenBasePolicy::Amortized {
+            published_delta_merges_over_frozen_base: self
+                .lock()
+                .get(namespace_id)
+                .map(|entry| entry.published_delta_merges_over_frozen_base.clone())
+                .unwrap_or_default(),
         }
     }
 
     /// Records what one published merge unit said about its group.
     ///
-    /// A merge that ran above a frozen base is one more engagement the group
-    /// spent without its retention restarting; a merge that started at the
+    /// A merge that ran above a frozen base is one more delta merge the group
+    /// published without its retention restarting; a merge that started at the
     /// group's oldest run means the base is not frozen, so the count goes.
     pub(crate) fn record_merge(
         &self,
         namespace_id: &NamespaceId,
-        families: &[MetadataTableFamily],
+        group: MetadataFamilyGroup,
         bottom_anchored_merge_blocked: bool,
     ) {
-        let mut namespaces = self.lock();
         if !bottom_anchored_merge_blocked {
-            let Some(entry) = namespaces.get_mut(namespace_id) else {
-                return;
-            };
-            entry.blocked_engagements.remove(families);
-            if entry.is_empty() {
-                namespaces.remove(namespace_id);
-            }
+            self.clear_published_delta_merges(namespace_id, group);
             return;
         }
-        *namespaces
+        *self
+            .lock()
             .entry(namespace_id.clone())
             .or_default()
-            .blocked_engagements
-            .entry(families.to_vec())
+            .published_delta_merges_over_frozen_base
+            .entry(group)
             .or_default() += 1;
     }
 
-    /// Clears a group's engagement count after a job rebuilt it.
+    /// Clears a group's published-delta-merge count after a job rebuilt it.
     ///
     /// The base is no longer frozen, so the group starts counting again from
     /// nothing.
-    pub(crate) fn clear_engagements(
+    pub(crate) fn clear_published_delta_merges(
         &self,
         namespace_id: &NamespaceId,
-        families: &[MetadataTableFamily],
+        group: MetadataFamilyGroup,
     ) {
         let mut namespaces = self.lock();
         let Some(entry) = namespaces.get_mut(namespace_id) else {
             return;
         };
-        entry.blocked_engagements.remove(families);
+        entry.published_delta_merges_over_frozen_base.remove(&group);
         if entry.is_empty() {
             namespaces.remove(namespace_id);
         }
