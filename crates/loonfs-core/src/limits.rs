@@ -128,16 +128,30 @@ pub const METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS: u64 = 5 * 60 * 1000;
 /// Heartbeats a lease may miss before the collector reads its job as gone.
 pub const METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS: u64 = 5;
 
-/// How long after its last heartbeat a lease still says its job owns its
-/// prefix.
+/// How long after its last heartbeat an `active` lease still says its job owns
+/// its prefix.
 ///
 /// Two things have to fit inside it. A running job must never lose its
 /// prefix, so the window covers several missed heartbeats rather than one.
 /// And a job's last heartbeat before it publishes is at the top of a
-/// finalization attempt, so the window must also outlast one publication:
-/// `GC_MIN_GRACE_WINDOW_MS` is the bound on the span from a publication's
-/// first object write to its root compare-and-swap, and the assertion below
-/// holds the lease above it.
+/// finalization attempt, so the window must also outlast one publication.
+///
+/// That second requirement is what makes the fence complete, and it is an
+/// inequality over the constants here:
+///
+/// ```text
+/// one finalization attempt   <= METADATA_PUBLICATION_BUDGET_MS
+///                                  (enforced: `ensure_metadata_publication_budget`)
+///                             < GC_MIN_GRACE_WINDOW_MS
+///                                  (that budget plus provider bounds and skew)
+///                            <= METADATA_COMPACTION_LEASE_EXPIRY_MS
+///                                  (asserted below)
+/// ```
+///
+/// So a job that heartbeats at the top of an attempt cannot have its lease
+/// expire before that attempt's root compare-and-swap: garbage collection
+/// cannot claim the prefix underneath it mid-attempt, and a job that got past
+/// the heartbeat is the only party that can publish the segments it named.
 pub const METADATA_COMPACTION_LEASE_EXPIRY_MS: u64 =
     METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS * METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS;
 

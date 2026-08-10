@@ -44,12 +44,12 @@
 //! sustained writes there is always another pair of them, so a planner
 //! deciding from one step's view alone would take the delta merge every time
 //! and never start the job — the base would stay frozen and the group's
-//! retention would stay stopped. The runtime therefore counts, per group, the
-//! engagements that planned work while the bottom-anchored window was
-//! blocked, and hands that count back through
-//! [`MetadataCompactionView`]. At
+//! retention would stay stopped. The caller therefore states a
+//! [`FrozenBasePolicy`]. A writer's own maintenance amortizes: it counts, per
+//! group, the delta merges it has published over that frozen base, and at
 //! [`DELTA_MERGES_OVER_A_FROZEN_BASE`] the planner stops taking the merge and
-//! starts the job.
+//! plans the job. Everyone else asks for the job outright, because they are
+//! either reporting that the namespace needs one or running it.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::build::{
@@ -91,45 +91,90 @@ use loonfs_api::{
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Maintenance engagements that may plan a delta merge over a frozen base
-/// before the planner insists on the job that unfreezes it.
+/// Delta merges that may publish over a frozen base before the planner
+/// insists on the job that unfreezes it.
 ///
 /// Delta merges between jobs are how a stuck group amortizes: a job rereads
 /// the whole group, so running one for every eight delta runs would reread
-/// megabytes to fold in a sliver. Two engagements is the smallest count that
-/// still lets the ordinary merge do that work, and it bounds how long
-/// retention for the group can stay stopped — the job starts within two
-/// maintenance engagements of the block, whatever the write rate is.
+/// megabytes to fold in a sliver. Two merges is the smallest count that still
+/// lets the ordinary merge do that work, and it bounds how long retention for
+/// the group can stay stopped — the job starts within two published delta
+/// merges of the block, whatever the write rate is.
 pub(super) const DELTA_MERGES_OVER_A_FROZEN_BASE: u32 = 2;
+
+/// How planning treats a family group whose base run is frozen.
+///
+/// A group whose bottom-anchored window is blocked still has delta runs above
+/// that base to merge, and under sustained writes there is always another pair
+/// of them. So the planner has to be told what to do about that, and the two
+/// answers are genuinely different work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrozenBasePolicy {
+    /// Amortize the rebuild: keep taking the delta merge above the frozen
+    /// base until [`DELTA_MERGES_OVER_A_FROZEN_BASE`] of them have published
+    /// for the group, then plan the job. This is what a writer's own
+    /// maintenance runs under, because upkeep that rebuilt the whole group
+    /// for every eight delta runs would reread megabytes to fold in a sliver.
+    ///
+    /// The counts are per family group, keyed by the group itself: a group's
+    /// block is its own, and one step reorganizes one group. A group absent
+    /// from the map has published none.
+    ///
+    /// They are in-memory process state and safe to lose: a restart forgets
+    /// them and the next two merges rebuild them, which delays one cycle.
+    Amortized {
+        published_delta_merges_over_frozen_base: BTreeMap<MetadataFamilyGroup, u32>,
+    },
+    /// Plan the job as soon as the bottom-anchored window is blocked. This is
+    /// what an explicit compaction request runs under, and what a bounded step
+    /// with nowhere to run background work runs under: the first reports the
+    /// operation its caller asked for, and the second reports that the
+    /// namespace needs one promptly instead of publishing delta merges that
+    /// never reach it.
+    CompactImmediately,
+}
+
+impl Default for FrozenBasePolicy {
+    fn default() -> Self {
+        Self::Amortized {
+            published_delta_merges_over_frozen_base: BTreeMap::new(),
+        }
+    }
+}
+
+impl FrozenBasePolicy {
+    /// Whether a blocked bottom-anchored window goes straight to the job
+    /// rather than taking the delta merge above it.
+    fn compact_a_frozen_base(&self, group: MetadataFamilyGroup) -> bool {
+        match self {
+            Self::Amortized {
+                published_delta_merges_over_frozen_base,
+            } => {
+                published_delta_merges_over_frozen_base
+                    .get(&group)
+                    .copied()
+                    .unwrap_or(0)
+                    >= DELTA_MERGES_OVER_A_FROZEN_BASE
+            }
+            Self::CompactImmediately => true,
+        }
+    }
+}
 
 /// What the process running maintenance knows about one namespace's
 /// streaming compactions, which one step's read of durable state cannot see.
-///
-/// Both fields are in-memory process state, and both are safe to lose: a
-/// restart forgets the active job (a later step plans it again) and forgets
-/// the engagement counts (the next two engagements rebuild them, delaying one
-/// cycle).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MetadataCompactionView<'a> {
     /// The plan of the job running for this namespace, or `None` when it is
     /// running none. The step leaves that job's group alone and folds
     /// another, because every run of that group is in the job's snapshot and
     /// merging one would waste the whole job at finalization.
+    ///
+    /// In-memory process state, and safe to lose: a restart forgets the
+    /// active job and a later step plans it again.
     pub active: Option<&'a MetadataCompactionSpec>,
-    /// Per family group, how many maintenance engagements have planned work
-    /// for it while its bottom-anchored merge was blocked, since that group's
-    /// last completed job. Keyed by the group's families, which is the
-    /// group's identity outside this crate.
-    pub blocked_engagements: &'a [(&'a [MetadataTableFamily], u32)],
-}
-
-impl MetadataCompactionView<'_> {
-    fn engagements(&self, group: MetadataFamilyGroup) -> u32 {
-        self.blocked_engagements
-            .iter()
-            .find(|(families, _)| *families == group.families())
-            .map_or(0, |(_, engagements)| *engagements)
-    }
+    /// What this caller wants done about a group whose base is frozen.
+    pub frozen_base: FrozenBasePolicy,
 }
 
 /// What one reorganization step did.
@@ -143,7 +188,10 @@ pub enum MetadataReorganizeOutcome {
     /// when the subset started at the group's oldest run, and a bigger delta
     /// run otherwise.
     UnitPublished {
-        families: Vec<MetadataTableFamily>,
+        /// The group this unit merged, which is what a runtime keys its
+        /// per-group bookkeeping by. Its families are
+        /// [`MetadataFamilyGroup::families`].
+        group: MetadataFamilyGroup,
         folded_l0_rows: u64,
         input_runs: usize,
         decoded_input_rows: u64,
@@ -151,11 +199,11 @@ pub enum MetadataReorganizeOutcome {
         manifest_id: ManifestId,
         /// True when the window starting at the group's oldest run could not
         /// reach an L0 run, so this merge ran above a frozen base and the
-        /// group's retention is still stopped. The runtime counts these per
-        /// group and hands the count back through
-        /// [`MetadataCompactionView::blocked_engagements`], which is what
-        /// decides when the planner stops merging deltas over that base and
-        /// starts the job that unfreezes it.
+        /// group's retention is still stopped. A runtime that amortizes counts
+        /// these per group and hands the count back in
+        /// [`FrozenBasePolicy::Amortized`], which is what decides when the
+        /// planner stops merging deltas over that base and plans the job that
+        /// unfreezes it.
         bottom_anchored_merge_blocked: bool,
     },
     /// No oldest-first subset that would make progress fits the hard
@@ -163,7 +211,7 @@ pub enum MetadataReorganizeOutcome {
     /// compaction over every run it holds. The step publishes nothing and
     /// hands the plan back; starting the job is the runtime's.
     CompactionPlanned {
-        families: Vec<MetadataTableFamily>,
+        group: MetadataFamilyGroup,
         spec: MetadataCompactionSpec,
     },
     /// A concurrent publication moved the root while this unit ran; its
@@ -268,17 +316,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
-    let selection = select_reorganization_input(
-        &tables,
-        group,
-        policy,
-        floor_seq,
-        compactions.engagements(group) >= DELTA_MERGES_OVER_A_FROZEN_BASE,
-    )
-    .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-    })?;
+    let selection =
+        select_reorganization_input(&tables, group, policy, floor_seq, &compactions.frozen_base)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
     if let Some(bottom) = selection.group_bottom_over_budget {
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
     }
@@ -288,10 +331,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         Some(ReorganizationPlan::FullCompaction(spec)) => {
             return Ok(MetadataReorganizeReport {
                 namespace_id: namespace_id.clone(),
-                outcome: MetadataReorganizeOutcome::CompactionPlanned {
-                    families: group.families().to_vec(),
-                    spec,
-                },
+                outcome: MetadataReorganizeOutcome::CompactionPlanned { group, spec },
             })
         }
         // A selected group holds L0 rows, so it holds runs, so the planner
@@ -413,7 +453,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         ManifestPublicationOutcome::Published(_) => Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::UnitPublished {
-                families: group.families().to_vec(),
+                group,
                 folded_l0_rows: input.folded_l0_rows,
                 input_runs: input.runs.len(),
                 decoded_input_rows: input.decoded_rows,
@@ -625,17 +665,18 @@ pub(super) struct OverBudgetRun {
 /// again at drop time; a compaction spec carries it, because the floor a job
 /// judges every row against is fixed when the job is planned.
 ///
-/// `compact_a_frozen_base` is the runtime's answer to the one thing this
-/// function cannot see: how long this group has already been merging deltas
-/// over a base no window can reach. When it is set, a blocked bottom-anchored
-/// window goes straight to the job rather than taking the delta merge above
-/// it — the merge would make progress, but not the progress the group needs.
+/// `frozen_base` is the caller's answer to the one thing this function cannot
+/// see: whether the delta merge above a base no window can reach is still the
+/// work this group needs. When the policy says it is not, a blocked
+/// bottom-anchored window goes straight to the job rather than taking that
+/// merge — the merge would make progress, but not the progress the group
+/// needs.
 pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     group: MetadataFamilyGroup,
     policy: MetadataLsmPolicy,
     frozen_floor_seq: ChangeSeq,
-    compact_a_frozen_base: bool,
+    frozen_base: &FrozenBasePolicy,
 ) -> std::result::Result<ReorganizationSelection, ManifestLoadError> {
     let mut candidates = tables
         .scan_runs
@@ -679,9 +720,9 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         // has stopped. A delta merge still helps — it keeps the run count
         // down while the base waits — but only the job unfreezes the base, and
         // under sustained writes there is always another pair of delta runs to
-        // merge. So after the runtime has watched this group take that merge
-        // enough times, the planner stops taking it.
-        if window_start > 0 && compact_a_frozen_base {
+        // merge. So the caller's policy decides whether to take that merge
+        // once more or to go to the job now.
+        if window_start > 0 && frozen_base.compact_a_frozen_base(group) {
             break;
         }
         let mut runs = Vec::new();

@@ -30,8 +30,8 @@ use super::record::read_checkpoint_record;
 use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
-    flatten_manifest_tables, runs_from_metadata_files, runs_in_scan_order, MetadataLsmPolicy,
-    MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
+    flatten_manifest_tables, runs_from_metadata_files, runs_in_scan_order, MetadataFamilyGroup,
+    MetadataLsmPolicy, MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
     CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_L0_RUNS, REORGANIZE_FAMILY_GROUPS,
 };
 use super::stored_block_cache::{
@@ -339,6 +339,21 @@ pub(crate) async fn compact_a_family_group_into_staging<S: ObjectStore + ?Sized>
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> BTreeSet<String> {
+    let (policy, spec) = plan_a_family_group_compaction(store, namespace_id, context).await;
+    publish_planned_compaction(store, namespace_id, context, policy, &spec).await;
+    staged_keys_of_the_current_manifest(store, namespace_id).await
+}
+
+/// Plans one family group's streaming compaction without running it, with the
+/// budgets that make a small namespace's group unfoldable.
+///
+/// For a caller that has to do something between the plan and the
+/// publication — the collector's tests, which run a pass across that gap.
+pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> (MetadataLsmPolicy, MetadataCompactionSpec) {
     // One byte admits no run whole, so the group a step selects has no window
     // that makes progress and is handed to a job.
     let policy = MetadataLsmPolicy {
@@ -358,8 +373,14 @@ pub(crate) async fn compact_a_family_group_into_staging<S: ObjectStore + ?Sized>
     let MetadataReorganizeOutcome::CompactionPlanned { spec, .. } = report.outcome else {
         panic!("a budget that admits no run whole must plan a streaming compaction");
     };
-    publish_planned_compaction(store, namespace_id, context, policy, &spec).await;
+    (policy, spec)
+}
 
+/// The staged object keys the namespace's current manifest names.
+pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> BTreeSet<String> {
     let staging_prefix =
         loonfs_objectstore::keys::metadata_compaction_prefix(namespace_id.as_str());
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
@@ -381,8 +402,8 @@ pub(crate) async fn compact_a_family_group_into_staging<S: ObjectStore + ?Sized>
     staged
 }
 
-/// The same, where anything but a publication is a test failure.
-async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
+/// Runs one planned job, where anything but a publication is a test failure.
+pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,

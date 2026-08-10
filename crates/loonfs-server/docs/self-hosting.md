@@ -432,7 +432,13 @@ not report it: its admin handle shares the writer's background work, so a step
 you run by hand starts the job itself even with `maintenance = "manual"`.
 It is for embedded deployments whose admin handle has no writer behind it.
 Those call `FsAdmin::compact_metadata`, which runs one rebuild in the caller's
-own task and returns when it lands; cancelling it is dropping the future.
+own task and returns when it lands; cancelling it is dropping the future. That
+call does not wait for the amortization above: a caller who asks for the
+rebuild gets it on that call, because under steady writes there is always
+another pair of newer files to fold instead and waiting for them to run out
+would postpone the rebuild forever. A step run by hand on such a handle says
+`compaction_required` for the same reason — it reports the rebuild promptly
+rather than folding newer files that never reach it.
 
 Two metrics say what the limit is doing:
 `loonfs.maintenance.compactions_running` and
@@ -450,12 +456,27 @@ than waiting for it.
 Each job writes its files under
 `namespaces/{namespace}/metadata/compactions/{job}/tables/` and keeps a small
 `lease.json` beside them that it rewrites every few minutes while it runs.
-That lease is how a collection pass tells a job that is still writing from
-one that died: a job holding its lease keeps its files however old they are,
-and a job whose lease has gone stale leaves them to be reclaimed within the
-hour. The lease says only who owns the files and when the job last touched
-them; it records nothing about the rebuild's progress, so it cannot make a
-restart resume anything.
+That lease is how a collection pass tells a job that is still writing from one
+that died: a job holding its lease keeps its files however old they are, and a
+job whose lease has gone stale leaves them to be reclaimed within the hour. The
+lease says only who owns the files and when the job last touched them; it
+records nothing about the rebuild's progress, so it cannot make a restart
+resume anything.
+
+Both sides write that lease with a compare-and-swap, so only one of them can
+own the files. A collection pass that finds a stale lease claims it, and from
+that moment the job is fenced: its next lease write fails, it logs `streaming
+metadata compaction fenced` and publishes nothing, and the pass reclaims what
+it wrote. That is what stops a job that was suspended for half an hour from
+waking up and publishing files a pass has already deleted. It costs that
+rebuild and nothing else; the next step starts it again.
+
+A job that publishes leaves its lease behind rather than deleting it, and the
+lease then expires on its own within the hour. That is deliberate. A
+collection pass that started before the publication is working from an older
+picture in which those files are referenced by nothing, and the lease is what
+tells it otherwise; a later pass reads the published result, sees the files
+are in use, and removes only the leftover lease.
 
 Two lines mean the job did not land and will be run again: `streaming metadata
 compaction abandoned` (something else rewrote the group underneath it) and

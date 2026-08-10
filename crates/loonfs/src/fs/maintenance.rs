@@ -17,18 +17,25 @@ use crate::{
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_core::cache::{load_namespace_fold_basis, load_namespace_head_summary};
 
+#[cfg(test)]
+mod tests;
+
 /// What one explicit [`FsAdmin::compact_metadata`] call did.
 ///
 /// The job's own endings are [`loonfs_core::MetadataCompactionJobOutcome`],
-/// unchanged from what background work reports for the same job. The two
-/// variants beside it are the two ways a call runs no job at all.
+/// unchanged from what background work reports for the same job. The three
+/// variants beside it are the ways a call runs no job at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataCompactionOutcome {
-    /// The planner found no family group that has outgrown a bounded
-    /// reorganization step, so this call ran no job. It may have folded one
-    /// bounded unit instead, or lost the race for one, exactly as an ordinary
-    /// maintenance step does.
-    NotNeeded,
+    /// No family group has outgrown a bounded reorganization step and nothing
+    /// was published: either the namespace needed no upkeep at all, or the
+    /// bounded unit the planner chose lost the root race and a later call
+    /// takes it again.
+    NoWork,
+    /// The planner chose a bounded merge instead, and this call published it,
+    /// exactly as an ordinary maintenance step would have. No family group
+    /// has outgrown a step, so no job ran.
+    BoundedMergePublished,
     /// A job already holds this namespace's compaction slot. One runs at a
     /// time per namespace, so this call ran none.
     AlreadyRunning,
@@ -51,7 +58,13 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs_core::NamespaceEngine<SharedObjectStore> {
-        self.core.writer_engine(&self.actor, namespace_id)
+        let engine = self.core.writer_engine(&self.actor, namespace_id);
+        #[cfg(test)]
+        let engine = match self.reorganization_row_budget {
+            Some(rows) => engine.starve_reorganization_row_budget(rows),
+            None => engine,
+        };
+        engine
     }
 
     /// Drops everything this runtime caches for a namespace: the read
@@ -243,12 +256,25 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<ReorganizeStepOutcome> {
-        Ok(match self.reorganize_once(namespace_id).await? {
-            ReorganizationStep::Concluded(outcome) => outcome,
-            ReorganizationStep::CompactionPlanned(spec) => {
-                self.start_streaming_compaction(namespace_id, spec)
-            }
-        })
+        // A writer's own upkeep amortizes the rebuild across delta merges,
+        // because it is the thing that will eventually run the job and
+        // rebuilding a whole group for every eight delta runs would reread
+        // megabytes to fold in a sliver. A handle with no background work
+        // behind it has nowhere to run a job at all, so it says the namespace
+        // needs one as soon as the group's base freezes rather than
+        // publishing delta merges that never reach the rebuild.
+        let frozen_base = match &self.compactions {
+            Some(compactions) => compactions.amortization(namespace_id),
+            None => loonfs_core::FrozenBasePolicy::CompactImmediately,
+        };
+        Ok(
+            match self.reorganize_once(namespace_id, frozen_base).await? {
+                ReorganizationStep::Concluded(outcome) => outcome,
+                ReorganizationStep::CompactionPlanned(spec) => {
+                    self.start_streaming_compaction(namespace_id, spec)
+                }
+            },
+        )
     }
 
     /// The one reorganization unit both paths run, and what it left for its
@@ -257,21 +283,31 @@ impl FsAdmin {
     /// A step starts the planned job as background work; an explicit
     /// [`Self::compact_metadata`] runs it here. Everything before that point
     /// is the same call, so the bookkeeping a published unit leaves behind —
-    /// the cache invalidation, the engagement count — happens once, whichever
-    /// path asked.
-    async fn reorganize_once(&self, namespace_id: &NamespaceId) -> Result<ReorganizationStep> {
-        // A handle with no runner has no jobs and no counts, which reads to
-        // the planner exactly as a namespace nothing is stuck on. It could
-        // not start a job either way.
-        let pressure = self
+    /// the cache invalidation, the published-merge count — happens once,
+    /// whichever path asked.
+    ///
+    /// `frozen_base` is what the caller wants done about a group whose base
+    /// no bounded window can reach. It is the one thing the two paths
+    /// genuinely disagree about, so it is a parameter rather than something
+    /// read back out of this handle.
+    async fn reorganize_once(
+        &self,
+        namespace_id: &NamespaceId,
+        frozen_base: loonfs_core::FrozenBasePolicy,
+    ) -> Result<ReorganizationStep> {
+        // A handle with no runner has no jobs, which reads to the planner
+        // exactly as a namespace nothing is running for. It could not start
+        // one either way.
+        let active = self
             .compactions
             .as_ref()
-            .map(|compactions| compactions.pressure(namespace_id))
-            .unwrap_or_default();
-        let engagements = pressure.engagements();
+            .and_then(|compactions| compactions.active_spec(namespace_id));
         let report = self
             .engine(namespace_id)
-            .reorganize_metadata(pressure.view(&engagements))
+            .reorganize_metadata(loonfs_core::MetadataCompactionView {
+                active: active.as_ref(),
+                frozen_base,
+            })
             .await
             .map_err(RuntimeError::Core)?;
         Ok(ReorganizationStep::Concluded(match report.outcome {
@@ -279,7 +315,7 @@ impl FsAdmin {
                 ReorganizeStepOutcome::NotNeeded
             }
             loonfs_core::MetadataReorganizeOutcome::UnitPublished {
-                families,
+                group,
                 folded_l0_rows,
                 input_runs,
                 decoded_input_rows,
@@ -294,10 +330,10 @@ impl FsAdmin {
                 // decides when to stop merging deltas and start the job lives
                 // here.
                 if let Some(background) = &self.compactions {
-                    background.record_merge(namespace_id, &families, bottom_anchored_merge_blocked);
+                    background.record_merge(namespace_id, group, bottom_anchored_merge_blocked);
                 }
                 tracing::info!(
-                    families = ?families,
+                    families = ?group.families(),
                     folded_l0_rows,
                     input_runs,
                     decoded_input_rows,
@@ -389,14 +425,28 @@ impl FsAdmin {
     /// the writer's own jobs and is cancelled by that writer's shutdown. A
     /// standalone handle has neither, and the caller's own call rate is the
     /// only limit on how many of these run at once.
+    ///
+    /// Planning here does not amortize. A caller who asks for this asked for
+    /// the long rebuild, so a family group whose base no bounded window can
+    /// reach is compacted on this call rather than after two more delta
+    /// merges have published over it — which, under sustained writes, is a
+    /// wait with no end.
     pub async fn compact_metadata(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<MetadataCompactionOutcome> {
-        let ReorganizationStep::CompactionPlanned(spec) =
-            self.reorganize_once(namespace_id).await?
-        else {
-            return Ok(MetadataCompactionOutcome::NotNeeded);
+        let spec = match self
+            .reorganize_once(
+                namespace_id,
+                loonfs_core::FrozenBasePolicy::CompactImmediately,
+            )
+            .await?
+        {
+            ReorganizationStep::CompactionPlanned(spec) => spec,
+            ReorganizationStep::Concluded(ReorganizeStepOutcome::UnitPublished) => {
+                return Ok(MetadataCompactionOutcome::BoundedMergePublished)
+            }
+            ReorganizationStep::Concluded(_) => return Ok(MetadataCompactionOutcome::NoWork),
         };
         let Some(compactions) = &self.compactions else {
             // No runner behind this handle, so there is no slot to claim and
@@ -455,11 +505,11 @@ impl FsAdmin {
                 // The manifest moved, so every cached view of this namespace
                 // is one manifest behind.
                 self.invalidate_namespace(namespace_id);
-                // The group's base is no longer frozen, so the engagements it
-                // spent merging deltas over that base are spent. It starts
-                // counting again from nothing.
+                // The group's base is no longer frozen, so the delta merges it
+                // published over that base are spent. It starts counting again
+                // from nothing.
                 if let Some(background) = &self.compactions {
-                    background.clear_engagements(namespace_id, spec.families());
+                    background.clear_published_delta_merges(namespace_id, spec.group());
                 }
                 tracing::info!(
                     namespace_id = %namespace_id,

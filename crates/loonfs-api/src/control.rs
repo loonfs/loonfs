@@ -127,16 +127,49 @@ pub struct MetadataRootState {
     pub updated_at_ms: u64,
 }
 
-/// Says that one streaming metadata compaction is still running, so the
-/// objects under its job prefix belong to it.
+/// Lifecycle of a compaction lease: two states and one transition.
+///
+/// A lease is created `active` by the job that owns the prefix. Garbage
+/// collection moves it to `reaping` by compare-and-swap once it has expired,
+/// and that transition is the fence: the worker's next heartbeat
+/// compare-and-swap fails, so it can never publish, and only then may the
+/// collector treat the prefix as orphaned. `reaping` is terminal — nothing
+/// returns a lease to `active`, and the collector deletes the object once the
+/// prefix's unreferenced segments are gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataCompactionLeaseStatus {
+    /// The job owns its prefix. Whether it is still running is a question
+    /// about `heartbeat_at_ms`, not about this field.
+    Active,
+    /// Terminal: garbage collection claimed the prefix, so the job that
+    /// wrote it is fenced and the objects under it are orphans.
+    Reaping,
+}
+
+impl fmt::Display for MetadataCompactionLeaseStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Active => "active",
+            Self::Reaping => "reaping",
+        })
+    }
+}
+
+/// Says who owns the objects under one streaming metadata compaction's job
+/// prefix.
 ///
 /// The lease carries lifecycle ownership and nothing else: no cursor, no
-/// output descriptor, no offset, no progress. Its only reader is garbage
-/// collection, which retains a job prefix whose lease was refreshed recently
-/// and reclaims one whose lease is stale or gone (format spec, "Garbage
-/// collection", rule 12). Nothing about a job's correctness depends on it —
-/// a job that loses its lease loses its output to a later pass and runs
-/// again, which is what every other way a job can end already costs.
+/// output descriptor, no offset, no progress. Two parties write it. The job
+/// creates it, refreshes it by compare-and-swap while it runs, and stops
+/// writing it once its output is published. Garbage collection claims an
+/// expired lease by compare-and-swap and reclaims the prefix behind it
+/// (format spec, "Garbage collection", rule 12). Whoever wins that
+/// compare-and-swap owns the prefix; the loser has lost it for good.
+///
+/// Nothing about a job's correctness depends on the object surviving — a job
+/// that loses its lease loses its output to a later pass and runs again,
+/// which is what every other way a job can end already costs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataCompactionLeaseState {
@@ -148,10 +181,13 @@ pub struct MetadataCompactionLeaseState {
     /// Writer identity the job runs under, for an operator reading the
     /// object.
     pub owner_id: String,
+    /// Who owns the prefix: the job that wrote the lease, or the collector
+    /// that claimed it.
+    pub status: MetadataCompactionLeaseStatus,
     /// Unix-millisecond stamp of the job's first lease write.
     pub started_at_ms: u64,
     /// Unix-millisecond stamp of the most recent lease write, and the only
-    /// input to whether the job still owns its prefix.
+    /// input to whether an `active` lease has expired.
     pub heartbeat_at_ms: u64,
 }
 

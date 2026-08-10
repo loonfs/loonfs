@@ -74,8 +74,9 @@ pub use self::cache::{
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
 pub use self::reorganize::{
-    MetadataCompactionView, MetadataReorganizeOutcome, MetadataReorganizeReport,
+    FrozenBasePolicy, MetadataCompactionView, MetadataReorganizeOutcome, MetadataReorganizeReport,
 };
+pub use self::runs::MetadataFamilyGroup;
 pub(crate) use self::runs::MetadataLsmPolicy;
 pub use self::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
@@ -85,7 +86,7 @@ pub use self::streaming_compaction::{
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 
-pub(crate) use self::compaction_lease::{read_compaction_lease_state, CompactionLeaseState};
+pub(crate) use self::compaction_lease::{claim_compaction_prefix, CompactionPrefixOwner};
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;

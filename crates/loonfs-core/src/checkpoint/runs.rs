@@ -48,7 +48,7 @@ pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
 /// Declaration order is group order, which is what resolves ties when two
 /// groups have equally much to fold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum MetadataFamilyGroup {
+pub enum MetadataFamilyGroup {
     /// A directory binding, the reverse index that finds it by child, and the
     /// unbind that retires it.
     Bindings,
@@ -68,8 +68,8 @@ pub(super) enum MetadataFamilyGroup {
 
 impl MetadataFamilyGroup {
     /// The families this group merges together, in the order a run writes
-    /// them.
-    pub(super) const fn families(self) -> &'static [MetadataTableFamily] {
+    /// them. What a caller reports; never what it keys a group by.
+    pub const fn families(self) -> &'static [MetadataTableFamily] {
         match self {
             Self::Bindings => &[
                 MetadataTableFamily::DirentryBinds,

@@ -580,7 +580,7 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
     // A namespace that has published no manifest has no runs to rebuild.
     assert_eq!(
         block_on(fs.admin.compact_metadata(&namespace_id)).expect("compact an empty namespace"),
-        MetadataCompactionOutcome::NotNeeded
+        MetadataCompactionOutcome::NoWork
     );
 
     // Enough flushes to put the manifest's L0 run count over the fold
@@ -602,11 +602,11 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
         .current_manifest_id;
 
     // Nothing here has outgrown a bounded step, so the plan is a merge and
-    // this call reports that it ran no job — having folded the unit the
-    // planner chose, exactly as the next maintenance step would have.
+    // this call reports exactly that: it published the unit the planner
+    // chose, as the next maintenance step would have, and ran no job.
     assert_eq!(
         block_on(fs.admin.compact_metadata(&namespace_id)).expect("plan a compaction"),
-        MetadataCompactionOutcome::NotNeeded
+        MetadataCompactionOutcome::BoundedMergePublished
     );
     assert_ne!(
         fs.namespace_status_blocking(&namespace_id)

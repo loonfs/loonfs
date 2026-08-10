@@ -134,6 +134,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             // candidate reads or mutations, and the key is reconsidered
             // from the exclusive last-examined position on resume.
             if budget.exhausted() {
+                leases.finish(store).await?;
                 return stopped_on_budget(report, config, position.as_ref(), &sweep);
             }
 
@@ -157,6 +158,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
                 // The re-verification this candidate's decision needs could
                 // not be paid for, so the candidate stays undecided and is
                 // reconsidered from the same exclusive position on resume.
+                leases.finish(store).await?;
                 return stopped_on_budget(report, config, position.as_ref(), &sweep);
             }
             // Every candidate that gets past the check above comes back
@@ -171,6 +173,9 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         }
     }
 
+    // The last job the walk claimed has no following key to close it out, so
+    // the pass closes it here: its lease goes after the objects it covered.
+    leases.finish(store).await?;
     report.degraded_retention = sweep.degraded;
     Ok(report)
 }
@@ -303,8 +308,8 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
             }
         }
         // A compaction job's prefix holds the segments it has written and the
-        // lease that says it is still running. A published segment is named by
-        // the manifest and is live like any other table; everything else is
+        // lease that says who owns them. A published segment is named by the
+        // manifest and is live like any other table; everything else is
         // decided by the lease, because a job outlives the ordinary grace
         // window and its output would otherwise read as an aged orphan while
         // it was still being written. Only the segments are counted as
@@ -326,6 +331,11 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
                     StagedObject::UnrecognizedKey => {
                         report.retain(RetainedReason::UnrecognizedKey);
                     }
+                    // Decided, and deleted when the walk leaves this prefix:
+                    // the claim goes after the objects it fenced, so a pass
+                    // that stops in between leaves a lease that says the reap
+                    // is unfinished rather than nothing at all.
+                    StagedObject::ClaimedLease => {}
                     StagedObject::Orphaned => {
                         if sweep_aged(
                             store,

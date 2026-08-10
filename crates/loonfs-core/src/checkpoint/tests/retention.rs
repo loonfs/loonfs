@@ -884,8 +884,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     )
     .await
     .expect("budgeted step");
-    let super::MetadataReorganizeOutcome::CompactionPlanned { families, .. } = blocked.outcome
-    else {
+    let super::MetadataReorganizeOutcome::CompactionPlanned { group, .. } = blocked.outcome else {
         panic!("one byte must not admit an SST run");
     };
     assert_eq!(
@@ -895,7 +894,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     );
     assert_eq!(store.count(OperationClass::Put), 0);
     assert!(
-        store.count(OperationClass::Read) <= families.len(),
+        store.count(OperationClass::Read) <= group.families().len(),
         "byte preflight should read only the oldest candidate's index sections"
     );
 
@@ -917,7 +916,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     .await
     .expect("bounded step");
     let super::MetadataReorganizeOutcome::UnitPublished {
-        families,
+        group,
         input_runs,
         decoded_input_rows,
         decoded_input_bytes,
@@ -931,7 +930,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     assert!(decoded_input_rows <= policy.max_decoded_input_rows_per_step.get() as u64);
     assert!(decoded_input_bytes <= policy.max_decoded_input_bytes_per_step.get() as u64);
     assert!(
-        store.count(OperationClass::Read) <= input_runs * families.len() * 2,
+        store.count(OperationClass::Read) <= input_runs * group.families().len() * 2,
         "the step should read index and data sections only for selected-run family segments"
     );
 }
@@ -1291,8 +1290,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     .await
     .expect("first unit");
     let super::MetadataReorganizeOutcome::UnitPublished {
-        families: first_families,
-        ..
+        group: first_group, ..
     } = first_report.outcome
     else {
         panic!("expected a published unit, got {:?}", first_report.outcome);
@@ -1303,7 +1301,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
 
     // A fresh sequence of steps reads the live manifest and finishes the
     // job, including the delta the interleaved checkpoint added.
-    let mut folded_groups = vec![first_families];
+    let mut folded_groups = vec![first_group];
     loop {
         let report = super::reorganize_metadata_step(
             &store,
@@ -1315,8 +1313,8 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
         .await
         .expect("resumed unit");
         match report.outcome {
-            super::MetadataReorganizeOutcome::UnitPublished { families, .. } => {
-                folded_groups.push(families);
+            super::MetadataReorganizeOutcome::UnitPublished { group, .. } => {
+                folded_groups.push(group);
             }
             super::MetadataReorganizeOutcome::Superseded => {
                 panic!("no concurrent publisher exists in this test")
@@ -1548,7 +1546,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     policy: MetadataLsmPolicy,
 ) -> (
-    Vec<ApiMetadataTableFamily>,
+    MetadataFamilyGroup,
     super::reorganize::ReorganizationSelection,
 ) {
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
@@ -1563,11 +1561,11 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
         group,
         policy,
         frozen_floor_seq,
-        false,
+        &super::reorganize::FrozenBasePolicy::default(),
     )
     .await
     .expect("select a reorganization input");
-    (group.families().to_vec(), selection)
+    (group, selection)
 }
 
 /// The bounded merge a selection chose, or `None` when it chose a streaming
@@ -1667,8 +1665,8 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     let (group, _) =
         select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
     let base = base_run(&before.manifest);
-    let base_rows = group_run_rows(&base, &group);
-    let base_segments = group_segment_object_keys(&base, &group);
+    let base_rows = group_run_rows(&base, group.families());
+    let base_segments = group_segment_object_keys(&base, group.families());
     assert!(base_rows > 1, "the base run must hold rows in this group");
     let policy = policy_that_cannot_fold_the_base(base_rows);
 
@@ -1710,7 +1708,8 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     // stays exactly where it is, and stays one run.
     let mut published = 0usize;
     let mut compactions = 0usize;
-    let mut group_delta_run_counts = vec![group_delta_runs(&before.manifest, &group).len()];
+    let mut group_delta_run_counts =
+        vec![group_delta_runs(&before.manifest, group.families()).len()];
     let mut delta_runs_when_the_compaction_was_planned = None;
     for _ in 0..64 {
         let report = super::reorganize_metadata_step(
@@ -1730,11 +1729,11 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
         .await
         .expect("load the folded manifest");
         assert_eq!(
-            group_base_runs(&current.manifest, &group).len(),
+            group_base_runs(&current.manifest, group.families()).len(),
             1,
             "a merge above the base must not mint a second base run"
         );
-        group_delta_run_counts.push(group_delta_runs(&current.manifest, &group).len());
+        group_delta_run_counts.push(group_delta_runs(&current.manifest, group.families()).len());
         match &report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
             super::MetadataReorganizeOutcome::Superseded => {
@@ -1745,8 +1744,11 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
             // rebuild of the whole group moves it on, and that is the job the
             // step plans. This budget starves more than one group, so the
             // others are run too and the loop ends with nothing left to fold.
-            super::MetadataReorganizeOutcome::CompactionPlanned { families, spec } => {
-                if *families == group {
+            super::MetadataReorganizeOutcome::CompactionPlanned {
+                group: planned_group,
+                spec,
+            } => {
+                if *planned_group == group {
                     let referenced = run_segment_object_keys(&current.manifest);
                     assert!(
                         base_segments
@@ -1755,7 +1757,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
                         "the base must still be untouched when the job is planned"
                     );
                     delta_runs_when_the_compaction_was_planned =
-                        Some(group_delta_runs(&current.manifest, &group).len());
+                        Some(group_delta_runs(&current.manifest, group.families()).len());
                     compactions += 1;
                 }
                 publish_planned_compaction(&store, &namespace_id, &context, policy, spec).await;
@@ -1786,11 +1788,11 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     // segments are gone. That is the whole point: they could not be rewritten
     // by any step, and a run nothing rewrites is a run nothing reclaims.
     assert_eq!(
-        group_runs(&after.manifest, &group).len(),
+        group_runs(&after.manifest, group.families()).len(),
         1,
         "the group must end in one run, ran {group_delta_run_counts:?}"
     );
-    assert_eq!(group_base_runs(&after.manifest, &group).len(), 1);
+    assert_eq!(group_base_runs(&after.manifest, group.families()).len(), 1);
     let remaining = run_segment_object_keys(&after.manifest);
     for segment in &base_segments {
         assert!(
@@ -1893,10 +1895,10 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let (group, _) =
         select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
     assert!(
-        group.contains(&ApiMetadataTableFamily::DirentryUnbinds),
+        group.contains(ApiMetadataTableFamily::DirentryUnbinds),
         "this test is about the binding families, got {group:?}"
     );
-    let base_rows = group_run_rows(&base_run(&before.manifest), &group);
+    let base_rows = group_run_rows(&base_run(&before.manifest), group.families());
     let policy = policy_that_cannot_fold_the_base(base_rows);
 
     let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
@@ -1915,7 +1917,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         "a merge above the base writes a delta run at its newest input's sequence"
     );
     assert!(input.runs.len() > 1);
-    let base_before = group_base_runs(&before.manifest, &group);
+    let base_before = group_base_runs(&before.manifest, group.families());
 
     let report = super::reorganize_metadata_step(
         &store,
@@ -1946,12 +1948,12 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     // exactly the one it was, and the merged rows sit at the identity of the
     // newest run the window held, which is where that run stood.
     assert_eq!(
-        group_base_runs(&after.manifest, &group),
+        group_base_runs(&after.manifest, group.families()),
         base_before,
         "a merge above the base must not mint a base run"
     );
     assert_eq!(
-        group_delta_runs(&after.manifest, &group),
+        group_delta_runs(&after.manifest, group.families()),
         vec![(newest_input, CHECKPOINT_L0_RUN_LEVEL)],
         "the merged delta runs must leave one delta run at the newest input's identity"
     );
@@ -2030,10 +2032,10 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     .expect("load the manifest");
     let (group, _) =
         select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
-    let base_rows = group_run_rows(&base_run(&before.manifest), &group);
+    let base_rows = group_run_rows(&base_run(&before.manifest), group.families());
     let mut delta_rows = l0_runs(&before.manifest)
         .iter()
-        .map(|run| group_run_rows(run, &group))
+        .map(|run| group_run_rows(run, group.families()))
         .collect::<Vec<_>>();
     delta_rows.sort_unstable();
     let (narrow, wide) = (delta_rows[0], delta_rows[1]);

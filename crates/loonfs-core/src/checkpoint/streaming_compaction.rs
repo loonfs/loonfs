@@ -38,7 +38,7 @@
 use super::block_fetch::load_segment_filter;
 use super::block_load::SessionBlockMemo;
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
-use super::compaction_lease::CompactionLease;
+use super::compaction_lease::{CompactionLease, LeaseHold};
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping, SegmentRowIterator,
 };
@@ -141,7 +141,9 @@ impl MetadataCompactionSpec {
         }
     }
 
-    pub(super) fn group(&self) -> MetadataFamilyGroup {
+    /// The family group this job rebuilds, which is what a runtime keys its
+    /// per-group bookkeeping by.
+    pub fn group(&self) -> MetadataFamilyGroup {
         self.group
     }
 
@@ -263,6 +265,10 @@ pub(super) enum MetadataCompactionOutcome {
     /// The cancellation token was set. Whatever the job had written stays
     /// staged and unreferenced.
     Cancelled,
+    /// A heartbeat lost its compare-and-swap, so garbage collection owns this
+    /// job's prefix now. Whatever the job had written is being reaped, and
+    /// the job must not publish descriptors naming it.
+    Fenced,
 }
 
 /// What one finished job built, held in memory until the caller publishes it.
@@ -323,12 +329,22 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     };
 
     for cluster in retention_clusters(spec.group) {
-        if !job.run_cluster(cluster, lease).await? {
-            return Ok(MetadataCompactionOutcome::Cancelled);
+        match job.run_cluster(cluster, lease).await? {
+            ClusterEnd::Merged => {}
+            ClusterEnd::Cancelled => return Ok(MetadataCompactionOutcome::Cancelled),
+            ClusterEnd::Fenced => return Ok(MetadataCompactionOutcome::Fenced),
         }
     }
     job.refuse_a_run_whose_index_disagrees()?;
     Ok(MetadataCompactionOutcome::Completed(job.result))
+}
+
+/// How one cluster's merge ended.
+enum ClusterEnd {
+    /// Every row of the cluster was merged and its segments written.
+    Merged,
+    Cancelled,
+    Fenced,
 }
 
 /// How one background compaction job ended.
@@ -349,6 +365,11 @@ pub enum MetadataCompactionJobOutcome {
     /// published and the staged segments are orphans; a later step plans the
     /// group again from what the manifest now holds.
     Abandoned,
+    /// The job lost its lease: it stopped heartbeating for longer than the
+    /// lease expiry and garbage collection claimed its prefix. Ownership does
+    /// not come back, so the job publishes nothing and the collector reclaims
+    /// what it wrote. A later step plans the group again.
+    Fenced,
     /// Every publication attempt lost the root race. The job is thrown away
     /// and a later step plans it again.
     Superseded,
@@ -364,6 +385,9 @@ pub(super) enum Finalization {
     /// Nothing was swapped in, so the ending is the executor's: staged output
     /// nothing references, and the manifest where it was.
     Cancelled,
+    /// The heartbeat at the top of an attempt lost its compare-and-swap, so
+    /// this job no longer owns the segments it was about to name.
+    Fenced,
 }
 
 /// Runs one streaming compaction end to end: rebuild the group, then swap the
@@ -402,7 +426,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         context.now_ms,
         &timer,
     );
-    lease.heartbeat(store).await?;
+    lease.create(store).await?;
     tracing::info!(
         namespace_id = namespace_id.as_str(),
         job_id = spec.job_id().as_str(),
@@ -424,6 +448,19 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     .await?
     {
         MetadataCompactionOutcome::Completed(result) if !cancellation.is_cancelled() => result,
+        // The prefix belongs to garbage collection now, and the segments the
+        // job wrote are being reaped. Publishing descriptors naming them is
+        // exactly what the fence exists to stop.
+        MetadataCompactionOutcome::Fenced => {
+            tracing::warn!(
+                namespace_id = namespace_id.as_str(),
+                job_id = spec.job_id().as_str(),
+                families = ?spec.families(),
+                "streaming metadata compaction fenced: garbage collection claimed its prefix \
+                 while it ran, so it publishes nothing and a later step plans it again"
+            );
+            return Ok(MetadataCompactionJobOutcome::Fenced);
+        }
         // A token set after the last row still costs the job. Checked here so
         // a shutdown does not spend the drain building a manifest and taking
         // races for a publication it has already decided against.
@@ -459,10 +496,13 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     .await?
     {
         Finalization::Published(manifest_id) => {
-            // The manifest names the staged segments now, and a referenced
-            // object is live wherever it sits, so the claim has nothing left
-            // to protect.
-            lease.release(store).await;
+            // The job stops heartbeating here and leaves its final lease
+            // where it is. Deleting it would break the handoff: a collection
+            // pass that captured its live set before this publication would
+            // find segments hours older than any grace window and no lease
+            // saying who owns them. The fresh lease covers that pass, and the
+            // next one reads a root that already names the segments and
+            // removes only the expired lease.
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
                 job_id = spec.job_id().as_str(),
@@ -482,6 +522,16 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         }
         Finalization::Abandoned => Ok(MetadataCompactionJobOutcome::Abandoned),
         Finalization::Superseded => Ok(MetadataCompactionJobOutcome::Superseded),
+        Finalization::Fenced => {
+            tracing::warn!(
+                namespace_id = namespace_id.as_str(),
+                job_id = spec.job_id().as_str(),
+                families = ?spec.families(),
+                "streaming metadata compaction fenced while finalizing: garbage collection owns \
+                 its prefix, so nothing was published"
+            );
+            Ok(MetadataCompactionJobOutcome::Fenced)
+        }
         Finalization::Cancelled => {
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
@@ -534,11 +584,16 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         if cancellation.is_cancelled() {
             return Ok(Finalization::Cancelled);
         }
-        // The span from here to the compare-and-swap below is one publication
-        // budget, and a lease outlasts one publication, so refreshing the
-        // claim once per attempt keeps the output claimed until the manifest
-        // names it (`limits::METADATA_COMPACTION_LEASE_EXPIRY_MS`).
-        lease.heartbeat(store).await?;
+        // The claim is refreshed at the top of every attempt, and losing that
+        // compare-and-swap ends the job here. This is the check that makes
+        // the fence complete: the span from here to the root compare-and-swap
+        // below is one publication budget, which is shorter than the lease
+        // expiry, so a job that gets past this line cannot have its prefix
+        // claimed before the swap that makes its output referenced
+        // (`limits::METADATA_COMPACTION_LEASE_EXPIRY_MS`).
+        if lease.heartbeat(store).await? == LeaseHold::Fenced {
+            return Ok(Finalization::Fenced);
+        }
         let publication_started_ms = timer.monotonic_now_ms();
         let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
             .await
@@ -762,12 +817,12 @@ struct CompactionJob<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
-    /// Merges one cluster end to end. `false` means the job was cancelled.
+    /// Merges one cluster end to end.
     async fn run_cluster(
         &mut self,
         cluster: &RetentionCluster,
         lease: &mut CompactionLease<'_>,
-    ) -> Result<bool> {
+    ) -> Result<ClusterEnd> {
         // The descriptors are cloned out of the snapshot rather than borrowed
         // from it: an iterator outlives every other borrow the job takes, and
         // a cluster opens one per run per family, which is a handful.
@@ -794,12 +849,16 @@ impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
         let mut locality: Option<String> = None;
         loop {
             if self.cancellation.is_cancelled() {
-                return Ok(false);
+                return Ok(ClusterEnd::Cancelled);
             }
             // The claim on the job's prefix is refreshed where the job checks
             // whether it should stop, which is the one place it is guaranteed
-            // to reach however long a merge runs.
-            lease.heartbeat_if_due(self.store).await?;
+            // to reach however long a merge runs. Losing it is one more way
+            // the job has to stop: the segments it has written belong to the
+            // collector now.
+            if lease.heartbeat_if_due(self.store).await? == LeaseHold::Fenced {
+                return Ok(ClusterEnd::Fenced);
+            }
             self.refill(&mut iterators).await?;
             let Some(next) = select_next_iterator(&iterators, cluster.locality) else {
                 break;
@@ -849,7 +908,7 @@ impl<S: ObjectStore + ?Sized> CompactionJob<'_, S> {
                 .await?;
             self.result.output_segments.extend(segments);
         }
-        Ok(true)
+        Ok(ClusterEnd::Merged)
     }
 
     /// Says where a long job has got to, at [`PROGRESS_ROW_INTERVAL`].
