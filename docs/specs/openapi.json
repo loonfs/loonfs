@@ -3095,7 +3095,7 @@
             }
           }
         ],
-        "description": "Request for starting an upload session, tagged by the transport it asks\nfor.\n\nEach transport carries only what it needs, so the combinations a flat\nrequest could spell — a proxied begin carrying multipart geometry, a\ndirect put with no claim to sign — are refused when the body is decoded\nrather than by a handler reading them back. `mode` is required: a\nrequest that does not say how it intends to move its bytes is not a\nrequest this API can answer."
+        "description": "Request to start an upload session, tagged by transport mode.\n\nEach variant contains only fields valid for that transport, so invalid\ncombinations are rejected during decoding. The `mode` field is required."
       },
       "BeginUploadResponse": {
         "oneOf": [
@@ -3188,7 +3188,7 @@
             }
           }
         ],
-        "description": "Response for starting an upload session, tagged by the transport the\nserver settled on.\n\nEach transport carries what its client needs next and nothing else, so\nthe combinations a flat response could spell — a proxied session holding\npresigned access, a direct put with no capability to write through — are\nnot values this type can hold. Unlike the request, unknown fields are\naccepted: a response reader tolerates what a later server adds."
+        "description": "Response to starting an upload session, tagged by transport mode.\n\nEach variant contains only the fields needed by that transport. Unknown\nresponse fields are accepted for forward compatibility."
       },
       "CapabilityDocument": {
         "type": "object",
@@ -3378,7 +3378,7 @@
       },
       "ChecksumAlgorithm": {
         "type": "string",
-        "description": "Algorithm of a stored full-object checksum.\n\nEvery algorithm here covers the complete object. There is deliberately no\nchecksum-*type* field: full-object coverage is an invariant of this\nformat, established when the object is written, never read back from a\nprovider. (Cloudflare R2 never reports `x-amz-checksum-type` at all, so a\ntype read back would be unavailable exactly where it would matter.)\n\nEvery algorithm here is producible by this build, and the vocabulary is\nclosed: an algorithm spelling this build does not know fails to decode\nrather than decoding into a value nothing can recompute. So a\n`ChecksumAlgorithm` in hand always names evidence that can be checked,\nand the read, retry, and resume paths never have to carry a \"cannot\ntell\" answer. Adding a variant is therefore adding a producer for it.",
+        "description": "Supported algorithms for full-object checksums.\n\nFull-object coverage is part of the LoonFS format, so no separate checksum\ntype is stored. Unknown algorithms fail to decode because every in-memory\n`ChecksumAlgorithm` must be recomputable by this build. Adding a variant\nalso requires adding its implementation.",
         "enum": [
           "sha256",
           "crc64nvme",
@@ -3766,7 +3766,7 @@
       },
       "DirectMultipartContentClaim": {
         "type": "object",
-        "description": "What a `direct_multipart` client says about the object it finished\nwriting, supplied at completion rather than at begin.\n\nThe claim arrives last because that is the only place a one-pass\nuploader can produce it: a client that had to declare the length and\ndigest up front would have to read its payload twice, and a client\nreading from a pipe could not start at all. Nothing is lost by waiting —\nthe claim was never trusted, only verified, and verification happens at\ncompletion either way.\n\nThe digest is CRC-64/NVME rather than SHA-256 because that is the\nchecksum an S3-compatible provider computes over a multipart object: it\nis the only full-object evidence the provider will ever be able to show\nback, so it is the only thing worth claiming at all.",
+        "description": "Final size and checksum claimed for a direct multipart upload.\n\nThe claim is supplied at completion so one-pass and streaming uploaders do\nnot need to read the payload twice. LoonFS verifies the claim rather than\ntrusting it. CRC-64/NVME is used because S3-compatible providers report it\nfor the assembled full object.",
         "required": [
           "size_bytes",
           "crc64nvme"
@@ -3787,7 +3787,7 @@
       },
       "DirectMultipartUpload": {
         "type": "object",
-        "description": "Direct multipart upload details: the geometry a client cuts its payload\ninto parts with, and nothing else.\n\nThere is no content reference here, and no part count. The session has\nnot been told what it is about to receive, so there is no identity to\necho and no arithmetic to do — the server mints the content object\nbehind the session and names it in the completion response. The\nprovider's upload id is absent for the same reason it always was: a\nclient asks this server for part URLs by part number and never talks to\nthe provider's multipart API in its own words.",
+        "description": "Part geometry returned for a direct multipart upload.\n\nThe begin response does not include a content reference or part count\nbecause the final payload is not known yet. The server owns the provider\nupload id and returns the content reference only after completion.",
         "required": [
           "part_size_bytes"
         ],
@@ -3902,7 +3902,7 @@
       },
       "ErrorDetails": {
         "type": "object",
-        "description": "Structured, machine-readable context accompanying an [`ApiError`].\n\nEvery field is optional: a code populates the fields that apply to it\n(API spec, \"Standard error contract\"), and clients must tolerate absent\nfields exactly as they tolerate unknown codes. Retry decisions still key\noff the code; these fields carry the identity a caller needs to act —\nwhich commit to resubmit, which epoch displaced it, which revision the\nprecondition saw.",
+        "description": "Optional machine-readable details for an [`ApiError`].\n\nClients make retry decisions from the error code and use these fields for\nrelevant identifiers such as commit ids, writer epochs, and revisions.\nFields may be absent and clients must ignore fields they do not use.",
         "properties": {
           "active_acquired_at_ms": {
             "type": [
@@ -4573,7 +4573,7 @@
                   },
                   {
                     "$ref": "#/components/schemas/AbsolutePath",
-                    "description": "Absolute destination path whose parent must be visible and whose\nname must be absent. Absent means restore in place: re-bind\nunder the parent and name the deletion recorded, anchored on\nthe parent's identity rather than any remembered spelling, so\nthe entry lands correctly even when ancestors were renamed\nsince. A deletion that recorded no binding needs the explicit\npath."
+                    "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames. An explicit path is required when the\ndeletion recorded no binding."
                   }
                 ]
               }
@@ -4651,7 +4651,7 @@
                 "items": {
                   "$ref": "#/components/schemas/AttributeKey"
                 },
-                "description": "Keys to remove. A list rather than a set so a repeated key is\nrejected with a message that names it, instead of being folded\naway as if the caller had asked once."
+                "description": "Attribute keys to remove.\n\nA list preserves duplicate entries so validation can report them instead\nof silently deduplicating the request."
               },
               "set": {
                 "type": "object",
@@ -4667,7 +4667,7 @@
             }
           }
         ],
-        "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because every optimistic-concurrency guard\nbelow is an optional field. A misspelled `expected_revision_no` or\n`expected_inode_id` would otherwise decode to `None`, and the write would\napply unguarded and answer 200 — a lost update reported as a success. A\nguard the server never saw must fail the request, not the precondition.\n\nEvery variant here carries fields. A variant that carries none must still\nbe spelled with empty braces, because serde lets a *unit* variant of a\ntagged enum swallow whatever else the body held; `BeginUploadRequest` in\n[`super::uploads`] shows the same rule."
+        "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because concurrency guards are optional. A\nmisspelled guard must fail decoding instead of silently becoming `None`\nand allowing an unguarded write. Any future fieldless variant must use\nempty braces so serde also rejects unexpected fields for that variant."
       },
       "ForkNamespaceRequest": {
         "type": "object",
