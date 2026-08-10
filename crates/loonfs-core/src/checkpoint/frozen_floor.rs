@@ -1,13 +1,12 @@
 //! The frozen floor's shared rules: what a binding generation is, which ones
 //! an unbind retires, and whether a bind row survives.
 //!
-//! Two things fold rows below the retention floor, and they are peers. A
-//! bounded merge holds every row of its window and decides them together
-//! ([`super::reorganize`]). A streaming compaction cannot hold them and runs
-//! the same rules as streaming operators instead
-//! ([`super::compaction_retention`]). Neither owns the policy, so it lives
-//! here, and the equivalence oracle in the tests is what says the two reach
-//! the same rows.
+//! One engine folds rows below the retention floor
+//! ([`super::streaming_compaction`]), and it reaches these rules by two routes.
+//! A forward bind row is decided against the unbinds of its own locality group
+//! ([`super::compaction_retention`]); a reverse bind row is keyed by child, so
+//! its unbinds are point-read out of the same snapshot instead. Neither route
+//! owns the policy, so it lives here and both call it.
 
 use loonfs_api::wire::manifest::MetadataRow;
 use loonfs_api::{ChangeSeq, InodeId, NameKey};
@@ -24,8 +23,7 @@ pub(super) type BindingGeneration = (InodeId, NameKey, ChangeSeq, u32);
 /// The binding generations an unbind at or below `retention_floor_seq`
 /// retires.
 ///
-/// A whole-group fold builds this from every unbind row it merged. A
-/// streaming compaction builds it one binding generation at a time, from that
+/// The merge builds this one binding generation at a time, from that
 /// generation's own unbinds: a bind's row key is its generation and an
 /// unbind's key leads with the generation it retires, so the rows of one
 /// generation hold both halves of the pair.
@@ -33,37 +31,50 @@ pub(super) fn unbindings_at_or_below_floor(
     unbind_rows: &[MetadataRow],
     retention_floor_seq: ChangeSeq,
 ) -> BTreeSet<BindingGeneration> {
-    let mut unbound_at_floor = BTreeSet::new();
-    for row in unbind_rows {
-        if let MetadataRow::DirentryUnbind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            unbind_seq,
-            ..
-        } = row
-        {
-            if *unbind_seq <= retention_floor_seq {
-                unbound_at_floor.insert((
-                    *parent_inode_id,
-                    name_key.clone(),
-                    *bind_seq,
-                    *bind_delta_index,
-                ));
-            }
-        }
-    }
-    unbound_at_floor
+    unbind_rows
+        .iter()
+        .filter_map(|row| unbinding_at_or_below_floor(row, retention_floor_seq))
+        .collect()
+}
+
+/// The binding generation this row retires at or below `retention_floor_seq`,
+/// or `None` when it retires none.
+///
+/// The per-row half of [`unbindings_at_or_below_floor`], for a caller that
+/// meets unbind rows one at a time in a merged stream rather than holding a
+/// slice of them. Both spellings of the set are this one rule.
+pub(super) fn unbinding_at_or_below_floor(
+    row: &MetadataRow,
+    retention_floor_seq: ChangeSeq,
+) -> Option<BindingGeneration> {
+    let MetadataRow::DirentryUnbind {
+        parent_inode_id,
+        name_key,
+        bind_seq,
+        bind_delta_index,
+        unbind_seq,
+        ..
+    } = row
+    else {
+        return None;
+    };
+    (*unbind_seq <= retention_floor_seq).then(|| {
+        (
+            *parent_inode_id,
+            name_key.clone(),
+            *bind_seq,
+            *bind_delta_index,
+        )
+    })
 }
 
 /// Whether one bind row survives the frozen floor.
 ///
 /// A bind above the floor always survives. At or below it the bind survives
 /// exactly when nothing retired it, because a bind is only ever superseded by
-/// an operation that also unbinds it — the writer invariant
-/// `refuse_superseded_bind_without_unbind` in [`super::reorganize`] refuses to
-/// compact without.
+/// an operation that also unbinds it — the forward binding operator refuses to
+/// compact a slot where that does not hold
+/// (`super::compaction_retention::BindingRetention::check_the_slot_invariant`).
 ///
 /// Both bind families read this same rule, which is what keeps them dropping
 /// in lockstep: the format gives every bind row exactly one reverse row, and a

@@ -3,12 +3,15 @@
 
 use super::error::ManifestLoadError;
 use super::row::manifest_row_commit_seq;
+#[cfg(test)]
+use loonfs_api::wire::manifest::MetadataTableFamily;
 use loonfs_api::wire::manifest::{
-    MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MetadataRow, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{
     manifest_object_id_manifest_id, ChangeSeq, ManifestId, ManifestObjectId, NamespaceId,
 };
+#[cfg(test)]
 use std::collections::BTreeSet;
 
 pub(super) fn validate_namespace_manifest(
@@ -144,6 +147,14 @@ pub(super) fn validate_manifest_row_seq_range<'a>(
     Ok(())
 }
 
+/// Compares a bind family against its reverse index outright, over rows a
+/// caller holds all of.
+///
+/// Only the test-only inspection materialization holds a whole family, so only
+/// it can afford this. A merge never holds one and checks parity by digesting
+/// the rows it writes instead
+/// (`super::streaming_compaction::GroupMerge::refuse_a_run_whose_index_disagrees`).
+#[cfg(test)]
 pub(super) fn validate_direntry_child_bind_index(
     object_key: &str,
     direntry_bind_rows: &[MetadataRow],
@@ -167,6 +178,9 @@ pub(super) fn validate_direntry_child_bind_index(
     Ok(())
 }
 
+/// [`validate_direntry_child_bind_index`] for the revision pair, and
+/// test-only for the same reason.
+#[cfg(test)]
 pub(super) fn validate_revision_by_inode_desc_index(
     object_key: &str,
     revision_rows: &[MetadataRow],
@@ -197,6 +211,7 @@ pub(super) fn validate_revision_by_inode_desc_index(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_revision_rows_have_unique_keys(
     object_key: &str,
     family: MetadataTableFamily,
@@ -216,6 +231,7 @@ fn validate_revision_rows_have_unique_keys(
     Ok(())
 }
 
+#[cfg(test)]
 fn revision_logical_key(row: &MetadataRow) -> String {
     row.row_key_for_family(MetadataTableFamily::Revisions)
 }

@@ -3,7 +3,7 @@
 use super::*;
 use loonfs_api::{ContentId, StorageChecksum};
 
-async fn rewrite_manifest_segment(
+pub(super) async fn rewrite_manifest_segment(
     store: &LocalFsStore,
     _namespace_id: &NamespaceId,
     _run_seq: ChangeSeq,
@@ -30,6 +30,17 @@ async fn rewrite_manifest_segment(
     descriptor.min_key = built.min_key;
     descriptor.max_key = built.max_key;
     descriptor.index_block = built.index;
+    // A rewritten segment's filter changes size, and a descriptor that inlines
+    // a filter must inline the one it actually has: manifest load compares the
+    // two. Derived exactly as `write_manifest_segment` derives it.
+    descriptor.filter_inline = (built.filter.stored_len
+        <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
+        .then(|| {
+            let start = built.filter.offset as usize;
+            loonfs_api::wire::hex::hex_encode_bytes(
+                &built.bytes[start..start + built.filter.stored_len as usize],
+            )
+        });
     descriptor.filter_block = built.filter;
     descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
 }
@@ -102,7 +113,7 @@ fn default_target_block_bytes() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).expect("the default target is positive")
 }
 
-async fn overwrite_manifest(
+pub(super) async fn overwrite_manifest(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     manifest: NamespaceManifestEnvelope,
@@ -389,7 +400,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
         vec![unbind(1, 0, 2)],
     );
 
-    super::reorganize::drop_rows_below_retention_floor(&mut rows, ChangeSeq(1)).expect("drop");
+    fold_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1)).expect("drop");
 
     assert_eq!(rows[&ApiMetadataTableFamily::DirentryBinds].len(), 2);
     assert_eq!(rows[&ApiMetadataTableFamily::DirentryChildBinds].len(), 2);
@@ -428,7 +439,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     );
     rows.insert(ApiMetadataTableFamily::DirentryUnbinds, vec![unbind]);
 
-    super::reorganize::drop_rows_below_retention_floor(&mut rows, ChangeSeq(1)).expect("drop");
+    fold_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1)).expect("drop");
 
     // Only the delta-2 rebind (the slot's latest) survives; the superseded
     // delta-0 bind and its spent unbind marker are gone from both families.
@@ -466,7 +477,7 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
         vec![bind(0), bind(1)],
     );
 
-    let error = super::reorganize::drop_rows_below_retention_floor(&mut rows, ChangeSeq(1))
+    let error = fold_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
         .expect_err("superseded live bind must refuse the drop");
     assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
 }
@@ -795,10 +806,17 @@ async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
             }
         }
     }
+    // The merge digests the rows it writes into each family of the pair and
+    // compares the two, which is the one index-parity check either
+    // reorganization path makes.
     match rebuild_error.expect("reorganization should reject the divergent index") {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-            ManifestLoadError::RevisionIndexMismatch { .. },
-        )) => {}
+        CoreError::NamespaceCorrupt(message) => {
+            assert!(
+                message.contains("RevisionsByInodeDesc")
+                    && message.contains("must hold the same rows"),
+                "expected a revision index mismatch, got: {message}"
+            );
+        }
         other => panic!("expected revision index mismatch, got {other:?}"),
     }
 }

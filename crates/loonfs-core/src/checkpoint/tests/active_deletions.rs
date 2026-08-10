@@ -170,8 +170,12 @@ fn the_fold_drops_cancelled_pairs_and_keeps_every_live_deletion() {
         manifest_rows_for_family(&state, ApiMetadataTableFamily::ActiveDeletions),
     )]);
     // Far above every row: the floor must not touch this family.
-    reorganize::drop_rows_below_retention_floor(&mut rows_by_family, ChangeSeq(10_000))
-        .expect("fold active deletions");
+    fold_rows_with_retention(
+        MetadataFamilyGroup::ActiveDeletions,
+        &mut rows_by_family,
+        ChangeSeq(10_000),
+    )
+    .expect("fold active deletions");
 
     let kept = rows_by_family
         .remove(&ApiMetadataTableFamily::ActiveDeletions)

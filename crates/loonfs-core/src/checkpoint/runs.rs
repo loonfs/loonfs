@@ -36,8 +36,8 @@ pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
 /// One set of families whose rows merge in one reorganization unit.
 ///
 /// Families that read each other's rows to decide what to drop (see
-/// `super::reorganize::drop_rows_below_retention_floor`) must compact
-/// together, and a secondary index always travels with its canonical family.
+/// `super::compaction_retention`) must compact together, and a secondary index
+/// always travels with its canonical family.
 ///
 /// This is a closed enum rather than a list of family slices because every
 /// caller wants the group itself, not a slice it has to recognize by

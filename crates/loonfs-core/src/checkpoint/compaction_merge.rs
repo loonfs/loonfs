@@ -1,8 +1,8 @@
-//! Reading a streaming compaction's input: one iterator per run per family,
-//! merged in row-key order, refilled a bounded wave at a time.
+//! Reading a merge's input: one iterator per run per family, merged in row-key
+//! order, refilled a bounded wave at a time.
 //!
-//! This is what makes the job's input residency a fixed number rather than a
-//! function of the group it rebuilds. An iterator holds the blocks it has not
+//! This is what makes a merge's input residency a fixed number rather than a
+//! function of what it merges. An iterator holds the blocks it has not
 //! consumed and nothing else, a refill wave is bounded, and the selection
 //! that decides which iterator goes next compares borrowed key slices.
 
@@ -19,11 +19,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// Decoded data blocks one iterator holds at a time. An iterator refills only
-/// when it has none left, so this is also the most it ever holds, and the
-/// job's input residency is this times the number of open iterators.
+/// when it has none left, so this is also the most it ever holds, and a
+/// merge's input residency is this times the number of open iterators.
 const BLOCKS_PER_ITERATOR_FETCH: usize = 2;
 
-/// Iterators refilled in one wave. Refills are the job's only bulk reads, so
+/// Iterators refilled in one wave. Refills are a merge's only bulk reads, so
 /// this is the width of its fan-out at the store.
 const ITERATOR_FETCH_CONCURRENCY: usize = 8;
 
@@ -188,7 +188,7 @@ impl SegmentRowIterator {
             let descriptor = &self.segments[self.next_segment - 1];
             let end = (self.next_block + BLOCKS_PER_ITERATOR_FETCH).min(index.len());
             // Blocks are decoded into this iterator alone: no table cache and
-            // a memo that dies with the call, so nothing the job reads is
+            // a memo that dies with the call, so nothing the merge reads is
             // retained anywhere but here.
             let blocks = load_segment_data_block_span(
                 store,

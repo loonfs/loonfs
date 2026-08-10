@@ -39,6 +39,11 @@ pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
     .await
 }
 
+/// The layout invariant manifest load enforces for real, checked eagerly on a
+/// run a test just built. Production merges write through
+/// [`super::compaction_output::MergeSegmentWriter`], which never holds a run's
+/// tables in this shape.
+#[cfg(test)]
 pub(super) fn debug_assert_manifest_table_segments_do_not_overlap(
     _tables: &[MetadataTableManifest],
 ) {
@@ -208,7 +213,7 @@ impl<'a> MetadataSstWriteRequest<'a> {
 /// otherwise fetch one filter block per run to rule out — while keeping big
 /// base-segment filters (which range pruning already narrows to one
 /// candidate) out of the manifest.
-const INLINE_SEGMENT_FILTER_MAX_BYTES: u32 = 1024;
+pub(super) const INLINE_SEGMENT_FILTER_MAX_BYTES: u32 = 1024;
 
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,

@@ -1,13 +1,12 @@
 //! The frozen floor's rules as streaming operators: one row in, at most one
 //! row out, and a fixed amount of state in between.
 //!
-//! A whole-group fold holds every row of a family and decides them together
-//! ([`super::reorganize::drop_rows_below_retention_floor`]). A streaming
-//! compaction cannot: one inode may hold any number of attribute revisions
-//! and one parent-and-name slot any number of binding generations, so holding
-//! "the rows a rule reads together" is holding an unbounded set. These
-//! operators hold the *answer* a rule is building instead, which is a fixed
-//! number of fields per family and at most one row.
+//! Holding every row of a family and deciding them together is not available
+//! to a merge: one inode may hold any number of attribute revisions and one
+//! parent-and-name slot any number of binding generations, so holding "the
+//! rows a rule reads together" is holding an unbounded set. These operators
+//! hold the *answer* a rule is building instead, which is a fixed number of
+//! fields per family and at most one row.
 //!
 //! What makes that possible is the row-key grammar. Rows arrive in row-key
 //! order, and every rule reads neighbours that share a key prefix, so the rows
@@ -21,7 +20,7 @@
 //!
 //! The reverse bind index is the one family no grouping can serve: it is
 //! keyed by child while the unbind that retires a bind is keyed by parent, so
-//! its rows are decided one at a time by a point read into the job's snapshot
+//! its rows are decided one at a time by a point read into the merge's snapshot
 //! ([`super::streaming_compaction`]) and it holds no state here at all.
 
 use super::frozen_floor::{bind_survives_frozen_floor, BindingGeneration};
@@ -53,7 +52,7 @@ pub(super) enum RetentionRule {
     /// A bind and the unbinds of its own generation, decided together.
     ForwardBindings,
     /// Reverse bind rows, each decided by a point read into the snapshot.
-    /// The operator holds nothing; the job does the reading.
+    /// The operator holds nothing; the merge does the reading.
     ReverseBindProbe,
 }
 
@@ -69,16 +68,16 @@ impl RetentionRule {
             Self::ForwardBindings => {
                 RetentionOperator::ForwardBindings(BindingRetention::default())
             }
-            // The reverse index is decided one row at a time by the job,
+            // The reverse index is decided one row at a time by the merge,
             // which is the only thing that can read the snapshot, so this
-            // rule has no state of its own to run. The job still opens and
+            // rule has no state of its own to run. The merge still opens and
             // closes groups over it, and both are nothing to do.
             Self::ReverseBindProbe => RetentionOperator::KeepEveryRow,
         }
     }
 }
 
-/// The state one cluster's rule holds while the job streams through it.
+/// The state one cluster's rule holds while a merge streams through it.
 #[derive(Debug)]
 pub(super) enum RetentionOperator {
     KeepEveryRow,
@@ -131,7 +130,7 @@ impl RetentionOperator {
 
     /// How many rows this operator is holding right now.
     ///
-    /// This is the number the job's peak counter tracks, and the thing the
+    /// This is the number the merge's peak counter tracks, and the thing the
     /// resource tests assert stays small however many revisions one inode has
     /// or however many generations one name slot has.
     pub(super) fn held_rows(&self) -> usize {
@@ -191,7 +190,7 @@ impl AttributeRetention {
         // without gaps or repeats, so "the newest at or below the floor"
         // names exactly one row. Two rows sharing a number would make the
         // choice arbitrary and the drop unsafe; refuse to compact state that
-        // violates it, exactly as the whole-group fold does.
+        // violates it.
         if self.previous_at_floor == Some(*attributes_revision_no) {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "inode `{inode_id}` has two attribute rows at revision \
@@ -267,7 +266,7 @@ pub(super) struct BindingRetention {
     held_bind: Option<MetadataRow>,
     /// The generations this group's unbinds retired at or below the floor.
     /// One entry at most — every unbind in the group names the same
-    /// generation — and it is the same set a whole-group fold builds, so both
+    /// generation — and it is the set both bind families are judged against, so
     /// bind families reach `bind_survives_frozen_floor` by the same route.
     unbound_at_floor: BTreeSet<BindingGeneration>,
     /// The one bind at or below the floor in this slot that nothing retired,
@@ -449,7 +448,7 @@ mod tests {
     }
 
     /// The rule refuses a history where "the newest at the floor" is
-    /// ambiguous, exactly as the whole-group fold does.
+    /// ambiguous.
     #[test]
     fn two_attribute_rows_at_one_revision_below_the_floor_are_refused() {
         let mut operator = RetentionRule::Attributes.operator();
