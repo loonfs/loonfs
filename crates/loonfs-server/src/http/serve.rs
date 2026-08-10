@@ -365,6 +365,12 @@ async fn build_handles(
         // populating a second, default-sized cache.
         .runtime_cache(config.runtime_cache_config())
         .shared_metadata_table_cache(&writer)
+        // A maintenance step this server runs on request may plan a
+        // background streaming compaction. Sharing the writer's runner is
+        // what lets it start one, makes the operator's step and the writer's
+        // own steps agree that a namespace runs one job at a time, and puts
+        // the job under the shutdown that settles the writer.
+        .background_maintenance(&writer)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());

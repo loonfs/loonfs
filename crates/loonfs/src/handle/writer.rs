@@ -72,6 +72,14 @@ impl FsWriter {
         self.core.metadata_table_cache()
     }
 
+    /// The streaming metadata compactions this writer's runner is running,
+    /// for a handle built to share them.
+    pub(crate) fn background_compactions(
+        &self,
+    ) -> crate::maintenance_runner::BackgroundCompactions {
+        self.bits.maintenance.compactions()
+    }
+
     /// This writer's object-store client, instrumented exactly as the
     /// handle's own traffic is.
     ///
@@ -167,6 +175,12 @@ impl FsWriter {
     /// so a step is never torn down mid-flight; a long-lived host calls it
     /// to read durable state a step was about to leave. Callers await their
     /// own publications, so a quiet runner is a quiet writer.
+    ///
+    /// One task this waits for is not a bounded step. A family group that has
+    /// outgrown one step is rebuilt by a streaming compaction paced by no
+    /// budget, and this waits for that to finish rather than stopping it.
+    /// [`Self::shutdown`] cancels it instead, which is what makes a shutdown
+    /// short.
     pub async fn flush_background(&self) -> Result<()> {
         self.bits.maintenance.drain().await
     }
@@ -192,6 +206,14 @@ impl FsWriter {
     /// pass deletes provider objects, an index step writes segments, all
     /// after the process was asked to stop, and all of it the drain then
     /// has to sit through. Closing first leaves the window empty.
+    ///
+    /// Closing maintenance admission also cancels every streaming metadata
+    /// compaction this writer is running. Such a job is background work with
+    /// no budget pacing it, so the drain below would otherwise wait for a
+    /// whole family group to be rebuilt. The job checks its token between
+    /// block fetches and stops, and it costs the work it had done and nothing
+    /// else: it publishes only at the end, so the metadata it was rebuilding
+    /// never moved and a later step plans the group again.
     ///
     /// Nor can the order wedge, for a reason worth stating because it is
     /// not the obvious one: no maintenance step submits to the publication

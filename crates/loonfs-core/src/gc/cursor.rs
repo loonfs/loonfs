@@ -6,8 +6,8 @@ use loonfs_api::{
     PageCursor,
 };
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, upload_session_prefix,
-    wal_segment_prefix,
+    checkpoint_prefix, metadata_compaction_staging_prefix, metadata_manifest_prefix,
+    metadata_table_prefix, upload_session_prefix, wal_segment_prefix,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,15 +16,21 @@ use serde::{Deserialize, Serialize};
 pub(super) enum CandidateFamily {
     WalSegments,
     MetadataTables,
+    /// Metadata segments a streaming compaction wrote. Its own family
+    /// because it ages on its own window: a job outlives the ordinary grace
+    /// window, so its output would read as an aged orphan while it was still
+    /// being written.
+    CompactionStaging,
     Manifests,
     Checkpoints,
     UploadSessions,
 }
 
 impl CandidateFamily {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::WalSegments,
         Self::MetadataTables,
+        Self::CompactionStaging,
         Self::Manifests,
         Self::Checkpoints,
         Self::UploadSessions,
@@ -42,6 +48,7 @@ impl CandidateFamily {
         match self {
             Self::WalSegments => wal_segment_prefix(namespace_id.as_str()),
             Self::MetadataTables => metadata_table_prefix(namespace_id.as_str()),
+            Self::CompactionStaging => metadata_compaction_staging_prefix(namespace_id.as_str()),
             Self::Manifests => metadata_manifest_prefix(namespace_id.as_str()),
             Self::Checkpoints => checkpoint_prefix(namespace_id.as_str()),
             Self::UploadSessions => upload_session_prefix(namespace_id.as_str()),

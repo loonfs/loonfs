@@ -875,7 +875,7 @@ async fn drain_reorganization(
     for _ in 0..16 {
         let report = harness
             .engine
-            .reorganize_metadata()
+            .reorganize_metadata(None)
             .await
             .expect("reorganize metadata");
         match report.outcome {
@@ -893,7 +893,7 @@ async fn drain_reorganization(
             MetadataReorganizeOutcome::Superseded => {
                 panic!("single-writer test must not supersede reorganization")
             }
-            MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+            MetadataReorganizeOutcome::CompactionPlanned { .. } => {
                 panic!("default budget must admit the visibility scenario")
             }
         }

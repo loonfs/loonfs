@@ -107,6 +107,26 @@ pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 /// Default candidate budget for one step-driven garbage-collection pass.
 pub const DEFAULT_GC_MAX_OBJECTS: u64 = 1024;
 
+/// Grace a streaming compaction's staged segments get before garbage
+/// collection may reap one as an orphan (format spec, "Garbage collection",
+/// rule 12).
+///
+/// A staged segment is unreferenced for as long as its job runs, and the job
+/// has no time budget at all: it rebuilds a whole family group, which is the
+/// work no per-step budget could hold. The ordinary grace window only has to
+/// cover a publication in flight, so it is far too short here — a pass would
+/// reap the output of a job still writing it.
+///
+/// This window is a liveness bound and not a correctness one. A job that
+/// publishes leaves its segments named by the manifest, and a referenced
+/// object is live wherever it sits, so nothing this window protects is
+/// needed once the publication lands. Being generous costs storage for
+/// orphans a crash left behind; being tight costs a job that was nearly done.
+/// So it is one day, spelled as the number of metadata publication budgets
+/// that fit in one: a job that has not finished within that many is not one a
+/// restart is going to shorten.
+pub const METADATA_COMPACTION_STAGING_GRACE_MS: u64 = 96 * METADATA_PUBLICATION_BUDGET_MS;
+
 const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right {
         left
@@ -293,6 +313,19 @@ mod tests {
                     METADATA_PUBLICATION_BUDGET_MS,
                 ) + PROVIDER_OPERATION_DEADLINE_MS,
             "the floor keeps a margin above budget plus provider deadline"
+        );
+    }
+
+    /// The staging window has to outlast a job, and a job is allowed to be
+    /// long. Anything near the ordinary window would reap a job's output
+    /// while it was still writing it.
+    #[test]
+    fn the_compaction_staging_grace_is_a_day_of_publication_budgets() {
+        assert_eq!(METADATA_COMPACTION_STAGING_GRACE_MS, 24 * 60 * 60 * 1000);
+        assert!(
+            METADATA_COMPACTION_STAGING_GRACE_MS
+                > 10 * max_u64(GC_MIN_GRACE_WINDOW_MS, GcConfig::default().grace_window_ms),
+            "an orphan's window must be nothing like the window that covers a publication"
         );
     }
 }

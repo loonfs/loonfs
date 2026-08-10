@@ -5,6 +5,7 @@
 //! builds and collects its own state through this handle's public
 //! checkpoint calls, and its hosts drive it.
 
+use crate::maintenance_runner::CompactionStart;
 use crate::FsAdmin;
 use crate::NamespaceStatusResponse;
 use crate::{
@@ -28,7 +29,7 @@ impl FsAdmin {
     /// Drops everything this runtime caches for a namespace: the read
     /// caches, and — when this handle runs over a writer's runtime — the
     /// rebuildable half of that namespace's publisher state.
-    fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
+    pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
         self.core.invalidate_namespace_read_cache(namespace_id);
         if let Some(publisher) = &self.publisher {
             publisher.invalidate_projection(namespace_id);
@@ -192,18 +193,7 @@ impl FsAdmin {
         } else {
             WalFlushStepOutcome::NotNeeded
         };
-        let reorganize = match self.run_reorganization(namespace_id).await? {
-            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
-                ReorganizeStepOutcome::NotNeeded
-            }
-            loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {
-                ReorganizeStepOutcome::UnitPublished
-            }
-            loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
-                ReorganizeStepOutcome::BudgetExhausted
-            }
-            loonfs_core::MetadataReorganizeOutcome::Superseded => ReorganizeStepOutcome::Superseded,
-        };
+        let reorganize = self.run_reorganization(namespace_id).await?;
         Ok(MetadataMaintenanceResponse {
             wal_flush,
             reorganize,
@@ -215,17 +205,29 @@ impl FsAdmin {
     /// `loonfs-core`'s `reorganize_metadata`). Explicit steps stay bounded at
     /// one unit per call; the returned outcome lets writer-scheduled
     /// background work keep folding until nothing is left.
+    ///
+    /// A family group whose oldest run no longer fits one unit is rebuilt by
+    /// a streaming compaction instead, which this step starts as background
+    /// work and does not wait for. While that job runs its group is left
+    /// alone and the step folds the other groups; the plan it carries is what
+    /// tells the planner which group that is.
     async fn run_reorganization(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<loonfs_core::MetadataReorganizeOutcome> {
+    ) -> Result<ReorganizeStepOutcome> {
+        let active = self
+            .compactions
+            .as_ref()
+            .and_then(|compactions| compactions.active_spec(namespace_id));
         let report = self
             .engine(namespace_id)
-            .reorganize_metadata()
+            .reorganize_metadata(active.as_ref())
             .await
             .map_err(RuntimeError::Core)?;
-        match &report.outcome {
-            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {}
+        match report.outcome {
+            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
+                Ok(ReorganizeStepOutcome::NotNeeded)
+            }
             loonfs_core::MetadataReorganizeOutcome::UnitPublished {
                 families,
                 folded_l0_rows,
@@ -243,18 +245,112 @@ impl FsAdmin {
                     decoded_input_bytes,
                     "metadata reorganization unit published"
                 );
+                Ok(ReorganizeStepOutcome::UnitPublished)
             }
-            loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { families, .. } => {
-                tracing::warn!(
-                    families = ?families,
-                    "metadata reorganization input does not fit the per-step budget"
-                );
+            loonfs_core::MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => {
+                Ok(self.start_streaming_compaction(namespace_id, spec))
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
                 tracing::info!("metadata reorganization unit superseded; will retry");
+                Ok(ReorganizeStepOutcome::Superseded)
             }
         }
-        Ok(report.outcome)
+    }
+
+    /// Starts the job a step planned, unless something already owns the
+    /// namespace's one slot or this handle schedules no background work.
+    fn start_streaming_compaction(
+        &self,
+        namespace_id: &NamespaceId,
+        spec: loonfs_core::MetadataCompactionSpec,
+    ) -> ReorganizeStepOutcome {
+        let families = spec.families();
+        let input_runs = spec.input_runs();
+        let input_rows = spec.input_rows();
+        let started = match &self.compactions {
+            Some(compactions) => compactions.start(self, namespace_id, spec),
+            None => CompactionStart::NoRunner,
+        };
+        match started {
+            CompactionStart::Started => {
+                tracing::info!(
+                    families = ?families,
+                    input_runs,
+                    input_rows,
+                    "a family group outgrew one reorganization step; a streaming metadata \
+                     compaction is rebuilding it"
+                );
+                ReorganizeStepOutcome::CompactionStarted
+            }
+            CompactionStart::AlreadyRunning => {
+                tracing::info!(
+                    families = ?families,
+                    "a streaming metadata compaction is already running for this namespace; this \
+                     group waits for it to finish"
+                );
+                ReorganizeStepOutcome::CompactionPending
+            }
+            CompactionStart::NoRunner => {
+                tracing::warn!(
+                    families = ?families,
+                    "a family group needs a streaming metadata compaction, and this handle \
+                     schedules no background work; the group is unchanged"
+                );
+                ReorganizeStepOutcome::CompactionPending
+            }
+        }
+    }
+
+    /// Runs one streaming compaction to its end and says what that end was.
+    ///
+    /// The maintenance runner spawns this; nothing awaits it. Every ending
+    /// short of a publication leaves the manifest where it was and the
+    /// segments the job wrote unreferenced, so there is nothing to undo and
+    /// nothing to retry here — a later step plans the group again.
+    pub(crate) async fn run_streaming_compaction(
+        &self,
+        namespace_id: &NamespaceId,
+        spec: &loonfs_core::MetadataCompactionSpec,
+        cancellation: &loonfs_core::MetadataCompactionCancellation,
+    ) {
+        match self
+            .engine(namespace_id)
+            .run_metadata_compaction(spec, cancellation)
+            .await
+        {
+            Ok(loonfs_core::MetadataCompactionJobOutcome::Published {
+                manifest_id,
+                rows_read,
+                rows_written,
+                output_segments,
+            }) => {
+                // The manifest moved, so every cached view of this namespace
+                // is one manifest behind.
+                self.invalidate_namespace(namespace_id);
+                tracing::info!(
+                    namespace_id = %namespace_id,
+                    families = ?spec.families(),
+                    rows_read,
+                    rows_written,
+                    output_segments,
+                    manifest_id = manifest_id.0,
+                    "streaming metadata compaction rebuilt a family group"
+                );
+            }
+            Ok(outcome) => tracing::info!(
+                namespace_id = %namespace_id,
+                families = ?spec.families(),
+                outcome = ?outcome,
+                "streaming metadata compaction ended without publishing; a later step plans it \
+                 again"
+            ),
+            Err(error) => tracing::warn!(
+                namespace_id = %namespace_id,
+                families = ?spec.families(),
+                error = %error,
+                "streaming metadata compaction failed; a later step plans it again"
+            ),
+        }
     }
 
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.

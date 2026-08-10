@@ -467,8 +467,11 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     match metadata.reorganize {
                         ReorganizeStepOutcome::NotNeeded => "reorganize not needed",
                         ReorganizeStepOutcome::UnitPublished => "reorganized one family group",
-                        ReorganizeStepOutcome::BudgetExhausted => {
-                            "reorganize over the per-step budget"
+                        ReorganizeStepOutcome::CompactionStarted => {
+                            "started a background compaction of one family group"
+                        }
+                        ReorganizeStepOutcome::CompactionPending => {
+                            "one family group is waiting on a background compaction"
                         }
                         ReorganizeStepOutcome::Superseded => "reorganize superseded",
                     }

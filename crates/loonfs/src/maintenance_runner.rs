@@ -38,6 +38,7 @@
 //! schedule nothing.
 
 mod admission;
+mod compaction;
 mod jobs;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,7 @@ mod tests;
 use crate::metrics::RuntimeInstruments;
 use crate::{NamespaceId, Result, RuntimeError};
 use admission::{Admission, MaintenanceDispatch, MaintenanceKey, StepOutcome};
+pub(crate) use compaction::{BackgroundCompactions, CompactionStart};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -438,7 +440,7 @@ impl RunnerCounters {
     }
 }
 
-struct RunnerInner {
+pub(crate) struct RunnerInner {
     policy: FsBackgroundWork,
     /// Runtime that owns spawned work. Handle builders pin the runtime they
     /// were opened on; `None` resolves the runtime driving the triggering
@@ -458,6 +460,12 @@ struct RunnerInner {
     /// number on an existing trace answers for a reader with no metrics
     /// pipeline at all.
     instruments: Arc<RuntimeInstruments>,
+    /// The streaming metadata compactions running under this runner, one per
+    /// namespace at most. Held here rather than beside the admission book
+    /// because a compaction is not a bounded step: it takes no permit, it
+    /// runs for as long as it needs, and what the runner owes it is a spawn,
+    /// a cancellation at shutdown, and the drain every spawned task gets.
+    compactions: Arc<Mutex<BTreeMap<NamespaceId, compaction::ActiveCompaction>>>,
 }
 
 struct RunnerState {
@@ -509,6 +517,7 @@ impl MaintenanceRunner {
                 wake: Arc::new(Notify::new()),
                 counters: RunnerCounters::default(),
                 instruments,
+                compactions: Arc::new(Mutex::new(BTreeMap::new())),
             }),
         }
     }
@@ -519,6 +528,15 @@ impl MaintenanceRunner {
         MaintenanceHandle {
             inner: Arc::downgrade(&self.inner),
         }
+    }
+
+    /// A cloneable view of the streaming compactions this runner is running.
+    ///
+    /// Every handle whose maintenance steps may plan one holds this, which is
+    /// what makes the runner's own steps and an operator's explicit step see
+    /// the same jobs.
+    pub(crate) fn compactions(&self) -> BackgroundCompactions {
+        BackgroundCompactions::new(Arc::clone(&self.inner.compactions), &self.inner)
     }
 
     /// The executor registered under `id`.
@@ -549,13 +567,18 @@ impl MaintenanceRunner {
     }
 
     /// Rejects further scheduling and discards work still waiting for a
-    /// permit. Running steps stay visible to [`Self::drain`].
+    /// permit, and tells every running streaming compaction to stop. Running
+    /// steps and cancelled compactions stay visible to [`Self::drain`].
     ///
     /// Synchronous on purpose: a shutdown has to close admission before its
     /// first await, or a step finishing during the publication drain hands
-    /// its slot to work the shutdown already decided to drop.
+    /// its slot to work the shutdown already decided to drop. Cancelling the
+    /// compactions here rather than in the drain is the same reasoning — a
+    /// job checks its token between block fetches, so the earlier it is set
+    /// the less of the drain it spends finishing work nobody will publish.
     pub(crate) fn close_admission(&self) {
         self.inner.lock_state().admission.close();
+        self.compactions().cancel_all();
         self.inner.wake.notify_one();
     }
 
@@ -701,7 +724,7 @@ impl RunnerInner {
     /// refuses after a shutdown. Dropping the future without running it must
     /// release whatever it holds, so both refusals here clean up by
     /// dropping.
-    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+    pub(super) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
         let Some(runtime) = self.runtime() else {
             return;
         };

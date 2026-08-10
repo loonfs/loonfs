@@ -6,13 +6,15 @@ use super::live_set::{recollect_live_set, LiveSet};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
-use crate::checkpoint::tests::{create_checkpoint, mutation_context, write_test_file};
+use crate::checkpoint::tests::{
+    compact_a_family_group_into_staging, create_checkpoint, mutation_context, write_test_file,
+};
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::limits::{
     CONTENT_RECLAMATION_GRACE_MS, FORK_CHECKPOINT_LEASE_MS, GC_MIN_GRACE_WINDOW_MS,
-    UPLOAD_SESSION_LEASE_MS,
+    METADATA_COMPACTION_STAGING_GRACE_MS, UPLOAD_SESSION_LEASE_MS,
 };
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
@@ -22,8 +24,9 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_root,
-    metadata_table, metadata_table_prefix, wal_head, wal_segment, wal_segment_prefix,
+    checkpoint_prefix, metadata_compaction_staging_table, metadata_manifest_object,
+    metadata_manifest_prefix, metadata_root, metadata_table, metadata_table_prefix, wal_head,
+    wal_segment, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1866,10 +1869,15 @@ async fn fold_metadata<S: ObjectStore + ?Sized>(
     };
     let mut folded = false;
     for _ in 0..16 {
-        let report =
-            crate::checkpoint::reorganize_metadata_step(store, namespace_id, context, fold_policy)
-                .await
-                .expect("reorganize step");
+        let report = crate::checkpoint::reorganize_metadata_step(
+            store,
+            namespace_id,
+            context,
+            fold_policy,
+            None,
+        )
+        .await
+        .expect("reorganize step");
         if matches!(
             report.outcome,
             crate::checkpoint::MetadataReorganizeOutcome::NotNeeded { .. }
@@ -1959,6 +1967,140 @@ fn reason_total(report: &GcResponse) -> u64 {
         .into_iter()
         .map(|(_, count)| count)
         .sum()
+}
+
+/// A streaming compaction's staged segments age under a window of their own.
+///
+/// The job publishes nothing until it finishes and it has no time budget, so
+/// its output is unreferenced for as long as it runs. Under the ordinary
+/// window the collector would reap a job's segments while it was still writing
+/// them. Under the staging window it reaps them only once no job could still
+/// be alive, and a job that died leaves exactly those orphans.
+#[tokio::test]
+async fn a_staged_compaction_segment_ages_under_the_staging_window() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&inner, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+        .await
+        .expect("flush wal");
+
+    // The namespace ages past the window, so the pass has an anchor. The
+    // staged segment below is written after it, the way a job's output is.
+    let published = namespace_key_set(&inner, &namespace_id).await;
+    let store = aged_before_now(inner, published);
+    let staged_key = metadata_compaction_staging_table(
+        namespace_id.as_str(),
+        "tbl_0123456789abcdef0123456789abcdef",
+    );
+    store
+        .put_if_absent(&staged_key, Bytes::from_static(b"staged segment"))
+        .await
+        .expect("write a staged segment");
+
+    // Long past the ordinary window, which is where a job would still be
+    // running and this segment would still be its output.
+    let running =
+        context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &running)
+        .await
+        .expect("gc pass while a job could still be running");
+    assert_eq!(
+        report.deleted_metadata_tables, 0,
+        "a running job's output must not be reaped"
+    );
+    assert_eq!(report.retained.grace_window, 1);
+    assert!(store
+        .head(&staged_key)
+        .await
+        .expect("head the staged segment")
+        .is_some());
+
+    // Past the staging window, where no job can still be alive, the same
+    // object is the orphan a dead job left.
+    let dead = context(
+        now_after_newest_object(
+            store.inner(),
+            &namespace_id,
+            METADATA_COMPACTION_STAGING_GRACE_MS + 1,
+        )
+        .await,
+    );
+    let report = gc_namespace(&store, &namespace_id, &config(), &dead)
+        .await
+        .expect("gc pass once no job could still be running");
+    assert_eq!(
+        report.deleted_metadata_tables, 1,
+        "a dead job's orphan must be reaped"
+    );
+    assert!(store
+        .head(&staged_key)
+        .await
+        .expect("head the staged segment")
+        .is_none());
+}
+
+/// A published job's output is an ordinary referenced table. The manifest
+/// names it where it sits, so the sweep protects it for the same reason it
+/// protects every other table, and no window ever applies to it.
+#[tokio::test]
+async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..4 {
+        write_test_file(
+            &store,
+            &namespace_id,
+            &format!("/docs/{index}.txt"),
+            &format!("gc-body-{index}"),
+            &setup,
+        )
+        .await;
+        // Flushes rather than checkpoints: a checkpoint pins the manifest it
+        // published, and a pinned manifest protects its tables forever, which
+        // would leave this pass nothing to reap and nothing to prove.
+        crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+            .await
+            .expect("flush wal");
+    }
+    let staged = compact_a_family_group_into_staging(&store, &namespace_id, &setup).await;
+
+    // Far past every window this collector knows, including the staging one.
+    let long_after = context(
+        now_after_newest_object(
+            &store,
+            &namespace_id,
+            METADATA_COMPACTION_STAGING_GRACE_MS * 4,
+        )
+        .await,
+    );
+    let report = gc_namespace(&store, &namespace_id, &config(), &long_after)
+        .await
+        .expect("gc pass long after the job published");
+    assert!(
+        report.deleted_metadata_tables > 0,
+        "the pass must have reaped the runs the job replaced, or it proves nothing"
+    );
+    for key in &staged {
+        assert!(
+            store
+                .head(key)
+                .await
+                .expect("head a staged segment")
+                .is_some(),
+            "a published job's segment must survive every window"
+        );
+    }
 }
 
 /// The write-time arm is what covers an object the reference manifest
@@ -2380,10 +2522,15 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         ..Default::default()
     };
     for _ in 0..16 {
-        let report =
-            crate::checkpoint::reorganize_metadata_step(&store, &namespace_id, &setup, fold_policy)
-                .await
-                .expect("reorganize step");
+        let report = crate::checkpoint::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            &setup,
+            fold_policy,
+            None,
+        )
+        .await
+        .expect("reorganize step");
         if matches!(
             report.outcome,
             crate::checkpoint::MetadataReorganizeOutcome::NotNeeded { .. }

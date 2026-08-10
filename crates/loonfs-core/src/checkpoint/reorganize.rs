@@ -34,7 +34,10 @@
 //! group with a window that fits the budgets and makes progress gets that
 //! window. A group with no such window gets a streaming compaction over
 //! every run it holds ([`super::streaming_compaction`]), which is what takes
-//! a frozen base off the step budgets entirely.
+//! a frozen base off the step budgets entirely. The step does not run that
+//! job: it reports the plan, and the runtime starts the job in the
+//! background and hands its spec back to every step that follows, which is
+//! how a step knows to leave that group alone while it runs.
 
 use super::block_fetch::load_segment_index_for_reorganization;
 use super::build::{
@@ -91,11 +94,13 @@ pub enum MetadataReorganizeOutcome {
         decoded_input_bytes: u64,
         manifest_id: ManifestId,
     },
-    /// The trigger fired, but no oldest-first subset that would make
-    /// progress fit the hard per-step input budgets.
-    BudgetExhausted {
+    /// No oldest-first subset that would make progress fits the hard
+    /// per-step input budgets, so the group is rebuilt by a streaming
+    /// compaction over every run it holds. The step publishes nothing and
+    /// hands the plan back; starting the job is the runtime's.
+    CompactionPlanned {
         families: Vec<MetadataTableFamily>,
-        l0_runs: usize,
+        spec: MetadataCompactionSpec,
     },
     /// A concurrent publication moved the root while this unit ran; its
     /// output is unreferenced (garbage collection reclaims it) and the next
@@ -113,6 +118,11 @@ pub struct MetadataReorganizeReport {
 /// manifest. Callers (the maintenance step) invoke this repeatedly; each
 /// call re-reads durable state, so any two calls compose — including across
 /// process restarts.
+///
+/// `active_compaction` is the plan of the streaming compaction this process
+/// is running for the namespace, or `None` when it is running none. The step
+/// leaves that job's group alone and works on another; see
+/// [`select_family_group`].
 #[tracing::instrument(
     level = "info",
     name = "loonfs.phase",
@@ -125,9 +135,18 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
+    active_compaction: Option<&MetadataCompactionSpec>,
 ) -> Result<MetadataReorganizeReport> {
     let timer = StdMonotonicTimer::default();
-    reorganize_metadata_step_with_timer(store, namespace_id, context, policy, &timer).await
+    reorganize_metadata_step_with_timer(
+        store,
+        namespace_id,
+        context,
+        policy,
+        active_compaction,
+        &timer,
+    )
+    .await
 }
 
 pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>(
@@ -135,6 +154,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
+    active_compaction: Option<&MetadataCompactionSpec>,
     timer: &dyn MonotonicTimer,
 ) -> Result<MetadataReorganizeReport> {
     // The publication budget covers the whole unit: measurement starts
@@ -169,8 +189,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
         });
     }
-    let Some(group) = select_family_group(&previous.payload) else {
-        // L0 runs exist but hold no rows (empty families); nothing to fold.
+    let Some(group) = select_family_group(
+        &previous.payload,
+        active_compaction.map(MetadataCompactionSpec::group),
+    ) else {
+        // L0 runs exist but hold no rows (empty families), or the only group
+        // with rows is the one a job is rebuilding; nothing to fold here.
         return Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
@@ -196,17 +220,25 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     if let Some(bottom) = selection.group_bottom_over_budget {
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
     }
-    // A group that needs a streaming compaction reports the same blocked
-    // outcome it reported before the compactor existed. Scheduling the job is
-    // the runner's, and lands with it.
-    let Some(ReorganizationPlan::BoundedMerge(input)) = selection.plan else {
-        return Ok(MetadataReorganizeReport {
-            namespace_id: namespace_id.clone(),
-            outcome: MetadataReorganizeOutcome::BudgetExhausted {
-                families: group.families().to_vec(),
-                l0_runs,
-            },
-        });
+    let input = match selection.plan {
+        Some(ReorganizationPlan::BoundedMerge(input)) => input,
+        Some(ReorganizationPlan::FullCompaction(spec)) => {
+            return Ok(MetadataReorganizeReport {
+                namespace_id: namespace_id.clone(),
+                outcome: MetadataReorganizeOutcome::CompactionPlanned {
+                    families: group.families().to_vec(),
+                    spec,
+                },
+            })
+        }
+        // A selected group holds L0 rows, so it holds runs, so the planner
+        // always answers with one of the two plans above.
+        None => {
+            return Ok(MetadataReorganizeReport {
+                namespace_id: namespace_id.clone(),
+                outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
+            })
+        }
     };
 
     // Merge only the selected complete runs. The scan reads exactly the
@@ -347,9 +379,8 @@ pub(super) enum ReorganizationPlan {
     BoundedMerge(ReorganizationInput),
     /// No window that makes progress fits the budgets, so the group is
     /// rebuilt by a streaming compaction over every run it holds. The step
-    /// reports the group blocked and reads no further; the runner that starts
-    /// the job from this spec lands next.
-    FullCompaction(#[allow(dead_code)] MetadataCompactionSpec),
+    /// reports the plan and reads no further; the runtime starts the job.
+    FullCompaction(MetadataCompactionSpec),
 }
 
 pub(super) struct ReorganizationInput {
@@ -667,6 +698,11 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
                 .iter()
                 .map(|run| (run.run_seq, run.level))
                 .collect(),
+            candidates
+                .iter()
+                .flat_map(|run| group_run_descriptors(run, group))
+                .map(|descriptor| descriptor.row_count)
+                .sum(),
             MergePlacement::Base {
                 output_seq: head_seq,
             },
@@ -682,20 +718,18 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
 /// Says out loud that a family group's oldest run no longer fits one
 /// reorganization step.
 ///
-/// Nothing is corrupt when this fires, but work does stop. Folds keep
-/// merging the newer runs above the run named here, into one bigger delta run
-/// each time, until only one delta run is left; from then on the group has no
-/// window that makes progress and every step reports it blocked. Reclamation
-/// of the named run's rows stops first, because no step can rewrite a run it
-/// cannot read whole. Group selection then keeps choosing this group — it
-/// still holds the most L0 rows, and a merge that cannot drop rows never
-/// reduces them — so the other groups stop folding too. Raising
-/// `max_decoded_input_rows_per_step` and `max_decoded_input_bytes_per_step`
-/// past the numbers in this line is the operator's lever until the streaming
-/// compactor takes this case off the step.
+/// Nothing is corrupt when this fires and no work stops. Steps keep merging
+/// the newer runs above the run named here, into one bigger delta run each
+/// time. Once that merge has nothing left to take, the group has no window
+/// that makes progress, and the step hands the whole group to a background
+/// streaming compaction that rebuilds it in one pass under no budget at all.
+/// The group's rows are reclaimed when that job publishes. So this line says
+/// what a namespace has grown into, and that the rebuild of the group has
+/// moved off the step; there is nothing for an operator to do about it.
 ///
-/// One line per step: a step is already the unit maintenance schedules, so
-/// the cadence of the warning is the cadence of maintenance.
+/// One line per step until the job starts: a step is already the unit
+/// maintenance schedules, so the cadence of the warning is the cadence of
+/// maintenance.
 fn report_group_bottom_over_budget(
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
@@ -712,9 +746,9 @@ fn report_group_bottom_over_budget(
         max_decoded_input_rows_per_step = policy.max_decoded_input_rows_per_step.get(),
         max_decoded_input_bytes_per_step = policy.max_decoded_input_bytes_per_step.get(),
         "the oldest metadata run in this family group no longer fits one reorganization step; \
-         folds skip it and merge the newer runs into one delta run, so its rows are never \
-         reclaimed, and once that merge has nothing left to take this group blocks every step \
-         and the other groups stop folding behind it",
+         steps merge the newer runs above it into one delta run, and once that merge has \
+         nothing left to take, a background streaming compaction rebuilds the whole group and \
+         reclaims its rows",
     );
 }
 
@@ -781,11 +815,26 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
 
 /// The family group with the most L0 rows to fold; ties resolve in group
 /// order. `None` when no group has L0 rows.
+///
+/// `rebuilding` is the group a streaming compaction is rebuilding right now,
+/// and it is skipped. That one exclusion is the whole of the input-exclusion
+/// rule the design asks for, and it holds for two reasons. The job's snapshot
+/// is every run the group held, so any window over that group would touch it.
+/// And a run is a set of families: a merge of another group rewrites only its
+/// own families' descriptors, so the segments the job is reading stay
+/// referenced and unchanged whatever else folds meanwhile.
+///
+/// Without it the excluded group would win every step for as long as the job
+/// ran — its L0 rows are frozen in the job's snapshot, so its count never
+/// falls, while every other group's falls the moment it folds — and the step
+/// would spend itself re-planning a job that is already running.
 pub(super) fn select_family_group(
     payload: &NamespaceManifestPayload,
+    rebuilding: Option<MetadataFamilyGroup>,
 ) -> Option<MetadataFamilyGroup> {
     REORGANIZE_FAMILY_GROUPS
         .into_iter()
+        .filter(|group| Some(*group) != rebuilding)
         .map(|group| (group_l0_rows(payload, group), group))
         .filter(|(rows, _)| *rows > 0)
         .max_by(|(left_rows, left), (right_rows, right)| {
