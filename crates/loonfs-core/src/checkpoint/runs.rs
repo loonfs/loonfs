@@ -33,34 +33,74 @@ pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 10] = [
     MetadataTableFamily::Attributes,
 ];
 
-/// Families whose rows merge in one reorganization unit. Families that read
-/// each other's rows to decide what to drop (see
+/// One set of families whose rows merge in one reorganization unit.
+///
+/// Families that read each other's rows to decide what to drop (see
 /// `super::reorganize::drop_rows_below_retention_floor`) must compact
 /// together, and a secondary index always travels with its canonical family.
 ///
-/// The grouping is layout policy, not reorganization's alone: manifest load
-/// checks a per-group invariant — at most one base-tier run per group — so
-/// the loader reads this table too.
-pub(super) const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 7] = [
-    &[
-        MetadataTableFamily::DirentryBinds,
-        MetadataTableFamily::DirentryChildBinds,
-        MetadataTableFamily::DirentryUnbinds,
-    ],
-    &[
-        MetadataTableFamily::Revisions,
-        MetadataTableFamily::RevisionsByInodeDesc,
-    ],
-    &[MetadataTableFamily::Inodes],
-    &[MetadataTableFamily::Tombstones],
-    // Active deletions fold alone: a removal marker is cancelled by the
-    // listed row it names, and both live in this family.
-    &[MetadataTableFamily::ActiveDeletions],
-    &[MetadataTableFamily::CommitReceipts],
-    // Attributes fold alone too: a revision supersedes the revisions of the
-    // same inode, and they all live in this family. The family has no
-    // secondary index to travel with.
-    &[MetadataTableFamily::Attributes],
+/// This is a closed enum rather than a list of family slices because every
+/// caller wants the group itself, not a slice it has to recognize by
+/// comparing it against a table. The grouping is layout policy, not
+/// reorganization's alone: manifest load checks a per-group invariant — at
+/// most one base-tier run per group — so the loader reads it too.
+///
+/// Declaration order is group order, which is what resolves ties when two
+/// groups have equally much to fold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum MetadataFamilyGroup {
+    /// A directory binding, the reverse index that finds it by child, and the
+    /// unbind that retires it.
+    Bindings,
+    /// File revision history and its newest-first index.
+    Revisions,
+    Inodes,
+    Tombstones,
+    /// Active deletions fold alone: a removal marker is cancelled by the
+    /// listed row it names, and both live in this family.
+    ActiveDeletions,
+    CommitReceipts,
+    /// Attributes fold alone too: a revision supersedes the revisions of the
+    /// same inode, and they all live in this family. The family has no
+    /// secondary index to travel with.
+    Attributes,
+}
+
+impl MetadataFamilyGroup {
+    /// The families this group merges together, in the order a run writes
+    /// them.
+    pub(super) const fn families(self) -> &'static [MetadataTableFamily] {
+        match self {
+            Self::Bindings => &[
+                MetadataTableFamily::DirentryBinds,
+                MetadataTableFamily::DirentryChildBinds,
+                MetadataTableFamily::DirentryUnbinds,
+            ],
+            Self::Revisions => &[
+                MetadataTableFamily::Revisions,
+                MetadataTableFamily::RevisionsByInodeDesc,
+            ],
+            Self::Inodes => &[MetadataTableFamily::Inodes],
+            Self::Tombstones => &[MetadataTableFamily::Tombstones],
+            Self::ActiveDeletions => &[MetadataTableFamily::ActiveDeletions],
+            Self::CommitReceipts => &[MetadataTableFamily::CommitReceipts],
+            Self::Attributes => &[MetadataTableFamily::Attributes],
+        }
+    }
+
+    pub(super) fn contains(self, family: MetadataTableFamily) -> bool {
+        self.families().contains(&family)
+    }
+}
+
+pub(super) const REORGANIZE_FAMILY_GROUPS: [MetadataFamilyGroup; 7] = [
+    MetadataFamilyGroup::Bindings,
+    MetadataFamilyGroup::Revisions,
+    MetadataFamilyGroup::Inodes,
+    MetadataFamilyGroup::Tombstones,
+    MetadataFamilyGroup::ActiveDeletions,
+    MetadataFamilyGroup::CommitReceipts,
+    MetadataFamilyGroup::Attributes,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

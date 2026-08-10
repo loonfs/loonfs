@@ -722,7 +722,9 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::WalHead => KeyClass::NamespaceHead,
         DurableObjectFamily::WalSegment => KeyClass::WalSegment,
         DurableObjectFamily::MetadataManifest => KeyClass::NamespaceManifest,
-        DurableObjectFamily::MetadataTable => KeyClass::MetadataSst,
+        DurableObjectFamily::MetadataTable | DurableObjectFamily::MetadataCompactionStaging => {
+            KeyClass::MetadataSst
+        }
         DurableObjectFamily::CheckpointRecord | DurableObjectFamily::WalFloor => {
             KeyClass::GcControl
         }

@@ -123,16 +123,16 @@ where
                 .map_err(|_| CoreError::Internal("metadata SST index overflow".to_owned()))?;
             let table_id = MetadataTableId::generate();
             let object_key = metadata_table(namespace_id.as_str(), table_id.as_str());
-            requests.push(MetadataSstWriteRequest {
+            requests.push(MetadataSstWriteRequest::new(
                 namespace_id,
                 table_id,
+                object_key,
                 run_seq,
                 level,
                 family,
                 segment_index,
-                rows: segment_rows.rows,
-                object_key,
-            });
+                segment_rows.rows,
+            ));
         }
 
         let mut descriptors = Vec::with_capacity(requests.len());
@@ -171,6 +171,35 @@ pub(super) struct MetadataSstWriteRequest<'a> {
     segment_index: u32,
     rows: Vec<MetadataRow>,
     object_key: String,
+}
+
+impl<'a> MetadataSstWriteRequest<'a> {
+    /// One segment to write. The caller supplies the object key rather than
+    /// having it derived, because a streaming compaction writes the same
+    /// segment shape to the staging directory instead of to
+    /// `metadata/tables/` (format spec, "Compaction").
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        namespace_id: &'a NamespaceId,
+        table_id: MetadataTableId,
+        object_key: String,
+        run_seq: ChangeSeq,
+        level: u32,
+        family: MetadataTableFamily,
+        segment_index: u32,
+        rows: Vec<MetadataRow>,
+    ) -> Self {
+        Self {
+            namespace_id,
+            table_id,
+            run_seq,
+            level,
+            family,
+            segment_index,
+            rows,
+            object_key,
+        }
+    }
 }
 
 /// Largest filter block inlined into the segment's manifest descriptor, in

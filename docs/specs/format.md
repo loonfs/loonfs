@@ -79,6 +79,7 @@ The required durable object families and standard key patterns are:
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The lifecycle is monotonic: a record is created active under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
+| **Compaction staging** | Immutable | Hold metadata segments a streaming compaction has written before any manifest references them ("Compaction"). The object is an ordinary metadata segment; only the directory differs. | `namespaces/{owner_namespace_id}/metadata/compaction-staging/{table_id}.sst.zst` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The lifecycle is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
@@ -2127,6 +2128,21 @@ rows, the same posture inode and tombstone rows take, and that is what makes
 an undelete give back the map the inode had. A rewrite refuses to compact
 when two rows for one inode share a revision number at or below the floor,
 because that makes "the newest at the floor" arbitrary and the drop unsafe.
+
+A rebuild whose bottom-anchored window cannot fit one step's budget is run as
+a streaming compaction instead: it merges every run of the group in one job
+and writes each finished output segment as it fills, so nothing about the job
+follows the size of the group. Those segments are written under
+`namespaces/{owner_namespace_id}/metadata/compaction-staging/{table_id}.sst.zst`
+rather than under `metadata/tables/`. The object is an ordinary metadata
+segment — same encoding, same descriptor, same reads — and only its directory
+differs. The directory is what keeps a running job's output out of the
+listing that enumerates metadata tables: a job outlives the collector's grace
+window, so its segments would otherwise read as unreferenced objects aged
+past grace, which is the class the collector reaps. Nothing loads or
+validates the staging directory, and a manifest may reference a staged key
+directly: a completed publication moves no bytes, because a referenced object
+is live wherever it sits.
 
 Invariants:
 

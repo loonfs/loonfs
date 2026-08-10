@@ -20,7 +20,9 @@
 //!   materialization is test-only).
 //! - [`scan`] answers verified row scans over loaded manifest tables, while
 //!   [`row`] handles manifest-row encoding.
-//! - [`reorganize`] compacts bounded family groups into new base runs.
+//! - [`reorganize`] compacts bounded family groups into new base runs, and
+//!   [`streaming_compaction`] rebuilds a group whose bottom-anchored window
+//!   no longer fits one of those steps.
 //! - [`retention`] advances the retention floor behind verified progress.
 //! - [`runs`] models the LSM run layout shared by all of the above,
 //!   [`cache`] holds decoded SST blocks keyed by content digest, and
@@ -47,6 +49,7 @@ mod row;
 mod runs;
 mod scan;
 mod stored_block_cache;
+mod streaming_compaction;
 #[cfg(test)]
 pub(crate) mod tests;
 mod validate;

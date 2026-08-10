@@ -12,6 +12,7 @@ pub(crate) mod inspection_materialization;
 mod inventory;
 mod manifest_round_trips;
 mod retention;
+mod streaming_compaction;
 
 use super::build::{
     build_manifest_tables, build_manifest_tables_from_rows, MetadataTableSegmentation,
@@ -373,15 +374,21 @@ fn base_runs_per_family_group(
 ) -> Vec<(&'static [ApiMetadataTableFamily], Vec<RunId>)> {
     REORGANIZE_FAMILY_GROUPS
         .into_iter()
-        .map(|group| (group, group_base_runs(manifest, group)))
+        .map(|group| {
+            (
+                group.families(),
+                group_base_runs(manifest, group.families()),
+            )
+        })
         .collect()
 }
 
 fn group_containing(family: ApiMetadataTableFamily) -> &'static [ApiMetadataTableFamily] {
     REORGANIZE_FAMILY_GROUPS
         .into_iter()
-        .find(|group| group.contains(&family))
+        .find(|group| group.contains(family))
         .expect("every family belongs to a reorganization group")
+        .families()
 }
 
 fn base_segment_object_keys_for_family(

@@ -81,6 +81,21 @@ pub fn metadata_table(namespace: &str, table_id: &str) -> String {
     ObjectLayout::new().metadata_table(namespace, table_id)
 }
 
+/// Builds the immutable staging key a streaming compaction writes one
+/// metadata segment to before any manifest references it.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+pub fn metadata_compaction_staging_table(namespace: &str, table_id: &str) -> String {
+    ObjectLayout::new().metadata_compaction_staging_table(namespace, table_id)
+}
+
+/// Builds the listing prefix containing staged compaction segments for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+pub fn metadata_compaction_staging_prefix(namespace: &str) -> String {
+    ObjectLayout::new().metadata_compaction_staging_prefix(namespace)
+}
+
 /// Builds the mutable lifecycle key for one checkpoint record.
 ///
 /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
@@ -119,7 +134,8 @@ pub fn content_blob(content_store: &str, content_id: &ContentId) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, metadata_manifest_object, metadata_root, metadata_table,
+        checkpoint_record, content_blob, metadata_compaction_staging_prefix,
+        metadata_compaction_staging_table, metadata_manifest_object, metadata_root, metadata_table,
         namespace_prefix, upload_session, wal_floor, wal_head, wal_segment,
         wal_segment_id_from_key, wal_segment_prefix,
     };
@@ -217,6 +233,10 @@ mod tests {
             ),
             ("Checkpoint records", checkpoint_record("ns-1", "chk-1")),
             ("Metadata tables", metadata_table("ns-1", "tbl-1")),
+            (
+                "Compaction staging",
+                metadata_compaction_staging_table("ns-1", "tbl-1"),
+            ),
             ("Upload sessions", upload_session("ns-1", "up-1")),
             ("Metadata root", metadata_root("ns-1")),
             ("WAL floor", wal_floor("ns-1")),
@@ -272,6 +292,14 @@ mod tests {
         assert_eq!(
             metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
             "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
+        );
+        assert_eq!(
+            metadata_compaction_staging_prefix("ns-1"),
+            "namespaces/ns-1/metadata/compaction-staging/"
+        );
+        assert_eq!(
+            metadata_compaction_staging_table("ns-1", "tbl_00000000000000000000000000000001"),
+            "namespaces/ns-1/metadata/compaction-staging/tbl_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
             checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),

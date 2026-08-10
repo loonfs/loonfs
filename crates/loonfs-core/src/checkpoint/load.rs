@@ -27,7 +27,9 @@ use loonfs_api::wire::manifest::{
     NAMESPACE_MANIFEST_FORMAT_VERSION,
 };
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId, WriterEpoch};
-use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
+use loonfs_objectstore::keys::{
+    metadata_compaction_staging_table, metadata_manifest_object, metadata_table,
+};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 use tracing::Instrument;
@@ -342,13 +344,7 @@ fn validate_manifest_table_descriptors(
             validate_segment_numbering(&table.segments)?;
             validate_segment_key_order(&table.segments)?;
             for descriptor in &table.segments {
-                let expected_key = metadata_file_object_key(descriptor);
-                if descriptor.object_key != expected_key {
-                    return Err(ManifestLoadError::SegmentObjectKeyMismatch {
-                        object_key: descriptor.object_key.clone(),
-                        expected: expected_key,
-                    });
-                }
+                ensure_segment_object_key(descriptor)?;
                 // The one segment layout: the filter block sits immediately
                 // before the index block at the object tail. The read path
                 // assumes it (a filter fetch extends through the index; the
@@ -547,7 +543,7 @@ fn validate_one_base_run_per_family_group(
                 && run
                     .tables
                     .iter()
-                    .any(|table| group.contains(&table.family) && !table.segments.is_empty())
+                    .any(|table| group.contains(table.family) && !table.segments.is_empty())
         });
         let (Some(first), Some(second)) = (base_runs.next(), base_runs.next()) else {
             continue;
@@ -555,10 +551,14 @@ fn validate_one_base_run_per_family_group(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: manifest_object_key.to_owned(),
             message: format!(
-                "family group {group:?} holds base-tier runs at seq `{}` level {} and seq `{}` \
+                "family group {:?} holds base-tier runs at seq `{}` level {} and seq `{}` \
                  level {}; a group holds at most one base run, because a merge writes one only \
                  when it starts at the group's oldest run and then replaces it",
-                first.run_seq, first.level, second.run_seq, second.level
+                group.families(),
+                first.run_seq,
+                first.level,
+                second.run_seq,
+                second.level
             ),
         });
     }
@@ -570,4 +570,32 @@ pub(super) fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
         descriptor.owner_namespace_id.as_str(),
         descriptor.table_id.as_str(),
     )
+}
+
+/// Checks that a descriptor names one of the two keys a segment of its
+/// identity may live at.
+///
+/// The ordinary key is the metadata-table key its owner and table id build.
+/// The other is the staging directory a streaming compaction writes to: a
+/// compaction writes its output before any manifest names it, so its segments
+/// must sit outside the listing a collector sweeps for unreferenced tables
+/// (format spec, "Compaction"). Publication moves no bytes, so the manifest
+/// that swaps a compaction's output in names the staged keys. The segment is
+/// an ordinary one either way — same encoding, same descriptor — and the
+/// table id still makes the key its producer's alone.
+pub(super) fn ensure_segment_object_key(
+    descriptor: &MetadataFileRef,
+) -> Result<(), ManifestLoadError> {
+    let expected = metadata_file_object_key(descriptor);
+    let staged = metadata_compaction_staging_table(
+        descriptor.owner_namespace_id.as_str(),
+        descriptor.table_id.as_str(),
+    );
+    if descriptor.object_key == expected || descriptor.object_key == staged {
+        return Ok(());
+    }
+    Err(ManifestLoadError::SegmentObjectKeyMismatch {
+        object_key: descriptor.object_key.clone(),
+        expected,
+    })
 }
