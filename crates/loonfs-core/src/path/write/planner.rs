@@ -30,17 +30,11 @@ pub(crate) struct PlannedCommit {
     pub(crate) resulting_next_inode_id: InodeId,
 }
 
-/// The semantic identity of one mutation request.
+/// Computes the semantic fingerprint of a mutation request.
 ///
-/// The fingerprint itself is `loonfs-api`'s: the crate that owns the one
-/// operation language owns its identity function, because the HTTP client
-/// has to compute the same value to reconcile a reused-id conflict and does
-/// not depend on this crate. All this adds is core's vocabulary — the
-/// request shape on the way in, `CommitFingerprint` and `CoreError` on the
-/// way out.
-///
-/// The commit id is not an input. It is the key the mutation is filed
-/// under; the fingerprint is what was filed.
+/// `loonfs-api` owns the fingerprint algorithm so clients and the core use
+/// the same definition. The commit ID is excluded: it identifies the request
+/// record, while the fingerprint identifies the requested mutation.
 pub(crate) fn commit_fingerprint(
     namespace_id: &NamespaceId,
     request: &CommitRequest,
@@ -54,20 +48,16 @@ pub(crate) fn commit_fingerprint(
     .map_err(|err| CoreError::Internal(format!("failed to fingerprint mutation: {err}")))
 }
 
-/// Compiles one mutation request into the operations of a single commit.
+/// Compiles a mutation request into one ordered commit plan.
 ///
-/// Operations resolve in order. Operation `k` reads a metadata view that
-/// already carries what operations `0..k` would persist, so a request can
-/// create a directory and write into it, or delete a path and recreate it.
-/// Those effects are computed by the same op validation the commit plan
-/// performs, so resolution and validation cannot disagree about them.
+/// Each operation sees the effects of all earlier operations in the same
+/// request. This allows sequences such as creating a directory and then
+/// writing into it.
 ///
-/// The first operation that fails aborts the whole request, and its error
-/// names the operation's position. Naming the position is why a batch
-/// validates each operation here as well as in the commit plan: the plan
-/// validates the whole operation list at once and has no request-level
-/// position to report. A one-operation request skips the extra pass — it has
-/// one place to fail, and the plan is the only validation it needs.
+/// The first failure aborts the request. Multi-operation requests validate
+/// each operation here so the returned error can include its operation
+/// index. Single-operation requests rely on the final commit-plan
+/// validation.
 pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
     request: &CommitRequest,
     head: &HeadState,
@@ -205,12 +195,11 @@ fn attribute(error: CoreError, index: usize, operation_count: usize) -> CoreErro
     error.at_operation(index)
 }
 
-/// Hands out the inode ids the commit plan will allocate for `ops`, in
-/// operation order, and advances the running counter.
+/// Allocates inode IDs for `ops` in operation order and advances the shared
+/// counter.
 ///
-/// One counter serves the whole request: it is what the planner predicts
-/// parent ids from and what the commit plan re-derives, so the two cannot
-/// number the same creation differently.
+/// The planner and final commit plan use the same ordering so they assign
+/// identical IDs to every created inode.
 fn allocate_inode_ids(ops: &[PlannedOp], next_inode_id: &mut InodeId) -> Result<Vec<InodeId>> {
     let mut allocated = Vec::new();
     for planned in ops {
@@ -227,11 +216,11 @@ fn allocate_inode_ids(ops: &[PlannedOp], next_inode_id: &mut InodeId) -> Result<
     Ok(allocated)
 }
 
-/// Every parent an operation names is either an inode that existed before
-/// this request or one the request has already allocated, so no parent id can
-/// be at or past the running counter. A violation would mean the planner
-/// predicted an id the commit plan never hands out, and the operation would
-/// be parented under nothing.
+/// Verifies that every planned parent inode already exists or was allocated
+/// earlier in this request.
+///
+/// A parent ID at or after `next_inode_id` means the planner referenced an
+/// inode that the commit plan will not create.
 fn debug_assert_parents_are_allocated(ops: &[PlannedOp], next_inode_id: InodeId) {
     debug_assert!(
         ops.iter().all(|planned| {

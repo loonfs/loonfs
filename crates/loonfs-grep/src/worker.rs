@@ -1,14 +1,10 @@
-//! Explicit grep building, checkpointed backfill, reorganization, and
+//! Explicit grep-index backfill, incremental building, reorganization, and
 //! garbage collection.
 //!
-//! Reorganization is the same idea as the runtime's own metadata
-//! reorganization and uses the same word: a bounded step merges older runs
-//! into a newer one and publishes the result. The grep index carries one
-//! more level than the metadata store — delta, mid, base, against the
-//! metadata store's delta and base — because a gram posting list fans out
-//! far wider than a metadata row: every indexed file contributes to many
-//! gram keys, so merging deltas straight into the base would rewrite most
-//! of the base on every step. The mid level absorbs that churn.
+//! Reorganization publishes bounded merges like metadata reorganization.
+//! Grep uses delta, mid, and base levels because each file contributes to
+//! many gram posting lists. The mid level absorbs frequent delta merges
+//! without rewriting most of the base on every step.
 
 use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
 use crate::codec::{
@@ -49,23 +45,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
-/// User-checkpoint lifetime used by one backfill attempt.
+/// Lifetime of the checkpoint used by one grep backfill attempt.
 ///
-/// A backfill that outlives it needs no rescue and no extension: the pin
-/// keeps serving until a garbage-collection pass releases it, and the
-/// release is what the enumeration reports, at which point the worker
-/// rebootstraps onto a fresh checkpoint and a reset cursor. Nothing here
-/// refreshes a pin — an attempt this long has lost its race with the
-/// retention floor anyway, and starting over is the cheaper answer.
+/// If the checkpoint expires before backfill finishes, garbage collection
+/// eventually releases it and the worker restarts from a fresh checkpoint.
+/// The worker does not extend an old pin.
 pub const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// Unreferenced grep objects receive one hour of unconditional protection
-/// before grep-owned garbage collection may delete them.
+/// Grace period before grep garbage collection may delete an unreferenced
+/// object.
 ///
-/// The window has to outlast the longest publication that could still be
-/// holding an object it has not yet made reachable. Grep's publications are
-/// bounded by the same [`METADATA_PUBLICATION_BUDGET_MS`] the runtime's own
-/// are, so the runtime's derived floor is the bound grep must clear too.
+/// The period must exceed the maximum publication window so an in-progress
+/// root update cannot lose an object it has written but not yet referenced.
 pub const GREP_GC_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
 
 // The floor is derived from publication budgets and provider bounds rather
@@ -214,17 +205,12 @@ pub struct GrepGcReport {
     pub next_cursor: Option<String>,
 }
 
-/// Namespace-independent writer for the grep-owned durable keyspace.
+/// Bounded writer for grep-owned durable state.
 ///
-/// Calls are explicit and bounded. Whatever schedules them decides when to
-/// call them without changing the durable protocol.
-///
-/// The worker writes only grep's own keyspace, through `store`. Everything
-/// it needs from the filesystem it takes from the two runtime handles it
-/// borrows: reads through the reader, and the backfill checkpoint's
-/// creation and release through the admin handle — so the checkpoints grep
-/// pins are recorded under that handle's actor identity, like any other
-/// operator-created pin.
+/// The worker writes only grep keys. It reads namespace state through
+/// `FsReader` and creates or releases backfill checkpoints through `FsAdmin`,
+/// preserving the admin handle's actor identity. Scheduling is external to
+/// this type.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,

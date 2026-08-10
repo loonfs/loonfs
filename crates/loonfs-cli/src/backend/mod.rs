@@ -1,18 +1,10 @@
-//! The backend seam: one logical LoonFS API over two transports.
+//! Unified CLI operations for embedded and remote profiles.
 //!
-//! [`ResolvedTarget`] is what every CLI command programs against. A resolved
-//! profile decides which arm answers — [`EmbeddedBackend`] drives an
-//! in-process `loonfs` runtime, the remote arm drives a `loonfs-client` over
-//! HTTP — and the commands above this seam cannot tell which they got.
-//!
-//! The seam is private to this crate on purpose. It exists so `loonfs` can run
-//! its features against either transport, not as an extension point: an
-//! application embedding LoonFS programs against `loonfs` (runtime) or
-//! `loonfs-client` (HTTP) directly, and neither needs a seam between.
-//!
-//! The methods are async so the CLI drives both transports from its own
-//! runtime. [`loonfs_client::Client`] is itself async, so the remote arms are
-//! direct calls that map the client's error type onto [`BackendError`].
+//! Commands call [`ResolvedTarget`] without depending on the selected
+//! transport. Embedded profiles use the in-process `loonfs` runtime; remote
+//! profiles use `loonfs-client` over HTTP. This private abstraction is for
+//! CLI parity, not application extension. All methods are async and normalize
+//! transport errors as [`BackendError`].
 
 mod embedded;
 
@@ -55,13 +47,10 @@ use loonfs::{
 /// budgets, not by how fast it polls.
 const REMOTE_STATUS_POLL_INTERVAL_MS: u64 = 250;
 
-/// What a caller will spend driving bounded steps toward something.
+/// Optional step-count and elapsed-time limits for iterative commands.
 ///
-/// What one step is depends on what is being driven: one bounded index step
-/// where an embedded profile waits for the index, one status check where a
-/// remote one does, one bounded maintenance step where `admin run` drains an
-/// assignment. The accounting is the same in every case, and both bounds are
-/// optional — an unbudgeted caller runs until the work settles.
+/// A step may be an index update, a remote status check, or a maintenance
+/// operation. Commands without either limit continue until the work settles.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StepBudget {
     pub max_steps: Option<u64>,
@@ -77,12 +66,11 @@ impl StepBudget {
     }
 }
 
-/// One file's content, in the pieces the transport that opened it delivers.
+/// File content returned by either CLI transport.
 ///
-/// The arms exist because the transports genuinely differ, not because the
-/// commands above want to know which they got: all are consumed by the
-/// same [`FileDownload::next_chunk`] loop, so a download is written to disk
-/// or to standard output the same way whichever profile served it.
+/// Embedded and remote profiles expose different stream types, while small
+/// reads may already be buffered. [`FileDownload::next_chunk`] gives command
+/// code one common iteration model.
 pub(crate) enum FileDownload {
     /// The embedded runtime's bounded stream. Boxed because a stream carries
     /// its object key, reference, and running digest, and the whole arm is a
@@ -103,12 +91,11 @@ pub(crate) enum FileDownload {
 }
 
 impl FileDownload {
-    /// The next piece of the file, or `None` at a verified end.
+    /// Returns the next chunk, or `None` after full verification.
     ///
-    /// A streamed download verifies size and digest on the call that reports
-    /// the end, so a caller that drives this to `None` has verified content
-    /// and a caller that stops early does not. Held bytes were verified
-    /// before they were handed over and answer in one piece.
+    /// Streamed downloads verify length and checksum when the final call reaches
+    /// the end. Stopping early does not complete verification. Buffered bytes
+    /// were verified before this method receives them.
     pub(crate) async fn next_chunk(&mut self) -> Result<Option<Bytes>, BackendError> {
         match self {
             Self::Streamed {
@@ -211,13 +198,11 @@ impl MaintenanceDrainProgress {
     }
 }
 
-/// Refuses a maintenance host to a profile that has no runtime to host it
-/// in. Remote profiles are served by a server that runs its own runner;
-/// stepping one from here would be a second scheduler over the same
-/// namespaces, and there is no remote step to drive anyway.
-/// Refuses upload-session bookkeeping to a profile that has no sessions.
-/// An embedded profile stages content through its own runtime, so there is
-/// no session to ask after and nothing an interrupted upload could rejoin.
+/// Errors used when a command requires the other profile type.
+///
+/// Remote profiles cannot host local maintenance because the server already
+/// schedules it. Embedded profiles do not expose upload sessions because
+/// they stage content directly in-process.
 fn upload_sessions_need_a_remote_profile() -> BackendError {
     BackendError::new(
         loonfs_api::ErrorCode::NotSupported.as_str(),
@@ -255,15 +240,11 @@ async fn rest_between_status_checks() {
     .await;
 }
 
-/// One logical LoonFS API over two transports.
+/// Implements the same CLI operation set for embedded and remote targets.
 ///
-/// Every method below is an exhaustive `match self` with no catch-all arm,
-/// and that exhaustiveness *is* the parity statement this seam used to make
-/// with a trait and two named implementations: neither transport can quietly
-/// go missing from a method, and both must report the same registry error
-/// code for the same failure, so a command renders identical outcomes
-/// regardless of which transport a profile selects (this crate's two-mode
-/// parity tests hold that line).
+/// Each method exhaustively matches both variants, so adding an operation or
+/// target requires handling both transports. Both paths normalize failures to
+/// the same error-code registry, which keeps command output consistent.
 impl ResolvedTarget {
     /// Creates a new empty namespace.
     pub(crate) async fn create_namespace(

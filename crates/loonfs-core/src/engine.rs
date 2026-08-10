@@ -37,23 +37,18 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use thiserror::Error;
 
-/// The pinned inputs the runtime resolves once per read: the head anchored
-/// to its manifest, the shared caches, and (when the runtime has it) the
-/// namespace's immutable catalog pair.
+/// Read context pinned by the runtime for one request. It contains the head,
+/// metadata basis, and shared caches needed to serve every read from the same
+/// namespace snapshot.
 ///
-/// This is the runtime seam: the `loonfs` crate pins one context per
-/// request and fans every read of that request through it, so the whole
-/// request observes a single snapshot and shares the caches. It is a
-/// sanctioned public hook (STYLE, "Harness hooks are sanctioned"), not an
-/// application API — embedded applications use the `loonfs` handles, which
-/// drive this seam internally.
+/// This type supports the `loonfs` runtime. Applications should use the
+/// higher-level `loonfs` reader handles instead.
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
     pub head: HeadState,
     pub head_etag: String,
-    /// The materialized basis the head authorized when the anchor was
-    /// taken. It carries the namespace's own root when it has one, and the
-    /// genesis or fork basis until then.
+    /// Metadata basis referenced by the pinned head. This is the namespace's own
+    /// root after one is published, or its genesis or fork basis before then.
     pub basis: MetadataBasis,
     pub table_cache: Arc<MetadataTableCache>,
     pub tail_cache: Arc<WalTailProjectionCache>,
@@ -84,11 +79,10 @@ pub struct BeginDirectPutUploadTargetResponse {
     pub target: DirectPutUploadTarget,
 }
 
-/// Internal target used by server integrations before they mint part URLs.
+/// Internal multipart target used by the server before signing part URLs.
 ///
-/// There is no content ref: a multipart session is opened before anything
-/// is known about the payload, so identity exists but the reference that
-/// describes it does not yet.
+/// The session has an object identity but no content reference yet because
+/// the payload size and checksum are supplied at completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectMultipartUploadTarget {
     pub object_key: String,
@@ -228,9 +222,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Deletes this namespace: a fenced, terminal head-state transition.
-    /// Commits acknowledged before the swap stay committed; everything that
-    /// observes the deleted head afterward fails with `namespace_deleted`.
+    /// Deletes the namespace by atomically changing its head to the terminal
+    /// deleted state. Earlier committed changes remain durable, and later
+    /// operations return `namespace_deleted`.
     pub async fn delete_namespace(
         &self,
         options: DeleteNamespaceOptions,
@@ -281,25 +275,15 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    /// Opens a bounded streaming read of a file's current content against the
-    /// pinned runtime read context.
+    /// Opens a chunked stream for the file resolved from the pinned read context.
     ///
-    /// The path resolves exactly as it does for [`Self::read_file`]; what
-    /// differs is everything after. The content arrives as `chunk_bytes`
-    /// ranged reads with the verifying digest folded over them, so what the
-    /// read costs in memory is one chunk rather than the file's size, and the
-    /// deployment's buffered-read cap deliberately does not apply — that cap
-    /// bounds what a caller materializes, and this caller materializes a
-    /// chunk.
+    /// The stream fetches `chunk_bytes` at a time, so memory use is bounded by one
+    /// chunk and the buffered-read size limit does not apply. The resolved content
+    /// object is immutable, so later commits cannot change the bytes being read.
     ///
-    /// The pinned context resolves the path; it does not have to survive the
-    /// read. The reference names one immutable object at a random id, so no
-    /// commit landing mid-read can change the bytes under a reader.
-    ///
-    /// `start_offset` skips bytes the caller already holds; the stream still
-    /// verifies the whole object, so those bytes reach it through
-    /// [`FileContentStream::fold_resumed_prefix`] before it fetches
-    /// anything.
+    /// When `start_offset` is nonzero, the caller must pass the skipped prefix to
+    /// [`FileContentStream::fold_resumed_prefix`] before fetching more data. This
+    /// allows the stream to verify the checksum of the complete object.
     pub async fn read_file_stream(
         &self,
         path: impl AsRef<str>,
@@ -329,13 +313,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await?)
     }
 
-    /// Resolves a path to the content object a direct read would fetch,
-    /// against the pinned runtime read context.
-    ///
-    /// This reads metadata only. It is the read-side counterpart of
-    /// [`Self::begin_direct_put_upload_target`]: both hand a host the one
-    /// object key it needs in order to sign a transfer, and neither moves
-    /// a byte.
+    /// Resolves a file to the object key needed for a direct download. This
+    /// reads metadata only and does not transfer content bytes.
     pub async fn direct_download_target(
         &self,
         path: impl AsRef<str>,
@@ -368,15 +347,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         view.list_trash_page(request).await
     }
 
-    /// Reads one page of the files visible in the state `checkpoint_id`
-    /// pins, in ascending inode-id order.
+    /// Lists files from the manifest pinned by `checkpoint_id`, ordered by inode
+    /// ID.
     ///
-    /// The checkpoint's pinned manifest is the only state enumerated: the
-    /// context's own basis and WAL tail are deliberately not read, so a
-    /// commit landing while a consumer pages through changes nothing it
-    /// sees. Everything after the pinned sequence is the change feed's job.
-    /// The context supplies the namespace's immutable identity and proves
-    /// the namespace is still live.
+    /// The method ignores the current metadata basis and WAL tail, so every page
+    /// comes from the same checkpoint snapshot even when new commits arrive. The
+    /// read context is used only to validate the namespace identity and confirm
+    /// that it has not been deleted.
     pub async fn list_checkpoint_files_page(
         &self,
         checkpoint_id: &CheckpointId,
@@ -395,16 +372,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Answers, for each inode id, what it looks like in the namespace's
-    /// current state: whether it is visible, its current revision, and its
-    /// current path.
+    /// Resolves the current visibility, revision, and path for each inode ID.
     ///
-    /// One pinned read serves the whole batch, so every answer describes the
-    /// same state, and answers come back in input order. Ids that name
-    /// nothing are answered as not visible rather than refused — a consumer
-    /// holding ids from an earlier enumeration routinely holds stale ones.
-    /// At most [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES)
-    /// ids per call; a larger batch is refused before anything is read.
+    /// All results use the same pinned snapshot and preserve input order. Missing
+    /// inode IDs are returned as not visible because callers may hold IDs from an
+    /// older listing. Requests above
+    /// [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES) fail before
+    /// reading metadata.
     pub async fn resolve_current_files(
         &self,
         inode_ids: &[InodeId],
@@ -415,14 +389,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::path::read::resolve_current_files(&view, inode_ids).await
     }
 
-    /// Reads one immutable content object by reference.
+    /// Reads and verifies one immutable content object.
     ///
-    /// `max_bytes` is the caller's own budget for this read, checked against
-    /// the reference's declared size before any fetch; it is independent of
-    /// any deployment-wide download limit, so a consumer sizes its own
-    /// buffers. After the fetch the bytes are verified against the
-    /// reference's size and digest, and a mismatch fails the read — there is
-    /// no partial answer and no second attempt against another key.
+    /// `max_bytes` is checked against the declared size before the fetch and is
+    /// independent of deployment-wide download limits. The method returns an
+    /// error if the fetched size or checksum does not match the reference.
     pub async fn read_content_ref(
         &self,
         content_ref: &ContentRef,
@@ -440,11 +411,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         Ok(read.bytes)
     }
 
-    /// The namespace's immutable identity, read off the pinned head after
-    /// refusing a head that is not this namespace's or that is a tombstone.
+    /// Returns the namespace catalog derived from the pinned head after checking
+    /// that the head belongs to this namespace and is not deleted.
     ///
-    /// Reads that load a metadata view get both checks from the view load;
-    /// this is for the reads that deliberately do not load one.
+    /// Use this for read paths that do not load a full metadata view.
     fn live_catalog(&self, context: &RuntimeReadContext) -> Result<VerifiedNamespaceCatalogEntry> {
         if context.head.namespace_id != self.namespace_id {
             return Err(crate::error::CoreError::NamespaceCorrupt(format!(
@@ -570,10 +540,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Mints a direct_multipart upload target: a fresh content identity, the
-    /// provider upload that assembles it, and the part geometry the client
-    /// cuts its payload to. What the payload turns out to be is claimed at
-    /// completion.
+    /// Creates a direct multipart upload target with a new object identity,
+    /// provider upload ID, and required part size. The final size and checksum are
+    /// supplied when the upload is completed.
     pub async fn begin_direct_multipart_upload_target(
         &self,
         options: DirectMultipartUploadOptions,
@@ -587,8 +556,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Resolves one wave of parts for signing against the session that owns
-    /// them. Nothing durable is written: parts are the client's bookkeeping.
+    /// Validates a group of multipart parts and returns the information needed
+    /// to sign their upload URLs. This method does not write durable state.
     pub async fn direct_multipart_part_targets(
         &self,
         upload_id: &UploadId,
@@ -686,19 +655,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Stages bytes this process holds as content a session owns, ready to
-    /// publish here.
+    /// Stores in-process bytes as prepared content and completes the associated
+    /// upload session.
     ///
-    /// This is the whole upload lifecycle for the caller that is also the
-    /// uploader: a session opens, the bytes land under the identity it
-    /// allocated, and the session completes — with no wire step between them
-    /// and no receipt at the end, because the publication happens in this
-    /// process and takes the reference directly. What it does not skip is
-    /// the session record, which is what content garbage collection reads to
-    /// decide an object's fate; without one the bytes would be reachable by
-    /// nothing and reclaimable by nothing.
-    ///
-    /// Two small control writes on top of the content write, in that order.
+    /// This combines session creation, content upload, and completion without a
+    /// network round trip or receipt. It still writes the upload-session record
+    /// required by garbage collection. The content write is followed by two
+    /// small control-object writes.
     pub async fn stage_owned_bytes(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
@@ -732,12 +695,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Refuses a catalog resolved for some other namespace.
-    ///
-    /// A mismatch is the host's wiring mistake rather than anything a request
-    /// did, so naming the two namespaces says more than naming what was being
-    /// written would — and a multipart completion has no content id to name
-    /// anyway.
+    /// Verifies that a runtime-supplied catalog belongs to this engine's
+    /// namespace. A mismatch indicates an internal integration error.
     fn own_catalog<'c>(
         &self,
         catalog: &'c VerifiedNamespaceCatalogEntry,
@@ -772,8 +731,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Reads one upload session, minting a fresh receipt when it is
-    /// completed so a lost commit response never costs a retransfer.
+    /// Reads an upload session. For a completed upload, it also creates a new
+    /// receipt so the caller can retry publication without uploading the content
+    /// again.
     pub async fn read_upload_status(
         &self,
         upload_id: &UploadId,
@@ -793,14 +753,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Creates or reuses a named checkpoint pinning the current namespace
-    /// head for the calling user.
+    /// Creates or reuses a named checkpoint for the current namespace head.
     ///
-    /// A checkpoint pins a manifest version for retention/provenance. If the
-    /// current head has no manifest yet, this first publishes one for the
-    /// current durable namespace state; it is not a request to compact
-    /// metadata. `ttl_ms` computes the record's expiry from the engine's
-    /// clock; absent means the pin holds until explicitly released.
+    /// The checkpoint pins a manifest for retention and provenance. If the head
+    /// has no manifest, the method first publishes one without compacting
+    /// metadata. `ttl_ms` sets an expiration time; `None` keeps the checkpoint
+    /// until it is released.
     pub async fn create_checkpoint(
         &self,
         name: String,
@@ -818,11 +776,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Lists every active checkpoint record on the namespace, oldest first.
+    /// Lists active checkpoint records from oldest to newest.
     ///
-    /// A read: nothing here releases, expires, or reaps a record. A record
-    /// whose expiry has passed but which no collection pass has released is
-    /// still active and is still listed, with that expiry in the answer.
+    /// This method does not release expired records. A record remains active and
+    /// appears in the result until garbage collection processes it.
     pub async fn list_checkpoints(&self) -> Result<ListCheckpointsResponse> {
         crate::checkpoint::list_checkpoints(&self.store, &self.namespace_id).await
     }
@@ -857,21 +814,21 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    /// Runs at most one metadata reorganization unit: folds one family
-    /// group's L0 delta rows into new base segments and publishes a manifest
-    /// swapping that group's references. Checkpoints only append L0 runs, so
-    /// calling this from maintenance is what keeps read fan-out bounded.
-    /// Repeat until the report says `NotNeeded`; every call re-reads durable
-    /// state, so interrupted reorganizations resume from the live manifest.
+    /// Performs at most one metadata reorganization step for one row family.
+    /// It merges L0 delta rows into new base segments and publishes a manifest
+    /// that replaces the old references.
+    ///
+    /// Run this repeatedly until it returns `NotNeeded`. Each call reloads durable
+    /// state, so work can resume safely after interruption.
     ///
     /// A group whose oldest run no longer fits one unit is reported as
-    /// [`MetadataReorganizeOutcome::CompactionPlanned`] instead. The caller
-    /// runs that plan with [`Self::run_metadata_compaction`] as a background
-    /// job and hands its spec back here in `compactions` for as long as the
-    /// job runs, so no unit merges the group underneath it. `compactions`
-    /// also carries how long each group has been merging deltas over a base
-    /// no window can reach, which is what decides when the planner stops
-    /// taking that merge and starts the job.
+    /// [`crate::checkpoint::MetadataReorganizeOutcome::CompactionPlanned`]
+    /// instead. The caller runs that plan with
+    /// [`Self::run_metadata_compaction`] as a background job and includes its
+    /// specification in `compactions` while the job runs. This prevents a
+    /// bounded step from merging the same group concurrently. `compactions`
+    /// also records how many delta merges have run above an oversized base so
+    /// the planner knows when to request the full compaction.
     pub async fn reorganize_metadata(
         &self,
         compactions: crate::checkpoint::MetadataCompactionView<'_>,
@@ -921,12 +878,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// The identity every mutation publishes under.
-    ///
-    /// A read-only engine has none, so this fails instead of inventing one.
-    /// Nothing routes that error: the runtime hands read-only engines only to
-    /// read paths, and this exists so a wiring mistake fails honestly rather
-    /// than publishing under a fabricated writer.
+    /// Builds the mutation context for this engine. Read-only engines return an
+    /// internal error because they have no writer identity.
     fn mutation_context(&self) -> Result<MutationContext> {
         let writer = self.writer.as_ref().ok_or_else(|| {
             crate::error::CoreError::Internal(

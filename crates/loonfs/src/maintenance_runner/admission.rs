@@ -1,12 +1,8 @@
-//! Admission state: which `{job, namespace}` keys may run, which are
-//! running, where each one's job stopped, and when a parked key becomes
-//! eligible again.
+//! Synchronous scheduling state for maintenance jobs.
 //!
-//! Everything here is synchronous and guarded by the runner's one lock, so
-//! every scheduling decision — singleflight, coalescing, fairness, backoff,
-//! timed obligations, continuations, shutdown — can be reasoned about and
-//! tested without a runtime. The async half (permits held across a step,
-//! spawning, timers) lives in the parent module.
+//! The runner's lock protects admission, coalescing, fairness, backoff,
+//! deadlines, continuations, and shutdown. The parent module handles async
+//! execution, permits, and timers.
 
 use super::{MaintenanceClock, MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepResult};
 use crate::NamespaceId;
@@ -18,15 +14,11 @@ use std::sync::Arc;
 ///
 /// Small on purpose: one flaky call should come back quickly.
 const ERROR_BACKOFF_BASE_MS: u64 = 10;
-/// Ceiling the per-key error backoff window doubles up to.
+/// Maximum per-key error backoff window.
 ///
-/// A minute, because this backoff is fleet-wide: it governs every key this
-/// process has admitted. A cap sized for one namespace's indexer, where
-/// retrying every second costs nothing, turns a provider outage into every
-/// namespace retrying every second for as long as the outage lasts — a
-/// second outage stacked on the first. A minute is small enough that
-/// recovery is picked up within one reconciliation interval and large
-/// enough that a long outage costs a trickle.
+/// A one-minute cap prevents all admitted namespaces from retrying rapidly
+/// during a provider outage while still detecting recovery within one
+/// reconciliation interval.
 const ERROR_BACKOFF_CAP_MS: u64 = 60_000;
 
 /// One admitted unit of maintenance: a registered job, and the namespace it
@@ -49,11 +41,10 @@ impl MaintenanceKey {
     }
 }
 
-/// One claimed step, and everything running it needs.
+/// A claimed maintenance step and the scheduling data needed to run it.
 ///
-/// Taken under the lock that claimed it, so the runner never reads a
-/// dispatched step's state back out of the book — by the time it looked, the
-/// key could be queued again for its next run.
+/// This value is captured while holding the admission lock. The executor
+/// does not read the key's mutable scheduling state again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaintenanceDispatch {
     /// The key this permit is running.
@@ -107,8 +98,10 @@ impl ReadyRun {
         }
     }
 
-    /// Two requests for one key buy one run: the older ticket keeps its
-    /// place in line and its wait, and a gate on either still has to pass.
+    /// Coalesces two requests for the same key.
+    ///
+    /// The older ticket and queue time are preserved. The result also preserves
+    /// the later eligibility time, so a new request cannot bypass backoff.
     fn coalesced(self, other: Self) -> Self {
         Self {
             ticket: self.ticket.min(other.ticket),
@@ -138,15 +131,12 @@ enum KeyRunState {
     Running { rerun: Option<ReadyRun> },
 }
 
-/// The deadlines planted on one key.
+/// The earliest and latest outstanding deadlines for one key.
 ///
-/// Two times rather than one because the soonest is when to look and the
-/// latest is when the last thing asked for is definitely due, and a run
-/// consumes only the time it fired on. Every deadline in between is covered
-/// by the last: a pass that runs at the latest deadline reclaims everything
-/// whose own deadline has already passed, so re-arming on the latest loses
-/// nothing while keeping the state per key at two numbers instead of one per
-/// obligation.
+/// The earliest deadline determines the next wake. After it fires, the
+/// latest deadline is retained so later obligations are not lost. Intermediate
+/// deadlines need no separate storage because a run at the latest time covers
+/// all earlier obligations.
 #[derive(Debug, Clone, Copy)]
 struct TimedObligations {
     earliest_at_ms: u64,
@@ -168,8 +158,9 @@ impl TimedObligations {
         }
     }
 
-    /// What is still owed once the earliest deadline has fired at `now_ms`:
-    /// the latest, while it is still ahead, and nothing after that.
+    /// Re-arms the latest outstanding deadline after the earliest one fires.
+    ///
+    /// Returns `None` when all recorded deadlines have passed.
     fn re_armed(self, now_ms: u64) -> Option<Self> {
         (self.latest_at_ms > now_ms).then(|| Self::at(self.latest_at_ms))
     }
@@ -179,20 +170,17 @@ impl TimedObligations {
 #[derive(Debug, Default)]
 struct KeyState {
     run: KeyRunState,
-    /// Deadlines this key owes on its own, kept apart from `run` on purpose:
-    /// a key can be running right now because a publication nudged it and
-    /// still owe a lease deadline days out, so an unrelated run never
-    /// cancels an obligation.
+    /// Deadlines that remain active independently of the current run.
+    ///
+    /// A publication-triggered run must not cancel a later lease or grace-period
+    /// deadline.
     obligations: Option<TimedObligations>,
     /// Consecutive failed steps since the last conclusion, for the backoff.
     consecutive_failures: u32,
-    /// Where this key's job said its last step stopped, opaque here and
-    /// handed straight back to the next step.
+    /// Opaque continuation returned by the previous step.
     ///
-    /// It lives with the rest of the key's scheduling state so no job has
-    /// to keep a map of its own beside this one. Losing it costs a
-    /// restarted pass and nothing else: a step re-derives what it may do
-    /// from durable state whatever position it starts from.
+    /// Admission stores it and passes it to the next step. Losing it only
+    /// restarts the scan because each step revalidates durable state.
     continuation: Option<String>,
 }
 
@@ -393,12 +381,11 @@ impl Admission {
             .request_run(ticket, now_ms);
     }
 
-    /// Plants a timed obligation on the key: it becomes eligible on its own
-    /// once `at_ms` passes, even with nothing else asking for it.
+    /// Records a deadline that makes the key runnable at `at_ms`.
     ///
-    /// Merging keeps the soonest of the times asked for as the next wake,
-    /// and the latest as the point past which nothing is still owed. A time
-    /// already past is just a nudge.
+    /// Multiple deadlines retain the earliest next wake and the latest
+    /// outstanding obligation. A deadline that has already passed becomes an
+    /// immediate nudge.
     pub(crate) fn nudge_at(&mut self, key: MaintenanceKey, at_ms: u64, now_ms: u64) {
         if self.closed {
             return;
@@ -414,11 +401,10 @@ impl Admission {
         });
     }
 
-    /// Turns arrived obligations into ready keys, and re-arms a key whose
-    /// latest planted deadline is still ahead of the one that just fired.
+    /// Queues keys whose earliest deadline has arrived.
     ///
-    /// Reports how many keys arrived, which is what tells a timer wake a
-    /// deadline caused it from one an ordinary notify did.
+    /// If a key also has a later deadline, that deadline remains armed. Returns
+    /// the number of keys promoted.
     pub(crate) fn promote_due(&mut self, now_ms: u64) -> usize {
         if self.closed {
             return 0;
@@ -453,18 +439,13 @@ impl Admission {
         Some(dispatch)
     }
 
-    /// Ends one step and hands its permit to the next run, or releases the
-    /// permit when nothing is eligible.
+    /// Applies a step result and transfers its permit to the oldest eligible
+    /// queued run.
     ///
-    /// A request that arrived while the step ran is never lost and never
-    /// jumps the queue: it becomes an ordinary queued run with its own
-    /// ticket, and takes the permit only if it is the oldest eligible run
-    /// there is. Nothing else would bound it — a job that subscribes to
-    /// publications is renudged inside every step it runs, so a rerun that
-    /// kept the permit by finishing would let a couple of busy namespaces
-    /// hold every permit there is while a quiet key's collection never ran.
-    /// The outcome, the release, and the pick share one lock, so no request
-    /// is lost between freeing a permit and choosing its heir.
+    /// Requests received during the step keep their own tickets and do not jump
+    /// ahead. Applying the result and choosing the next run under one lock
+    /// prevents lost requests and keeps busy namespaces from monopolizing the
+    /// permit pool.
     pub(crate) fn finish(
         &mut self,
         key: &MaintenanceKey,
@@ -522,14 +503,10 @@ impl Admission {
         }
     }
 
-    /// The soonest wall-clock millisecond after `now_ms` at which a parked
-    /// key becomes eligible on its own, across obligations and backoffs.
+    /// Returns the next future deadline from obligations or backoff.
     ///
-    /// Deadlines already past are deliberately not reported: a key whose
-    /// backoff has expired is eligible now, and if it is not running it is
-    /// because the permit pool is full. Waking a timer for it would find
-    /// the pool still full and wake again immediately; the permit that
-    /// frees is what picks it up.
+    /// Expired deadlines are omitted because those keys are already eligible;
+    /// they will run when a permit becomes available.
     pub(crate) fn earliest_deadline_ms(&self, now_ms: u64) -> Option<u64> {
         self.keys
             .values()
@@ -683,13 +660,10 @@ impl Admission {
 
 /// How long a key waits after `consecutive_failures` failed steps.
 ///
-/// Full jitter over the exponential window: the delay is drawn uniformly
-/// from inside [`backoff_window_ms`] rather than being the window itself.
-/// Drawing is what keeps a provider outage from becoming a synchronized
-/// retry wave — keys that failed in the same millisecond come back spread
-/// across the window instead of together at the end of it — and it is the
-/// half of the policy that matters most at fleet scale, where the same
-/// error arrives for every admitted key at once.
+/// Draws a full-jitter delay from the exponential backoff window.
+///
+/// Randomizing each key's delay prevents a provider outage from producing a
+/// synchronized retry wave.
 fn backoff_delay_ms(consecutive_failures: u32, clock: &dyn MaintenanceClock) -> u64 {
     clock.jitter_below_ms(backoff_window_ms(consecutive_failures))
 }

@@ -55,25 +55,14 @@
 //! );
 //! ```
 
-// Sanctioned consumers of this crate's public surface, in full:
+// This crate has two supported consumers:
+// - `loonfs`, which wraps the core API with runtime caching and batching.
+// - `loonfs-core` integration tests, which inspect durable layout and replay.
 //
-// - **`loonfs`** — the embedded runtime, the only production consumer. It
-//   wraps everything below with caching, batching, and handles, and re-exports
-//   what applications need. Application code depends on `loonfs`, never on
-//   this crate.
-// - **`loonfs-core`'s own integration tests** (`tests/it`) — a white-box
-//   consumer that asserts on durable layout and replay directly. It is why
-//   `metadata` and parts of `commit` are public at all.
-//
-// Nothing else depends on this crate. `loonfs-grep` was extracted and reads
-// filesystem state through `loonfs`; `loonfs-sim`, `loonfs-model`, and
-// `loonfs-test-support` never depended on it; `loonfs-server` and `loonfs-cli`
-// reach the durable control plane through `loonfs::control`.
-//
-// The module list below is grouped by that intent: private modules are engine
-// internals, and each public one names why it is public.
+// Application code should depend on `loonfs`, not `loonfs-core`. Modules are
+// private unless one of these consumers needs them to be public.
 
-// --- engine internals: private, reachable only through the seams below ---
+// Internal engine modules. Public APIs below expose the supported entry points.
 mod checkpoint;
 mod commit_engine;
 mod context;
@@ -89,39 +78,34 @@ mod storage;
 mod timing;
 mod wal;
 
-// --- public seams ---
+// Public modules required by `loonfs` or this crate's integration tests.
 /// Commit planning, validation, and materialization. Consumed by the `loonfs`
 /// publisher and by this crate's commit-validation integration tests.
 pub mod commit;
-/// Content staging and preparation-token minting. Consumed by `loonfs`'s
-/// write path and its server-integration `content_tokens` seam.
+/// Content staging and preparation-token creation used by the `loonfs` write
+/// path and server integration code.
 pub mod content;
 /// Protocol and resource ceilings. Consumed by `loonfs` (re-exported to the
 /// server for request validation) and by layout tests.
 pub mod limits;
-/// Durable metadata state and its row codecs. Public for this crate's
-/// white-box integration tests, which compare projected state against the
-/// reference model; `loonfs` reaches metadata only through the seams above.
+/// Durable metadata state and row codecs. This module is public so
+/// integration tests can compare projected state with the reference model.
 pub mod metadata;
 /// Path parsing and current-state resolution. Consumed by `loonfs`'s write
 /// path (`parse_mutation_path`).
 pub mod path;
-/// Test doubles for this crate's public seams, behind the `test-support`
-/// feature. Consumed by the test targets of crates that implement or install
-/// those seams, and by this crate's own tests; no production build enables
-/// the feature. Doubles live here rather than in `loonfs-test-support`
-/// because that crate is a development dependency of this one and so cannot
-/// depend on these types.
+/// Test doubles for the public core APIs, available through the
+/// `test-support` feature. They remain in this crate because
+/// `loonfs-test-support` is a development dependency and cannot depend on
+/// these types without creating a dependency cycle.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-/// The wall-clock boundary durable timestamps are stamped at. Consumed by
-/// `loonfs`, whose mutation contexts and maintenance clock stamp from the
-/// same boundary this crate's own commits do.
+/// Wall-clock access used to assign durable timestamps. Both core commits
+/// and the `loonfs` runtime use this API so they share the same time source.
 pub mod time;
 
-/// Cache types and configuration for runtime read paths. Consumed by
-/// `loonfs`, which owns the runtime's cache configuration and stats, and
-/// which re-exports [`cache::Recency`] for the grep index's own block cache.
+/// Cache types and configuration used by runtime read paths. The `loonfs`
+/// runtime owns these caches and their statistics.
 pub mod cache {
     pub use crate::recency::Recency;
 
@@ -139,10 +123,8 @@ pub mod cache {
     };
 }
 
-/// Typed namespace control-object loaders and verified catalog state.
-/// Consumed by `loonfs`'s cache and write paths, and re-exported as
-/// `loonfs::control` for the white-box layout assertions the server and this
-/// crate's own tests make.
+/// Typed loaders for namespace control objects and verified catalog state.
+/// Used by `loonfs` read and write paths and by layout tests.
 pub mod control {
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
@@ -171,11 +153,9 @@ pub mod publish {
     pub use crate::storage::content_admission::PreparedContent;
 }
 
-// Crate-root re-exports. Every name below has a named consumer: `loonfs`
-// unless the comment says otherwise, or reachability through a public
-// signature where noted.
-// `MetadataReorganizeReport` has no caller that names it; it stays public
-// because it is the return type of `NamespaceEngine::reorganize_metadata`.
+// Crate-root re-exports used by `loonfs` or required by public return types.
+// `MetadataReorganizeReport` remains public because
+// `NamespaceEngine::reorganize_metadata` returns it.
 pub use checkpoint::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, FrozenBasePolicy,
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,

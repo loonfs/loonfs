@@ -1,14 +1,9 @@
-//! The two executors the runtime registers on every write-capable handle:
-//! metadata upkeep, and garbage collection.
+//! Runtime maintenance jobs for metadata upkeep and garbage collection.
 //!
-//! Both run the same operations an operator runs, through the same
-//! [`FsAdmin`] surface, rather than a private copy of them — and over the
-//! writer's own runtime, so their cache invalidations reach the writer's
-//! caches and publisher engines.
-//!
-//! Retention is deliberately not here. Advancing the floor surrenders
-//! replay history, which is a decision rather than upkeep, so it stays an
-//! explicit call with no scheduler behind it.
+//! Both jobs use the public [`FsAdmin`] operations on the writer's runtime,
+//! so they share the same behavior and cache invalidation paths as manual
+//! maintenance. Retention-floor advancement remains an explicit admin action
+//! because it discards replay history.
 
 use super::{
     BackgroundCompactions, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
@@ -45,17 +40,11 @@ pub(crate) fn register_core_jobs(
     Ok(())
 }
 
-/// Earliest instant a garbage-collection pass could reclaim an upload
-/// session opened now.
+/// Returns the earliest safe time to run garbage collection for a newly
+/// durable upload session.
 ///
-/// Derived from what the collector actually waits for: a session opens with
-/// [`UPLOAD_SESSION_LEASE_MS`] of lease, an expired session is only aborted
-/// once the pass's grace window has passed on top of that, and
-/// [`GC_SAFETY_MARGIN_MS`] covers the skew between the clock reading here
-/// and the one the pass will read. Taken after the session is durable, so
-/// the schedule can only land after the collector's own predicate, never
-/// before it — a pass that arrives early finds the session retained and
-/// parks with nothing left to bring it back.
+/// The deadline includes the upload lease, the collector's grace window, and
+/// a clock-skew safety margin.
 pub(crate) fn upload_session_reclaim_at_ms(session_durable_at_ms: u64) -> u64 {
     session_durable_at_ms
         .saturating_add(UPLOAD_SESSION_LEASE_MS)
@@ -71,13 +60,11 @@ pub(crate) fn completed_upload_reclaim_at_ms(completion_observed_at_ms: u64) -> 
         .saturating_add(GC_SAFETY_MARGIN_MS)
 }
 
-/// What an executor needs from the writer that owns it.
+/// Writer-owned state needed by one maintenance step.
 ///
-/// The writer's state is held weakly and upgraded for the length of one
-/// step: a scheduled step is the writer's own work and publishes under its
-/// identity, so it holds that identity while it runs and schedules nothing
-/// once the writer is gone. Holding it strongly instead would make the
-/// runner and the writer keep each other alive forever.
+/// The writer is held weakly to avoid a reference cycle. Each step upgrades
+/// it for the duration of the operation and stops scheduling when the writer
+/// has been dropped.
 struct StepContext {
     core: ReadCore,
     bits: Weak<WriterBits>,
@@ -180,15 +167,11 @@ impl MaintenanceJob for MetadataJob {
     }
 }
 
-/// Runs one bounded mark-and-sweep pass, resuming the enumeration the last
-/// pass stopped at.
+/// Runs one bounded garbage-collection pass.
 ///
-/// The enumeration cursor is the runner's, not this job's: it arrives as
-/// the step's `continuation` and leaves as the result's. That keeps one
-/// place holding what a key is waiting for, and it costs nothing here
-/// because the cursor was never authority — a resumed pass rebuilds the
-/// live set exactly as a fresh one does, so a cursor lost with the process
-/// costs re-enumeration and can never authorize a deletion.
+/// The runner stores the enumeration cursor and passes it back as the next
+/// continuation. A resumed pass rebuilds its live set from durable state, so
+/// losing the cursor only restarts enumeration and cannot authorize deletion.
 struct GcJob {
     context: StepContext,
 }
@@ -228,13 +211,9 @@ impl MaintenanceJob for GcJob {
                 ));
             }
             Err(error) if continuation.is_some() && error.code() == ErrorCode::InvalidRequest => {
-                // This plan selects collection and nothing else, and fixes
-                // every field of it but the cursor, so the cursor it was
-                // resumed with is the one thing the step can be asked to
-                // reject. Concluding without one hands the runner an empty
-                // continuation and takes the key again, which restarts
-                // enumeration — always sound, because every pass rebuilds
-                // its own safety proof from durable state.
+                // The cursor is the only caller-supplied field in this GC plan. If it is
+                // rejected, clear the continuation and restart enumeration. Each pass
+                // rebuilds its safety checks from durable state.
                 tracing::info!(
                     namespace_id = %namespace_id,
                     error = %error,
@@ -277,12 +256,12 @@ fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
     )
 }
 
-/// One upkeep pass's two outcomes, read as one conclusion.
+/// Combines WAL-flush and reorganization outcomes into one scheduling
+/// conclusion.
 ///
-/// Precedence runs progress, then races, then blocks: a step that flushed
-/// and then failed to fit a fold unit did move durable state and should run
-/// again; a step that only lost a race should take that race again; a step
-/// that only failed to fit has nothing to gain from an immediate retry.
+/// Progress takes precedence over a lost race, and a lost race takes
+/// precedence over a budget block. A step that changed durable state should
+/// run again even when its second operation was blocked.
 ///
 /// Starting a streaming compaction is progress of the useful kind: the step
 /// that started it did no folding, and the steps behind it now have the
@@ -341,39 +320,21 @@ fn gc_step_result(gc: GcResponse, submitted_cursor: Option<&str>) -> Maintenance
     MaintenanceStepResult {
         conclusion: gc_conclusion(&gc, submitted_cursor),
         continuation: gc.next_cursor,
-        // The pass itself is the source of truth for when it should be run
-        // again: it compared every retained candidate against its own
-        // clock, so it knows the soonest of those waits without being told.
-        // Handing it back here is what makes a pass self-scheduling —
-        // reclamation an upload path never planted a deadline for, and the
-        // deadlines a restart forgot, both come back through the next pass
-        // over the namespace rather than through a side channel.
+        // The pass reports the earliest future reclamation time it observed.
+        // Returning that deadline lets GC reschedule itself even when the original
+        // upload deadline was missed or lost during a restart.
         not_before_ms: gc.next_reclamation_at_ms,
     }
 }
 
-/// One collection pass, read as one conclusion.
+/// Converts one garbage-collection response into a scheduling conclusion.
 ///
-/// Progress is where the enumeration got to, never what the counters say. A
-/// pass that hands back a cursor past the one it was given walked keyspace
-/// and has more to walk, so it runs again. A pass that hands back the very
-/// cursor it started from decided nothing at all — its budget died in the
-/// marking or the content-reference scan, both of which every pass redoes
-/// before it may delete anything — and repeating it immediately would
-/// repeat that exact result forever, so it parks like any other
-/// zero-progress step and waits for something to change.
-///
-/// A pass that walked the whole keyspace is finished: idle when it freed
-/// nothing, eligible again when it did, because reclamation cascades — a
-/// deleted manifest can leave tables unreferenced. Ambiguous roots that
-/// suppressed deletion are the one clean-pass case with work provably left
-/// undone, so they park distinctly rather than reading as idle.
-///
-/// A pass with no cursor at all can still have run out: a namespace whose
-/// roots cost more than `max_objects` never gets as far as the keyspace,
-/// and says so outright. That parks too, and pointedly not as idle — idle
-/// clears the stored continuation, and this pass freed nothing and walked
-/// nowhere.
+/// A changed cursor means enumeration advanced and should continue. An
+/// unchanged cursor means the pass exhausted its budget before making
+/// progress and should park. A completed pass runs again only when it
+/// reclaimed something, because one deletion can expose more garbage.
+/// Budget exhaustion or degraded retention without progress is reported as
+/// blocked rather than idle.
 fn gc_conclusion(gc: &GcResponse, submitted_cursor: Option<&str>) -> MaintenanceStepConclusion {
     match gc.next_cursor.as_deref() {
         Some(next_cursor) if Some(next_cursor) == submitted_cursor => {
@@ -632,9 +593,8 @@ mod tests {
         );
     }
 
-    /// The cursor is the runner's now: it arrives as the step's
-    /// continuation and leaves as the result's, with no map on this job's
-    /// side of the seam.
+    /// The runner owns the cursor. The step receives it as its continuation
+    /// and returns it in the result without storing a job-local copy.
     #[test]
     fn a_collection_pass_hands_its_cursor_back_to_the_runner() {
         let mut walked = GcResponse::empty(namespace_id("demo"));

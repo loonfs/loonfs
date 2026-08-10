@@ -1,5 +1,6 @@
-//! The embedded arm of the CLI's backend seam: an in-process `loonfs`
-//! runtime behind the same method set the remote arm answers.
+//! Embedded CLI backend implemented by an in-process `loonfs` runtime.
+//!
+//! It implements the same operations as the remote backend.
 
 use crate::backend_error::{
     map_namespace_scoped_grep_error, map_namespace_scoped_runtime_error, map_runtime_error,

@@ -1,19 +1,13 @@
-//! Durable upload sessions: begin, stage, complete, and abort content
-//! uploads, including direct-put targets that move bytes past the server.
+//! Durable upload sessions for starting, staging, completing, and aborting
+//! content uploads, including direct-to-provider transfers.
 //!
-//! A session is `open`, then `completed` or `aborted`, and both of those are
-//! final. The compare-and-swap that lands one of them is the serialization
-//! point for the whole upload: provider state is cleaned strictly after the
-//! durable transition, never before it, so whichever transition wins is what
-//! happened and the loser reports a terminal error instead of undoing
-//! anything.
+//! A session starts open and ends as either completed or aborted. The
+//! compare-and-swap that records a terminal state determines the result.
+//! Provider cleanup runs only after that durable transition.
 //!
-//! Every content object in a namespace is written through a session, whether
-//! its bytes came from a remote peer or from the process doing the
-//! publishing (see [`stage_owned_bytes`]). That is what makes content
-//! collectable: the session record is the only thing that names an object
-//! before metadata does, so an object with no record would be reachable by
-//! nothing and reclaimable by nothing.
+//! Every content object is created through a session. Before metadata
+//! references the object, the session record gives garbage collection a
+//! durable owner and lifecycle state.
 
 use crate::context::MutationContext;
 use crate::control_update::{
@@ -97,13 +91,11 @@ fn upload_mode_name(mode: UploadMode) -> &'static str {
     }
 }
 
-/// Mints the content identity a direct upload will write to, and the
-/// reference that names it.
+/// Creates the object identity and content reference for a direct upload.
 ///
-/// The client declares only what it can know — how many bytes and what they
-/// hash to. Identity is the server's, so a caller can never aim a presigned
-/// write at an object it chose. The reference returned here is the one the
-/// signed write, the completion check, and the later commit all name.
+/// The client supplies the expected size and checksum. The server chooses
+/// the object identity, and the same reference is used for signing,
+/// completion verification, and publication.
 pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -132,20 +124,12 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Mints the content identity a direct multipart upload will assemble into,
-/// and opens the provider upload that will assemble it.
+/// Creates a multipart upload session and the corresponding provider upload.
 ///
-/// Nothing is claimed here. The session is opened for a payload whose
-/// length and digest the client may not know yet — reading from a pipe, or
-/// simply unwilling to read a large file twice — so all that is settled is
-/// the geometry. What the object turns out to be is claimed at completion,
-/// which is where it was always verified.
-///
-/// The provider upload is created before the session record, so the record
-/// is complete from birth and every later step — signing a part, completing,
-/// cleaning up — reads one durable object that already knows everything. A
-/// session record that fails to land takes the provider upload down with it,
-/// so the only thing a failure here can leave behind is nothing.
+/// Size and checksum are supplied at completion because they may be unknown
+/// when streaming begins. The provider upload is created first and then
+/// stored in the session record. If the session record cannot be written,
+/// the provider upload is aborted.
 pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -191,13 +175,10 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     })
 }
 
-/// Settles the part geometry one multipart session is opened with.
+/// Validates the multipart part size against provider limits.
 ///
-/// The bounds are the providers': no non-final part below 5 MiB, none above
-/// 5 GiB. The size a client picks is also what bounds its object, since a
-/// provider accepts at most [`MAX_MULTIPART_PARTS`] of them. The floor is
-/// well above zero, so what this returns can never be a geometry that cuts
-/// no bytes.
+/// The selected part size also bounds the maximum object size because the
+/// provider accepts at most [`MAX_MULTIPART_PARTS`] parts.
 fn multipart_part_size(requested: Option<u64>) -> Result<NonZeroU64> {
     let part_size_bytes = requested.unwrap_or(PROVIDER_MULTIPART_PART_BYTES);
     NonZeroU64::new(part_size_bytes)
@@ -210,13 +191,10 @@ fn multipart_part_size(requested: Option<u64>) -> Result<NonZeroU64> {
         })
 }
 
-/// Resolves the parts a client asked to be authorized against the session
-/// that owns them.
+/// Validates requested multipart parts and returns the data needed to sign
+/// them.
 ///
-/// The server signs a part, it does not remember one: nothing durable is
-/// written here and nothing is read back later. Part bookkeeping stays with
-/// the client all the way to completion, exactly as it does in the
-/// provider's own multipart API.
+/// Part state remains client-managed. This method writes no durable state.
 pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -264,10 +242,9 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     })
 }
 
-/// The provider upload a multipart session is bound to.
+/// Returns the provider upload ID for a direct multipart session.
 ///
-/// A multipart session always has one — the transport variant carries it —
-/// so the only thing left to say is that some other transport does not.
+/// Other upload modes return an invalid-upload error.
 fn multipart_session_upload(session: &UploadSessionState) -> Result<&str> {
     match &session.transport {
         UploadSessionTransport::DirectMultipart {
@@ -281,14 +258,11 @@ fn multipart_session_upload(session: &UploadSessionState) -> Result<&str> {
     }
 }
 
-/// Turns a client's multipart claim into the reference the assembled object
-/// is bound to.
+/// Builds the content reference for a completed multipart upload.
 ///
-/// There is no `whole_file_sha256`: nobody trustworthy hashes these bytes.
-/// The client's own digest is not evidence, and the provider assembles the
-/// object without ever computing a SHA-256 over it — so the CRC-64/NVME it
-/// does compute is the whole of the reference's evidence, and completion
-/// reads it back rather than believing the claim.
+/// Completion verifies the provider-reported CRC-64/NVME checksum. No
+/// trusted whole-file SHA-256 is available, so `whole_file_sha256` remains
+/// `None`.
 fn direct_multipart_content_ref(
     content_id: ContentId,
     claim: &DirectMultipartContentClaim,
@@ -352,15 +326,11 @@ fn multipart_parts(parts: &[CompletedUploadPart]) -> Result<Vec<MultipartPart>> 
         .collect()
 }
 
-/// Turns a client's claim into the reference the write is bound to.
+/// Builds the content reference for a direct PUT claim.
 ///
-/// The digest is the client's, but it stops being a client claim the moment
-/// it is signed into the provider write: the provider refuses any body that
-/// does not hash to it, and completion re-checks the stored object against
-/// it. That is why the resulting reference may carry `whole_file_sha256`
-/// — but only where the enforced checksum is itself a SHA-256. A provider
-/// that enforces something else has produced no SHA-256 for anyone to
-/// stand behind, and claiming one would be inventing evidence.
+/// The provider enforces the supplied storage checksum, and completion
+/// verifies the stored object against it. `whole_file_sha256` is included
+/// only when the enforced checksum algorithm is SHA-256.
 fn direct_put_content_ref(
     content_id: ContentId,
     claim: &DirectPutContentClaim,
@@ -460,9 +430,10 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     Ok(upload_id)
 }
 
-/// Admits an upload session only for a namespace that exists and still
-/// serves writes. The head is the whole existence check: absent means the
-/// namespace was never created, and the tombstone refuses.
+/// Verifies that the namespace exists and accepts writes.
+///
+/// A missing head means the namespace was not created. A deleted head
+/// rejects the upload.
 async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -481,11 +452,8 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-/// How a terminal session answers an operation that needed it open.
-///
-/// A completed session is a conflict the caller can reason about; an aborted
-/// one reports the same absence the eventual physical deletion does, because
-/// it will never select content again.
+/// Converts a terminal upload state into the error returned by an operation
+/// that requires an open session.
 fn terminal_session_error(
     state: &UploadSessionLifecycle,
     upload_id: UploadId,
@@ -499,11 +467,10 @@ fn terminal_session_error(
     }
 }
 
-/// The staging slot of a session that may still take bytes.
+/// Returns the staged-content slot for an open session.
 ///
-/// The one state that accepts bytes is the one that holds what was staged,
-/// so asking for the slot and asking whether the session is still live are
-/// the same question, answered once.
+/// Completed and aborted sessions return their corresponding terminal
+/// errors.
 fn open_staging_slot<'a>(
     state: &'a mut UploadSessionLifecycle,
     upload_id: &UploadId,
@@ -650,13 +617,11 @@ fn transport_name(transport: &UploadSessionTransport) -> &'static str {
     }
 }
 
-/// Stages bytes into a service-proxied session.
+/// Stores bytes in a service-proxied upload session.
 ///
-/// The bytes land under the identity the session allocated when it began,
-/// so re-sending the same bytes to the same session writes the same object
-/// rather than minting a second one. Two *different* sessions carrying
-/// identical bytes still get their own objects; sessions are where retry
-/// idempotency lives now, not the key space.
+/// Retries to the same session use the same object identity. Matching bytes
+/// are idempotent; different bytes return a content conflict. Separate
+/// sessions always use separate object identities.
 pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -712,14 +677,13 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     record_staged_content(store, namespace_id, upload_id, stored.content_ref, false).await
 }
 
-/// Records what a staging write produced and releases the claim it held, in
-/// the one compare-and-swap that makes the staged reference the session's.
+/// Records a staging result and releases its claim in the same
+/// compare-and-swap.
 ///
-/// `already_present` says the store refused to create the object because the
-/// key was occupied. Only this session can name that key, and the claim means
-/// no other request on it was writing, so an occupied key holds bytes from an
-/// earlier attempt of this session that never recorded them. Equal bytes are
-/// that attempt arriving again; different bytes are a conflict.
+/// `already_present` means the create-only object write found an existing
+/// object. The session's claim prevents concurrent writers, so that object
+/// can only come from an earlier attempt that did not record its result.
+/// Matching content is an idempotent retry; different content is a conflict.
 async fn record_staged_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -772,17 +736,14 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Stages a streamed payload into a service-proxied session.
+/// Streams content into a service-proxied session while computing its
+/// reference.
 ///
-/// The bytes are hashed as they are forwarded and never held whole, which
-/// is the only difference from [`upload_content`]. That difference forces
-/// the shape: the write cannot happen inside a retried compare-and-swap
-/// closure, because a stream can only be read once. So the session is read,
-/// the payload is written, and only then is the record swapped — and the
-/// swap is where an idempotent re-send is told from a conflicting one, by
-/// comparing the digest this write produced against the one the session
-/// recorded. The store consumes the whole body before it reports a refused
-/// precondition, so that digest exists either way.
+/// The payload is written before the session compare-and-swap because the
+/// stream cannot be replayed inside a retry loop. The compare-and-swap
+/// compares the computed reference with any value already stored in the
+/// session, making an identical retry idempotent and a different payload a
+/// conflict.
 pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -849,13 +810,12 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Completes an upload: verify the bytes, then make the completion durable.
+/// Completes an upload by verifying the content and then recording the
+/// terminal state.
 ///
-/// The order is the contract. Verification happens before the
-/// compare-and-swap, so nothing is ever recorded as completed on the
-/// strength of a provider response alone; and the terminal states are
-/// checked before any provider call, so a completion arriving after an abort
-/// fails without touching the object the abort is cleaning up.
+/// Verification happens before the compare-and-swap. Terminal session state
+/// is checked before provider access, so a completion cannot race an abort
+/// and read an object being cleaned up.
 pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -918,14 +878,10 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Freezes a verified reference as one session's final word.
+/// Stores a verified content reference as the session's completed state.
 ///
-/// Every completion lands here, whatever established the reference above it:
-/// a remote peer's bytes proven against the object that came to rest, or an
-/// in-process staging write proven by the write this runtime performed
-/// itself. By this point both hold the same thing, so the transition that
-/// makes content publishable — and, from the other side, collectable — has
-/// one implementation.
+/// All upload modes use this transition. Completion makes the content
+/// eligible for publication and later garbage collection.
 async fn freeze_completed_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -991,21 +947,12 @@ struct OwnedStagingSession {
     content_id: ContentId,
 }
 
-/// Stages bytes this runtime holds under a session that owns them.
+/// Stores in-process bytes through an upload session and returns prepared
+/// content.
 ///
-/// The convenience write paths are both ends of an upload at once: the bytes
-/// are already here, so there is no target to hand out, no claim to check,
-/// and no receipt to mint — the publication that follows happens in this
-/// process and takes the reference directly. What they do not skip is the
-/// session, because that is the half of the lifecycle content garbage
-/// collection reads.
-///
-/// The session record is durable before the object exists. That ordering is
-/// the ownership guarantee rather than an optimization: a record written
-/// afterwards leaves a window in which a crash strands bytes nothing names,
-/// which is the exact leak this path exists to close. It costs two small
-/// control writes on top of the content write, and they are sequential for
-/// the same reason.
+/// The session is written before the content object so garbage collection
+/// always has a durable owner for the object. The operation performs one
+/// content write and two sequential control-object writes.
 pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
@@ -1067,25 +1014,19 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Opens the session that will own a content object this runtime is about to
+/// Creates the internal upload session that owns an in-process content
 /// write.
 ///
-/// It is a service-proxied session because that is what it is: the bytes pass
-/// through this process on the way to the store. The upload id is never
-/// handed out, so the record has exactly one later reader — garbage
-/// collection, which learns from it that the object has an owner and what
-/// became of it.
+/// Its ID is not exposed. Garbage collection is its only later reader.
 async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     context: &MutationContext,
 ) -> Result<OwnedStagingSession> {
-    // No availability check, unlike the sessions a remote peer opens. This
-    // caller holds a catalog read off the namespace's own head, and the
-    // publication it is staging for is the admission decision: a namespace
-    // deleted in between refuses there, and a collection pass on a terminal
-    // namespace reaches nothing, so it reclaims this session and the object
-    // it holds like any other completed content nobody references.
+    // Do not recheck namespace availability here. The catalog came from the
+    // namespace head, and publication performs the final admission check. If
+    // the namespace is deleted first, garbage collection removes the
+    // unreferenced completed session and content.
     let session = NewUploadSession::service_proxied();
     let content_id = session.content_id.clone();
     let upload_id = create_upload_session(store, catalog.namespace_id(), session, context).await?;
@@ -1095,18 +1036,12 @@ async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Completes the session an in-process staging write just filled.
+/// Completes an in-process staging session using the content reference
+/// produced by the write.
 ///
-/// Nothing is verified here and nothing needs to be: this runtime wrote the
-/// object and hashed the payload doing it, which is the same evidence a
-/// service-proxied completion accepts from its own staged reference.
-///
-/// A failure before this point leaves an open session whose lease passes and
-/// whose sweep deletes both record and object, so no error path aborts: this
-/// session is unreachable by anyone else, the only way the transition fails
-/// is a store that is not answering, and an abort call is the least likely
-/// thing to get through it. Expiry costs a wait; a second failed write costs
-/// the wait anyway.
+/// No additional verification is needed because this process computed the
+/// checksum while writing. On failure, the open session eventually expires
+/// and garbage collection removes its object.
 async fn complete_owned_staging<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
@@ -1126,13 +1061,11 @@ async fn complete_owned_staging<S: ObjectStore + ?Sized>(
     .prepared)
 }
 
-/// Aborts an upload session, then cleans up what it was writing.
+/// Marks an upload session aborted, then cleans up its provider state and
+/// unpublished content.
 ///
-/// The durable transition comes first and the provider work strictly after
-/// it, so a crash in between leaves an object that the next garbage
-/// collection pass reclaims from the aborted record — never an object
-/// deleted out from under a session that is still open. Repeating an abort
-/// is a success that reports the first abort's stamp.
+/// Cleanup starts only after the durable transition. Repeating an abort is
+/// idempotent and returns the original abort timestamp.
 pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1189,11 +1122,10 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     Ok(response)
 }
 
-/// The provider state one terminated session owned.
+/// Provider resources owned by a terminated upload session.
 ///
-/// It travels out of the compare-and-swap that made the session terminal so
-/// cleanup runs strictly after the durable transition — the ordering that
-/// makes a crash in between cost a repeat rather than a lost object.
+/// The compare-and-swap returns this value so cleanup runs only after the
+/// terminal state is durable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AbandonedUpload {
     content_id: ContentId,
@@ -1235,11 +1167,11 @@ impl AbandonedUpload {
     }
 }
 
-/// Reads one session, minting a fresh receipt when it is completed.
+/// Reads an upload session and returns a fresh receipt when the session is
+/// completed.
 ///
-/// This read is the reason a lost commit response is cheap: the completed
-/// session is durable, so the receipt it hands back is as good as the one
-/// the completion returned, and the bytes never move again.
+/// A caller that lost the original completion response can recover the
+/// receipt without uploading the content again.
 pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1394,12 +1326,11 @@ enum CompletionOutcome {
     Unusable(String),
 }
 
-/// What a completion will do, resolved from the session's transport and the
-/// request together — no provider call, no durable write.
+/// The verification plan derived from the upload transport and completion
+/// request.
 ///
-/// Every arm carries what proving it needs, taken from whichever side knew
-/// it. That is why the step below has nothing left to look up and no case
-/// it cannot handle.
+/// Building the plan performs no provider calls or durable writes. Each
+/// variant contains all data needed for the verification step.
 enum CompletionPlan<'a> {
     /// A proxied session, which wrote and checked its own bytes: what it
     /// recorded staging is the evidence.
@@ -1433,17 +1364,13 @@ impl CompletionPlan<'_> {
     }
 }
 
-/// Matches a completion request against the session it is completing.
+/// Validates a completion request against the upload session's transport.
 ///
-/// Which side names the content depends on which side knew it first. A
-/// proxied or `direct_put` session was handed a reference before any byte
-/// moved, so the request names it back. A `direct_multipart` session was
-/// never told one, so the request carries the claim instead and the
-/// reference is assembled here, over the identity the session has held
-/// since it opened. Either way the client cannot choose the identity.
-///
-/// This is the one thing decoding the request cannot settle: which shape is
-/// right depends on the durable record, which only this server can read.
+/// Proxied and direct-PUT sessions already contain a content reference, so
+/// the request must return that reference. A multipart session receives its
+/// size and checksum claim at completion, while retaining the server-chosen
+/// object identity. The durable session determines which request form is
+/// valid.
 fn completion_plan<'a>(
     session: &'a UploadSessionState,
     request: &'a CompleteUploadRequest,
@@ -1491,15 +1418,13 @@ fn completion_plan<'a>(
     }
 }
 
-/// Establishes the content reference a completion may freeze.
+/// Verifies the uploaded object and returns the content reference that may
+/// be recorded as completed.
 ///
-/// A proxied session already wrote and checked its bytes, so the staged
-/// reference is the answer. A direct session's bytes bypassed the server,
-/// so this is where the server learns what actually landed: it verifies
-/// rather than trusts, because provider enforcement is not uniform across
-/// the family we support and a random object id says nothing about its
-/// contents. One checksum-bearing HEAD settles size and bytes together
-/// without a download.
+/// Proxied uploads use the reference computed while staging. Direct uploads
+/// verify the provider-stored object because the bytes bypassed this server.
+/// A checksum-bearing metadata request verifies size and checksum without
+/// downloading the object.
 async fn completion_outcome<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
@@ -1559,20 +1484,16 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Asks the provider to assemble the parts a client uploaded, then proves
-/// what it assembled.
+/// Asks the provider to assemble the uploaded parts, then verifies the
+/// resulting object.
 ///
-/// The read-back is the load-bearing check, not a formality: AWS S3 treats
-/// the whole-object checksum as a precondition and refuses a wrong one, but
-/// Cloudflare R2 accepts it, assembles the object anyway, and reports the
-/// true checksum instead. One provider enforces, one only witnesses, so
-/// LoonFS witnesses for itself on both.
+/// Provider behavior differs: some reject an incorrect whole-object checksum,
+/// while others assemble the object and report the actual checksum. LoonFS
+/// therefore verifies the stored object after every completion.
 ///
-/// A completion whose response was lost reconciles here too. Replaying the
-/// provider's completion is useless — S3 answers success with no checksum,
-/// R2 answers `NoSuchUpload` while the object sits there correct — so a
-/// consumed upload is not read as failure. The object at the key is the
-/// evidence, and it answers the same way on both providers.
+/// The same verification also recovers from a lost completion response. An
+/// unknown or already-consumed provider upload is accepted only when the
+/// object at the target key passes verification.
 async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
@@ -1614,17 +1535,11 @@ async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Reports what a failed verification proves about the content.
+/// Classifies a content-verification failure.
 ///
-/// A verification that ran and disagreed is evidence about the bytes: the
-/// object is absent, the wrong length, or hashes to something else. Nothing
-/// the session can do changes that, so the reason is returned for the caller
-/// to end the session with.
-///
-/// A verification that could not run is evidence about nothing. The store
-/// refused the read or did not answer it, and the object it was asked about
-/// is untouched, so the store failure is propagated as itself: the session
-/// stays open, the object stays, and the completion can be retried.
+/// A confirmed absence, length mismatch, or checksum mismatch makes the
+/// upload unusable. A storage access failure is returned unchanged so the
+/// session remains open and completion can be retried.
 fn content_failure_reason(error: DurableContentValidationError) -> Result<String> {
     match error {
         DurableContentValidationError::Store { .. } => Err(CoreError::DurableContent(error)),

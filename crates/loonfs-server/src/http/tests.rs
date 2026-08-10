@@ -2390,7 +2390,7 @@ fn assert_api_error<T: std::fmt::Debug>(
 /// what they wrote. These exercise that with a store double standing in for
 /// the provider: a loopback issuer that signs nothing, and a loopback
 /// object server reading the same store the deployment writes to — so the
-/// whole grant path (route, issuer seam, presigned fetch, client
+/// whole grant path (route, issuer adapter, presigned fetch, client
 /// verification) runs end to end without a real bucket.
 mod direct_download {
     use super::*;

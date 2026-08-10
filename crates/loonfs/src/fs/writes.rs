@@ -17,14 +17,12 @@ use loonfs_core::NamespaceEngine;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-/// What a retry can still say about the payload it just staged.
+/// Evidence retained for comparing a newly staged payload with an earlier
+/// committed payload.
 ///
-/// A buffered put can answer any question about its bytes by hashing them
-/// again. A streamed put cannot: the payload went by once and is gone, and
-/// what it kept instead is the reference the write path built while hashing
-/// it. Both describe the same bytes; they differ only in which questions
-/// they can answer, and a question neither can answer is reported as such
-/// rather than guessed at.
+/// Buffered bytes can be hashed again with any supported algorithm. A
+/// streamed payload retains only its computed content reference, so checksum
+/// algorithms not recorded there cannot be compared.
 #[derive(Debug, Clone, Copy)]
 enum StagedPayload<'a> {
     /// The payload itself, which can produce any digest this build knows.
@@ -141,21 +139,17 @@ impl FsWriter {
             payload_class = tracing::field::Empty,
         )
     )]
-    /// Re-running this with a `commit_id` that already committed is safe
-    /// when the request is the same. A commit's identity names *which*
-    /// content object it wrote, and a re-run necessarily stages a fresh
-    /// one, so the publisher sees a different commit and reports
-    /// `commit_id_reuse_conflict`. This resolves that by reading back what
-    /// the commit id actually committed and rebuilding this request's
-    /// fingerprint around it: an identical value plus bytes that provably
-    /// agree means the operation had already succeeded. Anything else —
-    /// a different path, behavior, guard, message, or payload — surfaces
-    /// the conflict.
+    /// A retry with the same `commit_id` is reconciled against the durable
+    /// receipt.
     ///
-    /// The freshly staged duplicate object is then referenced by nothing.
-    /// That is by design, not a leak: it is a completed upload session's
-    /// content that no metadata names, and content garbage collection
-    /// reclaims exactly that once the reclamation grace passes.
+    /// Each retry stages a new content object, so its initial fingerprint differs
+    /// from the committed request. On a reuse conflict, the runtime reads the
+    /// committed change, rebuilds the fingerprint with the committed content
+    /// reference, and verifies that the staged bytes match. The retry succeeds
+    /// only when the complete request and payload are equivalent.
+    ///
+    /// The unused staged object remains unpublished and is reclaimed by content
+    /// garbage collection after the grace period.
     pub async fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -260,23 +254,14 @@ impl FsWriter {
         }
     }
 
-    /// Decides whether a reused commit id already did this exact work.
+    /// Determines whether a commit-id conflict is an idempotent retry of the
+    /// same file write.
     ///
-    /// The proof is the commit's whole semantic identity, not a selection of
-    /// its parts. The conflict reports the fingerprint the receipt holds;
-    /// this reads the one change that commit id landed, rebuilds this
-    /// request's fingerprint with the committed content reference in place
-    /// of the freshly staged one, and requires the two to be equal. That
-    /// covers the path, the replacement behavior, the expected revision, the
-    /// annotation, and that the original commit was this one put — every
-    /// field a future request gains is covered the day it joins the
-    /// preimage. What the fingerprint cannot speak to is whether the two
-    /// content objects hold the same bytes, so digest evidence answers that
-    /// separately.
-    ///
-    /// Nothing weaker counts: every way of failing to prove the two requests
-    /// are the same — including the staged payload having no answer to give
-    /// — leaves the original conflict standing, never agreement.
+    /// The runtime compares the durable receipt's full request fingerprint with a
+    /// fingerprint rebuilt using the committed content reference. It separately
+    /// verifies that the newly staged payload matches the committed bytes. If
+    /// either comparison is unavailable or differs, the original conflict is
+    /// returned.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
@@ -325,14 +310,12 @@ impl FsWriter {
         })
     }
 
-    /// Reads the one change a reuse conflict said the commit id landed at.
+    /// Reads the committed change identified by a reuse conflict.
     ///
-    /// There is no by-commit-id read, but the conflict already named the
-    /// sequence, so this is one feed page positioned on it rather than a
-    /// search. `None` means the evidence is not there to compare — the
-    /// sequence has fallen below the retention floor, or the row at it
-    /// belongs to some other commit — and the caller turns that into the
-    /// conflict rather than into a guess.
+    /// The conflict supplies the sequence, so one change-feed page can read the
+    /// expected row directly. Returns `None` when retention removed the row or
+    /// when the row belongs to another commit; the caller then preserves the
+    /// original conflict.
     async fn read_committed_change(
         &self,
         namespace_id: &NamespaceId,
@@ -357,21 +340,16 @@ impl FsWriter {
             .find(|change| change.seq == committed_seq && &change.commit_id == commit_id))
     }
 
-    /// Stages file bytes as durable content for later publication.
+    /// Stores file bytes and returns proof that they are ready to publish.
     ///
-    /// Preparation performs one content PUT and no content reads, plus the
-    /// two small control writes of the upload session that owns the object:
-    /// the session record lands before the bytes do, and the completion
-    /// after them. That is what a publish failing afterwards costs, and all
-    /// it costs — the object is a completed session's unpublished content,
-    /// which garbage collection reclaims once nothing references it and the
-    /// reclamation grace has passed.
+    /// Preparation writes the upload-session record, the content object, and the
+    /// completed session record, in that order. If publication later fails, the
+    /// unpublished object is reclaimed after the content-reclamation grace
+    /// period.
     ///
-    /// The same window bounds how long the returned value stays worth
-    /// holding. A prepared reference carries no clock and never expires by
-    /// itself, but the bytes behind it are protected only while its session
-    /// is inside that grace, so a prepared reference is for publishing now,
-    /// not for keeping.
+    /// `PreparedContent` has no local expiry, but callers should publish it
+    /// promptly because garbage collection protects the object only for that
+    /// grace period while it remains unpublished.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.prepare",

@@ -1,20 +1,13 @@
-//! The node-local cache of encoded metadata blocks, backed by foyer.
+//! Node-local cache of encoded metadata blocks, implemented with foyer.
 //!
-//! This module is the only place in the server that names a foyer type.
-//! Everything above it sees [`StoredMetadataBlockCache`], the runtime's seam:
-//! an async lookup that answers `None` on a miss, a fire-and-forget insert,
-//! an invalidation, and a close.
+//! Higher layers use the [`StoredMetadataBlockCache`] interface rather than
+//! foyer types. Cache reads and inserts are best effort: failures are recorded
+//! and treated as misses or dropped inserts. Closing is the only fallible
+//! operation exposed to the caller.
 //!
-//! The tier holds a copy of bytes object storage already holds, so nothing
-//! here is durable. A lookup that fails for any reason is a miss, an insert
-//! that cannot be kept is dropped, and both are counted rather than
-//! surfaced. The one failure a caller can observe is a close that did not
-//! finish cleanly, which a draining host reports on its way out.
-//!
-//! The directory the tier writes is this process's alone while it runs. An
-//! exclusive lock on a file under the configured root is what says so, and a
-//! second process pointed at the same root fails to start rather than
-//! interleaving writes into one device.
+//! An exclusive file lock gives one server process ownership of the cache
+//! directory. A second process configured with the same directory fails at
+//! startup.
 
 use crate::config::{LocalCacheConfig, ServerConfigError};
 use async_trait::async_trait;
@@ -62,16 +55,13 @@ const GEOMETRY_MARKER: &str = "geometry.json";
 /// counters carry.
 const CACHE_NAME: &str = "loonfs-metadata-blocks";
 
-// The four disk-engine numbers below are provisional until this tier is
-// qualified against real traffic. They are constants rather than
-// configuration for that reason: a deployment tuning them today would be
-// guessing from the same absence of measurement.
+// These disk-engine values remain fixed until production measurements support
+// exposing them as deployment settings.
 
-/// Size of one disk block. A block is the disk tier's allocation and
-/// eviction unit and holds many entries, so it is bounded from both sides:
-/// foyer claims the whole capacity as blocks at startup, one file per block
-/// and each one held open, and it refuses an entry larger than a block less
-/// its blob index. This is foyer's own default, which sits between the two.
+/// Size of one disk allocation and eviction block.
+///
+/// Foyer creates and holds one file per block at startup, and entries must fit
+/// within a block after index overhead. This uses foyer's default size.
 pub(crate) const DISK_BLOCK_BYTES: usize = 16 * 1024 * 1024;
 /// Flusher tasks writing the disk tier.
 const DISK_FLUSHERS: usize = 2;
@@ -83,14 +73,11 @@ const DISK_BUFFER_POOL_BYTES: usize = 64 * 1024 * 1024;
 /// ones. A drop is counted, never surfaced.
 const DISK_SUBMIT_QUEUE_THRESHOLD_BYTES: usize = 256 * 1024 * 1024;
 
-/// The smallest disk tier a deployment may configure, which the config
-/// check enforces so a too-small one is refused rather than run.
+/// Minimum supported disk capacity.
 ///
-/// The tier allocates whole blocks, so a capacity under one block allocates
-/// none: the cache opens, holds nothing on disk, and a restart is cold with
-/// nothing said about it. Six blocks is the floor because it is also the
-/// smallest count foyer itself calls stable, which wants the flusher count
-/// plus the clean-block threshold to be at most half the block count.
+/// Capacity is allocated in whole blocks. Six blocks is the smallest layout
+/// that satisfies foyer's stability requirement for flushers and clean-block
+/// reserves.
 pub(crate) const MIN_DISK_BYTES: u64 = 6 * DISK_BLOCK_BYTES as u64;
 
 /// Per-entry overhead the memory weigher charges on top of the value's
@@ -110,13 +97,10 @@ const BLOCK_KINDS: [StoredMetadataBlockKind; 3] = [
 /// One counter per block kind, indexed by [`kind_index`].
 type PerKind = [Arc<dyn CounterHandle>; BLOCK_KINDS.len()];
 
-/// A [`StoredMetadataBlockCache`] over a foyer hybrid cache: a byte-weighted
-/// memory tier in front of a block engine on local disk.
+/// Foyer-backed cache with a byte-limited memory tier and local disk tier.
 ///
-/// The cache has two states and one transition between them. It opens Open
-/// and [`close`](StoredMetadataBlockCache::close) makes it Closed, after
-/// which a lookup answers `None`, an insert and an invalidation do nothing,
-/// and closing again succeeds without doing anything further.
+/// After [`close`](StoredMetadataBlockCache::close), lookups return `None`,
+/// mutations do nothing, and repeated closes succeed.
 pub struct FoyerStoredMetadataBlockCache {
     cache: HybridCache<StoredMetadataBlockKey, Bytes>,
     /// The exclusive lock on the configured root, held for the life of this
@@ -146,17 +130,12 @@ impl Debug for FoyerStoredMetadataBlockCache {
 }
 
 impl FoyerStoredMetadataBlockCache {
-    /// Takes the configured directory and opens the cache in it.
+    /// Opens the cache in the configured directory.
     ///
-    /// The root is created if it is missing and locked exclusively, so a
-    /// second process pointed at the same root fails here rather than
-    /// writing into a device another process owns. The versioned directory
-    /// beneath it is foyer's, and foyer recovers what it can from it, but
-    /// only once [`prepare_directory`] has agreed the directory holds the
-    /// geometry this start is about to claim. A directory foyer then cannot
-    /// open at all fails startup rather than being deleted: an open failure
-    /// says something about the machine, and what to do about it is the
-    /// operator's decision and not this process's.
+    /// The root is created and locked exclusively. The versioned cache directory
+    /// is reused only when its recorded geometry matches the requested geometry.
+    /// If foyer cannot open a compatible directory, startup fails without deleting
+    /// it automatically.
     pub(crate) async fn open(
         config: &LocalCacheConfig,
         recorder: &dyn MetricsRecorder,
@@ -192,10 +171,7 @@ impl FoyerStoredMetadataBlockCache {
         })?;
         let cache = HybridCacheBuilder::<StoredMetadataBlockKey, Bytes>::new()
             .with_name(CACHE_NAME)
-            // Written to disk when an entry is inserted rather than when the
-            // memory tier evicts it: a block this process decoded once is
-            // worth keeping across a restart, and waiting for eviction means
-            // a restart loses whatever the memory tier still held.
+            // Persist entries on insertion so blocks still in memory survive a restart.
             .with_policy(HybridCachePolicy::WriteOnInsertion)
             .with_metrics_registry(Box::new(OverflowRegistry::new(overflow.clone())))
             .memory(memory_bytes)
@@ -214,12 +190,9 @@ impl FoyerStoredMetadataBlockCache {
                     .with_buffer_pool_size(DISK_BUFFER_POOL_BYTES)
                     .with_submit_queue_size_threshold(DISK_SUBMIT_QUEUE_THRESHOLD_BYTES),
             )
-            // The bytes are already the compressed form the segment object
-            // holds, so compressing them again would spend cpu for nothing.
+            // Stored segment sections are already compressed; do not recompress them.
             .with_compression(Compression::None)
-            // An entry recovery cannot make sense of is dropped rather than
-            // fatal. Every entry here is a copy of something object storage
-            // still has, so the worst a bad one costs is one miss.
+            // Drop unreadable recovered entries. Object storage remains authoritative.
             .with_recover_mode(RecoverMode::Quiet)
             .build()
             .await
@@ -310,17 +283,14 @@ impl StoredMetadataBlockCache for FoyerStoredMetadataBlockCache {
         if self.is_closed() {
             return;
         }
-        // The seam's one caller is a hit whose bytes did not decode, so this
-        // counts rejections rather than evictions. foyer evicts on its own
-        // and reports nothing here.
+        // Invalidation is called only for cached bytes that failed to decode, so
+        // record it as a rejection rather than an eviction.
         self.metrics.rejections[kind_index(key.kind)].increment(1);
         self.cache.remove(key);
     }
 
     async fn close(&self) -> Result<(), StoredMetadataBlockCacheCloseError> {
-        // The one transition. Whoever flips the flag owns the shutdown; a
-        // second caller has nothing left to do, and every call after the
-        // flip is already answering as a closed cache.
+        // The first caller performs shutdown. Later callers observe the closed state.
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -344,10 +314,8 @@ pub(crate) struct FoyerCacheStats {
     pub(crate) memory_bytes: usize,
     /// Bytes the memory tier may hold.
     pub(crate) memory_capacity_bytes: usize,
-    /// Bytes of the disk device the engine has claimed as blocks. foyer
-    /// exposes claimed space rather than live entry bytes, and the engine
-    /// claims the whole device at startup, so this is a level only in the
-    /// sense that it reports what the device gave up.
+    /// Disk capacity claimed as foyer blocks. This is allocated capacity, not
+    /// the size of live cache entries.
     pub(crate) disk_bytes: usize,
     /// Bytes of disk the device was opened with.
     pub(crate) disk_capacity_bytes: usize,
@@ -668,14 +636,11 @@ const FOYER_BUFFER_OVERFLOW_LABEL: &str = "buffer_overflow";
 /// threshold.
 const FOYER_CHANNEL_OVERFLOW_LABEL: &str = "channel_overflow";
 
-/// A metrics registry that keeps two of foyer's counters and discards the
-/// rest.
+/// Metrics registry that retains foyer's two overflow counters and discards
+/// all other instruments.
 ///
-/// foyer's registry is a push interface: it registers instrument vectors at
-/// construction and then only increments handles. Nothing reads back, so a
-/// host that wants a number has to have kept the handle. This registry keeps
-/// the two that matter and answers every other registration with a handle
-/// that drops what it is given.
+/// Foyer registers handles once and updates them later, so this registry keeps
+/// only the handles the server exposes.
 #[derive(Debug)]
 struct OverflowRegistry {
     counters: FoyerOverflowCounters,

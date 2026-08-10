@@ -40,14 +40,11 @@ pub struct ApiError {
     pub details: Option<Box<ErrorDetails>>,
 }
 
-/// Structured, machine-readable context accompanying an [`ApiError`].
+/// Optional machine-readable details for an [`ApiError`].
 ///
-/// Every field is optional: a code populates the fields that apply to it
-/// (API spec, "Standard error contract"), and clients must tolerate absent
-/// fields exactly as they tolerate unknown codes. Retry decisions still key
-/// off the code; these fields carry the identity a caller needs to act —
-/// which commit to resubmit, which epoch displaced it, which revision the
-/// precondition saw.
+/// Clients make retry decisions from the error code and use these fields for
+/// relevant identifiers such as commit ids, writer epochs, and revisions.
+/// Fields may be absent and clients must ignore fields they do not use.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorDetails {
@@ -209,16 +206,10 @@ pub enum DeleteDirectoryBehavior {
 
 /// One path-oriented filesystem operation.
 ///
-/// Unknown fields are rejected because every optimistic-concurrency guard
-/// below is an optional field. A misspelled `expected_revision_no` or
-/// `expected_inode_id` would otherwise decode to `None`, and the write would
-/// apply unguarded and answer 200 — a lost update reported as a success. A
-/// guard the server never saw must fail the request, not the precondition.
-///
-/// Every variant here carries fields. A variant that carries none must still
-/// be spelled with empty braces, because serde lets a *unit* variant of a
-/// tagged enum swallow whatever else the body held; `BeginUploadRequest` in
-/// [`super::uploads`] shows the same rule.
+/// Unknown fields are rejected because concurrency guards are optional. A
+/// misspelled guard must fail decoding instead of silently becoming `None`
+/// and allowing an unguarded write. Any future fieldless variant must use
+/// empty braces so serde also rejects unexpected fields for that variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -297,13 +288,12 @@ pub enum FilesystemOperation {
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
         deleted_at_seq: ChangeSeq,
-        /// Absolute destination path whose parent must be visible and whose
-        /// name must be absent. Absent means restore in place: re-bind
-        /// under the parent and name the deletion recorded, anchored on
-        /// the parent's identity rather than any remembered spelling, so
-        /// the entry lands correctly even when ancestors were renamed
-        /// since. A deletion that recorded no binding needs the explicit
-        /// path.
+        /// Optional destination for the restored inode.
+        ///
+        /// When absent, the inode is rebound to the parent and name recorded by the
+        /// deletion. Parent identity, rather than an old path string, keeps this
+        /// correct after ancestor renames. An explicit path is required when the
+        /// deletion recorded no binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<AbsolutePath>,
     },
@@ -325,9 +315,10 @@ pub enum FilesystemOperation {
         /// not name are left alone.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         set: BTreeMap<AttributeKey, AttributeValue>,
-        /// Keys to remove. A list rather than a set so a repeated key is
-        /// rejected with a message that names it, instead of being folded
-        /// away as if the caller had asked once.
+        /// Attribute keys to remove.
+        ///
+        /// A list preserves duplicate entries so validation can report them instead
+        /// of silently deduplicating the request.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remove: Vec<AttributeKey>,
         /// When set, the update applies only if the path still resolves to

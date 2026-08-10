@@ -10,7 +10,7 @@ use crate::{
 use bytes::Bytes;
 use thiserror::Error;
 
-/// Failure to establish that an immutable key contains the requested bytes.
+/// Failure to verify that an immutable key contains the requested bytes.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ImmutableWriteError {

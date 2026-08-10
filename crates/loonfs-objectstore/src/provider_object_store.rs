@@ -45,31 +45,19 @@ pub const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// One HTTP attempt's connect timeout.
 pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Hard deadline for one logical object-store operation, consumed across
-/// every retry of that operation rather than restarting per attempt. Reads
-/// get it as the provider client's retry timeout; verified immutable writes
-/// and deletes share it through `TransportRetryPolicy`. The deadline gates
-/// starting another attempt, and one outer attempt may itself contain the
-/// inner client's full retry budget for status-code retries — so one
-/// operation's total wall time is bounded by the deadline plus the inner
-/// retry budget plus one attempt bound (worst case roughly six minutes),
-/// still a hard bound. The GC grace window is derived
-/// above this bound (format spec, "Garbage collection", rule 1); multipart
-/// uploads deliberately carry no whole-operation clock (their parts are
-/// individually bounded), which leaves the floor inequality untouched
-/// because everything it times — WAL segments inside the publish budget,
-/// the root compare-and-swap — is a small control object on the
-/// single-request path.
+/// Deadline shared by all retries of one logical object-store operation.
+///
+/// Reads apply it through the provider client. Verified immutable writes and
+/// deletes apply it through `TransportRetryPolicy`. A new outer attempt may
+/// start only while time remains. Multipart uploads are excluded because
+/// each part has its own timeout and retry limit. The garbage-collection
+/// grace period is longer than the maximum publication operation.
 pub const PROVIDER_OPERATION_DEADLINE: Duration = Duration::from_secs(120);
 
-/// Payload size at and above which overwrite puts use the provider's native
-/// multipart upload instead of one whole-object PUT, matching the multipart
-/// thresholds mainstream storage clients ship. The format spec allows this
-/// for large immutable file data and forbids relying on it for small
-/// mutable control objects: create-if-absent and compare-and-swap puts
-/// never take this path, because providers complete multipart uploads as
-/// unconditional overwrites and those modes exist to carry real provider
-/// preconditions.
+/// Minimum payload size for native multipart overwrite uploads.
+///
+/// Create-if-absent and compare-and-swap writes always use a single request
+/// because multipart completion cannot enforce those provider preconditions.
 pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Fixed size of every multipart part except the last. Cloudflare R2
@@ -82,12 +70,10 @@ pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 /// Concurrent in-flight parts per multipart upload.
 pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
 
-/// Buffered parts a streamed write holds at once.
+/// Number of multipart buffers retained by a streamed write.
 ///
-/// One. The in-memory path can afford a window because it already holds the
-/// whole payload; a streamed write exists precisely so that it does not, so
-/// it fills a buffer, uploads it, drops it, and only then fills the next.
-/// Peak memory is therefore one part whatever the object's size.
+/// Streamed writes upload and release each part before buffering the next, so
+/// peak payload memory remains one part regardless of object size.
 pub const PROVIDER_STREAMED_PART_WINDOW: usize = 1;
 
 /// Parts one provider multipart upload accepts. Every supported provider
@@ -95,12 +81,11 @@ pub const PROVIDER_STREAMED_PART_WINDOW: usize = 1;
 /// multipart write can produce.
 pub(crate) const MAX_PROVIDER_MULTIPART_PARTS: usize = 10_000;
 
-/// Bound for one payload-bearing HTTP attempt's request phase. A request
-/// body is opaque to progress observation while it uploads, so a flat
-/// generous bound stands in for stall detection: parts are at most
-/// [`PROVIDER_MULTIPART_PART_BYTES`], and an 8 MiB body that cannot finish
-/// inside this bound is moving slower than roughly 70 KiB/s — treated as
-/// stalled and retried on a fresh connection.
+/// Request-phase timeout for one HTTP attempt that carries a payload.
+///
+/// Upload progress is not observable while a request body is being sent, so
+/// this fixed timeout treats an excessively slow part as stalled. Multipart
+/// parts are bounded by [`PROVIDER_MULTIPART_PART_BYTES`].
 pub const PROVIDER_TRANSFER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Request bodies at least this large are payload transfers and get
@@ -283,22 +268,15 @@ impl ProviderObjectStore {
         }
     }
 
-    /// Writes one large payload through the provider's native multipart
-    /// upload: fixed-size parts uploaded through a bounded window, each part
-    /// retried in place on transient failures (part indices are stable, so a
-    /// retry re-sends the same part), and a best-effort abort so a failed
-    /// upload does not strand parts. An ambiguous completion — a transport
-    /// failure whose attempt may have landed — is resolved by the immutable
-    /// operation's shared exact-byte read-back
-    /// ([`MultipartWrite::resolve_ambiguous_completion`]).
+    /// Uploads a large overwrite through the provider's multipart API.
     ///
-    /// There is deliberately no whole-operation clock: every part attempt is
-    /// individually bounded and every retry loop is count-bounded, so a
-    /// healthy transfer takes as long as the link needs while a stuck one
-    /// still fails within one part's retry budget. Completion itself is one
-    /// attempt: only [`ObjectStore::put_immutable_verified`] may replay an
-    /// object-publishing write. Conditional modes stay on the single-request
-    /// path where real provider preconditions exist.
+    /// Parts use stable indices, bounded concurrency, and bounded retries. A
+    /// failed upload is aborted on a best-effort basis. If completion returns an
+    /// ambiguous transport error, immutable writes verify the stored bytes before
+    /// deciding whether the write succeeded.
+    ///
+    /// Multipart uploads have per-part limits rather than one total deadline.
+    /// Conditional write modes do not use this path.
     async fn put_large_multipart(
         &self,
         multipart: &dyn MultipartStore,
@@ -328,14 +306,11 @@ impl ProviderObjectStore {
         }
     }
 
-    /// Applies the shared retry gate for one failed write attempt: `None`
-    /// means the budget is spent and the caller must surface the error;
-    /// `Some` carries the backoff to sleep before the next attempt. The
-    /// budget is the retry count, plus the operation deadline when the
-    /// operation carries one (multipart transfers deliberately do not — see
-    /// [`Self::put_large_multipart`]). Exhaustion logs name the payload
-    /// size so a too-slow-link failure is attributable instead of reading
-    /// as weather.
+    /// Returns the delay before the next write attempt, or `None` when the
+    /// retry count or operation deadline is exhausted.
+    ///
+    /// Multipart transfers use only the retry count. Exhaustion logs include the
+    /// payload size to help distinguish slow transfers from other failures.
     fn next_write_backoff(
         &self,
         key: &str,
@@ -448,15 +423,12 @@ impl PartReader {
     }
 }
 
-/// Abandons a provider multipart upload if the write that opened it is
-/// dropped before it finishes.
+/// Aborts a provider multipart upload when its streamed write is cancelled.
 ///
-/// Every path that returns from a streamed write aborts explicitly and
-/// disarms this. What is left is cancellation — a client that disconnects
-/// mid-upload takes the handler's future with it — where there is no
-/// `await` point to run cleanup from, so the abort is spawned. Without a
-/// runtime to spawn on, the upload falls back to the bucket's own
-/// incomplete-upload lifecycle rule, which is what collects it today.
+/// Normal return paths abort explicitly and disable this guard. Cancellation
+/// has no cleanup `await` point, so `Drop` starts the abort on the current
+/// Tokio runtime. Without a runtime, the bucket's incomplete-upload lifecycle
+/// policy must remove the parts.
 struct AbortUploadOnDrop {
     multipart: Option<Arc<dyn MultipartStore>>,
     path: Path,
@@ -532,23 +504,15 @@ impl MultipartWrite<'_> {
         }
     }
 
-    /// Uploads a stream as parts, one buffered part at a time, and
-    /// assembles them.
+    /// Uploads a stream as fixed-size parts while retaining at most one part.
     ///
-    /// `head` is the first part, already cut by the caller so it could
-    /// decide that the payload does not fit in one request. Every later part
-    /// is cut into a fresh buffer *after* its predecessor has been uploaded
-    /// and dropped, so peak memory is one part regardless of how large the
-    /// object is. The final part may be short.
+    /// `head` is the first part. Later parts are buffered only after the previous
+    /// part has been uploaded and released. The final part may be shorter.
     ///
-    /// Completion is not resolved by read-back the way the in-memory path's
-    /// is: there is no payload left in memory to prove a landed write
-    /// against. An ambiguous completion is a failure, and the caller abandons
-    /// the upload.
-    ///
-    /// `mode` is evaluated by [`Self::precondition_holds`] once the stream
-    /// has been consumed and immediately before the completion, because the
-    /// completion itself cannot carry it.
+    /// Because the original payload is no longer available, an ambiguous
+    /// completion cannot be verified by reading the object back. The caller
+    /// treats it as a failure. Conditional modes are checked after the stream is
+    /// consumed and immediately before completion.
     async fn upload_stream_and_complete(
         &self,
         upload_id: &provider_store::MultipartId,
@@ -585,24 +549,14 @@ impl MultipartWrite<'_> {
         }
     }
 
-    /// Evaluates the caller's write mode against the object at the key, in
-    /// the last moment before the completion assembles over it.
+    /// Checks a streamed multipart write's condition immediately before
+    /// completion.
     ///
-    /// A provider assembles a multipart upload unconditionally, so this
-    /// separate read is the only way a streamed create-only or
-    /// compare-and-swap write can be refused at all. Two things follow, and
-    /// both are contract:
-    ///
-    /// - It runs after the stream has been consumed, which is what
-    ///   [`ObjectStore::put_streamed`] promises a caller that folds a digest
-    ///   over the same stream: a refused write still leaves that caller a
-    ///   digest over the complete payload.
-    /// - It is not atomic with the completion. A key that was already
-    ///   occupied when this read ran is refused; a writer that lands between
-    ///   this read and the completion is not, and this write assembles over
-    ///   it. Callers that cannot tolerate that must keep concurrent writers
-    ///   off the key themselves, which is what the upload protocol's staging
-    ///   claim does.
+    /// Providers complete multipart uploads unconditionally, so this separate
+    /// read is required for create-if-absent and compare-and-swap modes. It runs
+    /// after the complete stream has been consumed. The check is not atomic with
+    /// completion; callers requiring stronger exclusion must prevent concurrent
+    /// writes to the key.
     async fn precondition_holds(&self, mode: &PutMode) -> Result<()> {
         let refused = || {
             Err(ObjectStoreError::PreconditionFailed {
@@ -721,18 +675,13 @@ impl MultipartWrite<'_> {
         }
     }
 
-    /// Decides an ambiguous completion by reading the object back: byte
-    /// equality with the payload is the only accepted proof that the write
-    /// landed. Size or etag agreement is never identity — this store serves
-    /// generic overwrite keys, so a stale object of the same length must
-    /// not pass as the new write. The payload is still in memory, so the
-    /// read-back costs one GET on this failure path and proves the put's
-    /// postcondition itself.
+    /// Resolves an ambiguous multipart completion by comparing the stored bytes
+    /// with the original in-memory payload.
     ///
-    /// A proven completion still aborts the upload id: when this upload's
-    /// completion landed the id is already gone and the abort is a no-op,
-    /// and when the proof came from an identical object some earlier writer
-    /// committed, the abort reclaims this upload's stranded parts.
+    /// Size and etag equality are insufficient because an older object may share
+    /// them. Exact byte equality proves the write's postcondition. After a
+    /// successful comparison, the upload id is aborted on a best-effort basis to
+    /// remove any remaining parts.
     async fn resolve_ambiguous_completion(
         &self,
         upload_id: &provider_store::MultipartId,
@@ -949,9 +898,8 @@ impl ObjectStore for ProviderObjectStore {
     /// itself draws, so a small streamed write behaves exactly like a small
     /// buffered one. Anything longer goes through the provider's multipart
     /// upload. A provider assembles one unconditionally, so a conditional
-    /// mode is evaluated by [`MultipartWrite::precondition_holds`] against a
-    /// separate read of the key, taken after the payload is consumed and
-    /// immediately before the completion.
+    /// mode is checked against a separate read of the key after the payload is
+    /// consumed and immediately before completion.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         let path = self.to_path(key)?;
         let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
@@ -1073,23 +1021,12 @@ fn map_put_mode(mode: PutMode) -> provider_store::PutMode {
     }
 }
 
-/// Reads a provider last-modified stamp as the age evidence it is, or as
-/// nothing.
+/// Converts a provider timestamp to object age information.
 ///
-/// A response without a `Last-Modified` header is not an object written at
-/// the unix epoch, but the AWS-compatible client path synthesizes one for it
-/// (`object_store`'s header parsing falls back to `timestamp_nanos(0)` where
-/// the header is not required, and the AWS path is the one that does not
-/// require it). S3-compatible endpoints — MinIO, Ceph RGW, gateways — are
-/// configured through exactly that path, so the synthesized stamp is
-/// reachable in production. Passing it on would make every object read as
-/// infinitely old, and garbage collection's grace window is measured against
-/// this number: an object stamped at the epoch is past every window there
-/// is, so the window would protect nothing.
-///
-/// Absent is the honest reading, and it is the reading the rest of the system
-/// already handles — an object whose age is unknown is treated as young and
-/// retained (format spec, "Garbage collection", rule 1).
+/// Some AWS-compatible clients represent a missing `Last-Modified` header as
+/// Unix epoch zero. Returning that value would make garbage collection treat
+/// the object as extremely old. Non-positive timestamps are therefore
+/// returned as `None`, which causes unknown-age objects to be retained.
 fn last_modified_ms(timestamp_millis: i64) -> Option<u64> {
     match timestamp_millis > 0 {
         true => u64::try_from(timestamp_millis).ok(),

@@ -59,11 +59,10 @@ pub enum MetadataTableFamily {
     ActiveDeletions,
     /// Preserves commit idempotency evidence independently of retained WAL history.
     CommitReceipts,
-    /// Stores inode attribute revisions newest-first per inode.
+    /// Stores inode attribute revisions newest-first.
     ///
-    /// The family stands alone: it has no ascending twin, because nothing
-    /// reads attributes in any other order than newest first for one inode.
-    /// So no cross-family index-parity validator applies to it.
+    /// Attributes are read only in this order, so the family has no secondary
+    /// index and requires no cross-family parity check.
     Attributes,
 }
 
@@ -92,9 +91,9 @@ pub struct MetadataFileRef {
     pub min_key: String,
     /// Inclusive greatest durable row key; range planning skips disjoint segments.
     pub max_key: String,
-    /// Where the segment's index block lives and how to verify it. The
-    /// descriptor is the only entry point into a segment object — there is
-    /// no footer — so a reader starts here.
+    /// Location and verification data for the segment index block.
+    ///
+    /// Segments have no footer, so readers begin with this handle.
     pub index_block: BlockHandle,
     /// Where the segment's bloom filter block lives and how to verify it.
     pub filter_block: BlockHandle,
@@ -191,12 +190,11 @@ pub enum MetadataRow {
         /// every `committed_at_ms`.
         deleted_at_ms: u64,
     },
-    /// Names one deletion generation in the derived active-deletions family.
+    /// Derived row used to list currently recoverable deletions.
     ///
-    /// The row is not a new event: the materializer derives it from the
-    /// tombstone family, adding a `listed` row for each `set` and a `removed`
-    /// row for each `revoke`, so the trash listing is a range scan instead of
-    /// a walk over every deletion the namespace ever recorded.
+    /// Materialization writes `listed` for each tombstone set and `removed` for
+    /// each revoke. This lets trash listing use an ordered range scan instead of
+    /// replaying all historical deletion events.
     ActiveDeletion {
         /// Subtree root the deletion covers. With `deleted_at_seq` this is
         /// exactly the handle `undelete` addresses.
@@ -263,12 +261,10 @@ pub struct TombstoneGeneration {
     pub delta_index: u32,
 }
 
-/// The directory binding a path delete removed, described whole.
+/// Directory binding removed by a path deletion.
 ///
-/// Tombstone rows are immortal, so this is where a deleted name survives
-/// after the unbind row ages out — and where undelete reads the binding it
-/// restores. The three fields describe one binding, so they travel as one:
-/// a tombstone either recorded a binding or it did not.
+/// Tombstones retain this binding after the corresponding unbind row may be
+/// collected. Undelete uses it to restore the original parent and name.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeletedDirentry {
@@ -316,15 +312,12 @@ pub enum TombstoneRowAction {
     },
 }
 
-/// Active-deletion row vocabulary (format spec, "Tombstones and deletion").
+/// Current-state rows for recoverable deletions.
 ///
-/// The family holds current state, not history: a `listed` row means the
-/// deletion is recoverable and the trash lists it, and a `removed` row is the
-/// undelete's compensating marker that hides it. The two rows for one
-/// deletion share a key prefix and `removed` sorts first, so an ascending
-/// scan always sees the removal before the row it removes; reorganization
-/// then drops the pair, because a cancelled deletion is not state anyone can
-/// still observe.
+/// `Listed` exposes a deletion in trash; `Removed` hides it after undelete.
+/// Both rows share a key prefix, with `Removed` sorting first, so scans can
+/// suppress restored entries. Reorganization later removes the cancelled
+/// pair.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActiveDeletionRowAction {

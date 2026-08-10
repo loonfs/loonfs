@@ -1,13 +1,9 @@
-//! Independent implementation of the visibility semantics — on purpose.
+//! Independent reference implementation of metadata visibility.
 //!
-//! This module re-states the metadata visibility rules (binding identity,
-//! active bindings, tombstone coverage, visible-path resolution) from
-//! scratch, deliberately NOT sharing code with `loonfs-core`'s
-//! `metadata::visibility` module. The differential suite replays the same
-//! logical commits through both implementations and requires identical
-//! outcomes; that comparison only catches bugs while the two sides remain
-//! independent. Do not "deduplicate" this into core — collapsing them would
-//! turn the differential tests into a tautology.
+//! This module intentionally does not share code with
+//! `loonfs-core::metadata::visibility`. Differential tests replay the same
+//! commits through both implementations and compare their results. Merging
+//! the implementations would remove the independence those tests require.
 
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{ChangeSeq, ContentRef, InodeId, InodeKind, RevisionNo};
@@ -75,14 +71,13 @@ pub struct SubtreeTombstoneRecord {
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
     pub deleted_at_ms: u64,
-    /// What this event did, mirroring the core row semantics: the newest
-    /// event per root wins, and a revoke as the newest means no active
-    /// tombstone.
+    /// Action recorded by this event. The newest event for each root determines
+    /// state; a newest `Revoke` means no tombstone is active.
     pub action: SubtreeTombstoneAction,
 }
 
-/// One inode's whole attribute map at one revision, spelled in this crate's
-/// own plain types: text keys, its own value enum, and flat fields.
+/// Complete attribute map for one inode revision, represented with this
+/// model's independent key, value, and field types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttributeRevisionRecord {
     pub inode_id: InodeId,
@@ -109,17 +104,16 @@ pub enum AttributeContent {
     TextList(Vec<String>),
 }
 
-/// Where one deletion event committed. A revoke names its target this way,
-/// so the two events it takes to cancel a deletion stay tied together.
+/// Commit position of a deletion event. A revoke uses this value to identify
+/// the exact deletion it cancels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeletionGeneration {
     pub seq: ChangeSeq,
     pub delta_index: u32,
 }
 
-/// The binding a path delete removed, restated in this crate's own plain
-/// spelling. The three fields describe one binding, so they travel as one:
-/// an event either recorded a binding or it did not.
+/// Directory binding removed by a path deletion, represented with this
+/// model's independent types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeletedBinding {
     pub parent_inode_id: InodeId,

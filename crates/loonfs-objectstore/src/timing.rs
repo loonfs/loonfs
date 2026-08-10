@@ -7,8 +7,8 @@
 //! they gate only the observer's next action (stop retrying,
 //! abandon-and-rebuild). No validator compares timestamps, nothing on the
 //! wire carries these readings, and commit validity never consults time.
-//! `loonfs-core` re-exports these types; the trait is an injection seam the
-//! external simulation harness also consumes.
+//! `loonfs-core` re-exports these types. The trait supports deterministic
+//! clock injection by the external simulation harness.
 
 use std::sync::OnceLock;
 use std::time::Instant;

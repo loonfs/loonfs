@@ -368,10 +368,10 @@ where
         self.put_with(key, kind, bytes, mode).await
     }
 
-    /// Streamed writes are traced but not fault-injected: every scheduled
-    /// write fault is expressed against a payload the harness holds, and a
-    /// stream has none to hold. The simulator drives content through `put`,
-    /// so nothing it schedules is being skipped here.
+    /// Traces streamed writes without injecting scheduled write faults.
+    ///
+    /// Scheduled write faults require an in-memory payload. Simulation scenarios
+    /// that inject those faults use `put` rather than `put_streamed`.
     async fn put_streamed(
         &self,
         key: &str,

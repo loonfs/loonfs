@@ -81,15 +81,12 @@ impl ControlObjectKind {
     }
 }
 
-/// Lower bound of retained WAL/change history: the symmetrical pair to
-/// `wal/head.json`.
+/// Earliest sequence for which incremental WAL history is retained.
 ///
-/// Updated only by monotonic compare-and-swap on its own etag; never
-/// consulted for live commit visibility. Missing, stale, or unverifiable
-/// floors mean "retain more history", never less. The floor is necessary
-/// but not sufficient for deletion: below-floor objects are candidates,
-/// and actual deletion additionally requires delete-time re-verification
-/// (format spec, "Garbage collection").
+/// The floor advances monotonically by compare-and-swap and does not control
+/// live visibility. Missing or unverifiable floor state must retain more
+/// history. Objects below the floor are only deletion candidates; garbage
+/// collection still revalidates them before removal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalFloorState {
@@ -191,16 +188,12 @@ pub struct MetadataCompactionLeaseState {
     pub heartbeat_at_ms: u64,
 }
 
-/// Lifecycle of a durable checkpoint record: monotonic, with exactly two
-/// states and one transition.
+/// Monotonic lifecycle of a durable checkpoint record.
 ///
-/// A record is born `active` under a freshly generated id and pins its basis
-/// until something moves it to `released` by compare-and-swap — the owner
-/// asking for it, or garbage collection observing that its `expires_at_ms`
-/// passed. `released` is terminal: nothing returns a record to `active`, so
-/// a released record protects nothing and answers no read. Garbage
-/// collection deletes it once `released_at_ms` is a grace window old. A new
-/// pin is a new record under a new id, never a revival of this one.
+/// A new record starts active and pins its basis. Explicit release or expiry
+/// moves it to the terminal released state by compare-and-swap. Released
+/// records serve no reads and are deleted after the release grace period.
+/// Creating another pin always creates a new record id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CheckpointRecordLifecycle {
@@ -309,14 +302,12 @@ struct StrictCheckpointRecordState {
 }
 
 impl<'de> Deserialize<'de> for CheckpointRecordState {
-    /// Reads one checkpoint record and proves the one relationship its shape
-    /// cannot: that a fork-owned pin carries the lease bounding it.
+    /// Decodes a checkpoint record and validates that every fork-owned record
+    /// has an expiry.
     ///
-    /// The lease is the only thing that ever releases an attempt whose
-    /// target head was never installed — nothing else can tell that attempt
-    /// from one still running — so a fork record without one pins its basis
-    /// forever, and no pass can decide otherwise. It is refused at load like
-    /// any other corruption.
+    /// The expiry bounds an abandoned fork attempt whose target head was never
+    /// installed. Without it, the source basis could remain pinned forever, so
+    /// such a record is rejected as corrupt.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -534,15 +525,12 @@ impl From<StrictWalSegmentPointer> for WalSegmentPointer {
 }
 
 impl<'de> Deserialize<'de> for HeadState {
-    /// Reads one head and proves the one relationship its shape cannot: that
-    /// the replay accelerator begins at the visible WAL tip.
+    /// Decodes a namespace head and validates the WAL hint list.
     ///
-    /// Every publisher writes `visible_wal_tip` and `recent_segments` in the
-    /// same compare-and-swap. A namespace before its first commit has
-    /// neither, and every namespace after it has the tip as the
-    /// accelerator's first entry. Readers count the visible WAL tail from a
-    /// hint run that starts at the tip, so a head that disagrees with itself
-    /// is refused at load like any other corruption.
+    /// Before the first commit, both `visible_wal_tip` and `recent_segments` are
+    /// empty. Afterward, the first recent segment must equal the visible tip
+    /// because both are written in the same compare-and-swap. A mismatch is
+    /// rejected as corrupt state.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -658,13 +646,10 @@ impl HeadState {
     }
 }
 
-/// How one upload session moves its bytes into object storage, and
-/// everything that choice settles before any byte moves.
+/// Transport selected when an upload session is created.
 ///
-/// A session's transport is fixed when it opens and never changes. Each
-/// variant carries exactly what its own path needs, so a session cannot
-/// hold a provider upload it will never use, or a promise it was never
-/// given.
+/// The transport never changes, and each variant stores only the state
+/// required by that upload path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UploadSessionTransport {
@@ -672,11 +657,10 @@ pub enum UploadSessionTransport {
     /// so it learns size and digest from the bytes as they pass and has
     /// nothing to record here.
     ///
-    /// The empty braces are load-bearing: serde lets a *unit* variant of a
-    /// tagged enum swallow whatever else the object carried, so spelling
-    /// this as `ServiceProxied` would read a record holding a provider
-    /// upload as a proxied session and drop the handle that cleans it up.
-    /// A variant with no fields refuses it as the corruption it is.
+    /// Empty braces force serde to reject fields from another transport.
+    ///
+    /// A unit variant would silently ignore unexpected fields, which could drop
+    /// a provider upload id needed for cleanup.
     ServiceProxied {},
     /// The client writes the whole object through one presigned request.
     DirectPut {
@@ -689,16 +673,12 @@ pub enum UploadSessionTransport {
         /// reference rather than believing it.
         promised_content: ContentRef,
     },
-    /// The client writes the object in parts through presigned part
-    /// uploads, and the provider assembles it.
+    /// The client uploads parts and the provider assembles the object.
     ///
-    /// There is deliberately no content promise here. A session that had to
-    /// declare its length and digest up front would make a one-pass
-    /// uploader read its payload twice, and a client reading from a pipe
-    /// could not start at all — so a multipart upload claims what it wrote
-    /// at completion, which is where it was always verified rather than
-    /// believed. This variant carrying no reference is what makes an
-    /// up-front multipart claim unrepresentable.
+    /// Multipart sessions do not store a content reference at creation because
+    /// one-pass and streaming clients may not know the final size or checksum.
+    /// The client supplies those values at completion, when LoonFS verifies the
+    /// assembled object.
     DirectMultipart {
         /// The provider-side upload the parts assemble through, and the
         /// only provider handle LoonFS keeps: parts are the client's
@@ -725,17 +705,12 @@ impl UploadSessionTransport {
     }
 }
 
-/// Lifecycle of a durable upload session: one live state and two terminal
-/// ones, with no way back.
+/// Monotonic lifecycle of a durable upload session.
 ///
-/// A session opens with a lease and either completes or is aborted. The
-/// compare-and-swap that makes one of those two land is the serialization
-/// point for the whole upload — provider state follows the durable
-/// transition, never the other way around — so whichever transition wins is
-/// simply what happened, and the loser reports a terminal error rather than
-/// undoing anything. Nothing returns a session to `open`: a client that
-/// wants another try begins another session, which mints its own content
-/// identity.
+/// A session starts open and ends either completed or aborted. The
+/// compare-and-swap that writes the terminal state decides which transition
+/// won; provider cleanup happens afterward. Terminal sessions never reopen,
+/// so another attempt requires a new session and content id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UploadSessionLifecycle {
@@ -757,22 +732,13 @@ pub enum UploadSessionLifecycle {
         /// completed one names its content once, below.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         staged_content: Option<ContentRef>,
-        /// Unix-millisecond stamp of the staging request currently writing
-        /// the content object, or `None` when no request holds the slot.
+        /// Time at which the current staging request claimed exclusive access,
+        /// or `None` when no request is staging.
         ///
-        /// The claim is what makes staging exclusive. A service-proxied
-        /// session writes one object key, and a provider cannot make the
-        /// create-only condition on a multipart write part of the write, so
-        /// two requests that both found the key absent would both assemble
-        /// over it and only one of them would record its digest. Taking this
-        /// claim is a compare-and-swap, so exactly one request writes at a
-        /// time and the recorded reference always describes the object.
-        ///
-        /// It carries no expiry of its own. The claim is honoured only while
-        /// the session is open, so `expires_at_ms` above bounds it: a request
-        /// that is cancelled while holding the claim leaves the session
-        /// unable to stage until its lease passes, and garbage collection
-        /// aborts the session at exactly that point.
+        /// The claim is acquired by compare-and-swap so only one request can write
+        /// the session's content object at a time. It has no separate expiry; the
+        /// upload session lease bounds a claim left behind by cancellation, after
+        /// which garbage collection aborts the session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         staging_claimed_at_ms: Option<u64>,
     },

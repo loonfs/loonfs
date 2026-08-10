@@ -1,63 +1,25 @@
-//! The runtime's publication service: every mutation publishes through
-//! here.
+//! Runtime publication service for namespace mutations.
 //!
-//! [`PublisherRegistry`] funnels every mutation for a namespace through one
-//! per-namespace publisher that:
+//! Each namespace has one publisher and one worker queue. The publisher:
 //!
-//! - coalesces concurrent requests into a single batched publication (one
-//!   WAL segment, one head compare-and-swap),
-//! - deduplicates resubmissions by commit id — a duplicate joins the
-//!   in-flight request, while reusing a commit id for semantically
-//!   different contents is rejected,
-//! - sequences namespace deletion as a barrier: work admitted before the
-//!   delete publishes first, work admitted after it fails once the delete
-//!   succeeds,
-//! - retries stale-head and unknown-outcome compare-and-swap results with
-//!   the same commit ids, so durable receipts replay instead of surfacing
-//!   ambiguity, and
-//! - paces successive head compare-and-swap attempts per namespace.
+//! - batches concurrent commits into one WAL segment and one head CAS,
+//! - joins duplicate in-flight commit IDs and rejects conflicting reuse,
+//! - orders namespace deletion after earlier work and before later work,
+//! - retries stale or unknown CAS outcomes with the same commit IDs, and
+//! - enforces the configured minimum interval between head CAS attempts.
 //!
-//! A publisher owns its namespace's commit engine and writer session for its
-//! whole life, so it is the single writer of head-advancing state: batches
-//! and the delete barrier run through one engine, under one session epoch,
-//! on one worker task draining one queue.
+//! A publisher keeps one commit engine and writer session for its lifetime.
+//! The writer session is small and cannot be reconstructed after fencing.
+//! The WAL-tail projection is rebuildable, so the registry evicts projections
+//! when the shared cache budget is exceeded.
 //!
-//! That life is the namespace's, not a cache entry's, so what a publisher
-//! may hold is bounded rather than dropped: the session's epoch and fencing
-//! are a few dozen bytes nothing can rebuild, while the engine's WAL-tail
-//! projection is large and rebuildable from the store. The registry
-//! therefore keeps every publisher and bounds the projections across them,
-//! against the same budget the read-side projection cache spends
-//! (`max_cached_namespaces` and the two WAL-tail knobs beside it).
+//! The first request for an idle namespace publishes immediately. Requests
+//! that arrive during a publish or its pacing interval join the next batch.
+//! Cancelling a caller does not cancel admitted work.
 //!
-//! Every writer owns one registry, and the direct
-//! [`FsWriter`](crate::FsWriter) mutation methods, the reference server,
-//! and any embedded host with many in-process writer agents all submit
-//! through it — one publication implementation, one batching policy, one
-//! delete barrier. [`FsWriter::publisher`](crate::FsWriter::publisher)
-//! exposes the writer's registry for hosts that want to submit
-//! already-classified candidates directly.
-//!
-//! Batching is adaptive, driven by one knob (the runtime's
-//! `min_publish_interval_ms`): a submission to a cold namespace publishes
-//! immediately, and while a publish is in flight or the namespace is
-//! within the pacing interval of its last publication start, later
-//! submissions coalesce into the next batch. A solo writer submitting
-//! sequentially therefore pays no added latency, while sustained
-//! concurrent load amortizes into batches at most one publication per
-//! interval — larger batches and fewer WAL segments instead of head
-//! compare-and-swap thrash. The trade sits on a cold burst: its first
-//! submission publishes alone and the rest coalesce into the next paced
-//! batch, so one extra segment buys the immediate first flush.
-//!
-//! Admitted work is owned by the publisher's worker task, never by the
-//! caller futures awaiting results: a cancelled caller abandons only its
-//! result delivery, and the publication still lands. At shutdown,
-//! [`PublisherRegistry::close_admission`] refuses new submissions with
-//! `shutting_down` and [`PublisherRegistry::drain`] settles everything
-//! already admitted. Hosts do not sequence those themselves:
-//! [`FsWriter::shutdown`](crate::FsWriter::shutdown) owns the order they
-//! run in relative to the maintenance runner's own close and drain.
+//! Shutdown first closes admission and then drains admitted work. Use
+//! [`FsWriter::shutdown`](crate::FsWriter::shutdown), which also coordinates
+//! shutdown with the maintenance runner.
 
 use crate::fs::{ReadCore, WriterBits};
 use crate::publish::{CommitCandidate, CommitRequest, PreparedContent};
@@ -97,18 +59,14 @@ pub type PublishObserver = Arc<dyn Fn(&NamespaceId, loonfs_api::ChangeSeq) + Sen
 /// `commit_queue_full`.
 const MAX_BATCH_CANDIDATES: usize = 1024;
 
-/// Shared front door to the per-namespace publishers of one writer.
+/// Registry of per-namespace publishers owned by one writer.
 ///
-/// Cloning is cheap; clones share the same per-namespace publishers, so
-/// every writer in the process should submit through clones of one
-/// registry — [`FsWriter::publisher`](crate::FsWriter::publisher) hands
-/// out exactly that.
+/// Clones share the same publishers and worker tasks. Submit through the
+/// registry returned by [`FsWriter::publisher`](crate::FsWriter::publisher).
 ///
-/// The registry owns the worker tasks its publishers spawn, and settling
-/// them is two steps: [`Self::close_admission`], then [`Self::drain`]. A
-/// host does not run them itself —
-/// [`FsWriter::shutdown`](crate::FsWriter::shutdown) does, in the order
-/// that is correct relative to the maintenance runner.
+/// Shutdown closes admission and then drains admitted work. Prefer
+/// [`FsWriter::shutdown`](crate::FsWriter::shutdown), which also coordinates
+/// the maintenance runner.
 #[derive(Clone)]
 pub struct PublisherRegistry {
     shared: Arc<RegistryShared>,
@@ -126,8 +84,8 @@ pub struct PublisherRegistry {
     trace_store_kind: &'static str,
 }
 
-/// Registry state every publisher reaches back into: admission gating, the
-/// publisher map, and the panic tally a shutdown reports.
+/// State shared by all publishers in this registry: admission status,
+/// publisher instances, retained projections, and contained panic count.
 struct RegistryShared {
     state: Mutex<RegistryState>,
     /// Publications and deletes whose panic a worker survived. Workers
@@ -143,10 +101,9 @@ struct RegistryState {
 }
 
 impl RegistryShared {
-    // Recover a poisoned lock instead of `expect`: every critical section
-    // over this state is a plain field update, and turning one panicked
-    // publication into a permanently unusable registry is exactly the
-    // failure the workers' panic containment exists to prevent.
+    // Recover the inner state after poisoning. These critical sections only
+    // update fields, and worker panic containment is intended to keep the
+    // registry usable after a publication panics.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
         self.state
             .lock()
@@ -160,16 +117,13 @@ impl RegistryShared {
         state.projections.totals()
     }
 
-    /// Records what one namespace's publish left retained, then brings the
-    /// writer back under the shared projection budget.
+    /// Records the namespace's retained projection and evicts projections until
+    /// the writer is within its shared budget.
     ///
-    /// Victims are chosen least-recently-published first and lose their tail
-    /// projection only: never the publisher, never its engine identity,
-    /// never the writer session beside it. A victim whose engine is held —
-    /// a publication or delete is in flight — is skipped and stays
-    /// accounted, because that unit rebuilds and reports its own weight when
-    /// it finishes. Skipping therefore costs one sweep, not accounting
-    /// truth.
+    /// Eviction removes only rebuildable WAL-tail projections, starting with the
+    /// least recently published namespace. If a publication or delete currently
+    /// holds an engine, that namespace is skipped and remains counted. The active
+    /// operation reports its projection weight when it finishes.
     fn settle_projection(
         &self,
         namespace_id: &NamespaceId,
@@ -188,8 +142,9 @@ impl RegistryShared {
                 })
                 .collect::<Vec<_>>()
         };
-        // Swept outside the registry lock: locks nest publisher-then-
-        // registry on the eviction path, never the other way around.
+        // Invalidate projections without holding the registry lock.
+        // Publication may acquire the engine lock before the registry lock,
+        // so eviction must not acquire them in the opposite order.
         let dropped = victims
             .into_iter()
             .filter(|(_, publisher)| {
@@ -301,10 +256,11 @@ impl RetainedProjections {
             .saturating_sub(entry.weight.decoded_bytes);
     }
 
-    /// The namespaces to drop, least-recently-published first, until what
-    /// remains fits the budget — the same three knobs, read the same way, as
-    /// the read-side projection cache. Selection changes nothing: only an
-    /// eviction that actually took the engine does.
+    /// Selects least-recently-published projections until the remaining totals
+    /// fit the same three limits used by the read-side projection cache.
+    ///
+    /// Selection does not change accounting. Totals are updated only after a
+    /// selected projection is actually invalidated.
     fn over_budget_victims(&self, budget: &RuntimeCacheConfig) -> Vec<RetainedProjection> {
         let mut projections = self.entries.len();
         let mut rows = self.rows;
@@ -408,12 +364,12 @@ impl PublisherRegistry {
         publisher.submit(candidate).await
     }
 
-    /// Drops the rebuildable half of the namespace's publish state (its WAL
-    /// tail projection). The session's epoch and fencing are untouched:
-    /// they are facts about this process, not a cache.
+    /// Invalidates the namespace's rebuildable WAL-tail projection without
+    /// changing its writer epoch or fencing state.
     ///
-    /// A held engine means a publication or delete is in flight; that unit
-    /// revalidates against the live head itself, so skipping it is safe.
+    /// If an operation currently holds the engine, invalidation is skipped. That
+    /// operation validates the live head and reports its retained projection when
+    /// it completes.
     pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
         let publisher = self
             .shared
@@ -462,28 +418,29 @@ impl PublisherRegistry {
         self.shared.lock_state().closed
     }
 
-    /// Closes the front door: every later submission fails with
-    /// `shutting_down`, while already-admitted work keeps publishing.
-    /// Idempotent.
+    /// Stops accepting new submissions while allowing admitted work to finish.
+    ///
+    /// Later submissions fail with `shutting_down`. Calling this more than once
+    /// has no additional effect.
     pub fn close_admission(&self) {
         let publishers: Vec<NamespacePublisher> = {
             let mut state = self.shared.lock_state();
             state.closed = true;
             state.publishers.values().cloned().collect()
         };
-        // Swept outside the registry lock: locks nest publisher-then-
-        // registry on the eviction path, never the other way around.
+        // Close each publisher without holding the registry lock. Publisher
+        // operations may acquire their own state before the registry, so
+        // shutdown must not acquire those locks in the opposite order.
         for publisher in publishers {
             publisher.close_admission();
         }
     }
 
-    /// Waits for every publisher's worker to settle the work it owns,
-    /// surfacing publications whose panic the worker contained.
+    /// Waits for all current publisher workers to finish.
     ///
-    /// Call [`Self::close_admission`] first for a terminal drain; without
-    /// it this settles only the work admitted so far, and new submissions
-    /// keep scheduling more.
+    /// Returns an error if any publication or deletion panicked and the worker
+    /// contained the panic. Call [`Self::close_admission`] first to prevent new
+    /// work from being admitted during the drain.
     pub async fn drain(&self) -> Result<(), RuntimeError> {
         let publishers: Vec<NamespacePublisher> = self
             .shared
@@ -527,18 +484,12 @@ struct NamespacePublisher {
     trace_store_kind: &'static str,
 }
 
-/// The publisher's commit engine and writer session for its namespace.
+/// Commit engine and writer session retained by one namespace publisher.
 ///
-/// A writer session's acquired epoch and terminal fencing record are facts
-/// about this process, not cached views of durable state: nothing in the
-/// store can rebuild "this session was fenced". When they lived inside the
-/// LRU control cache, eviction erased them (and cache-disabled runs never
-/// kept them at all), so a fenced writer could silently bump the epoch back
-/// and fence the legitimate writer instead. They live here instead, with the
-/// publisher that owns every head-advancing write for the namespace: a few
-/// dozen bytes per namespace this process has published to, released only
-/// with the publisher itself, once the namespace is deleted and its id can
-/// never rebind.
+/// The session stores the acquired epoch and terminal fencing state. Those
+/// values describe this process and cannot be reconstructed from object
+/// storage. They therefore live for the publisher's lifetime rather than in
+/// an evictable cache. Only the engine's WAL-tail projection is invalidated.
 struct EngineSlot {
     /// Built on the first unit of work and kept for the publisher's life.
     /// Invalidation drops only its rebuildable tail projection.
@@ -547,12 +498,10 @@ struct EngineSlot {
     session: SharedWriterSessionState,
 }
 
-/// Whether the publisher still admits work, and if not, what it owes the
-/// caller.
+/// Admission state for a namespace publisher.
 ///
-/// One state rather than two flags, so the precedence holds by construction:
-/// a namespace whose delete landed is gone, not shutting down, and closing
-/// admission afterwards cannot demote it.
+/// A single enum preserves precedence: after deletion succeeds, the
+/// publisher remains `Deleted` even if registry shutdown closes admission.
 enum PublisherAdmissionState {
     Open,
     /// Set by the registry's admission close. Later admissions fail with
@@ -667,8 +616,7 @@ impl NamespacePublisher {
         }
     }
 
-    /// What an admission owes its caller right now, or `Ok(())` while the
-    /// publisher is open.
+    /// Returns the error for the current admission state, or succeeds when open.
     fn check_admission(&self, state: &NamespacePublisherState) -> Result<(), CoreError> {
         match state.admission {
             PublisherAdmissionState::Open => Ok(()),
@@ -690,16 +638,13 @@ impl NamespacePublisher {
         true
     }
 
-    /// Records what a publish left retained and sweeps the writer back under
-    /// the shared projection budget.
+    /// Records the projection retained by the completed publish and enforces the
+    /// writer's shared projection budget.
     ///
-    /// Called while the publish still holds its engine, so the weight
-    /// recorded is the projection the engine actually kept: no concurrent
-    /// sweep can drop it in between and leave the ledger claiming one that
-    /// is gone. Taking the registry lock under a held engine is the one
-    /// place the nesting runs that way and it still cannot cycle, because a
-    /// sweep releases the registry lock before it reaches for an engine and
-    /// never waits for one.
+    /// The caller still holds the engine lock, so the recorded weight matches the
+    /// projection in the engine. This path may acquire the registry lock while
+    /// holding the engine lock. Eviction avoids deadlock by releasing the
+    /// registry lock before attempting to lock any engine.
     fn settle_retained_projection(&self, weight: Option<PublishTailWeight>) {
         let Some(shared) = self.shared.upgrade() else {
             return;
@@ -715,10 +660,11 @@ impl NamespacePublisher {
             .publisher_retained_projections(totals.projections, totals.decoded_bytes);
     }
 
-    /// The path to `admit` is await-free: a submission future's first poll
-    /// either admits the candidate or fails, and only then parks on the
-    /// result channel. Cancellation tests rely on this — after one poll of
-    /// a submission, the publication is admitted and owned by the worker.
+    /// Admits the request before awaiting its result.
+    ///
+    /// The first poll either admits the candidate or returns an error. After
+    /// admission, cancelling the caller only drops result delivery; the worker
+    /// still owns and publishes the request.
     async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
         let enqueued_at = Instant::now();
@@ -852,10 +798,9 @@ impl NamespacePublisher {
         loop {
             let collect_started = Instant::now();
             let queue_depth_start = queued_candidates(&self.lock_state());
-            // There is no fixed coalescing wait — batches form from what
-            // arrives while a publication is in flight or while the pacing
-            // interval since the last publication start runs out, so a cold
-            // namespace publishes its first submission immediately.
+            // Do not add a separate batching delay. The first request for an idle
+            // namespace publishes immediately; requests arriving during a publish or
+            // pacing interval form the next batch.
             self.await_cas_slot(false).await;
             let Some(item) = self.take_next_item() else {
                 return;
@@ -910,16 +855,13 @@ impl NamespacePublisher {
         item
     }
 
-    /// Publishes one taken batch, containing a panic in the publication.
+    /// Publishes one batch while containing panics from the publication.
     ///
-    /// Deliberate v0 scope, not defensive habit. This publisher is the only
-    /// path by which its namespace accepts writes, so a panic that killed
-    /// the worker would leave that namespace unwritable until the process
-    /// restarts, with every taken waiter hanging. The taken requests instead
-    /// settle as `commit_outcome_unknown` — the panic may have struck either
-    /// side of the head compare-and-swap, and that is an answer callers
-    /// already know how to resolve: retry with the same commit id and the
-    /// durable receipt replays. The worker keeps its queue and moves on.
+    /// This worker is the namespace's only publication path. If publication
+    /// panics, each request in the batch receives `commit_outcome_unknown`
+    /// because the panic may have occurred before or after the head CAS. Callers
+    /// can retry with the same commit ID and use the durable receipt to resolve
+    /// the outcome. The worker then continues with queued work.
     async fn publish_batch(&self, candidates: Vec<BatchCandidate>) {
         let taken_commit_ids = candidates
             .iter()
@@ -1030,9 +972,10 @@ impl NamespacePublisher {
             .collect()
     }
 
-    /// The publisher's engine, built on first use. The namespace's
-    /// immutable identity travels in the head every publish already loads,
-    /// so the engine needs nothing seeded but its caches and session.
+    /// Returns the publisher's lazily created commit engine.
+    ///
+    /// Each publish loads the namespace identity from the head, so construction
+    /// only needs the shared table cache and writer session.
     fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
         slot.engine.get_or_insert_with(|| {
             NamespaceCommitEngine::new(self.namespace_id.clone())
@@ -1051,9 +994,8 @@ impl NamespacePublisher {
         {
             Ok(outcome) => outcome,
             Err(_) => {
-                // Contained like a panicked publication, but a delete has no
-                // receipt to replay: the caller is told, and the worker keeps
-                // serving the namespace the delete did not remove.
+                // Contain deletion panics so the worker can continue. Deletion has no commit
+                // receipt for reconciliation, so report an internal error to its callers.
                 self.record_panic();
                 Err(CoreError::Internal(
                     "delete task aborted mid-delete".to_owned(),
@@ -1144,13 +1086,11 @@ impl NamespacePublisher {
         }
     }
 
-    /// Sleeps until this namespace's next head compare-and-swap is allowed.
+    /// Waits until the namespace may start another head CAS.
     ///
-    /// `claim` decides what happens on arrival: a claiming waiter also
-    /// reserves the slot by pushing the next allowed instant out by one
-    /// pacing interval, so two waiters cannot both take the same slot. A
-    /// non-claiming waiter only observes that the slot is open — the caller
-    /// reserves it later, when it actually takes a work item.
+    /// When `claim` is true, this method also reserves the next slot by advancing
+    /// the deadline one pacing interval. When false, it only waits; the caller
+    /// reserves the slot when it removes work from the queue.
     async fn await_cas_slot(&self, claim: bool) {
         loop {
             let sleep_until = self.lock_state().next_allowed_cas_at;
@@ -1264,10 +1204,11 @@ fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
     waiters
 }
 
-/// Retrying with the same commit ids is safe: candidates that actually
-/// committed replay their durable receipts. So an unknown head outcome is
-/// retried like a stale head, resolving it into a definite answer instead of
-/// handing `commit_outcome_unknown` to every waiter.
+/// Returns whether publication should retry the batch.
+///
+/// Retrying with the same commit IDs is safe because committed candidates
+/// replay their durable receipts. Both stale-head and unknown-outcome errors
+/// are retried to obtain a definite result.
 fn is_retryable_head_publish(result: &CommitResult) -> bool {
     matches!(
         result,

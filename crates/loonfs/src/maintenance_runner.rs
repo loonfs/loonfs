@@ -1,41 +1,21 @@
-//! One runner admits every background maintenance step.
+//! Scheduler for bounded background maintenance.
 //!
-//! A [`MaintenanceJob`] knows how to do one bounded piece of upkeep for one
-//! namespace: it re-reads durable state, does at most one unit of work,
-//! publishes through a compare-and-swap, and reports a
-//! [`MaintenanceStepResult`]. It decides nothing about when to run.
+//! A [`MaintenanceJob`] performs one bounded unit of work for one namespace.
+//! Each step reloads durable state, performs at most one update, and reports a
+//! [`MaintenanceStepResult`]. Jobs do not decide when they run.
 //!
-//! The [`MaintenanceRunner`] decides that, and it is the only thing that
-//! does. It holds the pending `{job, namespace}` keys, the one permit pool
-//! every job shares, the per-key error backoff, the not-before times a
-//! wall-clock obligation plants, the opaque continuation a bounded job
-//! stopped at, and a bounded sweep over the keys it has admitted. Triggers
-//! — a publish crossing a threshold, an upload session opening — are hints:
-//! level-triggered, never authoritative, and safe to lose because the
-//! durable state a step re-reads is the truth.
+//! [`MaintenanceRunner`] owns scheduling. It tracks pending `(job, namespace)`
+//! keys, concurrency permits, retry backoff, earliest run times, per-job
+//! continuations, and reconciliation progress. Triggers are hints only; every
+//! step validates current durable state before acting.
 //!
-//! A job keeps no scheduling state of its own. Where its last bounded step
-//! stopped comes back to it as the `continuation` argument of the next one,
-//! so there is one place that knows what a key is waiting for. That state
-//! is in memory and performance-only: a step rebuilds every safety proof
-//! from durable state whatever position it starts from, so a continuation
-//! lost with the process costs a restarted pass and authorizes nothing.
+//! Continuations are in-memory performance hints. Losing one restarts the
+//! pass but does not change correctness.
 //!
-//! ## What automatic maintenance covers
-//!
-//! Automatic maintenance covers namespaces touched by the running process
-//! and namespaces explicitly assigned to a maintenance host. It never
-//! discovers namespaces: LoonFS has no operation that enumerates them, and
-//! this runner introduces none. A namespace enters the admitted set by
-//! being nudged — by a write, a query, a timed obligation, or an explicit
-//! assignment — and reconciliation revisits exactly that set. A namespace
-//! that no process has touched and no host has been assigned is outside
-//! this guarantee, and an operator brings it back in by assigning it.
-//!
-//! LoonFS never creates a hidden runtime for maintenance. Steps are spawned
-//! on the writer's own owning runtime and stay visible to shutdown through
-//! the registry here. Only a writer owns a runner: readers and admins
-//! schedule nothing.
+//! Automatic maintenance covers namespaces touched by this process or
+//! explicitly assigned to it. The runner never discovers namespaces.
+//! Maintenance tasks run on the writer's runtime and are included in writer
+//! shutdown. Readers and admin handles do not own a runner.
 
 mod admission;
 mod compaction;
@@ -59,15 +39,11 @@ pub(crate) use jobs::{
     completed_upload_reclaim_at_ms, register_core_jobs, upload_session_reclaim_at_ms,
 };
 
-/// How often the runner sweeps the keys it has admitted, looking for work no
-/// trigger reported.
+/// Interval between reconciliation sweeps of admitted maintenance keys.
 ///
-/// Triggers are hints, and a hint can be lost: a step that concluded
-/// `Blocked`, a namespace whose last writer went quiet mid-backlog, a key
-/// cleared by a shutdown earlier in this process. The sweep is the answer to
-/// all of them, so its period is how long such work may sit — short enough
-/// to be a hiccup, long enough that one cheap probe per admitted key is
-/// nothing next to the traffic the same process is serving.
+/// Sweeps recover work that was blocked, left behind by a quiet writer, or
+/// missed by a trigger. This interval is the maximum expected delay before
+/// such work is probed again.
 const RECONCILE_INTERVAL_MS: u64 = 60_000;
 
 /// Most admitted keys one reconciliation sweep probes. The sweep resumes
@@ -131,10 +107,10 @@ impl fmt::Display for MaintenanceJobId {
     }
 }
 
-/// What one bounded maintenance step accomplished.
+/// Result category for one bounded maintenance step.
 ///
-/// The conclusion is the executor's whole vocabulary for scheduling: it says
-/// what happened, and the runner decides what that means for the key.
+/// Jobs report what happened; the runner decides whether and when to schedule
+/// the key again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceStepConclusion {
     /// Durable state advanced. The key is eligible again at once — behind
@@ -169,11 +145,10 @@ impl MaintenanceStepConclusion {
     }
 }
 
-/// Everything one bounded step tells the runner.
+/// Scheduling information returned by one bounded maintenance step.
 ///
-/// A job returns this instead of a bare conclusion so that the scheduling
-/// state it produces — where it stopped, and when it should next be looked
-/// at — lives in the runner rather than in a map beside it.
+/// The runner stores the conclusion, optional continuation, and earliest next
+/// run time so jobs do not maintain separate scheduler state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaintenanceStepResult {
     /// What the step accomplished.
@@ -187,13 +162,11 @@ pub struct MaintenanceStepResult {
     /// It never crosses a process boundary: a job that cannot restart its
     /// pass from the beginning safely must not use this.
     pub continuation: Option<String>,
-    /// The earliest wall-clock millisecond this step saw work becoming
-    /// eligible — a lease that will expire, a grace window that will pass.
+    /// Earliest Unix millisecond when the observed work may become eligible.
     ///
-    /// It joins the deadlines triggers plant, under the same rule: the
-    /// soonest of them is when the runner wakes, the latest is when the key
-    /// stops owing anything. `None` when the step observed no deadline,
-    /// which is not a claim that there is none.
+    /// The runner keeps the earliest deadline reported by either a trigger or a
+    /// step. `None` means this step did not observe a deadline; it does not prove
+    /// that no deadline exists.
     pub not_before_ms: Option<u64>,
 }
 
@@ -223,13 +196,11 @@ pub enum MaintenanceProbe {
     Idle,
 }
 
-/// One kind of bounded background upkeep, for one namespace at a time.
+/// A bounded maintenance operation that runs for one namespace at a time.
 ///
-/// An executor re-reads durable state on every call — it never trusts what
-/// the trigger that woke it claimed — does at most one bounded unit of work,
-/// and reports what happened. Delivery is at-least-once and conclusions are
-/// idempotent through the compare-and-swap each step publishes with, so a
-/// duplicated step costs a round trip and nothing else.
+/// Each call reloads durable state, performs at most one unit of work, and
+/// reports the result. Steps may run more than once, so implementations must
+/// be idempotent through their durable compare-and-swap.
 #[async_trait::async_trait]
 pub trait MaintenanceJob: Send + Sync + 'static {
     /// This job's stable identity.
@@ -252,32 +223,21 @@ pub trait MaintenanceJob: Send + Sync + 'static {
     /// job can. Called only by reconciliation, never on the hot path.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe>;
 
-    /// Whether a landed publication is a reason to look at this job's work
-    /// for the namespace that published it.
+    /// Returns whether successful publications should nudge this job.
     ///
-    /// A job that derives something from the namespace's own history — an
-    /// index, a projection — says `true` and is nudged after every
-    /// publication the writer commits, so it needs no hook of its own on
-    /// the write path. The nudge is a hint like any other: it is dropped
-    /// when admission is closed, and the step it suggests re-reads what the
-    /// publication committed rather than trusting it.
-    ///
-    /// Jobs that answer to durable deadlines rather than to writes leave
-    /// this `false`, which is why it is the default.
+    /// Use `true` for work derived from namespace history, such as an index or
+    /// projection. The nudge is only a scheduling hint; the step must reload
+    /// durable state. Deadline-driven jobs keep the default `false`.
     fn nudged_by_publications(&self) -> bool {
         false
     }
 }
 
-/// Wall-clock milliseconds the runner schedules against.
+/// Clock used to schedule durable Unix-millisecond deadlines.
 ///
-/// Scheduling is all this clock decides. The deadlines it is compared with —
-/// an upload session's lease, a completed session's reclamation grace — are
-/// unix milliseconds stamped into durable records, so the runner has to read
-/// the same kind of clock to know when they arrive. Nothing here gates
-/// correctness: firing a step early costs one round trip that concludes
-/// there was nothing to do, because every executor re-derives its own
-/// safety from durable state under its own mutation context.
+/// This clock controls only when a step is attempted. Each job validates
+/// eligibility from durable state, so an early wake can waste a read but
+/// cannot make an unsafe update.
 pub(crate) trait MaintenanceClock: fmt::Debug + Send + Sync {
     /// Unix milliseconds.
     fn now_ms(&self) -> u64;
@@ -318,16 +278,10 @@ impl Default for SystemMaintenanceClock {
 
 impl MaintenanceClock for SystemMaintenanceClock {
     fn now_ms(&self) -> u64 {
-        // A clock before the unix epoch reads as the epoch here rather than
-        // failing. Every eligibility test is `at_ms <= now_ms`, so the
-        // epoch is the reading under which nothing timed comes due: work
-        // that answers to a durable deadline parks until something nudges
-        // it. That is the safe end to fall off. The opposite fallback would
-        // make every deadline due at once, and since the timer's sleep is
-        // floored at one millisecond it would drive reconciliation sweeps
-        // at that floor for as long as the clock stayed wrong. A pre-epoch
-        // clock is also a condition every durable path refuses outright, so
-        // there is no useful maintenance to run through it either way.
+        // Treat a pre-epoch system clock as Unix time zero. This leaves durable
+        // deadlines in the future instead of making every deadline immediately due
+        // and causing a tight scheduler loop. Durable mutation paths reject the same
+        // invalid clock independently.
         loonfs_core::time::current_time_ms().unwrap_or(0)
     }
 
@@ -353,12 +307,10 @@ fn split_mix_64(counter: u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
-/// Cloneable, non-blocking way to tell the runner a key may have work.
+/// Cloneable handle for non-blocking maintenance hints.
 ///
-/// Nudges are hints. They never block the caller, never wait for a permit,
-/// and are simply dropped once the runner's admission has closed or the
-/// writer that owns it is gone — a write path holding one of these is not
-/// on the hook for the maintenance it suggests.
+/// Nudges coalesce and never wait for a permit. They are ignored after
+/// admission closes or after the owning writer is dropped.
 #[derive(Clone)]
 pub struct MaintenanceHandle {
     inner: Weak<RunnerInner>,
@@ -418,12 +370,10 @@ pub(crate) struct MaintenanceRunner {
     inner: Arc<RunnerInner>,
 }
 
-/// Running totals a trace reports beside the event that moved them.
+/// Process-wide counters included in maintenance trace events.
 ///
-/// Counters rather than a metrics framework, and process-wide rather than
-/// per key: what an operator asks of them is whether backoffs and timed
-/// wakes are happening at all and roughly how often, which a monotonic
-/// number on an existing event answers without any new cardinality.
+/// They show whether retry backoff and deadline wakes are occurring without
+/// adding per-key metric cardinality.
 #[derive(Debug, Default)]
 struct RunnerCounters {
     /// Steps that failed and were scheduled for a backoff retry.
@@ -632,15 +582,11 @@ impl MaintenanceRunner {
         Ok(())
     }
 
-    /// Tells every job that subscribes to publications that `namespace_id`
-    /// just committed one.
+    /// Nudges each registered job that subscribes to successful publications.
     ///
-    /// The write path calls this instead of knowing which jobs care, so a
-    /// job that wants publication nudges gets them by saying so on the
-    /// trait rather than by a host wiring an observer to it. Each nudge is
-    /// an ordinary one: non-blocking, coalescing, and dropped once
-    /// admission is closed or the policy is
-    /// [`FsBackgroundWork::ManualOnly`].
+    /// Subscription is declared by [`MaintenanceJob::nudged_by_publications`], so
+    /// the write path does not need job-specific wiring. Nudges are non-blocking,
+    /// coalesced, and ignored when automatic maintenance is disabled or closed.
     pub(crate) fn nudge_publication_subscribers(&self, namespace_id: &NamespaceId) {
         // The subscriber list is read out from under the job lock before
         // any nudge takes the scheduling lock: the two are never held
@@ -657,8 +603,8 @@ impl MaintenanceRunner {
         }
     }
 
-    /// Whether the key is admitted with work still owed to it. Test and
-    /// diagnostic seam; nothing on a hot path asks.
+    /// Returns whether this key is currently pending. Used only by tests and
+    /// diagnostics.
     #[cfg(test)]
     pub(crate) fn is_pending(&self, job: MaintenanceJobId, namespace_id: &NamespaceId) -> bool {
         self.inner
@@ -728,10 +674,10 @@ impl RunnerInner {
         }
     }
 
-    /// Spawns work on the owning runtime and registers it for shutdown, or
-    /// refuses after a shutdown. Dropping the future without running it must
-    /// release whatever it holds, so both refusals here clean up by
-    /// dropping.
+    /// Spawns maintenance on the owning runtime and tracks it for shutdown.
+    ///
+    /// If no runtime is available or admission has closed, the future is
+    /// dropped. It must release any claimed key or permit when dropped.
     pub(super) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
         let Some(runtime) = self.runtime() else {
             return;
@@ -793,10 +739,9 @@ fn dispatch_ready(inner: &Arc<RunnerInner>) {
         spawn_chain(inner, dispatch);
     }
     if dispatched > 0 {
-        // What is left behind is the useful half: a queue that keeps
-        // growing, or an oldest wait that keeps climbing, is the permit
-        // pool being too small for what this process admits. Queue-wide
-        // numbers, so no key names appear.
+        // Report the queue remaining after dispatch. Sustained queue growth or rising
+        // wait time indicates that the shared permit limit is too low. Metrics are
+        // aggregate and do not include namespace IDs.
         let now_ms = inner.clock.now_ms();
         let state = inner.lock_state();
         tracing::debug!(
@@ -834,12 +779,11 @@ fn spawn_chain(inner: &Arc<RunnerInner>, dispatch: MaintenanceDispatch) {
     });
 }
 
-/// Holds one permit across a chain of steps and gives it back exactly once.
+/// Owns one maintenance permit and releases it exactly once.
 ///
-/// The chain hands its permit straight to the next key on every ordinary
-/// finish. Dropping — on a panic, on a refused spawn, or on a task discarded
-/// with its runtime — releases the key and the permit instead, so neither is
-/// ever stranded.
+/// Normal completion may transfer the permit to the next ready key. Dropping
+/// the chain after a panic, refused spawn, or runtime shutdown abandons the
+/// current key and returns the permit.
 struct PermitChain {
     inner: Arc<RunnerInner>,
     dispatch: Option<MaintenanceDispatch>,
@@ -921,12 +865,11 @@ fn ensure_scheduler(inner: &Arc<RunnerInner>) {
     state.scheduler = Some(runtime.spawn(scheduler_loop(weak, wake)));
 }
 
-/// The one timer: it wakes for the soonest deadline any key is parked on,
-/// and at least once per reconciliation interval.
+/// Scheduler task for deadlines and periodic reconciliation.
 ///
-/// It holds the runner weakly and re-upgrades after every sleep, so a
-/// handle dropped without a shutdown lets this task exit on its own rather
-/// than keeping the runtime state alive behind it.
+/// It sleeps until the earliest key deadline or reconciliation interval. The
+/// task holds only a weak runner reference, so dropping the runner lets the
+/// task exit even without explicit shutdown.
 async fn scheduler_loop(inner: Weak<RunnerInner>, wake: Arc<Notify>) {
     loop {
         let delay = {
@@ -1004,15 +947,11 @@ fn take_reconcile_turn(inner: &Arc<RunnerInner>, now_ms: u64) -> bool {
     true
 }
 
-/// Asks a bounded slice of the admitted keys whether they have work.
+/// Probes a bounded batch of admitted maintenance keys.
 ///
-/// Scope is what this process admitted and nothing else: no namespace
-/// discovery, no listing. Automatic maintenance therefore covers the
-/// namespaces this process has touched and the ones a host has explicitly
-/// assigned to it — a set that starts empty at every start-up and grows
-/// only by being nudged. Nothing admitted is lost within one process
-/// lifetime; a namespace outside that set is outside the guarantee until
-/// something touches it or an operator assigns it.
+/// Reconciliation never discovers namespaces. It covers only namespaces
+/// touched by this process or explicitly assigned to it. The admitted set
+/// starts empty after each process restart and grows through nudges.
 async fn reconcile(inner: &Arc<RunnerInner>) {
     let batch = inner
         .lock_state()

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///   the same code for the same failure. Never restate a registry code as a
 ///   string literal; use `ErrorCode::X.as_str()` or an error's `code()`.
 /// - **Backend-local codes** ([`crate::backend_error::BackendError`]) pass
-///   through verbatim from the backend seam: `invalid_config`,
+///   through verbatim from the backend: `invalid_config`,
 ///   `invalid_input`, `client_error`, `io_error`, and `runtime_error`.
 /// - **CLI-local codes** cover failures that never reach a backend. The
 ///   complete list, each owned by a constructor below, is: `invalid_config`,
@@ -20,10 +20,9 @@ use serde::{Deserialize, Serialize};
 ///   `config_already_exists`, `destination_exists`,
 ///   `non_interactive_input_required`, `json_not_supported_for_streaming`,
 ///   `invalid_usage`, `io_error`, and `cancelled`. Overlaps with
-///   backend-local codes are
-///   deliberate: the same string means the same thing on both sides of the
-///   seam — a local configuration failure is `invalid_config` whether the
-///   CLI or the backend seam caught it, and the registry codes are reserved
+///   backend-local codes are deliberate: the same string means the same thing
+///   in both layers. A local configuration failure is `invalid_config`
+///   whether the CLI or backend detects it, and registry codes are reserved
 ///   for failures a server could also produce.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CliError {
@@ -39,9 +38,9 @@ pub(crate) struct CliError {
 }
 
 impl From<crate::backend_error::BackendError> for CliError {
-    /// Backend failures pass through verbatim: the seam already carries the
-    /// registry or backend-local code, message, and any server diagnostics
-    /// this CLI reports.
+    /// Backend failures pass through verbatim because the value already
+    /// carries the registry or backend-local code, message, and any server
+    /// diagnostics this CLI reports.
     fn from(error: crate::backend_error::BackendError) -> Self {
         Self {
             code: error.code,

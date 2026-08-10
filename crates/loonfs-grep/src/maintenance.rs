@@ -1,11 +1,9 @@
-//! Grep's two executors for the runtime's maintenance runner: building the
-//! index, and reclaiming what building it leaves behind.
+//! Grep index-building and garbage-collection jobs for the runtime
+//! maintenance runner.
 //!
-//! Both are upkeep like any other: one bounded unit of work against durable
-//! state, published through a compare-and-swap, reported as a conclusion.
-//! Registering them is all a host does — the runner they register with owns
-//! admission, the permit pool every maintenance family shares, backoff, and
-//! shutdown, so grep brings no scheduler of its own.
+//! Each job performs one bounded operation against durable state and reports
+//! a scheduling conclusion. The shared runner provides admission, permits,
+//! backoff, and shutdown; grep does not create another scheduler.
 
 use crate::root::{load_grep_root, GrepLifecycle};
 use crate::{
@@ -60,14 +58,12 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         true
     }
 
-    /// Builds one bounded unit, and folds one only when there is nothing
-    /// left to build.
+    /// Runs one bounded build step, then one reorganization step only when the
+    /// index is caught up.
     ///
-    /// The order is the index's own priority: catching up with the namespace
-    /// keeps queries answerable, while reorganization only makes an already
-    /// complete answer cheaper. A step that built something says so and is
-    /// eligible again at once, so a backlog is drained by repeated steps
-    /// rather than by one long one.
+    /// Catch-up takes priority because it affects query completeness;
+    /// reorganization only improves read cost. Progress is scheduled again so a
+    /// backlog is drained through repeated bounded steps.
     async fn step(
         &self,
         namespace_id: &NamespaceId,
@@ -145,15 +141,11 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
     }
 }
 
-/// Reclaims one namespace's unreferenced grep objects, one bounded pass at
-/// a time.
+/// Runs one bounded grep garbage-collection pass.
 ///
-/// The enumeration cursor is the runner's, not this job's: it arrives as the
-/// step's `continuation` and leaves as the result's, exactly as the
-/// runtime's own collection carries its cursor. That costs nothing here,
-/// because the cursor was never authority — a resumed pass re-reads liveness
-/// and rebuilds the live key set just as a fresh one does, so a cursor lost
-/// with the process costs re-enumeration and can never authorize a deletion.
+/// The runner stores the enumeration cursor as the job continuation. Every
+/// resumed pass rebuilds liveness from durable state, so losing the cursor
+/// only restarts enumeration and cannot authorize deletion.
 #[derive(Debug, Clone)]
 pub struct GrepGcJob<S> {
     worker: GrepWorker<S>,
@@ -221,19 +213,12 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
     }
 }
 
-/// One collection pass, read as one conclusion.
+/// Converts a grep GC report into a scheduling conclusion.
 ///
-/// Progress is where the enumeration got to, never what the counters say. A
-/// pass that hands back a cursor past the one it was given walked keyspace
-/// and has more to walk, so it runs again. A pass that hands back the very
-/// cursor it started from decided nothing at all, and repeating it
-/// immediately would repeat that exact result, so it parks like any other
-/// zero-progress step.
-///
-/// A pass that walked the whole prefix is finished: idle when it freed
-/// nothing, eligible again when it did. A namespace it could not read
-/// liveness or a root for suppressed deletions it might otherwise have made,
-/// so it parks distinctly rather than reading as idle.
+/// A changed cursor means enumeration advanced and should continue. An
+/// unchanged cursor means the pass made no progress and should park. A
+/// completed pass runs again only after deleting objects. Incomplete
+/// liveness information is reported as blocked rather than idle.
 fn grep_gc_step_result(
     report: GrepGcReport,
     submitted_cursor: Option<&str>,

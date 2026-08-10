@@ -24,11 +24,10 @@ const XDG_CONFIG_SUBDIR: &str = "loonfs";
 /// Directory under `$HOME`, where installs predating XDG support live.
 const LEGACY_CONFIG_SUBDIR: &str = ".loonfs";
 
-/// The way past a config file this build will not accept. Every failure to
-/// load the resolved file ends with it, because strict decoding is only
-/// safe while a rejected file can always be stepped around — otherwise one
-/// unknown key bricks every command, `loonfs init` included. The
-/// environment variable named here is [`CONFIG_PATH_ENV`].
+/// Recovery instructions appended to config-load errors.
+///
+/// Strict decoding is safe only when users can select or create another
+/// config file, including when the default file is unreadable.
 const CONFIG_REMEDY: &str = "fix that file, or run against a different one with `--config <path>` \
      or `LOONFS_CONFIG=<path>`; `loonfs config path` prints the file in use, and \
      `loonfs init --config <path>` writes a fresh one";
@@ -255,13 +254,12 @@ impl ConfigLocation {
     }
 }
 
-/// Resolves the config file for this invocation: `--config` beats
-/// `LOONFS_CONFIG` beats the default location.
+/// Resolves the config path in this order: `--config`,
+/// `LOONFS_CONFIG`, then the default location.
 ///
-/// The explicit forms win by being spelled, never by the named file
-/// existing — a path that is not there yet is still the path this
-/// invocation uses, which is what makes `loonfs init --config <path>` a way
-/// out of an unreadable default file.
+/// An explicit path is selected even when the file does not exist, allowing
+/// commands such as `loonfs init --config <path>` to create a replacement
+/// for an invalid default config.
 pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocation, CliError> {
     if let Some(path) = flag {
         return Ok(ConfigLocation::at(path.to_path_buf(), ConfigSource::Flag));
@@ -272,13 +270,11 @@ pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocat
     default_config_location()
 }
 
-/// The default location: `$XDG_CONFIG_HOME/loonfs/config.toml` when that
-/// variable names an absolute directory, and `~/.loonfs/config.toml`
-/// otherwise.
+/// Returns the default config location.
 ///
-/// Existence decides exactly one thing here, and only for the migration:
-/// an install that predates XDG support keeps reading its `~/.loonfs` file
-/// until a config exists at the preferred path.
+/// An absolute `XDG_CONFIG_HOME` selects the XDG path. Otherwise the legacy
+/// `~/.loonfs/config.toml` path is used. During migration, an existing legacy
+/// file remains active until a file exists at the XDG path.
 fn default_config_location() -> Result<ConfigLocation, CliError> {
     let legacy = legacy_config_path();
     let Some(xdg_dir) = xdg_config_home() else {
@@ -332,9 +328,10 @@ pub(crate) fn load_config(path: &Path) -> Result<CliConfig, CliError> {
     decode_config_source(path, &source.text)
 }
 
-/// A config load for the repair commands. When the strict decode rejects the
-/// file, they get the loose TOML table instead, so a typo in one profile
-/// never bricks the commands that would fix it.
+/// Config result used by repair commands.
+///
+/// When strict decoding fails, repair commands receive the raw TOML table so
+/// they can edit the invalid file.
 pub(crate) enum ConfigLoad {
     Valid(CliConfig),
     Degraded {

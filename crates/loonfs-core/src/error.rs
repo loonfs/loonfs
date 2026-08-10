@@ -1,9 +1,9 @@
 //! Core error types and their wire-code classification.
 //!
-//! Stringification rule: core errors are `Clone`/serde-constrained, so foreign
-//! causes (object-store, codec, io) are captured as prefixed message strings
-//! next to the object key they are about, not as `#[source]` chains. Crates
-//! without those constraints (server, CLI) prefer `#[source]` chains instead.
+//! Core errors must support `Clone` and serialization. Errors from the object
+//! store, codecs, and I/O are therefore stored as messages with the relevant
+//! object key instead of as `#[source]` chains. The server and CLI use source
+//! chains where these constraints do not apply.
 
 use crate::checkpoint::ManifestLoadError;
 use crate::commit::{CommitHeadPublishError, CommitValidationError};
@@ -28,9 +28,8 @@ use thiserror::Error;
 /// machine-readable reason.
 pub use self::CoreError as Error;
 
-/// Result type used by `loonfs-core` entrypoints. Crate-internal: the alias
-/// is transparent, so public signatures using it still read as
-/// `std::result::Result<T, Error>` from outside.
+/// Internal result alias used by core entry points. Public signatures still
+/// expose this as `std::result::Result<T, Error>`.
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 pub use loonfs_api::{ErrorCode, ErrorKind};
@@ -81,26 +80,24 @@ pub enum CoreError {
         inode_id: InodeId,
         revision_no: RevisionNo,
     },
-    /// A buffered content read was refused before any fetch: the resolved
-    /// content is larger than the caller's read budget allows in memory.
+    /// The content exceeds the caller's in-memory limit. No data was fetched.
     #[error(
         "file content is {size_bytes} bytes, over the {max_bytes}-byte limit \
          this deployment buffers for one read"
     )]
     ContentTooLarge { size_bytes: u64, max_bytes: u64 },
-    /// A batch read asked for more items than one call answers. The caller
-    /// splits the batch; nothing was read.
+    /// The request contains more items than one batch may read. No items were
+    /// read; split the request into smaller batches.
     #[error("asked for {requested} items, over the {max} one batch answers")]
     BatchTooLarge { requested: usize, max: usize },
-    /// A streamed read was asked to start past the end of the content it
-    /// reads, either outright or by being handed more already-held bytes
-    /// than the content has. Nothing was read.
+    /// The requested start offset is past the end of the content. This can also
+    /// happen when the caller supplies more previously read bytes than the
+    /// content contains. No data was read.
     #[error("cannot start a read at offset {start_offset} of {size_bytes}-byte content")]
     ResumeOffsetOutOfRange { start_offset: u64, size_bytes: u64 },
-    /// A streamed read that starts past zero was driven before the bytes it
-    /// skipped were folded into its verification. Verification covers the
-    /// whole object, so it cannot begin until the caller has handed over
-    /// what it already holds. Nothing was read.
+    /// A resumed read cannot continue until the caller supplies all bytes before
+    /// the resume offset for whole-object checksum verification. No data was
+    /// read.
     #[error(
         "a read resumed at offset {start_offset} was given {folded} bytes of what it skipped; \
          verification covers the whole object, so all of them are needed first"
@@ -117,34 +114,29 @@ pub enum CoreError {
     #[error("{}", destination_exists_message(.path, .existing_display_name.as_deref()))]
     DestinationExists {
         path: String,
-        /// Stored spelling of the occupying entry, when the planner had it.
-        /// Rendered when it differs from what the caller typed, because
-        /// sibling names collide after NFC normalization and case folding
-        /// and the two spellings can look identical.
+        /// Stored name of the existing entry, when available. It is included in the
+        /// error when normalization or case folding makes it conflict with the name
+        /// supplied by the caller.
         existing_display_name: Option<String>,
     },
     #[error("commit id conflict for `{commit_id}`")]
     CommitIdReuseConflict {
         commit_id: String,
-        /// Sequence the commit id already landed at, when the conflict was
-        /// decided against a durable receipt — the receipt is what holds
-        /// it. Absent when nothing has committed under the id yet and two
-        /// live requests are claiming it at once, which is the one case a
-        /// caller cannot reconcile by reading the feed.
+        /// Sequence of the commit that already used this ID, when a durable receipt
+        /// exists. This is `None` when two concurrent requests claim the same ID
+        /// before either one commits.
         committed_seq: Option<ChangeSeq>,
-        /// Semantic identity of the mutation that landed under the id, taken
-        /// from the same receipt as `committed_seq` and present exactly when
-        /// it is. Reporting it is what lets a retry prove it is the same
-        /// request by recomputing one value, rather than comparing whichever
-        /// fields it thought to compare.
+        /// Fingerprint of the committed mutation. It is present whenever
+        /// `committed_seq` is present and lets a retry verify that it represents the
+        /// same request.
         committed_fingerprint: Option<String>,
     },
     #[error(transparent)]
     ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
-    /// The serving front-end closed admission for shutdown. New work is
-    /// refused; work admitted earlier still settles.
+    /// The service is shutting down. New requests are rejected, while requests
+    /// accepted earlier may finish.
     #[error("shutting down; new work is not admitted")]
     ShuttingDown,
     #[error("checkpoint unavailable: {0}")]
@@ -206,28 +198,19 @@ pub enum CoreError {
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
-    /// A caller-supplied `expected_head_seq` did not match the head.
+    /// A caller-supplied `expected_head_seq` did not match the current head.
     ///
-    /// Distinct from the publish path's [`CommitHeadPublishError::StaleHead`],
-    /// which reports a race the caller never asked about: this is a
-    /// precondition the caller wrote, so the rejection owes it both numbers —
-    /// what it asked for and what the namespace was actually at — and a
-    /// caller that meant to delete the current head can retry against the
-    /// sequence it found. Both carry the `stale_head` code.
+    /// Unlike [`CommitHeadPublishError::StaleHead`], this error reports a failed
+    /// explicit precondition. It includes both sequence numbers so the caller can
+    /// decide whether to retry. Both errors use the `stale_head` code.
     #[error("expected head sequence {expected}, found {actual}")]
     StaleHeadPrecondition {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
-    /// A batch stopped at one of its operations. A mutation commits all of
-    /// its operations or none of them, so this names the operation that
-    /// stopped the request and carries the failure it produced. The wire code
-    /// stays the inner failure's; the position joins the message and the
-    /// structured details.
-    ///
-    /// Only a request with more than one operation is wrapped: a
-    /// single-operation request has one place to fail, so its error stays
-    /// exactly what the operation produced.
+    /// Identifies the operation that caused a multi-operation request to fail.
+    /// The request remains atomic, and the error code is taken from the underlying
+    /// failure. Single-operation requests return the underlying error directly.
     #[error("operation {operation_index}: {source}")]
     FailedOperation {
         operation_index: u32,
@@ -330,9 +313,9 @@ impl From<ImmutableWriteError> for CoreError {
     }
 }
 
-/// What a failed provider operation says about who can fix it, preserved
-/// across the message-flattening seams so the wire code can distinguish
-/// "fix the storage credentials" from "unclassified internal failure".
+/// Classifies a provider failure by the action required to fix it. This
+/// classification is preserved after the original error is converted to a
+/// message so the wire error code remains accurate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StoreFailureClass {
     /// The provider rejected the deployment's credentials: operator work,
@@ -343,8 +326,7 @@ pub enum StoreFailureClass {
 }
 
 impl StoreFailureClass {
-    /// Classifies a provider error at the seam where its message is
-    /// flattened into a carrier's `message` field.
+    /// Classifies a provider error before converting it to a stored message.
     pub fn of(error: &ObjectStoreError) -> Self {
         match error {
             ObjectStoreError::PermissionDenied { .. } => Self::PermissionDenied,
@@ -506,14 +488,11 @@ impl CoreError {
     }
 }
 
-/// The fencing event a writer session observed: the epoch the session held,
-/// the epoch that displaced it, and — when the head recorded a writer block —
-/// the winner's label and when it acquired.
+/// Describes a writer fencing event: the displaced epoch, the active epoch,
+/// and any available information about the active writer.
 ///
-/// The epochs are what identifies the two parties. Writer labels are process
-/// names, so two local processes can share one (the CLI defaults `writer_id`
-/// to the hostname); the acquisition stamp is what tells those runs apart in
-/// a diagnostic.
+/// Epochs identify the competing sessions. Writer labels may be shared by
+/// multiple processes, so the acquisition timestamp helps distinguish them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterFence {
     /// Epoch the fenced session held.
@@ -545,9 +524,8 @@ impl std::fmt::Display for WriterFence {
             "epoch {} was fenced by epoch {}",
             self.fenced_epoch, self.active_epoch
         )?;
-        // Both fields come from the head's writer block, so in practice they
-        // are present or absent together; the arms keep the message honest
-        // either way.
+        // These fields normally appear together, but format a useful message when
+        // only one is available.
         match (self.active_writer.as_deref(), self.active_acquired_at_ms) {
             (Some(writer), Some(acquired_at_ms)) => {
                 write!(f, " (writer `{writer}`, acquired at {acquired_at_ms} ms)")

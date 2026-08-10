@@ -1540,7 +1540,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     };
     store.wait_until_blocked().await;
 
-    // ...then admission closes. New work is refused at the front door.
+    // Admission then closes, and new work is refused.
     registry.close_admission();
     let refused = registry
         .submit_commit(

@@ -1,39 +1,23 @@
 //! Checkpoints, namespace manifests, and metadata SSTs.
 //!
-//! A namespace manifest names the immutable metadata SST runs that
-//! materialize one namespace file-set version; a checkpoint pins one manifest
-//! version for retention, forks, stable reads, and restore. Submodules follow
-//! the manifest lifecycle:
+//! A namespace manifest references the immutable metadata SST runs for one
+//! namespace state. A checkpoint pins a manifest for retention, forks, stable
+//! reads, or restore.
 //!
-//! - [`flush`] folds the visible WAL tail into metadata tables and
-//!   advances `metadata/root.json` — the record-less latest-state
-//!   maintenance path.
-//! - [`create`] orchestrates checkpoint creation: flush, then pin
-//!   the resulting manifest under one durable record.
-//! - [`build`] segments metadata rows and writes the immutable SST objects.
-//! - [`publish`] writes manifest objects and advances `metadata/root.json`
-//!   by compare-and-swap.
-//! - [`record`], [`list`], and [`release`] manage durable checkpoint
-//!   records, and [`files`] enumerates the files a record's manifest pins.
-//! - [`load`] and [`validate`] provide envelope-only loading and
-//!   descriptor-only table verification (full-row inspection
-//!   materialization is test-only).
-//! - [`scan`] answers verified row scans over loaded manifest tables, while
-//!   [`row`] handles manifest-row encoding.
-//! - [`reorganize`] compacts bounded family groups into new base runs, and
-//!   [`streaming_compaction`] rebuilds a group whose bottom-anchored window
-//!   no longer fits one of those steps. The job's own parts are split by what
-//!   they do: [`compaction_merge`] reads its input, [`compaction_retention`]
-//!   holds the frozen floor's rules as streaming state,
-//!   [`compaction_output`] writes its segments, and [`compaction_lease`]
-//!   holds its claim on them. [`frozen_floor`] holds the drop rules the
-//!   bounded merge and the streaming job both read, because neither owns
-//!   them.
-//! - [`retention`] advances the retention floor behind verified progress.
-//! - [`runs`] models the LSM run layout shared by all of the above,
-//!   [`cache`] holds decoded SST blocks keyed by content digest, and
-//!   [`stored_block_cache`] defines the seam a node-local cache of the same
-//!   blocks in their encoded form plugs into.
+//! The submodules cover these areas:
+//! - Building and publishing manifests: [`build`], [`flush`], [`create`], and
+//!   [`publish`].
+//! - Managing checkpoint records: [`record`], [`list`], [`release`], and
+//!   [`files`].
+//! - Loading, validating, and scanning metadata: [`load`], [`validate`],
+//!   [`scan`], and [`row`].
+//! - Planning and running metadata merges: [`reorganize`],
+//!   [`streaming_compaction`], [`compaction_merge`],
+//!   [`compaction_retention`], [`compaction_output`], [`compaction_lease`],
+//!   and [`frozen_floor`].
+//! - Advancing the retention floor: [`retention`].
+//! - Describing run layout and caching: [`runs`], [`cache`], and
+//!   [`stored_block_cache`].
 
 mod block_fetch;
 mod block_load;

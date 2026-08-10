@@ -64,12 +64,10 @@ impl Default for PublishTailOptions {
     }
 }
 
-/// What one retained publish-tail projection weighs, in the same two units
-/// [`PublishTailOptions`] bounds.
+/// The row and decoded-byte cost of a retained publish-tail projection.
 ///
-/// Runtimes that retain a projection per namespace bound the total with
-/// these, so the accounting reads the weight the reuse check already
-/// computed instead of walking the state again.
+/// Runtimes use these values to enforce aggregate cache limits without
+/// recounting the projection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PublishTailWeight {
     pub rows: usize,
@@ -292,15 +290,13 @@ fn ensure_publish_reconstructed_head_matches(
     Ok(())
 }
 
-/// Closes the load by confirming the head has not moved underneath it.
+/// Confirms that the namespace head did not change while the publish view
+/// was loading.
 ///
-/// A moved head is ambiguous on its own: it means either that another
-/// publisher committed (retryable) or that another session took the writer
-/// epoch and fenced this one (terminal). The fence check at the top of the
-/// load only sees the opening snapshot, so a takeover landing mid-load would
-/// otherwise be reported as `stale_head` — telling a permanently fenced
-/// writer to retry. Re-reading the head on the mismatch path resolves which
-/// it was, at the cost of one extra read on a path that already failed.
+/// When the ETag changes, the method distinguishes a normal concurrent
+/// commit from writer fencing. It rereads the head only on this failure path
+/// so a fenced writer receives a terminal error instead of a retryable stale
+/// head error.
 async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

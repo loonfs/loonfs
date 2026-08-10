@@ -31,30 +31,20 @@ pub enum WriterEpochAcquireError {
     RetryExhausted { attempts: usize },
 }
 
-/// Acquires the namespace writer epoch for a writer session.
+/// Acquires the namespace writer epoch for one writer session.
 ///
-/// Lazy by design: sessions call this on their first semantic write, not at
-/// open, and cache the result. Acquisition bumps `writer_epoch` and records
-/// the non-authoritative `writer` block, which fences every other session at
-/// its next publish. There is no lease and no expiry: nothing arbitrates
-/// between two live writers except the epoch itself, so acquisition never
-/// refuses a live caller and contention resolves as deterministic
-/// last-writer-wins. A session that has been fenced must not call this again
-/// on its own; reacquisition is an explicit caller decision.
+/// A session acquires lazily on its first write and caches the result.
+/// Acquisition increments `writer_epoch`; any older session is fenced on its
+/// next publish. There is no lease or expiry, so concurrent acquisitions use
+/// last-writer-wins ordering.
 ///
-/// The one refusal is terminal state: a deleted namespace's head is an
-/// immutable tombstone, so acquisition fails with `NamespaceDeleted` before
-/// any CAS — no attempt may rewrite the tombstone, inflate its epoch, or
-/// name a "current writer" for a dead namespace.
+/// Deleted namespaces reject acquisition before the compare-and-swap. A
+/// fenced session may reacquire only when its caller explicitly starts a new
+/// writer session.
 ///
-/// Every attempt bumps: there is no "this head is already mine" recognition,
-/// because there is no session identity to recognize. That is safe because a
-/// session acquires at most once — the commit engine memoizes the result in
-/// `session_writer_epoch` and never asks again — so a second call only
-/// happens when the first call's outcome was unknown to the caller. Bumping
-/// again then fences an epoch that never published anything, which takeover
-/// already handles as last-writer-wins. The cost is one wasted epoch on a
-/// rare retry path; the benefit is that acquisition needs no identity at all.
+/// Every acquisition attempt increments the epoch, even when the same writer
+/// ID is already recorded. Writer IDs do not identify sessions, and the
+/// commit engine normally calls this only once per session.
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -70,9 +60,9 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
         |loaded_head| {
             let head = &loaded_head.envelope.state;
-            // Terminal-state guard before the bump: no caller, not even the
-            // writer named in the tombstone's block, gets an epoch back for
-            // a deleted namespace.
+            // Check for deletion before incrementing the epoch. A deleted namespace
+            // never grants another writer epoch, including to the writer recorded in
+            // its tombstone.
             if head.state == NamespaceState::Deleted {
                 return Err(WriterEpochAcquireError::NamespaceDeleted {
                     namespace_id: head.namespace_id.clone(),

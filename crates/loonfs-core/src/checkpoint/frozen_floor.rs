@@ -68,20 +68,12 @@ pub(super) fn unbinding_at_or_below_floor(
     })
 }
 
-/// Whether one bind row survives the frozen floor.
+/// Returns whether a bind row remains visible at the frozen retention floor.
 ///
-/// A bind above the floor always survives. At or below it the bind survives
-/// exactly when nothing retired it, because a bind is only ever superseded by
-/// an operation that also unbinds it — the forward binding operator refuses to
-/// compact a slot where that does not hold
-/// (`super::compaction_retention::BindingRetention::check_the_slot_invariant`).
-///
-/// Both bind families read this same rule, which is what keeps them dropping
-/// in lockstep: the format gives every bind row exactly one reverse row, and a
-/// run whose two counts disagree does not load. They reach the rule by
-/// different routes — the forward row's unbinds arrive in its own locality
-/// group, the reverse row's do not and are point-read instead — but the rule
-/// is one function and the answer is one answer.
+/// Binds above the floor are always retained. A bind at or below the floor is
+/// removed only when a matching unbind is also at or below the floor. The
+/// forward and reverse bind families both use this rule so their corresponding
+/// rows are retained or removed together.
 pub(super) fn bind_survives_frozen_floor(
     row: &MetadataRow,
     retention_floor_seq: ChangeSeq,

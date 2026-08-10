@@ -6,21 +6,13 @@ use loonfs_client::ClientError;
 use loonfs_grep::GrepError;
 use thiserror::Error;
 
-/// Failure surfaced by the backend seam ([`crate::resolve::ResolvedTarget`]),
-/// as a `(code, message)` pair.
+/// Normalized error returned by either CLI backend.
 ///
-/// `code` draws from exactly two namespaces:
-///
-/// - **Registry codes** ([`loonfs_api::ErrorCode`]) pass through verbatim
-///   from whichever transport produced them, so embedded and remote backends
-///   surface the same code for the same failure. Never restate a registry
-///   code as a string literal; use `ErrorCode::X.as_str()` or an error's
-///   `code()`.
-/// - **Backend-local codes** cover failures that never produce a registry
-///   code — a server cannot see a caller's local profile or store
-///   configuration, so these deliberately live outside the registry. The
-///   complete list, each owned by a constructor below, is: `invalid_config`,
-///   `invalid_input`, `client_error`, `io_error`, and `runtime_error`.
+/// `code` is either a shared [`loonfs_api::ErrorCode`] string or one of the
+/// local codes created below: `invalid_config`, `invalid_input`,
+/// `client_error`, `io_error`, or `runtime_error`. Shared codes must come
+/// from the registry rather than duplicated string literals so embedded and
+/// remote profiles report the same condition consistently.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message}")]
 pub(crate) struct BackendError {
@@ -107,13 +99,9 @@ impl From<ClientError> for BackendError {
                 details,
             },
             ClientError::Io(message) => Self::io_error(format!("i/o error: {message}")),
-            // Every variant `loonfs-client` defines today has an explicit arm
-            // above, so this one is unreachable and the mapping is unchanged
-            // from when it lived inside that crate. It is required because
-            // `ClientError` is `#[non_exhaustive]`, which only binds across a
-            // crate boundary — a variant added later lands here as a generic
-            // transport failure instead of failing this build. Give any new
-            // variant its own arm rather than letting it fall through.
+            // `ClientError` is non-exhaustive across crate boundaries, so future
+            // variants map to a generic transport failure. Add an explicit arm when a
+            // new variant needs a more specific CLI code.
             other => Self::client_error(other.to_string()),
         }
     }

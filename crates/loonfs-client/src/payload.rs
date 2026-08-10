@@ -1,9 +1,8 @@
-//! Where a streaming put reads its bytes, and how it cuts them into parts.
+//! Streaming payload sources and multipart chunking.
 //!
-//! A [`PayloadSource`] is read exactly once, forward, in pieces. That is the
-//! whole contract: it is what lets one put serve a file on disk and a pipe
-//! with no length equally well, and what keeps the memory a large put costs
-//! independent of how large it is.
+//! [`PayloadSource`] yields bytes once, in order, without requiring a known
+//! length. This supports files, pipes, and sockets while keeping memory use
+//! independent of total payload size.
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::{BoxStream, StreamExt};
@@ -105,15 +104,11 @@ impl PayloadSource {
         (self.stream, self.size_bytes)
     }
 
-    /// Wraps the stream while keeping everything the source knows about
-    /// itself.
+    /// Replaces the byte stream while preserving length and rewind metadata.
     ///
-    /// A wrapper that only watches bytes go past — counting them for a
-    /// progress bar, say — has not changed which payload this is or where it
-    /// came from. Rebuilding the source instead would throw that away, and
-    /// with it the free second pass a file-backed payload gets: an upload
-    /// that has to read the bytes twice would copy them to a spool rather
-    /// than re-open a file that was there all along.
+    /// Wrappers such as progress reporters do not change the payload source.
+    /// Preserving `rewind` lets file-backed uploads reopen the file instead of
+    /// copying it to a temporary spool for a second pass.
     pub fn map_stream(self, wrap: impl FnOnce(PayloadStream) -> PayloadStream) -> Self {
         Self {
             stream: wrap(self.stream),
@@ -122,20 +117,13 @@ impl PayloadSource {
         }
     }
 
-    /// Reads the source to its end, folding `digest` and counting bytes, and
-    /// hands back a payload that can be read again.
+    /// Measures and hashes the source, then returns a payload that can be read
+    /// again.
     ///
-    /// This is the price of a transport that states the payload's digest
-    /// before it may write: the digest must be complete before the first
-    /// body byte, and one forward pass cannot do both. What it must not cost
-    /// is memory. A source opened from a file is not copied at all — the
-    /// second pass re-opens it. Any other source is spooled to a temporary
-    /// file as it is read, chunk by chunk, and the spool is deleted when the
-    /// result is dropped. Nothing here ever holds the payload whole.
-    ///
-    /// The length it returns is measured, not the hint the source declared:
-    /// a source that delivers a different number of bytes is measured as it
-    /// actually is, and that is what may be claimed and what may refuse.
+    /// Transports that sign a checksum before upload require a complete first
+    /// pass. File-backed sources are reopened for the second pass; other sources
+    /// are copied incrementally to a temporary file. The returned length is the
+    /// number of bytes actually read, not the source's optional length hint.
     pub(crate) async fn measure(
         self,
         digest: &mut StreamingChecksum,

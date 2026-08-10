@@ -64,14 +64,11 @@ const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 /// its signature.
 const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
 
-/// What a retry can still say about the payload it just uploaded.
+/// Evidence retained for comparing a new upload with an earlier commit.
 ///
-/// A buffered put can answer any question about its bytes by hashing them
-/// again. A one-pass put cannot: its payload went by once and is gone, and
-/// what it kept instead is the verified description the server gave back.
-/// Both are evidence about the same bytes; they differ only in which
-/// questions they can answer, and a question neither can answer is reported
-/// as such rather than guessed at.
+/// Buffered bytes can be hashed with any supported algorithm. A one-pass
+/// upload retains only the verified content reference returned by the
+/// server, so unavailable checksum algorithms cannot be compared.
 #[derive(Debug, Clone, Copy)]
 enum UploadedContent<'a> {
     /// The payload itself, which can produce any digest this build knows.
@@ -288,15 +285,12 @@ impl DirectDownloadStream {
     }
 }
 
-/// What a caller keeps so an interrupted direct multipart upload can pick
-/// up rather than start over.
+/// State required to resume an interrupted direct multipart upload.
 ///
-/// The parts are the caller's own bookkeeping, deliberately: an upload
-/// session records the geometry it was opened with and nothing per part, so
-/// the only account of which parts landed is the one the uploading client
-/// kept. Resuming with fewer parts than actually landed re-sends them,
-/// which is harmless; resuming with parts that did not land fails the
-/// completion, which is the assembly refusing to be wrong.
+/// The server records session geometry but not completed parts, so the
+/// client retains the upload id, part size, and accepted part metadata.
+/// Missing entries are safely re-uploaded; incorrect entries cause completion
+/// to fail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultipartUploadResume {
     pub upload_id: UploadId,
@@ -335,12 +329,11 @@ struct StagedContent {
     validated_content_token: Option<ValidatedContentToken>,
 }
 
-/// The transport one payload takes to object storage.
+/// Upload path selected from the server capability document.
 ///
-/// Which of these a deployment can offer is its own answer, read from the
-/// capability document: the two direct arms are independent of each other,
-/// so a provider that signs whole-object writes but has no multipart API to
-/// open is spelled by [`Self::DirectPut`] alone.
+/// Direct PUT and direct multipart are independent capabilities; a
+/// deployment may support either one without the other. Proxied upload is
+/// used when no suitable direct path is available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UploadTransport {
     /// Parts, straight to object storage, retried one at a time.

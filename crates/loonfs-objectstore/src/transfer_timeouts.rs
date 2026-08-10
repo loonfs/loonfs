@@ -1,24 +1,14 @@
-//! Transfer-aware timeouts for provider HTTP requests.
+//! Progress-aware timeouts for provider HTTP requests.
 //!
-//! A blanket total-request timeout is the wrong shape for payload transfers:
-//! it turns "the payload is larger than the window allows at this link speed"
-//! into a deterministic failure that retries cannot fix. The connector here
-//! replaces the provider client's total-request timeout with two
-//! progress-shaped bounds, the same shape mainstream storage clients use:
+//! A total-request timeout makes large transfers fail solely because of their
+//! size. This connector instead applies:
 //!
-//! - The request phase (connect, request-body upload, response headers) gets
-//!   [`request_phase_bound`]: one flat bound for control-plane requests and
-//!   one flat, generous bound for payload-bearing requests. Payload bodies
-//!   are bounded by the multipart part size, so a flat number per request is
-//!   sufficient stall protection — no request ever carries a body a healthy
-//!   link cannot move inside it.
-//! - Response bodies get an idle bound: every body frame must arrive within
-//!   the base attempt timeout of the previous one. Bytes moving means the
-//!   transfer is alive; a body that stalls is cut without putting a total
-//!   clock on how long a large download may take.
+//! - a fixed request-phase timeout selected by body size; and
+//! - an idle timeout between response-body frames.
 //!
-//! Timeouts surface as [`HttpErrorKind::Timeout`], which the provider client
-//! retries exactly where it would retry its own request timeouts.
+//! Large downloads may continue indefinitely while frames keep arriving.
+//! Stalls are reported as [`HttpErrorKind::Timeout`] so the provider client
+//! can apply its normal retry policy.
 
 use crate::provider_object_store::{request_phase_bound, PROVIDER_ATTEMPT_TIMEOUT};
 use async_trait::async_trait;
@@ -36,10 +26,8 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime::Handle;
 
-/// The stalled-transfer diagnostic carried by synthesized timeout errors: it
-/// names the phase, the bytes involved, and the enforced bound, so a timeout
-/// on a payload transfer is attributable to size and link speed instead of
-/// reading as an anonymous request failure.
+/// Diagnostic for a synthesized timeout, including the transfer phase,
+/// byte count, and enforced limit.
 #[derive(Debug, Error)]
 pub(crate) enum TransferTimeoutError {
     #[error(
@@ -117,10 +105,10 @@ async fn request_phase_timeout<T>(bound: Duration, request: impl Future<Output =
     tokio::time::timeout(bound, request).await.ok()
 }
 
-/// Response body enforcing an idle bound between frames: progress resets the
-/// clock, a stall past the bound fails the body with a retry-classifiable
-/// timeout. There is deliberately no total clock here — a large download is
-/// healthy for as long as bytes keep arriving.
+/// Response body with an idle timeout between frames.
+///
+/// Each received frame resets the timer. There is no total download timeout,
+/// so a large response remains valid while data continues to arrive.
 struct IdleDeadlineBody {
     inner: HttpResponseBody,
     idle_bound: Duration,

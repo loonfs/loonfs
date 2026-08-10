@@ -1,20 +1,13 @@
-//! Upload and content reclamation, split at the completed line.
+//! Garbage collection for upload sessions and their content.
 //!
-//! Everything before a session completes belongs to upload collection: an
-//! open session whose lease has passed is aborted and the object it was
-//! writing is deleted, and that reasoning is entirely session-local, because
-//! a random content id that was never published can only ever have had one
-//! owner.
+//! Before completion, an expired open session can be aborted and its
+//! unpublished object deleted using only the session record.
 //!
-//! Everything at or after completion belongs to content collection, which is
-//! the harder half: completed content may or may not have been published, and
-//! the only honest way to tell is to look at what the namespace's metadata
-//! actually references. That is decidable — rather than a race against
-//! writers — because a reference can only enter metadata through a receipt,
-//! receipts stop being minted a fixed window after completion, and
-//! `CONTENT_RECLAMATION_GRACE_MS` outlasts that window plus the last
-//! receipt's life plus the publication it could admit. Past the grace, the
-//! set of references to a completed session's content can no longer grow.
+//! After completion, content may already be referenced by metadata. The
+//! collector waits for `CONTENT_RECLAMATION_GRACE_MS`, then scans namespace
+//! metadata before deleting the object. The grace period covers the receipt
+//! lifetime and any publication that receipt can authorize, so no new
+//! reference can appear after the scan becomes eligible.
 
 use super::budget::PassBudget;
 use super::live_set::LiveSet;
@@ -44,13 +37,9 @@ const REVISION_SCAN_WAVE_ROWS: usize = 1024;
 pub(super) enum UploadSessionSweep {
     /// The session key survives this pass. It may have advanced a state.
     Retain {
-        /// When the wait this pass was too early for ends, for the three
-        /// retentions a clock decides: an open session's lease plus the
-        /// grace window, an aborted session's grace, a completed session's
-        /// derived content-reclamation grace. `None` for a retention no
-        /// clock resolves — a lost compare-and-swap, a reference set this
-        /// pass could not establish — where there is no time to come back
-        /// at, only a next pass to look again.
+        /// Earliest time this session may be reconsidered when retention is
+        /// time-based. `None` means the pass must retry later for a non-time-based
+        /// reason, such as a lost CAS or an incomplete reference scan.
         reclaimable_at_ms: Option<u64>,
     },
     /// The session has nothing left to say and its key may be deleted.
@@ -59,22 +48,18 @@ pub(super) enum UploadSessionSweep {
         /// completed and nothing ever published.
         reclaimed_content: bool,
     },
-    /// The pass could not afford the reference collection this session's
-    /// content needs. The session is retained exactly as an undecidable one
-    /// is, completed-content reclamation is off for the rest of the
-    /// invocation, and the sweep goes on to the next candidate: what the
-    /// budget could not pay for is the scan, not the sweep.
+    /// The remaining pass budget was too small to scan content references. Keep
+    /// the session, disable completed-content reclamation for this invocation,
+    /// and continue sweeping other candidates.
     ContentReclamationDeferred,
 }
 
-/// Advances one upload session and reclaims whatever it stops owning.
+/// Advances one upload session and reclaims content it no longer owns.
 ///
-/// Every transition here is a compare-and-swap on exactly the etag inspected
-/// with the state, and a lost swap retains without retrying, so a racing
-/// completion can never be overwritten by a second read. Provider cleanup
-/// always follows the durable transition: a crash in between leaves an
-/// object the next pass deletes from the terminal record, never an object
-/// deleted out from under a session that is still open.
+/// State transitions use a CAS against the ETag that was read with the
+/// session. A CAS conflict keeps the session for a later pass. Provider
+/// cleanup runs only after the durable state transition, so a crash may leave
+/// extra data to clean up but cannot delete data from an open session.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
@@ -86,9 +71,8 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<UploadSessionSweep> {
-    // Reading first only selects the arm. Nothing here acts on this
-    // observation without re-reading under an etag, so a session that
-    // changes underneath the read is decided correctly anyway.
+    // This read selects the lifecycle branch only. Any state change is applied
+    // through a later CAS using a fresh ETag.
     let state = match read_upload_session_state(store, namespace_id, upload_id).await {
         Ok(state) => state,
         Err(CoreError::UploadNotFound { .. }) => return Ok(retain_undated()),
@@ -112,17 +96,14 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             if context.now_ms.saturating_sub(aborted_at_ms) < grace_window_ms {
                 return Ok(retain_until(aborted_at_ms.saturating_add(grace_window_ms)));
             }
-            // Repeating the abort's own cleanup is what makes a crash
-            // between the abort swap and its provider work cost nothing.
+            // Repeat provider cleanup so a later pass completes work left by a crash
+            // after the abort CAS.
             AbandonedUpload::of(&state)
                 .release(store, content_store_id)
                 .await;
-            // Not counted as a reclaimed content object: this delete is
-            // unconditional cleanup that runs whether or not the session
-            // ever wrote anything, and it repeats on every pass until the
-            // record ages out. Only the content half's Absent verdict
-            // reports a reclamation, because only it establishes that
-            // there was something to reclaim.
+            // Do not count this as reclaimed content. Abort cleanup runs even when no
+            // object was written. Only a completed session with an `Absent` reference
+            // result proves that a content object was eligible for reclamation.
             Ok(UploadSessionSweep::Delete {
                 reclaimed_content: false,
             })
@@ -142,8 +123,8 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             {
                 ContentReference::Unknown => Ok(retain_undated()),
                 ContentReference::Deferred => Ok(UploadSessionSweep::ContentReclamationDeferred),
-                // Published content answers to metadata now, not to the
-                // session that uploaded it, so the record is all that goes.
+                // Metadata now owns the published content. Delete only the completed
+                // upload-session record.
                 ContentReference::Referenced => Ok(UploadSessionSweep::Delete {
                     reclaimed_content: false,
                 }),
@@ -177,12 +158,11 @@ fn retain_undated() -> UploadSessionSweep {
     }
 }
 
-/// Aborts one session whose lease has passed, then deletes what it was
-/// writing.
+/// Aborts a session after its lease and grace period expire, then cleans up
+/// its unpublished content.
 ///
-/// The grace on top of the lease is not part of the safety argument — the
-/// compare-and-swap is — it just keeps a completion that arrives moments
-/// late from being a race anyone has to think about.
+/// The CAS provides safety. The additional grace period only reduces races
+/// with completions that arrive shortly after lease expiry.
 async fn abort_expired_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -215,8 +195,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     )
     .await;
     match aborted {
-        // The record this pass just aborted is retained under the aborted
-        // arm's own grace from here, and that is the next thing it owes.
+        // Keep the newly aborted record until its post-abort grace period expires.
         Ok(UploadSessionCas::Applied(Some(abandoned))) => {
             abandoned.release(store, content_store_id).await;
             Ok(retain_until(context.now_ms.saturating_add(grace_window_ms)))
@@ -256,33 +235,20 @@ enum CollectedReferences {
     /// A root could not be read, so this pass has no reference set at all
     /// (format spec, "Garbage collection", rule 5).
     Unavailable,
-    /// The scan ran out of budget once, which settles it for the whole
-    /// invocation: a later candidate must not pay to start the same scan
-    /// over, and being skipped is a property of the invocation rather than
-    /// of the session that happened to ask first. The ids gathered before
-    /// the budget ran out are dropped, because a partial set is not a
-    /// smaller answer, it is no answer: every id it is missing looks
-    /// unreferenced, so deciding a deletion from one would delete live
-    /// content.
+    /// The reference scan exceeded the pass budget. Do not retry it during this
+    /// invocation, and discard the partial result because missing IDs could make
+    /// live content appear unreferenced.
     Deferred,
     /// Every root was read. The set is complete and may decide deletions.
     Referenced(BTreeSet<ContentId>),
 }
 
-/// Every content id the namespace's live metadata references, collected at
-/// most once per invocation and only when a completed session has actually
-/// aged into reclamation — which in a healthy namespace is never, because
-/// published sessions are swept before their content ever becomes a
-/// question.
+/// Memoized set of content IDs referenced by live namespace metadata.
 ///
-/// The memo lives for one invocation, not one cursor-paged sweep. Carrying
-/// it further would mean putting "already scanned through here, found
-/// nothing" into the cursor, and the cursor is a client-supplied token that
-/// carries enumeration position only and never authorizes a deletion. So a
-/// resumed sweep collects again, and the budget above is what keeps that
-/// honest: the scan pays its own way every time it runs. A verdict of "not
-/// this time" is memoized like any other, which is what keeps one
-/// unaffordable scan from being re-attempted once per aged session.
+/// The set is collected at most once per garbage-collection invocation and
+/// only when an aged completed session needs it. It is not stored in the
+/// pagination cursor because the cursor records position, not permission to
+/// delete. A resumed invocation performs a new budgeted scan.
 pub(super) struct ContentReferences<'a> {
     live: &'a LiveSet,
     collected: CollectedReferences,
@@ -326,15 +292,10 @@ impl<'a> ContentReferences<'a> {
     }
 }
 
-/// Collects every content id the namespace can still reach.
-///
-/// The roots are the same ones the rest of the pass uses: every manifest the
-/// live set protects, which includes each fork basis a fork-owned checkpoint
-/// record pins, plus the retained WAL chain for commits that are durable
-/// but not yet materialized. A fork target can only carry forward references
-/// that were in the basis it forked from, and a commit in any other
-/// namespace can only name content minted by that namespace's own sessions,
-/// so those two sources are the whole reachable set.
+/// Collects every content ID reachable from protected manifests and the
+/// retained WAL chain. Protected manifests include fork bases pinned by
+/// checkpoints. Other namespaces cannot reference these content IDs because
+/// each namespace publishes content created by its own upload sessions.
 ///
 /// Only the manifest half is read here. The chain's references were
 /// harvested off the bodies marking already decoded, so this half is a set

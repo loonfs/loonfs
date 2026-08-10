@@ -24,14 +24,12 @@ use tokio::sync::Semaphore;
 
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
 
-/// Purpose-specific handles over one shared store client: read endpoints go
-/// through `reader`, mutations through `writer` (and the publication service
-/// it hands out), maintenance endpoints through `admin`. `writer` is also
-/// what a host settles at shutdown, and what [`app`] returns beside the
-/// router for that purpose.
+/// Request handles built over one shared store client.
 ///
-/// `reader` is a cheap clone derived from `writer` at construction, kept as
-/// its own field because most handlers only read.
+/// Read handlers use `reader`, mutations use `writer`, and maintenance uses
+/// `admin`. The host also shuts down `writer` after the listener drains.
+/// `reader` is stored separately because most handlers require only read
+/// access.
 #[derive(Clone)]
 pub(super) struct AppState {
     pub(super) config: Arc<ServerConfig>,
@@ -66,25 +64,21 @@ pub(super) struct AppState {
     /// worst-case download memory is
     /// `max_concurrent_downloads * max_download_bytes`.
     pub(super) download_permits: Arc<Semaphore>,
-    /// The recorder every handle in this process reports through, and the
-    /// request-level instruments only this server can report. `GET /metrics`
-    /// renders its snapshot. Always installed: a metrics surface a
-    /// deployment has to remember to switch on is a metrics surface nobody
-    /// has during the incident.
+    /// Shared recorder for runtime and request-level metrics. `GET /metrics`
+    /// renders its snapshot. It is always installed.
     pub(super) metrics: Arc<ServerMetrics>,
-    /// The node-local block cache this deployment keeps, when `[local_cache]`
-    /// asked for one. The handles reach it through the decoded block cache
-    /// they were built with; it is held here as its concrete type for the
-    /// two things the seam does not offer — reading foyer's own numbers at
-    /// scrape time, and closing the cache at shutdown.
+    /// Optional node-local block cache.
+    ///
+    /// Runtime handles use it through the shared cache interface. The server
+    /// retains the concrete type to read foyer statistics and close it during
+    /// shutdown.
     pub(super) local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 }
 
-/// Everything a request path tells the writer's maintenance runner about
-/// the grep index, and the one question it asks before telling it anything.
+/// Request-side access to grep maintenance.
 ///
-/// The runner owns admission, the permit pool, backoff, and shutdown: this
-/// is a nudge and a probe, both cheap and neither blocking.
+/// Requests may probe whether indexing is due and submit a non-blocking nudge.
+/// The maintenance runner owns admission, concurrency, backoff, and shutdown.
 #[derive(Clone)]
 pub(super) struct GrepMaintenance {
     handle: MaintenanceHandle,
@@ -98,12 +92,10 @@ impl GrepMaintenance {
         self.handle.nudge(GREP_INDEX_JOB, namespace_id);
     }
 
-    /// Nudges only a namespace whose index is actually behind.
+    /// Nudges a namespace only when the probe reports that indexing is due.
     ///
-    /// A read has no business admitting work that does not exist, and the
-    /// job already knows how to answer that question in at most two small
-    /// reads. An unreadable answer nudges nothing: the step would only
-    /// rediscover the same failure.
+    /// Probe failures do not schedule work because the indexing step would fail
+    /// on the same unreadable state.
     pub(super) async fn nudge_if_behind(&self, namespace_id: &NamespaceId) {
         if matches!(
             self.job.probe(namespace_id).await,
@@ -114,23 +106,13 @@ impl GrepMaintenance {
     }
 }
 
-/// Builds the HTTP application: the router that serves requests, the writer
-/// whose background work its host must settle, and the local block cache
-/// that host must close.
+/// Builds the router and returns the resources the host must shut down.
 ///
-/// Everything this app spawns belongs to that writer — publications, and
-/// the maintenance runner that admits the runtime's steps alongside the
-/// grep index's. [`serve`] settles it itself. A host embedding the
-/// [`Router`] on its own HTTP server must call [`FsWriter::shutdown`] after
-/// its listener drains, or publisher tasks and writer maintenance outlive
-/// the listener unobserved, and must then call
-/// [`StoredMetadataBlockCache::close`] on the returned cache, or the blocks
-/// its memory tier still holds never reach disk. The writer also answers
-/// what a deployment's shape is, so a host that needs to know whether the
-/// grep index job is registered here asks
-/// [`FsWriter::maintenance_job`](loonfs::FsWriter::maintenance_job).
-///
-/// The cache is `None` unless the config carried a `[local_cache]` table.
+/// After an embedded listener drains, the host must call
+/// [`FsWriter::shutdown`] to settle publication and maintenance tasks, then
+/// close the returned cache so in-memory entries are flushed. [`serve`]
+/// performs both steps automatically. The cache is present only when
+/// `[local_cache]` is configured.
 pub async fn app(
     config: ServerConfig,
 ) -> Result<(Router, FsWriter, Option<Arc<FoyerStoredMetadataBlockCache>>), ServerConfigError> {
@@ -139,10 +121,8 @@ pub async fn app(
     // file-loaded ones fail at load.
     config.validate()?;
     let store = config.object_store()?;
-    // The store settled this at construction: a bundle exists only where the
-    // provider can sign the preconditions direct transfers rest on and the
-    // endpoint is one the live conformance suite has proven. Nothing here
-    // asks configuration about it a second time.
+    // Provider construction already validated direct-transfer signing and endpoint
+    // support. Reuse that decision without reinterpreting configuration here.
     let direct_transfers = store.direct_transfers();
     let store = store.into_shared();
     let (router, state) =
@@ -311,17 +291,11 @@ pub(super) async fn build_handles_with_metrics_jsonl_path(
     .await
 }
 
-/// Opens the process's handles on one store, with the metrics wiring every
-/// deployment gets.
+/// Builds the process handles over one store and one metrics recorder.
 ///
-/// Both handles report through the same recorder, so their instruments are
-/// one set of numbers rather than two. The optional JSONL path adds a second
-/// sink for the raw object-store samples; the handle fans one store wrapper
-/// out to both rather than stacking two.
-///
-/// The local block cache is installed on the writer, which is what puts it
-/// under the decoded block cache the reader and the admin share. One
-/// installation covers all three handles.
+/// An optional JSONL recorder receives the same object-store samples. The
+/// local block cache is installed once on the writer's shared runtime core,
+/// so the reader and admin use the same decoded cache hierarchy.
 async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
@@ -534,19 +508,12 @@ where
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(ServeError::Serve)?;
-    // Only once the listener has drained: the writer's shutdown refuses new
-    // mutations, so running it while requests are still arriving would fail
-    // work this server accepted. What order the shutdown itself runs in is
-    // the writer's business, not this function's. Panicked tasks surface
-    // here rather than disappearing with the process.
+    // Shut down the writer only after the listener drains, so accepted requests
+    // are not rejected by closing mutation admission. Task panics surface here.
     let settled = writer.shutdown().await.map_err(ServeError::Shutdown);
-    // The cache closes after the writer, and it closes whether or not the
-    // writer settled: a read may outlive the writer by design, and a lookup
-    // after the close is a miss by contract, so nothing is left waiting on
-    // bytes this takes away. Closing is what flushes the memory tier to
-    // disk, so a shutdown that skipped it would throw away the blocks this
-    // process spent the most on. A writer that failed to settle is the
-    // worse news of the two and is what a host is told about.
+    // Close the cache after writer shutdown, even when writer shutdown fails.
+    // Closing flushes retained memory entries to disk. If both steps fail, report
+    // the writer failure.
     let closed = match local_cache {
         Some(local_cache) => local_cache
             .close()
