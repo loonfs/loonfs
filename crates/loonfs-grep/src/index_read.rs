@@ -74,16 +74,23 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     handle: &BlockHandle,
 ) -> Result<Arc<SegmentFilter>> {
     let key = cache_key(payload_checksum, GrepBlockKind::Filter, handle);
-    if let Some(DecodedGrepBlock::Filter(filter)) = cache.get(&key) {
-        return Ok(filter);
+    let decoded = cache
+        .get_or_load(&key, || async {
+            let bytes = load_index_section_bytes(store, object_key, handle).await?;
+            let filter = Arc::new(
+                decode_filter_block(&bytes, handle)
+                    .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
+            );
+            Ok::<_, GrepError>(DecodedGrepBlock::Filter {
+                filter,
+                decoded_byte_len: handle.decoded_len as usize,
+            })
+        })
+        .await?;
+    match decoded {
+        DecodedGrepBlock::Filter { filter, .. } => Ok(filter),
+        _ => Err(cache_kind_corrupt(object_key, "filter")),
     }
-    let bytes = load_index_section_bytes(store, object_key, handle).await?;
-    let filter = Arc::new(
-        decode_filter_block(&bytes, handle)
-            .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
-    );
-    cache.insert(key, DecodedGrepBlock::Filter(Arc::clone(&filter)));
-    Ok(filter)
 }
 
 pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
@@ -94,16 +101,23 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     handle: &BlockHandle,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
     let key = cache_key(payload_checksum, GrepBlockKind::Index, handle);
-    if let Some(DecodedGrepBlock::Index(entries)) = cache.get(&key) {
-        return Ok(entries);
+    let decoded = cache
+        .get_or_load(&key, || async {
+            let bytes = load_index_section_bytes(store, object_key, handle).await?;
+            let entries = Arc::new(
+                decode_index_block(&bytes, handle)
+                    .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
+            );
+            Ok::<_, GrepError>(DecodedGrepBlock::Index {
+                entries,
+                decoded_byte_len: handle.decoded_len as usize,
+            })
+        })
+        .await?;
+    match decoded {
+        DecodedGrepBlock::Index { entries, .. } => Ok(entries),
+        _ => Err(cache_kind_corrupt(object_key, "index")),
     }
-    let bytes = load_index_section_bytes(store, object_key, handle).await?;
-    let entries = Arc::new(
-        decode_index_block(&bytes, handle)
-            .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
-    );
-    cache.insert(key, DecodedGrepBlock::Index(Arc::clone(&entries)));
-    Ok(entries)
 }
 
 pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
@@ -114,14 +128,29 @@ pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
     handle: &BlockHandle,
 ) -> Result<Arc<DecodedDataBlock<IndexRow>>> {
     let key = cache_key(payload_checksum, GrepBlockKind::Data, handle);
-    if let Some(DecodedGrepBlock::Data(block)) = cache.get(&key) {
-        return Ok(block);
+    let decoded = cache
+        .get_or_load(&key, || async {
+            let bytes = load_index_section_bytes(store, object_key, handle).await?;
+            let block = Arc::new(
+                decode_data_block_rows::<IndexRow>(&bytes, handle)
+                    .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
+            );
+            Ok::<_, GrepError>(DecodedGrepBlock::Data {
+                block,
+                decoded_byte_len: handle.decoded_len as usize,
+            })
+        })
+        .await?;
+    match decoded {
+        DecodedGrepBlock::Data { block, .. } => Ok(block),
+        _ => Err(cache_kind_corrupt(object_key, "data")),
     }
-    let bytes = load_index_section_bytes(store, object_key, handle).await?;
-    let block = Arc::new(
-        decode_data_block_rows::<IndexRow>(&bytes, handle)
-            .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
-    );
-    cache.insert(key, DecodedGrepBlock::Data(Arc::clone(&block)));
-    Ok(block)
+}
+
+fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
+    GrepError::CorruptIndex {
+        message: format!(
+            "index segment `{object_key}` resolved its {expected} block to a different cache kind"
+        ),
+    }
 }

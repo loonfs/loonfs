@@ -9,7 +9,8 @@ use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
 use loonfs_api::{ErrorCode, NamespaceId};
 use loonfs_client::{Client, ClientConfig};
-use loonfs_grep::GrepService;
+use loonfs_grep::{GrepBlockCache, GrepService, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
+use std::sync::Arc;
 
 pub(crate) struct LoadedConfig {
     pub path: std::path::PathBuf,
@@ -188,13 +189,16 @@ impl EmbeddedTarget {
             .build()
             .await
             .map_err(map_runtime_error)?;
+        let grep_block_cache =
+            Arc::new(GrepBlockCache::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES));
         let backend = EmbeddedBackend {
             writer,
             reader,
             admin,
             // Embedded mode composes grep itself: the runtime handles above
             // know nothing about it.
-            grep: GrepService::new(),
+            grep: GrepService::with_block_cache(Arc::clone(&grep_block_cache)),
+            grep_block_cache,
         };
         Ok(Self { backend })
     }

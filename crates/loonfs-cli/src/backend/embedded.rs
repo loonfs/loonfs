@@ -30,9 +30,9 @@ use loonfs_api::{
 };
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepGcJob,
-    GrepIndexSnapshot, GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads, GREP_GC_JOB,
-    GREP_INDEX_JOB,
+    GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
+    GrepGcJob, GrepIndexSnapshot, GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
+    GREP_GC_JOB, GREP_INDEX_JOB,
 };
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -55,9 +55,11 @@ pub(crate) struct EmbeddedBackend {
     pub(crate) reader: FsReader,
     pub(crate) admin: FsAdmin,
     /// Grep is composed here rather than by the runtime: this service owns
-    /// the query-side block cache for the length of the command, and the
-    /// worker below is built from the same handles the other commands use.
+    /// the query side for the length of the command.
     pub(crate) grep: GrepService,
+    /// The process-wide grep cache is retained separately so workers created
+    /// lazily by commands share the service's decoded immutable blocks.
+    pub(crate) grep_block_cache: Arc<GrepBlockCache>,
 }
 
 /// How many times a gated publish resubmits after settling the maintenance
@@ -129,10 +131,11 @@ impl EmbeddedBackend {
     /// the writer's store client, its filesystem reads the reader, and its
     /// backfill checkpoints the admin handle.
     fn grep_worker(&self) -> GrepWorker<SharedObjectStore> {
-        GrepWorker::new(
+        GrepWorker::with_block_cache(
             self.writer.object_store(),
             self.reader.clone(),
             self.admin.clone(),
+            Arc::clone(&self.grep_block_cache),
         )
     }
 

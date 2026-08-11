@@ -6,7 +6,7 @@
 //! many gram posting lists. The mid level absorbs frequent delta merges
 //! without rewriting most of the base on every step.
 
-use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
+use crate::cache::{GrepBlockCache, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
 use crate::codec::{
     extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
 };
@@ -232,13 +232,29 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker over one grep-keyspace store handle and the runtime
-    /// handles it reads and checkpoints through.
+    /// handles it reads and checkpoints through, with a fresh default-sized
+    /// block cache.
     pub fn new(store: S, reader: FsReader, admin: FsAdmin) -> Self {
+        Self::with_block_cache(
+            store,
+            reader,
+            admin,
+            Arc::new(GrepBlockCache::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES)),
+        )
+    }
+
+    /// Creates a worker over a host-composed process-wide grep block cache.
+    pub fn with_block_cache(
+        store: S,
+        reader: FsReader,
+        admin: FsAdmin,
+        block_cache: Arc<GrepBlockCache>,
+    ) -> Self {
         Self {
             store,
             reader,
             admin,
-            block_cache: Arc::new(GrepBlockCache::new(MAX_CACHED_GREP_BLOCKS)),
+            block_cache,
         }
     }
 
