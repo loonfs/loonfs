@@ -18,7 +18,7 @@ mod render;
 mod resolve;
 mod uploads;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::process::ExitCode;
 
 /// Exit status for a command line the parser rejected, which is clap's own.
@@ -33,6 +33,15 @@ pub async fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => return render_parse_failure(&error),
     };
+    // Clap does not check a child argument's conflict against a global
+    // argument written before the subcommand, so close that ordering gap.
+    if cli.json && matches!(&cli.command, args::Command::Ls(args) if args.jsonl) {
+        let error = args::Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "the argument '--jsonl' cannot be used with '--json'",
+        );
+        return render_parse_failure(&error);
+    }
     let runtime = args::RuntimeBehavior::detect(&cli);
 
     match commands::run(cli, runtime).await {

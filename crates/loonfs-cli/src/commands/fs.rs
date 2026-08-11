@@ -50,6 +50,7 @@ pub(crate) async fn run_filesystem_ls(
     kind: CommandKind,
     config_path: &Path,
     args: FilesystemLsArgs,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = true;
@@ -59,18 +60,37 @@ pub(crate) async fn run_filesystem_ls(
         allow_root,
     )
     .map_err(|error| context.fail(kind, error))?;
-    let (entries, next_cursor) = match (args.limit, args.cursor.as_deref()) {
-        // Unbounded is still the default: a listing nobody bounded prints
-        // the whole directory, as it always has.
-        (None, None) => {
-            let entries = context
-                .target
-                .list_path_entries_all(&spec)
-                .await
-                .map_err(|error| context.fail(kind, error))?;
-            (entries, None)
-        }
-        (limit, cursor) => list_bounded_path_entries(&context, kind, &spec, limit, cursor).await?,
+    let streams_pages = args.jsonl || (args.all && !runtime.json);
+    if streams_pages {
+        stream_path_entries(
+            &context,
+            kind,
+            &spec,
+            args.limit,
+            args.cursor.as_deref(),
+            args.all,
+            args.jsonl,
+        )
+        .await?;
+        return Ok(CommandOutput {
+            kind,
+            profile: Some(context.profile_name),
+            mode: Some(context.mode),
+            data: CommandData::StreamedToStdout,
+        });
+    }
+
+    let (entries, next_cursor) = if args.all {
+        list_all_path_entries(&context, kind, &spec, args.cursor.as_deref()).await?
+    } else if let Some(limit) = args.limit {
+        list_bounded_path_entries(&context, kind, &spec, limit, args.cursor.as_deref()).await?
+    } else {
+        let page = context
+            .target
+            .list_path_entries_page(&spec, None, args.cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        (page.entries, page.next_cursor)
     };
     Ok(CommandOutput {
         kind,
@@ -83,38 +103,100 @@ pub(crate) async fn run_filesystem_ls(
     })
 }
 
-/// Reads pages until `limit` entries are in hand, and reports the cursor
-/// that resumes where it stopped.
-///
-/// `limit` bounds the total, not one page, so the loop asks for what it
-/// still needs — clamped to a page size every deployment accepts, because a
-/// caller-supplied page limit above `pagination.max_limit` is rejected
-/// rather than clamped by the server. An absent `limit` follows the cursor
-/// to the end, which is what `--cursor` alone asks for.
+/// Reads pages until `limit` entries are in hand.
 async fn list_bounded_path_entries(
     context: &CommandContext,
     kind: CommandKind,
     spec: &NamespacePath,
-    limit: Option<u32>,
+    limit: u32,
     cursor: Option<&str>,
 ) -> Result<(Vec<loonfs_api::AuthoritativePathEntry>, Option<String>), CommandFailure> {
     let mut entries = Vec::new();
     let mut cursor = cursor.map(ToOwned::to_owned);
     loop {
+        // Servers reject oversized page limits, so ask only for the part of
+        // the total bound that one default deployment page can accept.
+        let remaining = limit.saturating_sub(entries.len() as u32);
+        let page_limit = remaining.min(loonfs_api::DEFAULT_PAGE_LIMIT);
+        let page = context
+            .target
+            .list_path_entries_page(spec, Some(page_limit), cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        entries.extend(page.entries);
+        cursor = page.next_cursor;
+        let filled = entries.len() as u32 >= limit;
+        if filled || cursor.is_none() {
+            return Ok((entries, cursor));
+        }
+    }
+}
+
+/// Reads every page into one result for `--json --all`.
+async fn list_all_path_entries(
+    context: &CommandContext,
+    kind: CommandKind,
+    spec: &NamespacePath,
+    cursor: Option<&str>,
+) -> Result<(Vec<loonfs_api::AuthoritativePathEntry>, Option<String>), CommandFailure> {
+    let mut entries = Vec::new();
+    let mut cursor = cursor.map(ToOwned::to_owned);
+    loop {
+        let page = context
+            .target
+            .list_path_entries_page(spec, None, cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        entries.extend(page.entries);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return Ok((entries, None));
+        }
+    }
+}
+
+/// Writes each page before fetching the next one.
+async fn stream_path_entries(
+    context: &CommandContext,
+    kind: CommandKind,
+    spec: &NamespacePath,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+    all: bool,
+    jsonl: bool,
+) -> Result<(), CommandFailure> {
+    let mut written = 0_u32;
+    let mut cursor = cursor.map(ToOwned::to_owned);
+    loop {
         let page_limit = limit.map(|limit| {
-            let remaining = limit.saturating_sub(entries.len() as u32);
-            remaining.min(loonfs_api::DEFAULT_PAGE_LIMIT)
+            limit
+                .saturating_sub(written)
+                .min(loonfs_api::DEFAULT_PAGE_LIMIT)
         });
         let page = context
             .target
             .list_path_entries_page(spec, page_limit, cursor.as_deref())
             .await
             .map_err(|error| context.fail(kind, error))?;
-        entries.extend(page.entries);
+        written = written.saturating_add(page.entries.len() as u32);
+        crate::render::write_path_entries_page(&page.entries, jsonl)
+            .map_err(|error| context.fail(kind, CliError::io(error)))?;
         cursor = page.next_cursor;
-        let filled = limit.is_some_and(|limit| entries.len() as u32 >= limit);
-        if filled || cursor.is_none() {
-            return Ok((entries, cursor));
+
+        let filled = limit.is_some_and(|limit| written >= limit);
+        let follows_cursor = all || limit.is_some();
+        if filled || !follows_cursor || cursor.is_none() {
+            // Standard output stays machine-pure in `--jsonl`, so the
+            // continuation signal goes to standard error, where this CLI
+            // already reports progress. Without it a one-page stream would
+            // truncate silently.
+            if let Some(cursor) = cursor {
+                crate::render::write_stderr_progress(format!(
+                    "more entries exist; continue with --cursor {cursor} or stream everything \
+                     with --all"
+                ));
+            }
+            return Ok(());
         }
     }
 }

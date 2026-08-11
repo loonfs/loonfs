@@ -141,9 +141,7 @@ pub(crate) enum CommandData {
     Trash(TrashListing),
     PathEntries {
         entries: Vec<AuthoritativePathEntry>,
-        /// Where a bounded listing stopped, and how to resume it. Present
-        /// only when `--limit` cut the listing short; its presence is what
-        /// says the directory holds more than was printed.
+        /// Where a bounded listing stopped, and how to resume it.
         #[serde(skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
     },

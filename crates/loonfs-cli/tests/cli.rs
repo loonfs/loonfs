@@ -4688,10 +4688,123 @@ fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
     }
 }
 
-/// `ls` bounds its own output on request, and the cursor it reports
-/// resumes exactly where it stopped.
+/// The default listing stops after one real server page, while the explicit
+/// streaming modes cross that boundary and a cursor resumes at the next row.
 #[test]
-fn ls_limit_bounds_the_whole_listing_and_resumes_from_its_cursor() {
+fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    // The pagination policy is fixed at 1,000 entries, so one extra file is
+    // the smallest integration fixture that produces a continuation cursor.
+    let local = harness.temp_dir.path().join("listing");
+    fs::create_dir(&local).expect("create listing fixture");
+    for index in 0..=loonfs_api::DEFAULT_PAGE_LIMIT {
+        fs::write(local.join(format!("f{index:04}.txt")), b"x").expect("write listing entry");
+    }
+    let uploaded = harness.run(&[
+        "--json",
+        "--no-progress",
+        "put",
+        "-r",
+        local.to_str().expect("utf-8 path"),
+        "/listing",
+    ]);
+    assert_success(&uploaded);
+
+    let default_human = harness.run(&["ls", "/listing"]);
+    assert_success(&default_human);
+    let default_human = stdout_string(&default_human);
+    let human_lines = default_human.lines().collect::<Vec<_>>();
+    assert_eq!(
+        human_lines.len(),
+        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+    );
+    assert!(human_lines
+        .last()
+        .expect("continuation line")
+        .starts_with("more entries exist; continue with --cursor "));
+    assert!(human_lines
+        .last()
+        .expect("continuation line")
+        .ends_with(" or list everything with --all"));
+
+    let first = harness.run(&["--json", "ls", "/listing"]);
+    assert_success(&first);
+    let first_data = json_data(&first);
+    let first_entries = first_data["entries"].as_array().expect("first page");
+    assert_eq!(first_entries.len(), loonfs_api::DEFAULT_PAGE_LIMIT as usize);
+    let cursor = first_data["next_cursor"]
+        .as_str()
+        .expect("default JSON page carries a cursor");
+
+    let one_page_jsonl = harness.run(&["ls", "/listing", "--jsonl"]);
+    assert_success(&one_page_jsonl);
+    assert_eq!(
+        stdout_string(&one_page_jsonl).lines().count(),
+        loonfs_api::DEFAULT_PAGE_LIMIT as usize
+    );
+
+    let all = harness.run(&["ls", "/listing", "--all"]);
+    assert_success(&all);
+    assert_eq!(
+        stdout_string(&all).lines().count(),
+        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+    );
+    assert!(!stdout_string(&all).contains("more entries exist"));
+
+    let all_json = harness.run(&["--json", "ls", "/listing", "--all"]);
+    assert_success(&all_json);
+    let all_json_data = json_data(&all_json);
+    assert_eq!(
+        all_json_data["entries"]
+            .as_array()
+            .expect("all entries")
+            .len(),
+        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+    );
+    assert!(all_json_data.get("next_cursor").is_none());
+
+    let jsonl = harness.run(&["ls", "/listing", "--all", "--jsonl"]);
+    assert_success(&jsonl);
+    let jsonl_entries = stdout_string(&jsonl)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("one JSON entry per line"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        jsonl_entries.len(),
+        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+    );
+    assert!(jsonl_entries
+        .iter()
+        .all(|entry| entry.get("data").is_none()));
+    let actual_paths = jsonl_entries
+        .iter()
+        .map(|entry| entry["absolute_path"].as_str().expect("entry path"))
+        .collect::<Vec<_>>();
+    let expected_paths = (0..=loonfs_api::DEFAULT_PAGE_LIMIT)
+        .map(|index| format!("/listing/f{index:04}.txt"))
+        .collect::<Vec<_>>();
+    assert_eq!(actual_paths, expected_paths);
+
+    let second = harness.run(&["--json", "ls", "/listing", "--cursor", cursor]);
+    assert_success(&second);
+    let second_data = json_data(&second);
+    let second_entries = second_data["entries"].as_array().expect("second page");
+    assert_eq!(second_entries.len(), 1);
+    assert_eq!(
+        first_entries.last().expect("last first-page entry")["absolute_path"],
+        "/listing/f0999.txt"
+    );
+    assert_eq!(second_entries[0]["absolute_path"], "/listing/f1000.txt");
+}
+
+/// `ls --limit` bounds the total, and incompatible output bounds fail in
+/// clap before the command runs.
+#[test]
+fn ls_limit_bounds_the_whole_listing_and_rejects_all() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -4707,8 +4820,8 @@ fn ls_limit_bounds_the_whole_listing_and_resumes_from_its_cursor() {
         ]));
     }
 
-    // Unbounded still prints everything and reports no cursor.
-    let all = harness.run(&["--json", "ls"]);
+    // Explicitly unbounded JSON still prints everything in one document.
+    let all = harness.run(&["--json", "ls", "--all"]);
     assert_success(&all);
     let all_data = json_data(&all);
     assert_eq!(all_data["entries"].as_array().expect("json array").len(), 5);
@@ -4752,10 +4865,19 @@ fn ls_limit_bounds_the_whole_listing_and_resumes_from_its_cursor() {
     );
     assert!(rest_data.get("next_cursor").is_none());
 
-    // The human rendering says the listing stopped early.
+    // The human rendering says how to continue after the bound.
     let human = harness.run(&["ls", "--limit", "2"]);
     assert_success(&human);
-    assert!(stdout_string(&human).contains("next_cursor:"));
+    assert!(stdout_string(&human).contains("continue with --cursor"));
+
+    let conflicting_bound = harness.run(&["ls", "--all", "--limit", "2"]);
+    assert_failure(&conflicting_bound);
+    assert_eq!(conflicting_bound.status.code(), Some(2));
+
+    let conflicting_json = harness.run(&["--json", "ls", "--jsonl"]);
+    assert_failure(&conflicting_json);
+    assert_eq!(conflicting_json.status.code(), Some(2));
+    assert!(conflicting_json.stdout.is_empty());
 }
 
 /// The admin plane and the change feed work end to end, and both profile
