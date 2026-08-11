@@ -138,11 +138,11 @@ Namespace management
     Show the active profile and its default namespace
 
 Reading
-  loonfs ls [path] [--limit <n>] [--cursor <cursor>]
+  loonfs ls [path] [--limit <n> | --all] [--cursor <cursor>] [--jsonl]
     List the entries of a directory, `/` when the path is omitted. Without
-    --limit the whole directory is printed, however large; --limit stops
+    --limit or --all, one server page is printed. --limit stops
     after that many entries in total and reports a next_cursor, which
-    --cursor resumes from
+    --cursor resumes; --all streams pages except in JSON; --jsonl streams entries
 
   loonfs stat <path>
     Describe one path: kind, size, revision, content digest, and the

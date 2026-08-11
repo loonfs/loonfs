@@ -299,6 +299,23 @@ pub(crate) fn write_stderr_progress(message: impl std::fmt::Display) {
     let _ = writeln!(io::stderr().lock(), "{message}");
 }
 
+/// Writes one listing page and makes it visible before the next fetch.
+pub(crate) fn write_path_entries_page(
+    entries: &[loonfs_api::AuthoritativePathEntry],
+    jsonl: bool,
+) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    for entry in entries {
+        if jsonl {
+            serde_json::to_writer(&mut stdout, entry).map_err(io::Error::other)?;
+            stdout.write_all(b"\n")?;
+        } else {
+            writeln!(stdout, "{}", human_path_entry(entry))?;
+        }
+    }
+    stdout.flush()
+}
+
 pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
     match &output.data {
         CommandData::StreamBytes(_) | CommandData::StreamedToStdout => Err(io::Error::new(
@@ -572,19 +589,10 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             entries,
             next_cursor,
         } => {
-            let mut lines: Vec<String> = entries
-                .iter()
-                .map(|entry| {
-                    let size = entry
-                        .size_bytes
-                        .map(|value: u64| value.to_string())
-                        .unwrap_or_else(|| "-".to_owned());
-                    format!("{}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
-                })
-                .collect();
+            let mut lines: Vec<String> = entries.iter().map(human_path_entry).collect();
             if let Some(cursor) = next_cursor {
                 lines.push(format!(
-                    "next_cursor: {cursor} (more entries; resume with --cursor)"
+                    "more entries exist; continue with --cursor {cursor} or list everything with --all"
                 ));
             }
             lines.join("\n")
@@ -903,6 +911,14 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         CommandData::Version { version } => version.clone(),
         CommandData::StreamBytes(_) | CommandData::StreamedToStdout => String::new(),
     }
+}
+
+fn human_path_entry(entry: &loonfs_api::AuthoritativePathEntry) -> String {
+    let size = entry
+        .size_bytes
+        .map(|value: u64| value.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+    format!("{}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
 }
 
 /// One attribute value on one line. A list joins on `, `, which is a display

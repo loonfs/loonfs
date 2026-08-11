@@ -370,13 +370,18 @@ pub(crate) struct FilesystemLsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: Option<String>,
-    /// Stop after this many entries in total. Without it the command
-    /// follows cursors and prints the whole directory, however large.
-    #[arg(long)]
+    /// Stop after this many entries in total.
+    #[arg(long, conflicts_with = "all")]
     pub limit: Option<u32>,
     /// Resume cursor from a previous bounded listing.
     #[arg(long)]
     pub cursor: Option<String>,
+    /// Follow every page and print entries as pages arrive.
+    #[arg(long)]
+    pub all: bool,
+    /// Print one JSON entry per line as pages arrive.
+    #[arg(long, conflicts_with = "json")]
+    pub jsonl: bool,
 }
 
 #[derive(Debug, Args)]
