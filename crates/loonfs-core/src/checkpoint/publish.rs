@@ -15,8 +15,6 @@ use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 
-const DIFFERENT_MANIFEST_BYTES: &str = "unavailable because the encoded bytes differ";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
     Published(MetadataRootState),
@@ -55,11 +53,9 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     {
         Ok(()) => Ok(()),
         Err(ImmutableWriteError::DifferentObject { .. }) => Err(
-            MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
+            MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
                 object_key: manifest_key,
                 manifest_id: manifest.payload.manifest_id,
-                expected_payload_checksum: manifest.payload_checksum.clone(),
-                actual_payload_checksum: DIFFERENT_MANIFEST_BYTES.to_owned(),
             }),
         ),
         Err(ImmutableWriteError::Transport { source, .. }) => Err(
@@ -87,10 +83,10 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
 /// contention, and it is reported as such.
 pub(super) fn manifest_write_failure(error: MetadataProjectionLoadError) -> CoreError {
     match error {
-        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
-            object_key,
-            ..
-        }) => CoreError::NamespaceCorrupt(format!(
+        MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::ManifestObjectConflict { object_key, .. }
+            | ManifestLoadError::ManifestConflict { object_key, .. },
+        ) => CoreError::NamespaceCorrupt(format!(
             "namespace manifest `{object_key}` already exists with a different payload"
         )),
         error => CoreError::MetadataProjection(error),

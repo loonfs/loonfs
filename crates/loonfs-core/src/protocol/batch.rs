@@ -352,27 +352,24 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
 
 fn wal_immutable_write_error(error: ImmutableWriteError) -> CoreError {
     let fallback_object_key = error.object_key().to_owned();
-    let (object_key, message, class) = match error {
-        ImmutableWriteError::DifferentObject { object_key } => (
-            object_key,
-            "immutable WAL segment already exists with different bytes".to_owned(),
-            StoreFailureClass::Other,
+    match error {
+        ImmutableWriteError::DifferentObject { object_key } => CoreError::NamespaceCorrupt(
+            format!("immutable WAL segment `{object_key}` already exists with different bytes"),
         ),
         ImmutableWriteError::Transport { object_key, source } => {
             let message = source.message();
             let class = StoreFailureClass::of(&source);
-            (object_key, message, class)
+            CoreError::WalWrite {
+                object_key,
+                message,
+                class,
+            }
         }
-        error => (
-            fallback_object_key,
-            error.to_string(),
-            StoreFailureClass::Other,
-        ),
-    };
-    CoreError::WalWrite {
-        object_key,
-        message,
-        class,
+        error => CoreError::WalWrite {
+            object_key: fallback_object_key,
+            message: error.to_string(),
+            class: StoreFailureClass::Other,
+        },
     }
 }
 

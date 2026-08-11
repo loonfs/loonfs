@@ -294,11 +294,9 @@ impl From<ImmutableWriteError> for CoreError {
     fn from(value: ImmutableWriteError) -> Self {
         let fallback_object_key = value.object_key().to_owned();
         match value {
-            ImmutableWriteError::DifferentObject { object_key } => Self::Store {
-                object_key,
-                message: "immutable object already exists with different bytes".to_owned(),
-                class: StoreFailureClass::Other,
-            },
+            ImmutableWriteError::DifferentObject { object_key } => Self::NamespaceCorrupt(format!(
+                "immutable object `{object_key}` already exists with different bytes"
+            )),
             ImmutableWriteError::Transport { object_key, source } => Self::Store {
                 object_key,
                 message: source.message(),

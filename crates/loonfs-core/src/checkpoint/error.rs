@@ -48,6 +48,13 @@ pub enum ManifestLoadError {
         actual: ManifestObjectId,
     },
     #[error(
+        "namespace manifest object conflict for `{object_key}` manifest `{manifest_id}`: the immutable key contains different bytes"
+    )]
+    ManifestObjectConflict {
+        object_key: String,
+        manifest_id: ManifestId,
+    },
+    #[error(
         "namespace manifest conflict for `{object_key}` manifest `{manifest_id}`: expected payload checksum `{expected_payload_checksum}`, actual `{actual_payload_checksum}`"
     )]
     ManifestConflict {
@@ -104,9 +111,7 @@ pub enum ManifestLoadError {
 impl ManifestLoadError {
     pub fn failure_class(&self) -> ManifestLoadFailureClass {
         match self {
-            Self::ReadManifest { .. }
-            | Self::ReadSegment { .. }
-            | Self::ManifestConflict { .. } => ManifestLoadFailureClass::Store,
+            Self::ReadManifest { .. } | Self::ReadSegment { .. } => ManifestLoadFailureClass::Store,
             _ => ManifestLoadFailureClass::Corrupt,
         }
     }

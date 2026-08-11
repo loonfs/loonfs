@@ -932,22 +932,16 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         .await
         .expect_err("different same-id manifest must conflict");
 
+    assert_eq!(
+        CoreError::MetadataProjection(error.clone()).code(),
+        ErrorCode::NamespaceCorrupt
+    );
     match error {
-        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
+        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
             manifest_id,
-            expected_payload_checksum,
-            actual_payload_checksum,
             ..
         }) => {
             assert_eq!(manifest_id, ManifestId(1));
-            assert_eq!(
-                expected_payload_checksum,
-                conflicting_manifest.payload_checksum
-            );
-            assert_eq!(
-                actual_payload_checksum,
-                "unavailable because the encoded bytes differ"
-            );
         }
         other => panic!("unexpected error: {other:?}"),
     }
