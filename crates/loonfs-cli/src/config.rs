@@ -6,7 +6,7 @@ use loonfs_client::ClientConfig;
 use loonfs_objectstore::{SecretString, StoreConfigError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -453,6 +453,7 @@ pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig, CliError>
 }
 
 pub(crate) fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliError> {
+    let _lock = lock_config(path)?;
     config.validate()?;
     let contents = toml::to_string_pretty(config)
         .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
@@ -463,12 +464,34 @@ pub(crate) fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliErro
 /// commands when the file no longer strict-decodes: round-tripping through
 /// [`CliConfig`] would drop the content the user still needs to fix.
 pub(crate) fn save_config_table(path: &Path, table: &toml::Table) -> Result<(), CliError> {
+    let _lock = lock_config(path)?;
     let contents = toml::to_string_pretty(table)
         .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
     persist_config_contents(path, &contents)
 }
 
-fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> {
+/// Applies one edit to the latest config under the exclusive lock, so
+/// concurrent writers cannot lose each other's updates. The closure's value
+/// comes back to the caller once the file is durably replaced.
+pub(crate) fn mutate_config<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut CliConfig) -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let _lock = lock_config(path)?;
+    let mut config = load_or_default_config(path)?;
+    let value = mutate(&mut config)?;
+    config.validate()?;
+    let contents = toml::to_string_pretty(&config)
+        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
+    persist_config_contents(path, &contents)?;
+    Ok(value)
+}
+
+struct ConfigLock {
+    _file: File,
+}
+
+fn lock_config(path: &Path) -> Result<ConfigLock, CliError> {
     let parent = path.parent().ok_or_else(|| {
         CliError::invalid_config(format!(
             "config path has no parent directory: {}",
@@ -478,14 +501,62 @@ fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> 
     fs::create_dir_all(parent).map_err(|err| {
         CliError::invalid_config(format!("failed to create config directory: {err}"))
     })?;
-    let tmp_path = path.with_extension("tmp");
-    write_owner_only(&tmp_path, contents.as_bytes())?;
-    fs::rename(&tmp_path, path).map_err(|err| {
+    let lock_path = path.with_extension("lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| {
+            CliError::invalid_config(format!(
+                "failed to open the lock file `{}`: {err}",
+                lock_path.display()
+            ))
+        })?;
+    fs4::fs_std::FileExt::lock_exclusive(&file).map_err(|err| {
+        CliError::invalid_config(format!("failed to lock `{}`: {err}", lock_path.display()))
+    })?;
+    Ok(ConfigLock { _file: file })
+}
+
+fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> {
+    let parent = path.parent().ok_or_else(|| {
         CliError::invalid_config(format!(
-            "failed to persist config {}: {err}",
+            "config path has no parent directory: {}",
             path.display()
         ))
     })?;
+    let mut temp_file = tempfile::Builder::new()
+        .prefix(".loonfs-config-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|err| {
+            CliError::invalid_config(format!(
+                "failed to create temporary config file in {}: {err}",
+                parent.display()
+            ))
+        })?;
+    temp_file
+        .write_all(contents.as_bytes())
+        .map_err(|err| CliError::invalid_config(format!("failed to write config: {err}")))?;
+    temp_file
+        .flush()
+        .map_err(|err| CliError::invalid_config(format!("failed to flush config: {err}")))?;
+    temp_file
+        .as_file()
+        .sync_all()
+        .map_err(|err| CliError::invalid_config(format!("failed to sync config: {err}")))?;
+    temp_file.persist(path).map_err(|err| {
+        CliError::invalid_config(format!(
+            "failed to persist config {}: {}",
+            path.display(),
+            err.error
+        ))
+    })?;
+    if let Ok(directory) = File::open(parent) {
+        let _ = directory.sync_all();
+    }
     Ok(())
 }
 
@@ -525,43 +596,6 @@ fn redacted_config_value(key: Option<&str>, value: &toml::Value) -> toml::Value 
     }
 }
 
-fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|err| {
-                CliError::invalid_config(format!(
-                    "failed to create config file {}: {err}",
-                    path.display()
-                ))
-            })?
-    };
-    #[cfg(not(unix))]
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
-        .map_err(|err| {
-            CliError::invalid_config(format!(
-                "failed to create config file {}: {err}",
-                path.display()
-            ))
-        })?;
-
-    file.write_all(bytes)
-        .map_err(|err| CliError::invalid_config(format!("failed to write config: {err}")))?;
-    file.sync_all()
-        .map_err(|err| CliError::invalid_config(format!("failed to flush config: {err}")))?;
-    Ok(())
-}
-
 fn require_non_empty(field: &str, value: &str) -> Result<(), CliError> {
     if value.trim().is_empty() {
         return Err(CliError::invalid_config(format!("missing `{field}`")));
@@ -593,7 +627,7 @@ mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::CliConfig;
+    use super::{CliConfig, ProfileConfig};
 
     fn parse(contents: &str) -> Result<CliConfig, toml::de::Error> {
         toml::from_str(contents)
@@ -835,6 +869,99 @@ secret_access_key = "secret"
                 "{}",
                 error.message
             );
+        }
+    }
+
+    #[test]
+    fn concurrent_mutations_preserve_every_profile_and_remove_temp_files() {
+        const THREADS: usize = 16;
+        const MUTATIONS_PER_THREAD: usize = 8;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let barrier = std::sync::Barrier::new(THREADS);
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(THREADS);
+            for thread_index in 0..THREADS {
+                let barrier = &barrier;
+                let path = &path;
+                handles.push(scope.spawn(move || {
+                    let profile_name = format!("agent-{thread_index}");
+                    barrier.wait();
+                    for mutation_index in 0..MUTATIONS_PER_THREAD {
+                        let namespace = format!("namespace-{thread_index}-{mutation_index}");
+                        super::mutate_config(path, |config| {
+                            config.profiles.insert(
+                                profile_name.clone(),
+                                ProfileConfig::Remote {
+                                    server_url: format!(
+                                        "https://agent-{thread_index}-{mutation_index}.example.com"
+                                    ),
+                                    default_namespace: Some(namespace),
+                                    auth_token: None,
+                                    ca_cert_path: None,
+                                },
+                            );
+                            Ok(())
+                        })
+                        .expect("mutate config");
+                    }
+                }));
+            }
+            for handle in handles {
+                handle.join().expect("mutation thread");
+            }
+        });
+
+        let contents = std::fs::read_to_string(&path).expect("read final config");
+        let config: CliConfig = toml::from_str(&contents).expect("parse final config");
+        config.validate().expect("validate final config");
+        for thread_index in 0..THREADS {
+            let profile_name = format!("agent-{thread_index}");
+            let expected_namespace =
+                format!("namespace-{thread_index}-{}", MUTATIONS_PER_THREAD - 1);
+            let Some(ProfileConfig::Remote {
+                default_namespace, ..
+            }) = config.profiles.get(&profile_name)
+            else {
+                panic!("missing remote profile {profile_name}");
+            };
+            assert_eq!(
+                default_namespace.as_deref(),
+                Some(expected_namespace.as_str())
+            );
+        }
+
+        let temp_files: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read config directory")
+            .map(|entry| entry.expect("read directory entry").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+            .collect();
+        assert!(
+            temp_files.is_empty(),
+            "temporary files remain: {temp_files:?}"
+        );
+    }
+
+    #[test]
+    fn mutate_config_creates_an_owner_only_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("config.toml");
+
+        super::mutate_config(&path, |_| Ok(())).expect("create config");
+
+        assert!(path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&path)
+                .expect("config metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
         }
     }
 

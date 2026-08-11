@@ -93,7 +93,7 @@ impl CliError {
         Self::new(
             "no_default_namespace",
             format!(
-                "no default namespace is set for profile `{profile}`; use `loonfs use <namespace>` or `--namespace`"
+                "no default namespace is set for profile `{profile}`; use `--namespace`, `LOONFS_NAMESPACE`, or `loonfs use <namespace>`"
             ),
         )
     }
