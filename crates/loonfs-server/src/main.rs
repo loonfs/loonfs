@@ -2,7 +2,6 @@
 //! until shutdown.
 
 use clap::Parser;
-use loonfs_objectstore::{run_store_contract_probe, StoreProbeOutcome};
 use std::io::Write as _;
 use std::process::ExitCode;
 
@@ -28,37 +27,27 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let args = Args::parse();
     loonfs_server::init_tracing_from_env()?;
     let config = loonfs_server::load_server_config(&args.config)?;
+    let mut exit_code = ExitCode::SUCCESS;
     if args.check_config || args.probe_store {
-        // Run this once when the flags are combined: the probe adds to the
-        // startup checks instead of opening the cache a second time.
+        // Either flag includes the startup checks, and combined flags run
+        // them once before printing both requested reports.
         loonfs_server::check_config(&config).await?;
         let mut stdout = std::io::stdout().lock();
-        if args.probe_store {
-            let store = config.object_store()?.into_shared();
-            let run_id = loonfs_api::generated_id("probe");
-            let report = run_store_contract_probe(store.as_ref(), &run_id).await;
-            for check in &report.checks {
-                match &check.outcome {
-                    StoreProbeOutcome::Passed => writeln!(stdout, "{}: passed", check.name)?,
-                    StoreProbeOutcome::Unsupported => {
-                        writeln!(stdout, "{}: unsupported", check.name)?
-                    }
-                    StoreProbeOutcome::Failed { message } => {
-                        writeln!(stdout, "{}: failed: {message}", check.name)?
-                    }
-                }
-            }
-            stdout.flush()?;
-            return Ok(if report.all_passed() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            });
+        if args.check_config {
+            writeln!(stdout, "{}", config.check_summary())?;
         }
-        writeln!(stdout, "{}", config.check_summary())?;
+        if args.probe_store {
+            let report = loonfs_server::probe_store(&config).await?;
+            for check in &report.checks {
+                writeln!(stdout, "{}", check.check_line())?;
+            }
+            if !report.all_passed() {
+                exit_code = ExitCode::FAILURE;
+            }
+        }
         stdout.flush()?;
-        return Ok(ExitCode::SUCCESS);
+    } else {
+        loonfs_server::serve(config).await?;
     }
-    loonfs_server::serve(config).await?;
-    Ok(ExitCode::SUCCESS)
+    Ok(exit_code)
 }

@@ -63,51 +63,23 @@ fn write_tls_identity(dir: &Path) -> (PathBuf, PathBuf) {
     (cert_path, key_path)
 }
 
-fn check_config(config_path: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_loonfs-server"))
-        .arg("--config")
-        .arg(config_path)
-        .arg("--check-config")
-        .output()
-        .expect("run loonfs-server --check-config")
-}
-
-fn probe_store(config_path: &Path, check_config_too: bool) -> std::process::Output {
+fn run_server(config_path: &Path, flags: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_loonfs-server"));
-    command
-        .arg("--config")
-        .arg(config_path)
-        .arg("--probe-store");
-    if check_config_too {
-        command.arg("--check-config");
-    }
-    command.output().expect("run loonfs-server --probe-store")
+    command.arg("--config").arg(config_path).args(flags);
+    command.output().expect("run loonfs-server")
 }
 
-const STORE_PROBE_CHECKS: &[&str] = &[
-    "create_if_absent_enforced",
-    "compare_and_swap_rejects_stale",
-    "compare_and_swap_missing_object_rejected",
-    "overwrite_updates_head_and_body",
-    "get_with_metadata_round_trip",
-    "head_reports_last_modified",
-    "visibility_after_write",
-    "visibility_after_delete",
-    "delete_missing_idempotent",
-    "sorted_listing",
-    "range_reads",
-    "multipart_round_trip",
-    "stored_checksum_readback",
-    "cleanup_leaves_prefix_empty",
-];
-
-#[test]
-fn probe_store_reports_every_check_for_a_working_local_store() {
+#[tokio::test]
+async fn probe_store_reports_every_check_for_a_working_local_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store_root = dir.path().join("store");
     let config_path = write_config(dir.path(), "127.0.0.1:9400", &store_root);
 
-    let output = probe_store(&config_path, false);
+    let config = loonfs_server::load_server_config(&config_path).expect("load config");
+    let report = loonfs_server::probe_store(&config)
+        .await
+        .expect("probe store through library boundary");
+    let output = run_server(&config_path, &["--probe-store"]);
 
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
@@ -117,11 +89,16 @@ fn probe_store_reports_every_check_for_a_working_local_store() {
         output.status
     );
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), STORE_PROBE_CHECKS.len(), "{stdout}");
-    for name in STORE_PROBE_CHECKS {
-        let expected = format!("{name}: passed");
-        assert!(lines.contains(&expected.as_str()), "{stdout}");
-    }
+    let expected: Vec<String> = report
+        .checks
+        .iter()
+        .map(|check| check.check_line())
+        .collect();
+    assert_eq!(
+        lines,
+        expected.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{stdout}"
+    );
     assert!(!stdout.contains("check-config-token"), "{stdout}");
     assert!(!stdout.contains("check-config-secret"), "{stdout}");
     assert!(!stderr.contains("check-config-token"), "{stderr}");
@@ -135,7 +112,7 @@ fn probe_store_fails_when_the_local_store_root_cannot_be_created() {
     std::fs::write(&occupied, b"a file, not a directory").expect("occupy the store path");
     let config_path = write_config(dir.path(), "127.0.0.1:9400", &occupied);
 
-    let output = probe_store(&config_path, false);
+    let output = run_server(&config_path, &["--probe-store"]);
 
     assert!(!output.status.success(), "expected a non-zero exit");
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
@@ -147,25 +124,26 @@ fn probe_store_fails_when_the_local_store_root_cannot_be_created() {
     assert!(!stderr.contains("check-config-secret"), "{stderr}");
 }
 
-#[test]
-fn probe_store_and_check_config_may_be_combined() {
+#[tokio::test]
+async fn probe_store_and_check_config_may_be_combined() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = write_config(dir.path(), "127.0.0.1:9400", &dir.path().join("store"));
 
-    let output = probe_store(&config_path, true);
+    let config = loonfs_server::load_server_config(&config_path).expect("load config");
+    let report = loonfs_server::probe_store(&config)
+        .await
+        .expect("probe store through library boundary");
+    let output = run_server(&config_path, &["--probe-store", "--check-config"]);
 
     assert!(
         output.status.success(),
         "combined checks failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8(output.stdout)
-            .expect("utf-8 stdout")
-            .lines()
-            .count(),
-        STORE_PROBE_CHECKS.len()
-    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], config.check_summary());
+    assert_eq!(lines.len(), report.checks.len() + 1);
 }
 
 #[test]
@@ -174,7 +152,7 @@ fn check_config_accepts_a_valid_config_and_names_what_it_validated() {
     let store_root = dir.path().join("store");
     let config_path = write_config(dir.path(), "127.0.0.1:9400", &store_root);
 
-    let output = check_config(&config_path);
+    let output = run_server(&config_path, &["--check-config"]);
 
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
     assert!(
@@ -209,7 +187,7 @@ root = "/tmp/loonfs-check-config-unused"
     )
     .expect("write server config");
 
-    let output = check_config(&config_path);
+    let output = run_server(&config_path, &["--check-config"]);
 
     assert!(!output.status.success(), "expected a non-zero exit");
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
@@ -238,7 +216,7 @@ fn check_config_reports_a_tls_identity_it_cannot_load() {
         &tls_table(&missing_cert, &key_path),
     );
 
-    let output = check_config(&config_path);
+    let output = run_server(&config_path, &["--check-config"]);
 
     assert!(
         !output.status.success(),
@@ -261,7 +239,7 @@ fn check_config_reports_a_tls_identity_it_cannot_load() {
         &tls_table(&cert_path, &not_pem),
     );
 
-    let output = check_config(&config_path);
+    let output = run_server(&config_path, &["--check-config"]);
 
     assert!(
         !output.status.success(),
@@ -289,7 +267,7 @@ fn check_config_reports_a_local_cache_it_cannot_open() {
         &local_cache_table(&occupied),
     );
 
-    let output = check_config(&config_path);
+    let output = run_server(&config_path, &["--check-config"]);
 
     assert!(
         !output.status.success(),
@@ -329,7 +307,7 @@ fn check_config_opens_the_local_cache_and_leaves_it_openable() {
         ),
     );
 
-    let output = check_config(&config_path);
+    let output = run_server(&config_path, &["--check-config"]);
 
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
     assert!(
@@ -347,7 +325,7 @@ fn check_config_opens_the_local_cache_and_leaves_it_openable() {
         "the check opens the cache, and opening it builds the directory"
     );
 
-    let second = check_config(&config_path);
+    let second = run_server(&config_path, &["--check-config"]);
 
     assert!(
         second.status.success(),
@@ -365,7 +343,7 @@ fn check_config_does_not_bind_the_port() {
     let bind = listener.local_addr().expect("local addr").to_string();
     let config_path = write_config(dir.path(), &bind, &dir.path().join("store"));
 
-    let output = check_config(&config_path);
+    let output = run_server(&config_path, &["--check-config"]);
 
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");

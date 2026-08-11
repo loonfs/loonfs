@@ -1,4 +1,7 @@
 //! Request-outcome logging at the HTTP boundary.
+//!
+//! This is a separate binary because its global subscriber would leak across
+//! the shared `it` harness and capture unrelated tests.
 
 #[path = "it/common/mod.rs"]
 mod common;
@@ -7,9 +10,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::Request;
 use axum::Router;
 use common::http_split_support::test_config;
-use loonfs::CreateNamespaceOptions;
-use loonfs_server::{app, MaintenanceMode};
+use loonfs::{CreateNamespaceOptions, FsWriter, SharedObjectStore, TraceMode, TraceStoreKind};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_server::{app, app_with_store, MaintenanceMode};
 use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
 use tower::ServiceExt as _;
@@ -199,29 +204,33 @@ async fn store_fault_has_one_error_from_the_boundary() {
     let mut config = test_config(store_root.clone(), "logging-store-fault", key_prefix);
     config.maintenance = MaintenanceMode::Manual;
 
-    let (first_router, first_writer, _local_cache) =
-        app(config.clone()).await.expect("build first app");
-    first_writer
+    let failing = Arc::new(FailStore::new(
+        LocalFsStore::with_key_prefix(&store_root, Some(key_prefix)).expect("build local store"),
+        KeyPredicate::wal_head("faulty"),
+        OperationClass::Read,
+        InjectedError::Transport("injected WAL-head read failure".to_owned()),
+    ));
+    let store: SharedObjectStore = failing.clone();
+    let bootstrap = FsWriter::builder_with_store(store.clone())
+        .writer_id("logging-store-fault-bootstrap")
+        .trace_mode(TraceMode::Remote)
+        .trace_store_kind(TraceStoreKind::LocalFs)
+        .build()
+        .await
+        .expect("build bootstrap writer");
+    bootstrap
         .create_namespace(&namespace_id("faulty"), CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    first_writer
+    bootstrap
         .shutdown()
         .await
-        .expect("shutdown first writer");
-    drop(first_router);
-    drop(first_writer);
+        .expect("shutdown bootstrap writer");
 
-    // A directory at an object key is a deterministic local-store fault.
-    let head_path = store_root
-        .join(key_prefix)
-        .join("namespaces/faulty/wal/head.json");
-    std::fs::remove_file(&head_path).expect("remove WAL head object");
-    std::fs::create_dir(&head_path).expect("replace WAL head with a directory");
-
-    let (second_router, second_writer, _local_cache) = app(config).await.expect("build second app");
+    failing.fail_all();
+    let router = app_with_store(config, store).await.expect("build app");
     capture.clear();
-    let (status, _body, request_id) = request_error(&second_router, "/v0/namespaces/faulty").await;
+    let (status, _body, request_id) = request_error(&router, "/v0/namespaces/faulty").await;
     assert_eq!(status, 500);
 
     let events = capture.snapshot();
@@ -235,8 +244,5 @@ async fn store_fault_has_one_error_from_the_boundary() {
     assert_eq!(errors[0].request_id.as_deref(), Some(request_id.as_str()));
     assert_eq!(completion_events(&events, &request_id).len(), 1);
 
-    second_writer
-        .shutdown()
-        .await
-        .expect("shutdown second writer");
+    drop(router);
 }

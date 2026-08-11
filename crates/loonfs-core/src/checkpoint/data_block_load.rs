@@ -153,36 +153,60 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
         spans.push((start, cursor));
     }
 
-    futures::future::try_join_all(spans.iter().map(|(start, end)| {
-        let span = &entries[*start..*end];
-        async move {
-            // Single-flight on the span's first block: the winning fetch
-            // decodes and publishes the whole span, so a concurrent scan
-            // waiting here finds the remaining blocks in the shared cache
-            // instead of re-fetching the span.
-            let first_key = segment_block_cache_key(
-                descriptor,
-                MetadataTableBlockKind::Data,
-                span[0].block.offset,
-            );
-            let fetch = || async {
-                load_and_publish_span(store, table_cache, memo, descriptor, span).await
-            };
-            match table_cache {
-                Some(cache) => {
-                    cache.get_or_load(&first_key, fetch).await?;
+    let mut span_decodes = vec![None; spans.len()];
+    futures::future::try_join_all(spans.iter().zip(&mut span_decodes).map(
+        |((start, end), winner_decodes)| {
+            let span = &entries[*start..*end];
+            async move {
+                // Single-flight on the span's first block: the winning fetch
+                // keeps what it decoded and publishes the whole span. A
+                // concurrent loser resolves the remaining blocks from caches.
+                let first_key = segment_block_cache_key(
+                    descriptor,
+                    MetadataTableBlockKind::Data,
+                    span[0].block.offset,
+                );
+                let fetch = || async move {
+                    load_and_publish_span(
+                        store,
+                        table_cache,
+                        memo,
+                        descriptor,
+                        span,
+                        winner_decodes,
+                    )
+                    .await
+                };
+                match table_cache {
+                    Some(cache) => {
+                        cache.get_or_load(&first_key, fetch).await?;
+                    }
+                    None => {
+                        fetch().await?;
+                    }
                 }
-                None => {
-                    fetch().await?;
-                }
+                Ok::<_, ManifestLoadError>(())
             }
-            Ok::<_, ManifestLoadError>(())
-        }
-    }))
+        },
+    ))
     .await?;
 
-    // Everything the winner published (or this call fetched) is resolvable
-    // now; blocks that lost a cache race are fetched alone.
+    for ((start, end), winner_decodes) in spans.iter().zip(span_decodes) {
+        let Some(winner_decodes) = winner_decodes else {
+            continue;
+        };
+        assert_eq!(
+            winner_decodes.len(),
+            end - start,
+            "a span winner should retain every block it decoded"
+        );
+        for (slot, block) in blocks[*start..*end].iter_mut().zip(winner_decodes) {
+            *slot = Some(block);
+        }
+    }
+
+    // Only single-flight losers still need to resolve what the winner
+    // published, with the existing point-load fallback on cache eviction.
     for (position, entry) in entries.iter().enumerate() {
         if blocks[position].is_some() {
             continue;
@@ -198,21 +222,23 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
 }
 
 /// Fetches one contiguous span with a single ranged GET, decodes every
-/// block, and publishes them to the per-view memo and (when populating) the
-/// shared cache. Returns the first block's cache entry for the single-flight
-/// cell.
+/// block, keeps the winner's decodes, and publishes them to the per-view memo
+/// and (when populating) the shared cache. Returns the first block's cache
+/// entry for the single-flight cell.
 async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
     descriptor: &MetadataFileRef,
     span: &[SegmentIndexEntry],
+    winner_decodes: &mut Option<Vec<Arc<DecodedDataBlock>>>,
 ) -> Result<DecodedMetadataTableBlock, ManifestLoadError> {
     let first = &span[0].block;
     let last = &span[span.len() - 1].block;
     let span_len = last.offset + u64::from(last.stored_len) - first.offset;
     let bytes = load_section_bytes(store, &descriptor.object_key, first.offset, span_len).await?;
     let mut first_block = None;
+    let mut retained = Vec::with_capacity(span.len());
     for entry in span {
         let handle = entry.block;
         let begin = (handle.offset - first.offset) as usize;
@@ -225,7 +251,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
             segment_block_cache_key(descriptor, MetadataTableBlockKind::Data, handle.offset);
         let cache_block = DecodedMetadataTableBlock::Data {
             decoded_byte_len: decoded_manifest_block_weight(descriptor.family, &decoded.rows),
-            block: decoded,
+            block: Arc::clone(&decoded),
         };
         memo.record(&cache_key, &cache_block);
         if let Some(cache) = table_cache {
@@ -236,7 +262,9 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
         if first_block.is_none() {
             first_block = Some(cache_block);
         }
+        retained.push(decoded);
     }
+    *winner_decodes = Some(retained);
     Ok(first_block.expect("a span should always hold at least one block"))
 }
 

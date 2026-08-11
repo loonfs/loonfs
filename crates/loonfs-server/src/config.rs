@@ -150,6 +150,8 @@ fn default_request_deadline_ms() -> u64 {
 }
 
 fn default_shutdown_deadline_ms() -> u64 {
+    // Clears loonfs_objectstore::PROVIDER_OPERATION_DEADLINE so an accepted
+    // request can finish the provider operation it already started.
     600_000
 }
 

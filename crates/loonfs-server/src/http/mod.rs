@@ -22,7 +22,9 @@ mod tls;
 
 #[cfg(feature = "openapi")]
 pub use self::openapi::{openapi_document, openapi_json_pretty};
-pub use self::serve::{app, check_config, serve, serve_with_shutdown, ServeError};
+pub use self::serve::{
+    app, app_with_store, check_config, probe_store, serve, serve_with_shutdown, ServeError,
+};
 pub use self::tls::TlsConfigError;
 
 use self::error::ApiResponseError;
@@ -43,7 +45,7 @@ use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_index_not_maintained,
     grep_index_status, grep_queries_not_served,
 };
-use self::handlers_store::probe_store;
+use self::handlers_store::probe_store as probe_store_handler;
 use self::handlers_uploads::{
     abort_upload, begin_upload, complete_upload, read_upload_status, sign_upload_parts,
     upload_content,
@@ -51,7 +53,7 @@ use self::handlers_uploads::{
 use self::serve::AppState;
 #[cfg(test)]
 use self::serve::{
-    app_with_store, app_with_store_and_direct_transfers, app_with_store_and_state,
+    app_with_store_and_direct_transfers, app_with_store_and_state,
     build_handles_with_metrics_jsonl_path, serve_on,
 };
 use axum::extract::{MatchedPath, Request, State};
@@ -75,6 +77,29 @@ tokio::task_local! {
     pub(super) static REQUEST_ID: String;
 }
 
+macro_rules! request_completion_event {
+    ($level:ident, $method:expr, $route:expr, $status:expr, $started:expr, $request_id:expr) => {
+        tracing::$level!(
+            target: "loonfs_server::http::request",
+            method = %$method,
+            route = $route,
+            status = $status.as_u16(),
+            elapsed_ms = u64::try_from($started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            request_id = $request_id.as_str(),
+            "request completed"
+        )
+    };
+}
+
+// Membership is limited to streamed content and operator work that is long by design.
+const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
+    "/v0/namespaces/{namespace}/filesystem/content",
+    "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
+    "/v0/admin/namespaces/{namespace}/maintenance/step",
+    "/v0/admin/store/probe",
+    "/v0/admin/namespaces/{namespace}/grep/index/gc",
+];
+
 /// Assigns each request a correlation id: every response carries it as the
 /// `x-request-id` header, and error bodies repeat it as
 /// `ApiError.request_id` so a caller's log line and the server's trace can
@@ -92,6 +117,13 @@ async fn with_request_id(request: Request, next: Next) -> Response {
 
 /// Cancels bounded request work once the deployment's deadline passes.
 async fn with_request_deadline(request_deadline_ms: u64, request: Request, next: Next) -> Response {
+    if request
+        .extensions()
+        .get::<MatchedPath>()
+        .is_some_and(|matched| DEADLINE_EXEMPT_ROUTES.contains(&matched.as_str()))
+    {
+        return next.run(request).await;
+    }
     match tokio::time::timeout(
         std::time::Duration::from_millis(request_deadline_ms),
         next.run(request),
@@ -111,91 +143,33 @@ async fn with_request_deadline(request_deadline_ms: u64, request: Request, next:
     }
 }
 
-enum RequestRoute {
-    Matched(MatchedPath),
-    Unmatched(String),
-}
-
-impl RequestRoute {
-    fn as_str(&self) -> &str {
-        match self {
-            Self::Matched(path) => path.as_str(),
-            Self::Unmatched(path) => path,
-        }
-    }
-}
-
-/// Logs the response once the request has reached its HTTP outcome.
-async fn with_request_completion(request: Request, next: Next) -> Response {
-    let method = request.method().clone();
-    let route = request.extensions().get::<MatchedPath>().map_or_else(
-        || RequestRoute::Unmatched(request.uri().path().to_owned()),
-        |path| RequestRoute::Matched(path.clone()),
-    );
-    let started = request_clock();
-    let response = next.run(request).await;
-    let status = response.status();
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-    REQUEST_ID.with(|request_id| match status {
-        status if status.is_server_error() => tracing::error!(
-            target: "loonfs_server::http::request",
-            method = %method,
-            route = route.as_str(),
-            status = status.as_u16(),
-            elapsed_ms,
-            request_id = request_id.as_str(),
-            "request completed"
-        ),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
-            tracing::warn!(
-                target: "loonfs_server::http::request",
-                method = %method,
-                route = route.as_str(),
-                status = status.as_u16(),
-                elapsed_ms,
-                request_id = request_id.as_str(),
-                "request completed"
-            );
-        }
-        _ => tracing::debug!(
-            target: "loonfs_server::http::request",
-            method = %method,
-            route = route.as_str(),
-            status = status.as_u16(),
-            elapsed_ms,
-            request_id = request_id.as_str(),
-            "request completed"
-        ),
-    });
-    response
-}
-
-/// Counts and times every request against the route axum matched it to.
-///
-/// The label is the route template, never the request's own path: a path
-/// carries namespace, upload, and checkpoint ids, and one unbounded label
-/// set is how a metrics backend dies. A request that matched no route — a
-/// 404 — reports as `unmatched`, which is one label rather than one per
-/// probe an internet-facing listener receives.
-async fn with_request_metrics(
+/// Counts, times, and logs every request once it reaches its HTTP outcome.
+async fn with_request_observability(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
-    let route = request
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|matched| matched.as_str().to_owned());
     let method = request.method().clone();
+    let matched_route = request.extensions().get::<MatchedPath>().cloned();
     let started = request_clock();
     let response = next.run(request).await;
-    state.metrics.request_served(
-        route.as_deref(),
+    let status = response.status();
+    let route = state.metrics.request_served(
+        matched_route.as_ref().map(MatchedPath::as_str),
         &method,
-        response.status(),
+        status,
         started.elapsed().as_secs_f64(),
     );
+
+    REQUEST_ID.with(|request_id| match status {
+        status if status.is_server_error() => {
+            request_completion_event!(error, method, route, status, started, request_id)
+        }
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            request_completion_event!(warn, method, route, status, started, request_id)
+        }
+        _ => request_completion_event!(debug, method, route, status, started, request_id),
+    });
     response
 }
 
@@ -242,7 +216,7 @@ fn router(state: AppState) -> Router {
         get(grep_index_not_maintained)
     };
     let request_deadline_ms = state.config.request_deadline_ms;
-    let bounded_routes = Router::new()
+    Router::new()
         .route("/health", get(health))
         .route("/readiness", get(readiness))
         .route("/metrics", get(serve_metrics))
@@ -258,6 +232,10 @@ fn router(state: AppState) -> Router {
             get(list_path_entries),
         )
         .route("/v0/namespaces/{namespace}/filesystem/stat", get(stat_path))
+        .route(
+            "/v0/namespaces/{namespace}/filesystem/content",
+            get(get_file_bytes),
+        )
         // The read this deployment authorizes rather than performs. It sits
         // beside the proxied read because it answers the same question
         // about the same path; the route exists everywhere and refuses with
@@ -273,6 +251,18 @@ fn router(state: AppState) -> Router {
             grep_status_route,
         )
         .route(
+            "/v0/admin/namespaces/{namespace}/grep/index/enable",
+            enable_grep_route,
+        )
+        .route(
+            "/v0/admin/namespaces/{namespace}/grep/index/disable",
+            disable_grep_route,
+        )
+        .route(
+            "/v0/admin/namespaces/{namespace}/grep/index/gc",
+            grep_gc_route,
+        )
+        .route(
             "/v0/namespaces/{namespace}/filesystem/revisions",
             get(list_file_revisions),
         )
@@ -285,6 +275,14 @@ fn router(state: AppState) -> Router {
         // commit receipt makes retry safe.
         .route("/v0/namespaces/{namespace}/commits", post(apply_commit))
         .route("/v0/namespaces/{namespace}/uploads", post(begin_upload))
+        .route(
+            "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
+            // No body-limit layer: the upload route never buffers its
+            // body, so a framework limit measured against a buffered read
+            // would never fire. `UploadBodyStream` counts the bytes as it
+            // forwards them and enforces `upload.max_content_bytes` itself.
+            put(upload_content),
+        )
         .route(
             "/v0/namespaces/{namespace}/uploads/{upload_id}/parts",
             post(sign_upload_parts),
@@ -310,57 +308,26 @@ fn router(state: AppState) -> Router {
             "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",
             post(release_checkpoint),
         )
-        .route_layer(middleware::from_fn(move |request: Request, next: Next| {
-            with_request_deadline(request_deadline_ms, request, next)
-        }));
-
-    let exempt_routes = Router::new()
-        .route(
-            "/v0/namespaces/{namespace}/filesystem/content",
-            get(get_file_bytes),
-        )
-        .route(
-            "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
-            // No body-limit layer: the upload route never buffers its
-            // body, so a framework limit measured against a buffered read
-            // would never fire. `UploadBodyStream` counts the bytes as it
-            // forwards them and enforces `upload.max_content_bytes` itself.
-            put(upload_content),
-        )
         .route(
             "/v0/admin/namespaces/{namespace}/maintenance/step",
             post(maintenance_step),
         )
         // The one admin route whose subject is the store rather than a
         // namespace, so it sits beside them rather than under one.
-        .route("/v0/admin/store/probe", post(probe_store))
-        .route(
-            "/v0/admin/namespaces/{namespace}/grep/index/enable",
-            enable_grep_route,
-        )
-        .route(
-            "/v0/admin/namespaces/{namespace}/grep/index/disable",
-            disable_grep_route,
-        )
-        .route(
-            "/v0/admin/namespaces/{namespace}/grep/index/gc",
-            grep_gc_route,
-        );
-
-    bounded_routes
-        .merge(exempt_routes)
+        .route("/v0/admin/store/probe", post(probe_store_handler))
+        .route_layer(middleware::from_fn(move |request: Request, next: Next| {
+            with_request_deadline(request_deadline_ms, request, next)
+        }))
         // Unmatched paths and wrong methods answer inside the error
         // contract instead of axum's empty default bodies.
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        // Request timing runs inside the correlation id, so a slow request's
-        // trace and its measurement name the same id.
+        // Request observation runs inside the correlation id, so its trace
+        // and measurements name the same request.
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            with_request_metrics,
+            with_request_observability,
         ))
-        // Completion logging runs inside the request-id scope.
-        .layer(middleware::from_fn(with_request_completion))
         .layer(middleware::from_fn(with_request_id))
         .with_state(state)
 }

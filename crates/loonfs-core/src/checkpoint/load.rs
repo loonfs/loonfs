@@ -71,7 +71,7 @@ pub(super) fn ensure_root_matches_manifest(
 /// exists because the manifest payload shape requires one.
 const GENESIS_MANIFEST_OBJECT_ID: &str = "00000000000000000000-0000000000000000";
 
-fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceManifestEnvelope {
+pub(super) fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceManifestEnvelope {
     NamespaceManifestEnvelope {
         kind: NamespaceManifestKind::NamespaceManifest,
         format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
