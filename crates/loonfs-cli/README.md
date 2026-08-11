@@ -232,6 +232,8 @@ History and recovery
 
 Maintenance
   loonfs admin run --namespace <ns>... [--job <job>...] [--drain] [--max-steps <n>] [--deadline-ms <ms>]
+    This command is embedded-only; remote servers host background
+    maintenance themselves
     Host maintenance for the namespaces named here, continuously until a
     signal; nothing discovers namespaces, so at least one --namespace is
     required. --job selects `metadata`, `core-gc`, `grep-index`, or

@@ -1,3 +1,6 @@
+{{- if and .Values.localCache.enabled (empty .Values.localCache.sizeLimit) }}
+{{- fail "localCache.sizeLimit is required when the cache is enabled; it bounds the cache emptyDir and must comfortably exceed the configured disk_bytes" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -95,12 +98,8 @@ spec:
         # it goes with the pod. The config's [local_cache] path has to name
         # this mount point.
         - name: local-cache
-          {{- if .Values.localCache.sizeLimit }}
           emptyDir:
             sizeLimit: {{ .Values.localCache.sizeLimit | quote }}
-          {{- else }}
-          emptyDir: {}
-          {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

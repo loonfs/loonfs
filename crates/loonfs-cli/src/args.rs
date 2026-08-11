@@ -695,8 +695,8 @@ pub(crate) enum AdminCommand {
     /// Advance the retention floor, surrendering replay history below the
     /// flushed manifest head. File revision history is never affected.
     RetentionAdvance(AdminNamespaceArgs),
-    /// Host maintenance for explicitly assigned namespaces: continuously
-    /// until a signal, or as one bounded catch-up with --drain.
+    /// Host maintenance in-process for assigned namespaces; this command is
+    /// embedded-only.
     Run(AdminRunArgs),
     /// Run one core maintenance step (WAL flush and metadata folds).
     Step(AdminStepArgs),
