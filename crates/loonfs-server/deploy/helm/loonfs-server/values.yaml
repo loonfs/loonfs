@@ -48,9 +48,9 @@ localCache:
   # chart writes nothing into the config: the config's [local_cache] table
   # has to name /var/cache/loonfs as its `path`.
   enabled: false
-  # The emptyDir's sizeLimit, as a quantity such as "100Gi". Set it to at
-  # least the config's `disk_bytes`, because the kubelet evicts a pod whose
-  # emptyDir grows past the limit. Empty means the chart sets no limit.
+  # The emptyDir's sizeLimit, as a quantity such as "100Gi". The chart
+  # requires it when the cache is enabled, and it must comfortably exceed
+  # the config's `disk_bytes`.
   sizeLimit: ""
 
 # Environment variables for the container, passed through as written. Each

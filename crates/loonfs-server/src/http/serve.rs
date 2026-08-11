@@ -421,8 +421,9 @@ fn tls_server_config(
 /// Two startup failures stay outside it. It does not bind the configured
 /// address, because a check that held the port could not run beside the
 /// server it is checking, and it performs no object-store operation, because
-/// a reachability check belongs to `loonfs admin store-probe`. Constructing
-/// the store still creates a `local-fs` root, as a start does.
+/// a reachability check belongs to `loonfs-server --probe-store` or
+/// `loonfs admin store-probe`. Constructing the store still creates a
+/// `local-fs` root, as a start does.
 pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     config.validate()?;
     config.object_store()?;

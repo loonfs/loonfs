@@ -4297,7 +4297,7 @@ fn admin_store_probe_renders_the_profile_stores_report() {
     );
 }
 
-/// A remote profile's server hosts its own runner. Stepping one from here
+/// A remote profile's server hosts its own runner. Hosting another one here
 /// would be a second scheduler over the same namespaces, so the command
 /// refuses instead of pretending it can.
 #[test]
@@ -4320,12 +4320,10 @@ fn admin_run_refuses_a_remote_profile() {
     assert_failure(&refused);
     let error = json_error(&refused);
     assert_eq!(error["code"], "not_supported");
-    assert!(
-        error["message"]
-            .as_str()
-            .expect("message")
-            .contains("embedded profile"),
-        "{error}"
+    assert_eq!(
+        error["message"],
+        "`admin run` is embedded-only; the remote server hosts background maintenance itself; \
+         use `loonfs admin step` for an on-demand pass and `loonfs admin index-status` to inspect index maintenance"
     );
 }
 

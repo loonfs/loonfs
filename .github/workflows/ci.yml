@@ -137,6 +137,14 @@ jobs:
             --set image.digest=sha256:1111111111111111111111111111111111111111111111111111111111111111 >/dev/null
           helm template rel "$CHART" $SECRET \
             --set 'extraEnvFrom[0].secretRef.name=loonfs-server-secrets' >/dev/null
+      - name: reject an unbounded local cache
+        run: |
+          if output="$(helm template rel "$CHART" $SECRET \
+            --set localCache.enabled=true 2>&1)"; then
+            echo "FAIL: enabled cache without localCache.sizeLimit rendered" >&2
+            exit 1
+          fi
+          grep -q 'localCache.sizeLimit.*cache emptyDir.*disk_bytes' <<<"$output"
       - name: assert the single-writer settings
         run: |
           rendered="$(helm template rel "$CHART" $SECRET)"

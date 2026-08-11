@@ -66,6 +66,18 @@ That config names them at `/etc/loonfs/gcs-service-account.json`,
 `config.key` names the entry holding the TOML, and the container reads
 `/etc/loonfs/<key>`. The default is `config.toml`.
 
+Patch this optional init container into the Deployment pod spec to gate startup:
+
+```yaml
+# Use the same image as the server container.
+# initContainers:
+#   - name: probe-store
+#     image: ghcr.io/loonfs/loonfs-server:vX.Y.Z
+#     args: ["--probe-store", "--config", "/etc/loonfs/config.toml"]
+#     volumeMounts:
+#       - {name: config, mountPath: /etc/loonfs, readOnly: true}
+```
+
 Changing the Secret does not restart the pod. Roll it yourself:
 
 ```bash
@@ -110,10 +122,9 @@ Three numbers have to line up, and the server enforces the first of them.
 fails the process at startup rather than starting a cache that holds nothing.
 
 The disk tier claims the whole of `disk_bytes` up front, as 16 MiB files, and
-it holds every one of them open. `localCache.sizeLimit` has to be at least
-`disk_bytes` for that reason. The kubelet evicts a pod whose `emptyDir` grows
-past its limit, and a cache sized above the limit reaches it as it fills. The
-100 GiB config above needs `sizeLimit: 100Gi` or more.
+it holds every one of them open. The chart requires `localCache.sizeLimit`
+when the cache is enabled, and it must comfortably exceed `disk_bytes`. The
+kubelet evicts a pod whose `emptyDir` grows past its limit.
 
 The container's open-file limit has to be above `disk_bytes` divided by
 16 MiB, because every claimed file stays open. The 100 GiB config above asks
@@ -139,7 +150,7 @@ deletes it every time it stops.
 | `service.annotations` | `{}` | Annotations for the Service. |
 | `terminationGracePeriodSeconds` | `660` | How long the kubelet waits after SIGTERM before SIGKILL. |
 | `localCache.enabled` | `false` | Mount an `emptyDir` at `/var/cache/loonfs`. |
-| `localCache.sizeLimit` | `""` | That `emptyDir`'s `sizeLimit`, such as `100Gi`. Empty means no limit. |
+| `localCache.sizeLimit` | `""` | Required when the cache is enabled; it bounds that `emptyDir` and must comfortably exceed `disk_bytes`. |
 | `extraEnv` | `[]` | Environment variables for the container, as Kubernetes `EnvVar` entries. |
 | `extraEnvFrom` | `[]` | Environment sources for the container, as Kubernetes `EnvFromSource` entries. |
 | `podAnnotations` | `{}` | Annotations for the pod. |

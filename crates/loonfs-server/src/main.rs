@@ -2,7 +2,9 @@
 //! until shutdown.
 
 use clap::Parser;
+use loonfs_objectstore::{run_store_contract_probe, StoreProbeOutcome};
 use std::io::Write as _;
+use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
 #[command(name = "loonfs-server", version)]
@@ -10,31 +12,53 @@ struct Args {
     /// Config file to load.
     #[arg(long)]
     config: String,
-    /// Run the startup checks, report the result, and exit without serving.
-    /// The check reads the config, loads the TLS identity, and opens the
-    /// local block cache. It does not bind the configured address and it
-    /// performs no object-store operation, though constructing a `local-fs`
-    /// store creates its root directory as a start does.
+    /// Validate the startup config and exit without serving.
     #[arg(long)]
     check_config: bool,
+    /// Validate startup, write and delete scratch objects while probing the
+    /// configured store, and exit without serving.
+    #[arg(long)]
+    probe_store: bool,
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     // Parse the arguments first. `--version` and `--help` then answer even
     // when `LOONFS_TRACE` holds a value this build rejects.
     let args = Args::parse();
     loonfs_server::init_tracing_from_env()?;
     let config = loonfs_server::load_server_config(&args.config)?;
-    if args.check_config {
-        // The summary is printed only once the checks a start runs have
-        // passed, so the printed line means the same thing the flag claims.
+    if args.check_config || args.probe_store {
+        // Run this once when the flags are combined: the probe adds to the
+        // startup checks instead of opening the cache a second time.
         loonfs_server::check_config(&config).await?;
         let mut stdout = std::io::stdout().lock();
+        if args.probe_store {
+            let store = config.object_store()?.into_shared();
+            let run_id = loonfs_api::generated_id("probe");
+            let report = run_store_contract_probe(store.as_ref(), &run_id).await;
+            for check in &report.checks {
+                match &check.outcome {
+                    StoreProbeOutcome::Passed => writeln!(stdout, "{}: passed", check.name)?,
+                    StoreProbeOutcome::Unsupported => {
+                        writeln!(stdout, "{}: unsupported", check.name)?
+                    }
+                    StoreProbeOutcome::Failed { message } => {
+                        writeln!(stdout, "{}: failed: {message}", check.name)?
+                    }
+                }
+            }
+            stdout.flush()?;
+            return Ok(if report.all_passed() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            });
+        }
         writeln!(stdout, "{}", config.check_summary())?;
         stdout.flush()?;
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
     loonfs_server::serve(config).await?;
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }

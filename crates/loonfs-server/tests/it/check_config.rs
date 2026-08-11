@@ -1,6 +1,6 @@
-//! `loonfs-server --check-config` tests, driven through the real binary.
+//! `loonfs-server` startup-check tests, driven through the real binary.
 //!
-//! The flag exists so an operator can validate a config before a deployment
+//! The flags exist so an operator can validate a config before a deployment
 //! starts, so these tests run the binary the operator runs.
 
 use std::net::TcpListener;
@@ -70,6 +70,102 @@ fn check_config(config_path: &Path) -> std::process::Output {
         .arg("--check-config")
         .output()
         .expect("run loonfs-server --check-config")
+}
+
+fn probe_store(config_path: &Path, check_config_too: bool) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loonfs-server"));
+    command
+        .arg("--config")
+        .arg(config_path)
+        .arg("--probe-store");
+    if check_config_too {
+        command.arg("--check-config");
+    }
+    command.output().expect("run loonfs-server --probe-store")
+}
+
+const STORE_PROBE_CHECKS: &[&str] = &[
+    "create_if_absent_enforced",
+    "compare_and_swap_rejects_stale",
+    "compare_and_swap_missing_object_rejected",
+    "overwrite_updates_head_and_body",
+    "get_with_metadata_round_trip",
+    "head_reports_last_modified",
+    "visibility_after_write",
+    "visibility_after_delete",
+    "delete_missing_idempotent",
+    "sorted_listing",
+    "range_reads",
+    "multipart_round_trip",
+    "stored_checksum_readback",
+    "cleanup_leaves_prefix_empty",
+];
+
+#[test]
+fn probe_store_reports_every_check_for_a_working_local_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_root = dir.path().join("store");
+    let config_path = write_config(dir.path(), "127.0.0.1:9400", &store_root);
+
+    let output = probe_store(&config_path, false);
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        output.status.success(),
+        "expected success, got {:?}: {stdout}{stderr}",
+        output.status
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), STORE_PROBE_CHECKS.len(), "{stdout}");
+    for name in STORE_PROBE_CHECKS {
+        let expected = format!("{name}: passed");
+        assert!(lines.contains(&expected.as_str()), "{stdout}");
+    }
+    assert!(!stdout.contains("check-config-token"), "{stdout}");
+    assert!(!stdout.contains("check-config-secret"), "{stdout}");
+    assert!(!stderr.contains("check-config-token"), "{stderr}");
+    assert!(!stderr.contains("check-config-secret"), "{stderr}");
+}
+
+#[test]
+fn probe_store_fails_when_the_local_store_root_cannot_be_created() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let occupied = dir.path().join("store");
+    std::fs::write(&occupied, b"a file, not a directory").expect("occupy the store path");
+    let config_path = write_config(dir.path(), "127.0.0.1:9400", &occupied);
+
+    let output = probe_store(&config_path, false);
+
+    assert!(!output.status.success(), "expected a non-zero exit");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("store"), "{stderr}");
+    assert!(!stdout.contains("check-config-token"), "{stdout}");
+    assert!(!stdout.contains("check-config-secret"), "{stdout}");
+    assert!(!stderr.contains("check-config-token"), "{stderr}");
+    assert!(!stderr.contains("check-config-secret"), "{stderr}");
+}
+
+#[test]
+fn probe_store_and_check_config_may_be_combined() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = write_config(dir.path(), "127.0.0.1:9400", &dir.path().join("store"));
+
+    let output = probe_store(&config_path, true);
+
+    assert!(
+        output.status.success(),
+        "combined checks failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .expect("utf-8 stdout")
+            .lines()
+            .count(),
+        STORE_PROBE_CHECKS.len()
+    );
 }
 
 #[test]
