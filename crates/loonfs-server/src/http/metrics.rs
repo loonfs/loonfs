@@ -83,7 +83,7 @@ impl ServerMetrics {
         method: &Method,
         status: StatusCode,
         elapsed_seconds: f64,
-    ) {
+    ) -> &'static str {
         let route = self.route_label(matched_route);
         let (seconds, served) = {
             let mut requests = lock(&self.requests);
@@ -99,6 +99,7 @@ impl ServerMetrics {
         };
         served.increment(1);
         seconds.record(elapsed_seconds);
+        route
     }
 
     /// Reports one proxied upload refused for want of a transfer slot.
@@ -322,27 +323,28 @@ fn render_scrape_gauges(
 ) {
     for (field, value) in cache_gauges(cache) {
         let name = format!("loonfs_cache_{field}");
-        let _ = writeln!(rendered, "# HELP {name} Runtime cache counter `{field}`");
-        let _ = writeln!(rendered, "# TYPE {name} gauge");
-        let _ = writeln!(rendered, "{name} {value}");
+        write_gauge(
+            rendered,
+            &name,
+            &format!("Runtime cache counter `{field}`"),
+            value,
+        );
     }
     // Absent when this deployment keeps no local cache, so a scrape reports
     // nothing about a tier that does not exist rather than reporting zeros
     // that read like an idle one.
     if let Some(local_cache) = local_cache {
         for (name, description, value) in local_cache_gauges(&local_cache) {
-            let _ = writeln!(rendered, "# HELP {name} {description}");
-            let _ = writeln!(rendered, "# TYPE {name} gauge");
-            let _ = writeln!(rendered, "{name} {value}");
+            write_gauge(rendered, name, description, value);
         }
     }
-    #[cfg(target_os = "linux")]
     if let Some(resident_bytes) = process_resident_bytes() {
-        let name = "loonfs_process_resident_bytes";
-        let description = "Resident set size of the server process, sampled at scrape";
-        let _ = writeln!(rendered, "# HELP {name} {description}");
-        let _ = writeln!(rendered, "# TYPE {name} gauge");
-        let _ = writeln!(rendered, "{name} {resident_bytes}");
+        write_gauge(
+            rendered,
+            "loonfs_process_resident_bytes",
+            "Resident set size of the server process, sampled at scrape",
+            resident_bytes,
+        );
     }
     for (name, description, value) in [
         (
@@ -356,10 +358,19 @@ fn render_scrape_gauges(
             download_permits,
         ),
     ] {
-        let _ = writeln!(rendered, "# HELP {name} {description}");
-        let _ = writeln!(rendered, "# TYPE {name} gauge");
-        let _ = writeln!(rendered, "{name} {value}");
+        write_gauge(rendered, name, description, value);
     }
+}
+
+fn write_gauge(
+    rendered: &mut String,
+    name: &str,
+    description: &str,
+    value: impl std::fmt::Display,
+) {
+    let _ = writeln!(rendered, "# HELP {name} {description}");
+    let _ = writeln!(rendered, "# TYPE {name} gauge");
+    let _ = writeln!(rendered, "{name} {value}");
 }
 
 /// Reads the Linux-only resident-page count for this process.
@@ -370,6 +381,11 @@ fn process_resident_bytes() -> Option<u64> {
     // Neither rustix nor libc is a direct dependency. Every deployment
     // target shipped by this project uses 4 KiB pages.
     Some(resident_pages.saturating_mul(4096))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_resident_bytes() -> Option<u64> {
+    None
 }
 
 /// What foyer says about the local block cache, as gauges.

@@ -187,7 +187,7 @@ const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 128 * 1024;
 
 /// A segment object's total stored length: the index block is the last
 /// section, so it ends the object.
-fn segment_object_len(descriptor: &MetadataFileRef) -> u64 {
+pub(super) fn segment_object_len(descriptor: &MetadataFileRef) -> u64 {
     descriptor.index_block.offset + u64::from(descriptor.index_block.stored_len)
 }
 
@@ -341,7 +341,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(super) fn publish_segment_block(
+fn publish_segment_block(
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
     cache_key: MetadataTableCacheKey,

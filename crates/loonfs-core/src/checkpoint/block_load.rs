@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex};
 
 /// Bounds decoded data retained by one view. 64 MiB comfortably holds one
 /// page's working set plus read-ahead, while a runaway scan cannot pin
-/// gigabytes through its memo.
-const SESSION_BLOCK_MEMO_DATA_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+/// gigabytes through its memo. Its `_DECODED_BYTES` suffix follows the
+/// decoded-byte budget family in [`super::cache`].
+const SESSION_BLOCK_MEMO_DATA_DECODED_BYTES: usize = 64 * 1024 * 1024;
 
 /// The data blocks of one segment that can hold keys in
 /// `[lower_bound, upper_bound)`, shared straight from the decoded-block
@@ -75,8 +76,8 @@ pub(super) struct SessionBlockMemo {
 
 #[derive(Debug, Default)]
 struct SessionBlockMemoInner {
-    blocks: HashMap<MetadataTableCacheKey, DecodedMetadataTableBlock>,
-    data_insertion_order: VecDeque<MetadataTableCacheKey>,
+    blocks: HashMap<Arc<MetadataTableCacheKey>, DecodedMetadataTableBlock>,
+    data_insertion_order: VecDeque<Arc<MetadataTableCacheKey>>,
     data_decoded_bytes: usize,
 }
 
@@ -98,39 +99,43 @@ impl SessionBlockMemo {
         cache_key: &MetadataTableCacheKey,
         block: &DecodedMetadataTableBlock,
     ) {
+        let cache_key = Arc::new(cache_key.clone());
+        let DecodedMetadataTableBlock::Data {
+            decoded_byte_len, ..
+        } = block
+        else {
+            self.inner
+                .lock()
+                .expect("session block memo lock should not be poisoned")
+                .blocks
+                .insert(cache_key, block.clone());
+            return;
+        };
         let mut inner = self
             .inner
             .lock()
             .expect("session block memo lock should not be poisoned");
-        let previous = inner.blocks.insert(cache_key.clone(), block.clone());
-        if let Some(DecodedMetadataTableBlock::Data {
-            decoded_byte_len, ..
-        }) = previous
-        {
-            inner.data_decoded_bytes = inner.data_decoded_bytes.saturating_sub(decoded_byte_len);
-        } else if matches!(block, DecodedMetadataTableBlock::Data { .. }) {
-            inner.data_insertion_order.push_back(cache_key.clone());
+        let previous = inner.blocks.insert(Arc::clone(&cache_key), block.clone());
+        if let Some(previous) = previous {
+            inner.data_decoded_bytes = inner
+                .data_decoded_bytes
+                .saturating_sub(previous.decoded_byte_len());
+        } else {
+            inner.data_insertion_order.push_back(cache_key);
         }
-        if let DecodedMetadataTableBlock::Data {
-            decoded_byte_len, ..
-        } = block
-        {
-            inner.data_decoded_bytes = inner.data_decoded_bytes.saturating_add(*decoded_byte_len);
-        }
-        while inner.data_decoded_bytes > SESSION_BLOCK_MEMO_DATA_BUDGET_BYTES {
+        inner.data_decoded_bytes = inner.data_decoded_bytes.saturating_add(*decoded_byte_len);
+        while inner.data_decoded_bytes > SESSION_BLOCK_MEMO_DATA_DECODED_BYTES {
             let oldest = inner
                 .data_insertion_order
                 .pop_front()
                 .expect("accounted data blocks should have an insertion-order entry");
-            let Some(DecodedMetadataTableBlock::Data {
-                decoded_byte_len, ..
-            }) = inner.blocks.get(&oldest)
-            else {
-                continue;
-            };
-            let decoded_byte_len = *decoded_byte_len;
-            inner.blocks.remove(&oldest);
-            inner.data_decoded_bytes = inner.data_decoded_bytes.saturating_sub(decoded_byte_len);
+            let evicted = inner
+                .blocks
+                .remove(&oldest)
+                .expect("session block memo queue and map should stay one-to-one");
+            inner.data_decoded_bytes = inner
+                .data_decoded_bytes
+                .saturating_sub(evicted.decoded_byte_len());
         }
     }
 }
@@ -192,15 +197,10 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
 #[cfg(test)]
 mod tests {
     use super::super::cache::MetadataTableBlockKind;
+    use super::super::load::genesis_basis_manifest;
     use super::*;
-    use loonfs_api::wire::manifest::{
-        NamespaceManifestEnvelope, NamespaceManifestKind, NamespaceManifestPayload,
-        NAMESPACE_MANIFEST_FORMAT_VERSION,
-    };
     use loonfs_api::wire::sst_blocks::{decode_filter_block, SegmentBlocksBuilder};
-    use loonfs_api::{
-        ChangeSeq, CommitId, InodeId, ManifestId, ManifestObjectId, NamespaceId, WriterEpoch,
-    };
+    use loonfs_api::NamespaceId;
 
     fn key(kind: MetadataTableBlockKind, offset: u64) -> MetadataTableCacheKey {
         MetadataTableCacheKey {
@@ -237,29 +237,9 @@ mod tests {
     }
 
     fn manifest_block() -> DecodedMetadataTableBlock {
-        let manifest = NamespaceManifestEnvelope {
-            kind: NamespaceManifestKind::NamespaceManifest,
-            format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
-            payload_checksum: String::new(),
-            payload: NamespaceManifestPayload {
-                namespace_id: NamespaceId::parse("memo").expect("namespace id"),
-                manifest_id: ManifestId(0),
-                manifest_object_id: ManifestObjectId::parse(
-                    "00000000000000000000-0000000000000000",
-                )
-                .expect("manifest object id"),
-                head_seq: ChangeSeq(0),
-                head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
-                    .expect("commit id"),
-                base_seq: ChangeSeq(0),
-                writer_epoch: WriterEpoch(0),
-                next_inode_id: InodeId(1),
-                retention_floor_seq: ChangeSeq(0),
-                metadata_files: Vec::new(),
-            },
-        };
+        let namespace_id = NamespaceId::parse("memo").expect("namespace id");
         DecodedMetadataTableBlock::Manifest {
-            manifest: Arc::new(manifest),
+            manifest: Arc::new(genesis_basis_manifest(&namespace_id)),
             scan_runs: Arc::new(Vec::new()),
             decoded_byte_len: 1,
         }
@@ -286,11 +266,11 @@ mod tests {
         let newest_data_key = key(MetadataTableBlockKind::Data, 6);
         memo.record(
             &oldest_data_key,
-            &data_block(SESSION_BLOCK_MEMO_DATA_BUDGET_BYTES / 2),
+            &data_block(SESSION_BLOCK_MEMO_DATA_DECODED_BYTES / 2),
         );
         memo.record(
             &newer_data_key,
-            &data_block(SESSION_BLOCK_MEMO_DATA_BUDGET_BYTES / 2),
+            &data_block(SESSION_BLOCK_MEMO_DATA_DECODED_BYTES / 2),
         );
         memo.record(&newest_data_key, &data_block(1));
 

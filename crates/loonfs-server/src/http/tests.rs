@@ -363,6 +363,41 @@ async fn request_deadline_answers_408_and_leaves_fast_handlers_untouched() {
     assert_eq!(&body[..], b"fast");
 }
 
+#[tokio::test]
+async fn every_deadline_exemption_names_a_served_route() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let router = app_with_store(
+        test_config(temp_dir.path(), "deadline-exempt-route-writer"),
+        store,
+    )
+    .await
+    .expect("build app");
+
+    for route in super::DEADLINE_EXEMPT_ROUTES {
+        let uri = route
+            .replace("{namespace}", "deadline-exempt")
+            .replace("{upload_id}", "upl_deadline_exempt");
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .expect("route request"),
+            )
+            .await
+            .expect("route response");
+        assert_ne!(
+            response.status(),
+            axum::http::StatusCode::NOT_FOUND,
+            "deadline exemption `{route}` does not match a served route"
+        );
+    }
+}
+
 /// The `[local_cache]` table is the whole switch: without it nothing is
 /// built, and a scrape says nothing about a tier this deployment does not
 /// have.

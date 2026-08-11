@@ -16,6 +16,7 @@ use loonfs::{
 use loonfs_api::NamespaceId;
 use loonfs_grep::{GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::presign::DirectTransferIssuers;
+use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
 use std::future::IntoFuture;
 use std::net::SocketAddr;
@@ -132,8 +133,8 @@ pub async fn app(
     Ok((router, state.writer, state.local_cache))
 }
 
-#[cfg(test)]
-pub(super) async fn app_with_store(
+#[doc(hidden)]
+pub async fn app_with_store(
     config: ServerConfig,
     store: SharedObjectStore,
 ) -> Result<Router, ServerConfigError> {
@@ -440,6 +441,13 @@ pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     Ok(())
 }
 
+/// Runs the object-store contract probe against the store this config builds.
+pub async fn probe_store(config: &ServerConfig) -> Result<StoreProbeReport, ServeError> {
+    let store = config.object_store()?.into_shared();
+    let run_id = loonfs_api::generated_id("probe");
+    Ok(run_store_contract_probe(store.as_ref(), &run_id).await)
+}
+
 /// Serves until ctrl-c or SIGTERM, then shuts down gracefully: the listener
 /// stops accepting, in-flight requests drain, publisher work finishes, and
 /// writer maintenance — the runtime's steps and grep's alike — settles
@@ -530,28 +538,25 @@ where
     // The budget starts when shutdown fires. It does not limit server uptime.
     let served = tokio::select! {
         result = server.as_mut() => result,
-        drain_started = &mut drain_started_rx => {
-            if drain_started.is_err() {
-                server.as_mut().await
-            } else {
-                match tokio::time::timeout(
-                    Duration::from_millis(shutdown_deadline_ms),
-                    server.as_mut(),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
-                        tracing::warn!(
-                            shutdown_deadline_ms,
-                            "graceful drain deadline passed; remaining requests are abandoned"
-                        );
-                        Ok(())
-                    }
+        Ok(()) = &mut drain_started_rx => {
+            match tokio::time::timeout(
+                Duration::from_millis(shutdown_deadline_ms),
+                server.as_mut(),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        shutdown_deadline_ms,
+                        "graceful drain deadline passed; remaining requests are abandoned"
+                    );
+                    Ok(())
                 }
             }
         }
     };
+    // Dropping the server cancels requests left behind by an expired drain.
     drop(server);
     served.map_err(ServeError::Serve)?;
     // Shut down the writer after the drain finishes or its deadline passes.

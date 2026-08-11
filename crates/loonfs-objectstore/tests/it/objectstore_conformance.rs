@@ -311,13 +311,7 @@ fn probe_report_lines(report: &StoreProbeReport) -> String {
     report
         .checks
         .iter()
-        .map(|check| match &check.outcome {
-            StoreProbeOutcome::Passed => format!("  {}: passed", check.name),
-            StoreProbeOutcome::Unsupported => format!("  {}: unsupported", check.name),
-            StoreProbeOutcome::Failed { message } => {
-                format!("  {}: failed: {message}", check.name)
-            }
-        })
+        .map(|check| format!("  {}", check.check_line()))
         .collect::<Vec<_>>()
         .join("\n")
 }

@@ -19,10 +19,11 @@ use super::{
     ObjectStoreMetricsRecorder, SMALL_COUNT_BOUNDARIES,
 };
 use crate::metrics::LATENCY_SECONDS_BOUNDARIES;
-use crate::{GcResponse, MaintenanceJobId, MaintenanceStepConclusion};
+use crate::{
+    GcResponse, MaintenanceJobId, MaintenanceStepConclusion, MetadataCompactionJobOutcome,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
 /// The closed outcome vocabulary for a finished streaming compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,14 +36,6 @@ pub(crate) enum CompactionOutcome {
 }
 
 impl CompactionOutcome {
-    const ALL: [Self; 5] = [
-        Self::Completed,
-        Self::Failed,
-        Self::Superseded,
-        Self::Cancelled,
-        Self::Fenced,
-    ];
-
     const fn as_str(self) -> &'static str {
         match self {
             Self::Completed => "completed",
@@ -52,25 +45,6 @@ impl CompactionOutcome {
             Self::Fenced => "fenced",
         }
     }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::Completed => 0,
-            Self::Failed => 1,
-            Self::Superseded => 2,
-            Self::Cancelled => 3,
-            Self::Fenced => 4,
-        }
-    }
-}
-
-/// Logical input and output totals from one finished merge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CompactionTotals {
-    pub(crate) input_rows: u64,
-    pub(crate) output_rows: u64,
-    pub(crate) input_bytes: u64,
-    pub(crate) output_bytes: u64,
 }
 
 /// One reclaimable family: its label, and the count a pass reports for it.
@@ -204,35 +178,56 @@ impl RuntimeInstruments {
     /// Reports one finished streaming compaction and any merge it completed.
     pub(crate) fn compaction_finished(
         &self,
+        outcome: &crate::Result<MetadataCompactionJobOutcome>,
+        elapsed_ms: u64,
+    ) {
+        let (outcome, totals) = match outcome {
+            Ok(MetadataCompactionJobOutcome::Published {
+                rows_read,
+                rows_written,
+                input_bytes,
+                output_bytes,
+                ..
+            }) => (
+                CompactionOutcome::Completed,
+                Some((*rows_read, *rows_written, *input_bytes, *output_bytes)),
+            ),
+            Ok(
+                MetadataCompactionJobOutcome::Abandoned | MetadataCompactionJobOutcome::Superseded,
+            ) => (CompactionOutcome::Superseded, None),
+            Ok(MetadataCompactionJobOutcome::Cancelled) => (CompactionOutcome::Cancelled, None),
+            Ok(MetadataCompactionJobOutcome::Fenced) => (CompactionOutcome::Fenced, None),
+            Err(_) => (CompactionOutcome::Failed, None),
+        };
+        self.record_compaction(outcome, elapsed_ms, totals);
+    }
+
+    /// Reports a queued compaction cancelled before it began doing work.
+    pub(crate) fn compaction_not_admitted(&self) {
+        self.record_compaction(CompactionOutcome::Cancelled, 0, None);
+    }
+
+    fn record_compaction(
+        &self,
         outcome: CompactionOutcome,
-        elapsed: Duration,
-        totals: Option<CompactionTotals>,
+        elapsed_ms: u64,
+        totals: Option<(u64, u64, u64, u64)>,
     ) {
         let Some(installed) = &self.installed else {
             return;
         };
-        let outcome_instruments = &installed.compactions.outcomes[outcome.index()];
+        let outcome_instruments = installed.compactions.outcome(outcome);
         outcome_instruments.count.increment(1);
-        outcome_instruments.seconds.record(elapsed.as_secs_f64());
-        let Some(totals) = totals else {
+        outcome_instruments
+            .seconds
+            .record(seconds_from_ms(elapsed_ms));
+        let Some((input_rows, output_rows, input_bytes, output_bytes)) = totals else {
             return;
         };
-        installed
-            .compactions
-            .input_rows
-            .increment(totals.input_rows);
-        installed
-            .compactions
-            .output_rows
-            .increment(totals.output_rows);
-        installed
-            .compactions
-            .input_bytes
-            .increment(totals.input_bytes);
-        installed
-            .compactions
-            .output_bytes
-            .increment(totals.output_bytes);
+        installed.compactions.input_rows.increment(input_rows);
+        installed.compactions.output_rows.increment(output_rows);
+        installed.compactions.input_bytes.increment(input_bytes);
+        installed.compactions.output_bytes.increment(output_bytes);
     }
 
     /// Reports the candidates a namespace has admitted but not yet taken.
@@ -533,7 +528,11 @@ impl MaintenanceJobInstruments {
 struct CompactionInstruments {
     running: Arc<dyn GaugeHandle>,
     queued: Arc<dyn GaugeHandle>,
-    outcomes: [CompactionOutcomeInstruments; 5],
+    completed: CompactionOutcomeInstruments,
+    failed: CompactionOutcomeInstruments,
+    superseded: CompactionOutcomeInstruments,
+    cancelled: CompactionOutcomeInstruments,
+    fenced: CompactionOutcomeInstruments,
     input_rows: Arc<dyn CounterHandle>,
     output_rows: Arc<dyn CounterHandle>,
     input_bytes: Arc<dyn CounterHandle>,
@@ -547,10 +546,10 @@ struct CompactionOutcomeInstruments {
 
 impl CompactionInstruments {
     fn register(recorder: &dyn MetricsRecorder) -> Self {
-        let outcomes = CompactionOutcome::ALL.map(|outcome| CompactionOutcomeInstruments {
+        let outcome = |outcome: CompactionOutcome| CompactionOutcomeInstruments {
             count: recorder.register_counter(
                 "loonfs.maintenance.compactions",
-                "Streaming metadata compactions by outcome.",
+                "Streaming metadata compactions by outcome",
                 &[("outcome", outcome.as_str())],
             ),
             seconds: recorder.register_histogram(
@@ -559,7 +558,7 @@ impl CompactionInstruments {
                 &[("outcome", outcome.as_str())],
                 LATENCY_SECONDS_BOUNDARIES,
             ),
-        });
+        };
         let rows = |direction: &'static str| {
             recorder.register_counter(
                 "loonfs.maintenance.compaction_rows",
@@ -586,11 +585,25 @@ impl CompactionInstruments {
                  process permit",
                 &[],
             ),
-            outcomes,
+            completed: outcome(CompactionOutcome::Completed),
+            failed: outcome(CompactionOutcome::Failed),
+            superseded: outcome(CompactionOutcome::Superseded),
+            cancelled: outcome(CompactionOutcome::Cancelled),
+            fenced: outcome(CompactionOutcome::Fenced),
             input_rows: rows("input"),
             output_rows: rows("output"),
             input_bytes: bytes("input"),
             output_bytes: bytes("output"),
+        }
+    }
+
+    fn outcome(&self, outcome: CompactionOutcome) -> &CompactionOutcomeInstruments {
+        match outcome {
+            CompactionOutcome::Completed => &self.completed,
+            CompactionOutcome::Failed => &self.failed,
+            CompactionOutcome::Superseded => &self.superseded,
+            CompactionOutcome::Cancelled => &self.cancelled,
+            CompactionOutcome::Fenced => &self.fenced,
         }
     }
 }
@@ -1001,14 +1014,15 @@ mod tests {
         let instruments = RuntimeInstruments::new(Some(recorder.clone()));
 
         instruments.compaction_finished(
-            CompactionOutcome::Completed,
-            Duration::from_millis(25),
-            Some(CompactionTotals {
-                input_rows: 20,
-                output_rows: 10,
+            &Ok(MetadataCompactionJobOutcome::Published {
+                manifest_id: loonfs_api::ManifestId(1),
+                rows_read: 20,
+                rows_written: 10,
                 input_bytes: 2_000,
                 output_bytes: 1_000,
+                output_segments: 1,
             }),
+            25,
         );
 
         let snapshot = recorder.snapshot();

@@ -76,6 +76,19 @@ pub struct StoreProbeCheck {
     pub outcome: StoreProbeOutcome,
 }
 
+impl StoreProbeCheck {
+    /// Renders this check as one operator-facing report line.
+    pub fn check_line(&self) -> String {
+        match &self.outcome {
+            StoreProbeOutcome::Passed => format!("{}: passed", self.name),
+            StoreProbeOutcome::Unsupported => format!("{}: unsupported", self.name),
+            StoreProbeOutcome::Failed { message } => {
+                format!("{}: failed: {message}", self.name)
+            }
+        }
+    }
+}
+
 /// What one check concluded about the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreProbeOutcome {

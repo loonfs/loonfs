@@ -40,7 +40,7 @@
 //! The step that plans it starts it and returns; the runner cancels it on
 //! shutdown and joins it with the rest of its background work.
 
-use super::block_fetch::load_segment_filter;
+use super::block_fetch::{load_segment_filter, segment_object_len};
 use super::block_load::SessionBlockMemo;
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::compaction_lease::{CompactionLease, LeaseHold};
@@ -949,7 +949,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let input_bytes = snapshot
             .iter()
             .flat_map(|run| group_run_descriptors(run, group))
-            .map(metadata_segment_bytes)
+            .map(segment_object_len)
             .sum();
         Self {
             store,
@@ -1161,7 +1161,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.result.output_bytes = self
                 .result
                 .output_bytes
-                .saturating_add(segments.iter().map(metadata_segment_bytes).sum());
+                .saturating_add(segments.iter().map(segment_object_len).sum());
             self.result.output_segments.extend(segments);
         }
         Ok(ClusterEnd::Merged)
@@ -1406,14 +1406,6 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.index_digest.spell(),
         )))
     }
-}
-
-/// Returns the immutable segment object's stored byte length.
-fn metadata_segment_bytes(descriptor: &MetadataFileRef) -> u64 {
-    descriptor
-        .index_block
-        .offset
-        .saturating_add(u64::from(descriptor.index_block.stored_len))
 }
 
 /// An order-independent digest of the rows one family was written.

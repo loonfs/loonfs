@@ -42,9 +42,7 @@ use loonfs_core::{
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::time::Instant;
 
 /// Streaming compactions this process runs at once, across every namespace it
 /// serves.
@@ -256,19 +254,14 @@ impl BackgroundCompactions {
         let namespace_id = namespace_id.clone();
         runner.spawn(async move {
             if !claim.admitted().await {
-                admin.record_streaming_compaction(
-                    &Ok(MetadataCompactionJobOutcome::Cancelled),
-                    Duration::ZERO,
-                );
+                admin.core.instruments().compaction_not_admitted();
                 return;
             }
-            let started = Instant::now();
             // Every ending is logged inside, including the error one, so what
             // a task nobody awaits needs from it is only what to do next.
             let outcome = admin
                 .run_streaming_compaction(&namespace_id, &spec, claim.cancellation())
                 .await;
-            admin.record_streaming_compaction(&outcome, started.elapsed());
             let published = matches!(outcome, Ok(MetadataCompactionJobOutcome::Published { .. }));
             claim.finished(published);
         });
