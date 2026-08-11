@@ -247,6 +247,7 @@ impl<'a> CompactionLease<'a> {
     /// resolve.
     pub(super) async fn create<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
         let encoded = encode_lease(&self.state)?;
+        // A lease is mutable control state, so its first lifecycle state is a conditional create.
         let metadata = match store.put_if_absent(&self.object_key, encoded).await {
             Ok(metadata) => metadata,
             Err(ObjectStoreError::PreconditionFailed { .. }) => {

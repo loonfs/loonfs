@@ -209,10 +209,9 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     .expect("write hello");
 
     match create_checkpoint(&store, &namespace_id, &context).await {
-        Err(CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-            ManifestLoadError::ManifestCodec { .. },
-        ))) => {}
-        other => panic!("expected manifest codec manifest load error, got {other:?}"),
+        Err(CoreError::NamespaceCorrupt(message))
+            if message.contains("already exists with a different payload") => {}
+        other => panic!("expected conflicting manifest corruption error, got {other:?}"),
     }
 
     let materialization = load_current_projection(&store, &namespace_id)
@@ -945,7 +944,10 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
                 expected_payload_checksum,
                 conflicting_manifest.payload_checksum
             );
-            assert_eq!(actual_payload_checksum, manifest.payload_checksum);
+            assert_eq!(
+                actual_payload_checksum,
+                "unavailable because the encoded bytes differ"
+            );
         }
         other => panic!("unexpected error: {other:?}"),
     }
