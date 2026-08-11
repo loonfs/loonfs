@@ -69,7 +69,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
         Err(error) => return Err(CoreError::load_head(error)),
     };
-    let content_store_id = loaded.head.envelope.state.content_store_id.clone();
+    let content_store_id = loaded.head.state.content_store_id.clone();
 
     // Every invocation rebuilds all roots before interpreting the cursor.
     // The cursor can skip enumeration only; it never carries safety state.

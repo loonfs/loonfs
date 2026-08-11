@@ -28,19 +28,23 @@
 //! no lease saying who owns them. The lease expires on its own, and the pass
 //! that finds it expired reads a root that already names the segments.
 //!
-//! Nothing else loads it, so a lease that does not decode is treated as
-//! missing and logged: a corrupt lease must not keep a prefix alive forever,
-//! and it must not stop anything else from working either.
+//! A malformed lease is corruption rather than evidence that its prefix is
+//! unowned; collection stops before it can race a job whose fence it cannot
+//! verify.
 
+use crate::control_load::{
+    core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
+};
 use crate::error::{CoreError, Result};
 use crate::limits::{
     METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS, METADATA_COMPACTION_LEASE_EXPIRY_MS,
 };
+use crate::namespace::control::ControlObjectLoadError;
 use crate::timing::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, ControlObjectKind,
-    MetadataCompactionLeaseEnvelope, MetadataCompactionLeaseState, MetadataCompactionLeaseStatus,
+    encode_control_object, ControlObjectKind, MetadataCompactionLeaseEnvelope,
+    MetadataCompactionLeaseState, MetadataCompactionLeaseStatus,
 };
 use loonfs_api::{MetadataCompactionId, NamespaceId};
 use loonfs_objectstore::keys::metadata_compaction_lease;
@@ -58,9 +62,9 @@ pub(crate) enum CompactionPrefixOwner {
     /// lease is deleted after them, once nothing unreferenced is left under
     /// the prefix.
     ThisCollector,
-    /// There is no lease to own anything: it is missing, it does not decode,
-    /// or it names another job. Whatever sits under the prefix is an ordinary
-    /// unreferenced orphan and there is no claim to release afterwards.
+    /// There is no lease to own anything. Whatever sits under the prefix is
+    /// an ordinary unreferenced orphan and there is no claim to release
+    /// afterwards.
     NoOne,
 }
 
@@ -68,9 +72,8 @@ pub(crate) enum CompactionPrefixOwner {
 /// an expired lease on the way.
 ///
 /// `job_id` is the path component, not a parsed identity: a collector reads
-/// it off the key it is deciding. A lease naming a different job or a
-/// different namespace is not this prefix's lease, so it is read as absent
-/// whatever else it is.
+/// it off the key it is deciding. A lease naming a different job or namespace
+/// is corrupt because the key and embedded fence disagree.
 ///
 /// The claim is the whole point of reading it. An expired `Active` lease
 /// alone proves nothing — the job may be resuming from a long stall right
@@ -83,45 +86,26 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
     now_ms: u64,
 ) -> Result<CompactionPrefixOwner> {
     let object_key = metadata_compaction_lease(namespace_id.as_str(), job_id);
-    let Some(body) = store
-        .get_with_metadata(&object_key)
-        .await
-        .map_err(|error| CoreError::store(&object_key, &error))?
-    else {
-        return Ok(CompactionPrefixOwner::NoOne);
-    };
-    let decoded = decode_control_object::<MetadataCompactionLeaseState>(
-        &body.bytes,
+    let loaded = load_control_object(
+        store,
+        object_key,
         ControlObjectKind::CompactionLease,
-    );
-    let state = match decoded {
-        Ok(envelope) => envelope.state,
-        Err(error) => {
-            // Loud, because nothing else will ever say it: no read path
-            // touches this object, so a corrupt one would otherwise sit under
-            // its prefix in silence. Treated as missing, because the
-            // alternative — believing it — would keep a prefix alive forever.
-            tracing::warn!(
-                namespace_id = namespace_id.as_str(),
-                object_key = object_key.as_str(),
-                error = %error,
-                "a streaming metadata compaction lease does not decode; its prefix is collected \
-                 as an orphan"
-            );
-            return Ok(CompactionPrefixOwner::NoOne);
+        |state: &MetadataCompactionLeaseState| {
+            expect_namespace(namespace_id, &state.namespace_id)?;
+            expect_identity_field("compaction job id", job_id, state.job_id.as_str())
+        },
+    )
+    .await;
+    let loaded = match loaded {
+        Ok(loaded) => loaded,
+        Err(ControlObjectLoadError::MissingObject { .. }) => {
+            return Ok(CompactionPrefixOwner::NoOne)
         }
+        Err(error) => return Err(core_control_load_error(error)),
     };
-    if state.namespace_id != *namespace_id || state.job_id.as_str() != job_id {
-        tracing::warn!(
-            namespace_id = namespace_id.as_str(),
-            object_key = object_key.as_str(),
-            lease_namespace_id = state.namespace_id.as_str(),
-            lease_job_id = state.job_id.as_str(),
-            "a streaming metadata compaction lease names another job; its prefix is collected as \
-             an orphan"
-        );
-        return Ok(CompactionPrefixOwner::NoOne);
-    }
+    let object_key = loaded.object_key;
+    let expected_etag = loaded.etag;
+    let state = loaded.state;
     // Terminal: somebody already fenced this job, so the reap goes on from
     // wherever the pass that started it stopped.
     if state.status == MetadataCompactionLeaseStatus::Reaping {
@@ -136,24 +120,11 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
     }
 
     // Expired. Nothing is decided until the claim lands.
-    let Some(expected_etag) = body.metadata.etag.as_deref() else {
-        // A store that hands back no etag cannot be fenced against, and
-        // retaining a prefix costs storage while reaping one could cost a
-        // running job its output. Every supported provider returns an etag,
-        // so this is a loud never rather than a policy.
-        tracing::warn!(
-            namespace_id = namespace_id.as_str(),
-            object_key = object_key.as_str(),
-            "an expired streaming metadata compaction lease carries no etag to claim it by; its \
-             prefix is retained"
-        );
-        return Ok(CompactionPrefixOwner::ALiveJob);
-    };
     let mut reaping = state;
     reaping.status = MetadataCompactionLeaseStatus::Reaping;
     let encoded = encode_lease(&reaping)?;
     match store
-        .compare_and_swap(&object_key, expected_etag, encoded)
+        .compare_and_swap(&object_key, &expected_etag, encoded)
         .await
     {
         Ok(_) => {
@@ -336,14 +307,24 @@ impl<'a> CompactionLease<'a> {
     /// the second. A job never creates its lease twice.
     #[cfg(test)]
     pub(super) async fn open_for_test<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
-        let Some(body) = store
-            .get_with_metadata(&self.object_key)
-            .await
-            .map_err(|error| CoreError::store(&self.object_key, &error))?
-        else {
-            return self.create(store).await;
+        let namespace_id = self.state.namespace_id.clone();
+        let job_id = self.state.job_id.clone();
+        let loaded = load_control_object(
+            store,
+            self.object_key.clone(),
+            ControlObjectKind::CompactionLease,
+            |state: &MetadataCompactionLeaseState| {
+                expect_namespace(&namespace_id, &state.namespace_id)?;
+                expect_identity_field("compaction job id", job_id.as_str(), state.job_id.as_str())
+            },
+        )
+        .await;
+        let loaded = match loaded {
+            Ok(loaded) => loaded,
+            Err(ControlObjectLoadError::MissingObject { .. }) => return self.create(store).await,
+            Err(error) => return Err(core_control_load_error(error)),
         };
-        self.etag = Some(self.required_etag(body.metadata.etag)?);
+        self.etag = Some(loaded.etag);
         Ok(())
     }
 

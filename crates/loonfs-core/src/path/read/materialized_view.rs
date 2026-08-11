@@ -140,7 +140,7 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
             LoadedMetadataView::load_at_head(
                 store,
                 namespace_id,
-                loaded.head.envelope.state,
+                loaded.head.state,
                 &loaded.basis,
                 context,
             )

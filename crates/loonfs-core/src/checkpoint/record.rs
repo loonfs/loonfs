@@ -11,13 +11,17 @@
 //! manifests.
 
 use super::load::load_namespace_manifest_envelope;
+use crate::control_load::{
+    core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
+    LoadedControl,
+};
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointRecordEnvelope,
-    CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
+    encode_control_object, CheckpointRecordEnvelope, CheckpointRecordLifecycle,
+    CheckpointRecordState, ControlObjectKind,
 };
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
@@ -62,10 +66,7 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
-pub(crate) struct LoadedCheckpointRecord {
-    pub(crate) etag: Option<String>,
-    pub(crate) state: CheckpointRecordState,
-}
+pub(crate) type LoadedCheckpointRecord = LoadedControl<CheckpointRecordState>;
 
 pub(crate) async fn read_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
@@ -73,26 +74,25 @@ pub(crate) async fn read_checkpoint_record<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
 ) -> Result<Option<LoadedCheckpointRecord>> {
     let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
-    let Some(body) = store
-        .get_with_metadata(&object_key)
-        .await
-        .map_err(|error| CoreError::store(&object_key, &error))?
-    else {
-        return Ok(None);
-    };
-    let envelope: CheckpointRecordEnvelope =
-        decode_control_object(&body.bytes, ControlObjectKind::CheckpointRecord)
-            .map_err(|err| CoreError::NamespaceCorrupt(format!("`{object_key}`: {err}")))?;
-    if envelope.state.namespace_id != *namespace_id {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "checkpoint record `{object_key}` names namespace `{}`",
-            envelope.state.namespace_id
-        )));
+    let loaded = load_control_object(
+        store,
+        object_key,
+        ControlObjectKind::CheckpointRecord,
+        |state: &CheckpointRecordState| {
+            expect_namespace(namespace_id, &state.namespace_id)?;
+            expect_identity_field(
+                "checkpoint id",
+                checkpoint_id.as_str(),
+                state.checkpoint_id.as_str(),
+            )
+        },
+    )
+    .await;
+    match loaded {
+        Ok(loaded) => Ok(Some(loaded)),
+        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+        Err(error) => Err(core_control_load_error(error)),
     }
-    Ok(Some(LoadedCheckpointRecord {
-        etag: body.metadata.etag,
-        state: envelope.state,
-    }))
 }
 
 /// Moves a record `active -> released` by compare-and-swap, stamping
@@ -125,12 +125,10 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
         let mut next = loaded.state;
         next.state = CheckpointRecordLifecycle::Released { released_at_ms };
         let encoded = encode_checkpoint_record(&next)?;
-        let Some(etag) = loaded.etag.as_deref() else {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "missing etag for checkpoint record `{object_key}`"
-            )));
-        };
-        match store.compare_and_swap(&object_key, etag, encoded).await {
+        match store
+            .compare_and_swap(&object_key, &loaded.etag, encoded)
+            .await
+        {
             Ok(_) => return Ok(()),
             Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
             Err(error) => return Err(CoreError::store(&object_key, &error)),
@@ -155,7 +153,6 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     let head = read_head_object(store, &record.namespace_id)
         .await
         .map_err(CoreError::load_head)?
-        .envelope
         .state;
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await

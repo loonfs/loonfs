@@ -2173,13 +2173,10 @@ async fn staged_output_with_no_lease_at_all_is_reclaimed() {
         .is_none());
 }
 
-/// A lease that does not decode is treated as missing.
-///
-/// Nothing else reads this object, so believing a corrupt one would keep its
-/// prefix alive forever and nothing would ever say why. It is said out loud
-/// instead, and the prefix is collected like any other unclaimed one.
+/// A lease that does not decode is corruption, not evidence that the staged
+/// prefix is unowned. The pass stops before deleting either object.
 #[tokio::test]
-async fn a_lease_that_does_not_decode_does_not_immortalize_its_prefix() {
+async fn a_lease_that_does_not_decode_fails_the_pass() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let (store, staged_key, lease_key) =
@@ -2199,16 +2196,16 @@ async fn a_lease_that_does_not_decode_does_not_immortalize_its_prefix() {
         METADATA_COMPACTION_STAGING_GRACE_MS + 1,
     )
     .await;
-    let report = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
+    let error = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
         .await
-        .expect("a corrupt lease must not fail the pass");
-    assert_eq!(report.deleted_metadata_tables, 1);
+        .expect_err("a corrupt lease fails the pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
     for key in [&staged_key, &lease_key] {
         assert!(store
             .head(key)
             .await
             .expect("head a staged object")
-            .is_none());
+            .is_some());
     }
 }
 

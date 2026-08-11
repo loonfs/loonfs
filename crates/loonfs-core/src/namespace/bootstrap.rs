@@ -150,7 +150,7 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
         Ok(_) => Ok(NamespaceHeadInstall::Landed),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
             let existing = match read_head_object(store, namespace_id).await {
-                Ok(loaded) => loaded.envelope.state,
+                Ok(loaded) => loaded.state,
                 // An unreadable head still occupies the id: report the
                 // corruption rather than a lifecycle answer this attempt
                 // cannot support.

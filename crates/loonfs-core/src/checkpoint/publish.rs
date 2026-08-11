@@ -154,7 +154,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
                 None => continue,
             }
         };
-        let current = &loaded.envelope.state;
+        let current = &loaded.state;
         if current.manifest_id == manifest_id
             && current.manifest_object_id == manifest_object_id
             && current.manifest_payload_checksum == manifest.payload_checksum
@@ -191,11 +191,8 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
         let encoded = encode_control_object(&envelope).map_err(|err| {
             CoreError::Internal(format!("failed to encode metadata root object: {err}"))
         })?;
-        let expected_etag = loaded.metadata.etag.as_deref().ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!("missing root etag for `{}`", loaded.object_key))
-        })?;
         match store
-            .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
+            .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
             .await
         {
             Ok(_) => return Ok(ManifestPublicationOutcome::Published(next)),
@@ -204,7 +201,6 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
                 let recovered = read_metadata_root_object(store, namespace_id)
                     .await
                     .map_err(CoreError::load_head)?
-                    .envelope
                     .state;
                 if root_points_to_candidate(&recovered, &next) {
                     return Ok(ManifestPublicationOutcome::Published(recovered));

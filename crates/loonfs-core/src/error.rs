@@ -684,8 +684,8 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
             ControlUpdateError::LoadHead(error) => {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             }
-            // The remaining variants (missing etag, codec, control store error,
-            // retries exhausted) are control-plane plumbing failures with no
+            // The remaining variants (codec, control store error, retries
+            // exhausted) are control-plane plumbing failures with no
             // single object key in scope at this blanket conversion. They share
             // the ServerError wire code with `Store`; keep the detail as a
             // prefixed message.

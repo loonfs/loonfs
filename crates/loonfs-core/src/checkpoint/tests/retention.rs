@@ -10,7 +10,6 @@ async fn current_manifest_id<S: ObjectStore + ?Sized>(
     read_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
-        .envelope
         .state
         .manifest_id
 }
@@ -731,7 +730,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let head = read_head_object(&store, &namespace_id)
         .await
         .expect("read head")
-        .envelope
         .state;
     assert_eq!(head.recent_segments.len(), boundary);
     assert_eq!(head.recent_segments.first(), head.visible_wal_tip.as_ref());
@@ -1394,7 +1392,6 @@ async fn a_missing_floor_reads_as_retain_everything() {
     let head = crate::namespace::control::read_head_object(&store, &namespace_id)
         .await
         .expect("head")
-        .envelope
         .state;
     let floor = crate::namespace::basis::resolve_retention_floor_seq(&store, &head)
         .await
@@ -1431,7 +1428,6 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     let root_before = read_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
-        .envelope
         .state;
 
     // Every reading advances 20 minutes against the 15-minute budget: the
@@ -1448,7 +1444,6 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     let root_after = read_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
-        .envelope
         .state;
     assert_eq!(
         root_after, root_before,
@@ -1494,7 +1489,6 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let root_before = read_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
-        .envelope
         .state;
 
     let fold_everything = MetadataLsmPolicy {
@@ -1520,7 +1514,6 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let root_after = read_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
-        .envelope
         .state;
     assert_eq!(root_after, root_before);
 

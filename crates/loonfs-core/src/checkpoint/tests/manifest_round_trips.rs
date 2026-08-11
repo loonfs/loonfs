@@ -305,7 +305,6 @@ async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
     let head_after = read_head_object(&store, &namespace_id)
         .await
         .expect("read head")
-        .envelope
         .state;
     assert_eq!(head_after.seq, ChangeSeq(2));
 

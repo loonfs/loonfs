@@ -763,7 +763,6 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
         read_metadata_root_object(store, namespace_id)
             .await
             .expect("read root")
-            .envelope
             .state
             .manifest_id,
     )
@@ -3366,7 +3365,6 @@ async fn root_updated_at_ms<S: ObjectStore + ?Sized>(store: &S, namespace_id: &N
     read_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
-        .envelope
         .state
         .updated_at_ms
 }

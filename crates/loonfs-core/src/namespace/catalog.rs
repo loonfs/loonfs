@@ -55,9 +55,7 @@ pub async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     expected_namespace_id: &NamespaceId,
 ) -> Result<VerifiedNamespaceCatalogEntry, NamespaceCatalogLoadError> {
     let head = read_head_object(store, expected_namespace_id).await?;
-    Ok(VerifiedNamespaceCatalogEntry::from_head(
-        &head.envelope.state,
-    ))
+    Ok(VerifiedNamespaceCatalogEntry::from_head(&head.state))
 }
 
 pub(crate) async fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(

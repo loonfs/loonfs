@@ -51,7 +51,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         let loaded = read_head_object(store, namespace_id)
             .await
             .map_err(|error| CoreError::MetadataProjection(error.into()))?;
-        let head = loaded.envelope.state.clone();
+        let head = loaded.state.clone();
 
         // Terminal state first, ahead of the fence and the precondition
         // below: both of those decide whether this call may swap, and there
@@ -91,9 +91,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             }
         }
 
-        let head_etag = loaded.metadata.etag.clone().ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!("missing head etag for `{}`", loaded.object_key))
-        })?;
+        let head_etag = loaded.etag;
         let deleted_head = HeadState {
             state: NamespaceState::Deleted,
             ..head.clone()

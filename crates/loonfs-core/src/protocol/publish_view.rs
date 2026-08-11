@@ -134,12 +134,8 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
-    let head_etag = loaded.head.metadata.etag.clone().ok_or_else(|| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::MissingHeadEtag {
-            object_key: loaded.head.object_key.clone(),
-        })
-    })?;
-    let head = loaded.head.envelope.state;
+    let head_etag = loaded.head.etag;
+    let head = loaded.head.state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -335,7 +331,6 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
                 .map_err(|error| {
                     CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
                 })?
-                .envelope
                 .state;
             ensure_publish_head_matches_acquired_writer(&moved_head, acquired_writer)?;
         }

@@ -66,6 +66,7 @@
 mod checkpoint;
 mod commit_engine;
 mod context;
+mod control_load;
 mod control_update;
 mod engine;
 mod error;

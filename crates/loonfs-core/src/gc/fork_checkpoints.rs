@@ -3,11 +3,14 @@
 use super::reap::lease_expired;
 use crate::checkpoint::record::{encode_checkpoint_record, release_checkpoint_record};
 use crate::context::MutationContext;
+use crate::control_load::{
+    core_control_load_error, expect_key_namespace, expect_namespace, load_control_object,
+};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-    ControlObjectKind, NamespaceState,
+    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
+    NamespaceState,
 };
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -37,21 +40,19 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     grace_window_ms: u64,
     context: &MutationContext,
 ) -> Result<bool> {
-    let Some(body) = store
-        .get_with_metadata(key)
-        .await
-        .map_err(|error| CoreError::store(key, &error))?
-    else {
-        return Ok(false);
-    };
-    let Ok(envelope) = decode_control_object::<CheckpointRecordState>(
-        &body.bytes,
+    let loaded = load_control_object(
+        store,
+        key.to_owned(),
         ControlObjectKind::CheckpointRecord,
-    ) else {
-        // Unreadable records are ambiguous; never mutate one here.
-        return Ok(false);
+        |state: &CheckpointRecordState| expect_namespace(namespace_id, &state.namespace_id),
+    )
+    .await;
+    let loaded = match loaded {
+        Ok(loaded) => loaded,
+        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(false),
+        Err(error) => return Err(core_control_load_error(error)),
     };
-    let record = envelope.state;
+    let record = loaded.state;
     if record.state != (CheckpointRecordLifecycle::Active {}) {
         return Ok(false);
     }
@@ -81,21 +82,21 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     key: &str,
     context: &MutationContext,
 ) -> Result<ForkCheckpointSweep> {
-    let Some(body) = store
-        .get_with_metadata(key)
-        .await
-        .map_err(|error| CoreError::store(key, &error))?
-    else {
-        return Ok(ForkCheckpointSweep::NotAnActiveFork);
-    };
-    let Ok(envelope) = decode_control_object::<CheckpointRecordState>(
-        &body.bytes,
+    let loaded = load_control_object(
+        store,
+        key.to_owned(),
         ControlObjectKind::CheckpointRecord,
-    ) else {
-        // Unreadable records are ambiguous roots; never delete one here.
-        return Ok(ForkCheckpointSweep::Retained);
+        |state: &CheckpointRecordState| expect_key_namespace(key, &state.namespace_id),
+    )
+    .await;
+    let loaded = match loaded {
+        Ok(loaded) => loaded,
+        Err(ControlObjectLoadError::MissingObject { .. }) => {
+            return Ok(ForkCheckpointSweep::NotAnActiveFork)
+        }
+        Err(error) => return Err(core_control_load_error(error)),
     };
-    let record = envelope.state;
+    let record = loaded.state;
     if record.state != (CheckpointRecordLifecycle::Active {}) {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     }
@@ -108,15 +109,12 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     if !fork_target_proven_gone(store, target_namespace_id, &record, context).await? {
         return Ok(ForkCheckpointSweep::Retained);
     }
-    let Some(etag) = body.metadata.etag.as_deref() else {
-        return Ok(ForkCheckpointSweep::Retained);
-    };
     let mut released = record;
     released.state = CheckpointRecordLifecycle::Released {
         released_at_ms: context.now_ms,
     };
     let encoded = encode_checkpoint_record(&released)?;
-    match store.compare_and_swap(key, etag, encoded).await {
+    match store.compare_and_swap(key, &loaded.etag, encoded).await {
         Ok(_) => Ok(ForkCheckpointSweep::Released),
         // Another pass won the record; retain and let a later pass re-decide
         // against the fresh state.
@@ -149,7 +147,7 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<bool> {
     match read_head_object(store, target_namespace_id).await {
-        Ok(loaded) => Ok(loaded.envelope.state.state == NamespaceState::Deleted),
+        Ok(loaded) => Ok(loaded.state.state == NamespaceState::Deleted),
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             Ok(lease_expired(record, context.now_ms))
         }

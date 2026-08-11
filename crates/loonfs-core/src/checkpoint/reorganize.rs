@@ -228,7 +228,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
-        .map(|loaded| loaded.envelope.state)
+        .map(|loaded| loaded.state)
     else {
         return Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
@@ -269,7 +269,6 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let head = read_head_object(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
-        .envelope
         .state;
     let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
