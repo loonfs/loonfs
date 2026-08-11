@@ -109,9 +109,9 @@ impl FsAdmin {
     /// did not select that action. Losing the head race or being superseded
     /// by another publisher is an outcome, not an error.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.maintenance.step",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "maintenance.step",
@@ -572,9 +572,9 @@ impl FsAdmin {
     /// one is published first for the current durable namespace state; this
     /// is not a request to compact metadata.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.maintenance.checkpoint_create",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "maintenance.checkpoint_create",
@@ -687,9 +687,9 @@ impl FsAdmin {
     /// fold the tail, advance the root, invalidate what the fold
     /// invalidated.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.maintenance.wal_flush",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "maintenance.wal_flush",

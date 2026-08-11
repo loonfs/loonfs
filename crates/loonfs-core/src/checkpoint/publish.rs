@@ -26,9 +26,9 @@ pub(super) enum ManifestPublicationOutcome {
 }
 
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "write_namespace_manifest", key_class = "manifest_table")
 )]
@@ -110,9 +110,9 @@ pub(super) fn manifest_write_failure(error: MetadataProjectionLoadError) -> Core
 }
 
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "publish_metadata_root", key_class = "metadata_root")
 )]

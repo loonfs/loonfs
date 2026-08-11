@@ -653,9 +653,9 @@ impl GrepService {
     /// page is evaluated against the snapshot it runs on and reports that
     /// head in `head_seq`.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.phase",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(phase = "grep")
     )]

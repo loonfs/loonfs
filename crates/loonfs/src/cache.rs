@@ -392,7 +392,7 @@ impl ReadCore {
     /// exactly the same reasons, so a caller that owns a publication service
     /// drops that too; see `FsWriter::invalidate_namespace`.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.phase",
         skip_all,
         fields(phase = "update_cache")

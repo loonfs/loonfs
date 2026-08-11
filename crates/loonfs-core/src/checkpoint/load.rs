@@ -192,7 +192,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
     let fetch = || async {
         let Some(manifest_bytes) = store
             .get(&manifest_key, None)
-            .instrument(tracing::info_span!(
+            .instrument(tracing::debug_span!(
                 "loonfs.phase",
                 phase = "load_namespace_manifest",
                 key_class = "manifest_table"
@@ -297,7 +297,7 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
 ) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
     let Some(manifest_bytes) = store
         .get(manifest_key, None)
-        .instrument(tracing::info_span!(
+        .instrument(tracing::debug_span!(
             "loonfs.phase",
             phase = "load_namespace_manifest",
             key_class = "manifest_table"

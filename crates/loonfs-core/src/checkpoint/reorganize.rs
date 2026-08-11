@@ -193,9 +193,9 @@ pub struct MetadataReorganizeReport {
 /// compactions: which group a job is rebuilding right now, and how long each
 /// group has been merging deltas over a frozen base.
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "reorganize_metadata", key_class = "manifest")
 )]

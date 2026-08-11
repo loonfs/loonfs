@@ -111,6 +111,66 @@ async fn with_request_deadline(request_deadline_ms: u64, request: Request, next:
     }
 }
 
+enum RequestRoute {
+    Matched(MatchedPath),
+    Unmatched(String),
+}
+
+impl RequestRoute {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Matched(path) => path.as_str(),
+            Self::Unmatched(path) => path,
+        }
+    }
+}
+
+/// Logs the response once the request has reached its HTTP outcome.
+async fn with_request_completion(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let route = request.extensions().get::<MatchedPath>().map_or_else(
+        || RequestRoute::Unmatched(request.uri().path().to_owned()),
+        |path| RequestRoute::Matched(path.clone()),
+    );
+    let started = request_clock();
+    let response = next.run(request).await;
+    let status = response.status();
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    REQUEST_ID.with(|request_id| match status {
+        status if status.is_server_error() => tracing::error!(
+            target: "loonfs_server::http::request",
+            method = %method,
+            route = route.as_str(),
+            status = status.as_u16(),
+            elapsed_ms,
+            request_id = request_id.as_str(),
+            "request completed"
+        ),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
+            tracing::warn!(
+                target: "loonfs_server::http::request",
+                method = %method,
+                route = route.as_str(),
+                status = status.as_u16(),
+                elapsed_ms,
+                request_id = request_id.as_str(),
+                "request completed"
+            );
+        }
+        _ => tracing::debug!(
+            target: "loonfs_server::http::request",
+            method = %method,
+            route = route.as_str(),
+            status = status.as_u16(),
+            elapsed_ms,
+            request_id = request_id.as_str(),
+            "request completed"
+        ),
+    });
+    response
+}
+
 /// Counts and times every request against the route axum matched it to.
 ///
 /// The label is the route template, never the request's own path: a path
@@ -299,6 +359,8 @@ fn router(state: AppState) -> Router {
             state.clone(),
             with_request_metrics,
         ))
+        // Completion logging runs inside the request-id scope.
+        .layer(middleware::from_fn(with_request_completion))
         .layer(middleware::from_fn(with_request_id))
         .with_state(state)
 }

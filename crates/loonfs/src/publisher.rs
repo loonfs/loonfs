@@ -903,7 +903,7 @@ impl NamespacePublisher {
             );
         }
 
-        let publish_span = tracing::info_span!(
+        let publish_span = tracing::debug_span!(
             "loonfs.phase",
             phase = "batch_publish",
             mode = self.trace_mode,

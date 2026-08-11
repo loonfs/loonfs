@@ -95,7 +95,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
     let mut dedup = BatchDedup::default();
 
-    let prepare_span = tracing::info_span!(
+    let prepare_span = tracing::debug_span!(
         "publisher.batch_prepare",
         phase = "batch_prepare",
         batch_size,
@@ -112,7 +112,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 context.now_ms,
                 &mut dedup,
             )
-            .instrument(tracing::info_span!(
+            .instrument(tracing::debug_span!(
                 "loonfs.phase",
                 phase = "prepare_commit"
             ))
@@ -144,7 +144,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 continue;
             }
             let plan = {
-                let span = tracing::info_span!("loonfs.phase", phase = "build_commit_plan");
+                let span = tracing::debug_span!("loonfs.phase", phase = "build_commit_plan");
                 match build_commit_plan_for_publish(&request, context.now_ms, &validation)
                     .instrument(span)
                     .await
@@ -165,7 +165,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 "planner prediction and commit-plan allocation disagree"
             );
             let prepared = {
-                let _span = tracing::info_span!("loonfs.phase", phase = "PreparedCommit::prepare")
+                let _span = tracing::debug_span!("loonfs.phase", phase = "PreparedCommit::prepare")
                     .entered();
                 match PreparedCommit::new(
                     request,
@@ -183,11 +183,11 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
             let materialized = {
                 let _span =
-                    tracing::info_span!("loonfs.phase", phase = "materialize_commit").entered();
+                    tracing::debug_span!("loonfs.phase", phase = "materialize_commit").entered();
                 materialize_commit(prepared, context.now_ms)
             };
             let preview = {
-                let _span = tracing::info_span!(
+                let _span = tracing::debug_span!(
                     "loonfs.phase",
                     phase = "wal_payload_from_materialized_commit"
                 )
@@ -202,7 +202,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
             {
                 let _span =
-                    tracing::info_span!("loonfs.phase", phase = "apply_committed_wal_record")
+                    tracing::debug_span!("loonfs.phase", phase = "apply_committed_wal_record")
                         .entered();
                 session.apply_accepted_commit(&preview, &plan);
             }
@@ -318,7 +318,7 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
     batch_size: u64,
     accepted_count: u64,
 ) -> Result<PreparedWalSegment> {
-    let span = tracing::info_span!(
+    let span = tracing::debug_span!(
         "publisher.batch_write_wal",
         phase = "batch_write_wal",
         batch_size,
@@ -362,7 +362,7 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
     batch_size: u64,
     accepted_count: u64,
 ) -> Result<ObjectMetadata> {
-    let span = tracing::info_span!(
+    let span = tracing::debug_span!(
         "publisher.batch_cas_head",
         phase = "batch_cas_head",
         batch_size,
