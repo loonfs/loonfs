@@ -1,7 +1,7 @@
 //! Checkpoint retention, reorganization, compaction, and publication budgets.
 
 use super::*;
-use loonfs_objectstore::keys::wal_segment_prefix;
+use loonfs_objectstore::keys::{checkpoint_prefix, wal_segment_prefix};
 
 async fn current_manifest_id<S: ObjectStore + ?Sized>(
     store: &S,
@@ -657,7 +657,87 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
     let verified = super::record::verify_checkpoint_basis(&store, &stale)
         .await
         .expect("verification runs");
-    assert!(!verified, "sub-floor basis must not verify");
+    assert_eq!(
+        verified,
+        super::record::CheckpointBasisVerification::Invalid,
+        "sub-floor basis must not verify"
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_record() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
+    bootstrap_namespace(&setup_store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let manifest_key = current_manifest_key(&setup_store, &namespace_id).await;
+    let manifest_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let selected_reads = Arc::clone(&manifest_reads);
+    let selected_manifest_key = manifest_key.clone();
+    let store = FailStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        move |operation| {
+            operation.key() == selected_manifest_key
+                && matches!(
+                    operation.kind(),
+                    loonfs_test_support::stores::OperationKind::Get { .. }
+                )
+                && selected_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+        },
+        InjectedError::Transport("injected basis verification failure".to_owned()),
+    );
+    store.fail_next(1);
+
+    let error = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect_err("basis verification store failure must surface");
+
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    match error {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::ReadManifest {
+                object_key,
+                message,
+            },
+        )) => {
+            assert_eq!(object_key, manifest_key);
+            assert!(message.contains("injected basis verification failure"));
+        }
+        other => panic!("expected a classified manifest store error, got {other:?}"),
+    }
+    assert_eq!(store.attempts(), 1, "only the verification read fails");
+    assert_eq!(
+        manifest_reads.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the injected failure follows the projection's manifest read"
+    );
+
+    let record_keys = store
+        .inner()
+        .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+        .await
+        .expect("list checkpoint records");
+    assert_eq!(record_keys.len(), 1, "the failed create wrote one record");
+    let checkpoint_id = record_keys[0]
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.strip_suffix(".json"))
+        .and_then(|id| CheckpointId::parse(id).ok())
+        .expect("checkpoint record key");
+    let record = read_checkpoint_record(store.inner(), &namespace_id, &checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("record remains for cleanup inspection")
+        .state;
+    assert_eq!(
+        record.state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+            released_at_ms: context.now_ms
+        }
+    );
 }
 
 async fn wal_segment_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
