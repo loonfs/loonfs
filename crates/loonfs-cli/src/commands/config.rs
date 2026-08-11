@@ -7,8 +7,8 @@ use super::profile_config::{
 };
 use crate::args::{CommandKind, ConfigCommand, InitArgs, RuntimeBehavior};
 use crate::config::{
-    load_config_for_repair, load_or_default_config, redacted_config_table, save_config, ConfigLoad,
-    ConfigLocation, ProfileConfig,
+    load_config_for_repair, mutate_config, redacted_config_table, ConfigLoad, ConfigLocation,
+    ProfileConfig,
 };
 use crate::error::CliError;
 use crate::profiles::add_profile;
@@ -45,11 +45,11 @@ pub(crate) fn run_config_init(
             runtime,
         )?;
 
-        let mut config = load_or_default_config(config_path)?;
-        let (profile_name, redacted) = add_profile(&mut config, &name, profile)?;
-        config.default_profile = Some(profile_name.clone());
-        save_config(config_path, &config)?;
-        Ok((profile_name, redacted))
+        mutate_config(config_path, |config| {
+            let (profile_name, redacted) = add_profile(config, &name, profile)?;
+            config.default_profile = Some(profile_name.clone());
+            Ok((profile_name, redacted))
+        })
     })()
     .map_err(|error| fail(kind, None, None, error))?;
 

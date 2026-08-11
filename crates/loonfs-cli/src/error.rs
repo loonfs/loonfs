@@ -1,5 +1,6 @@
 //! [`CliError`]: the structured failure every command surfaces.
 
+use crate::config::NAMESPACE_ENV;
 use serde::{Deserialize, Serialize};
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
@@ -93,7 +94,7 @@ impl CliError {
         Self::new(
             "no_default_namespace",
             format!(
-                "no default namespace is set for profile `{profile}`; use `--namespace`, `LOONFS_NAMESPACE`, or `loonfs use <namespace>`"
+                "no default namespace is set for profile `{profile}`; use `--namespace`, `{NAMESPACE_ENV}`, or `loonfs use <namespace>`"
             ),
         )
     }

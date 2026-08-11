@@ -31,7 +31,7 @@ use loonfs_client::{
 };
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -44,6 +44,39 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
                 .map_err(|error| CliError::invalid_input(format!("invalid --commit-id: {error}")))
         })
         .transpose()
+}
+
+async fn follow_path_entry_pages(
+    context: &CommandContext,
+    kind: CommandKind,
+    spec: &NamespacePath,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+    follow: bool,
+    mut visit: impl FnMut(Vec<loonfs_api::AuthoritativePathEntry>) -> Result<(), CliError>,
+) -> Result<Option<String>, CommandFailure> {
+    let mut visited = 0_u32;
+    let mut cursor = cursor.map(ToOwned::to_owned);
+    loop {
+        let page_limit = limit.map(|limit| {
+            limit
+                .saturating_sub(visited)
+                .min(loonfs_api::DEFAULT_PAGE_LIMIT)
+        });
+        let page = context
+            .target
+            .list_path_entries_page(spec, page_limit, cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        visited = visited.saturating_add(page.entries.len() as u32);
+        visit(page.entries).map_err(|error| context.fail(kind, error))?;
+        cursor = page.next_cursor;
+
+        let filled = limit.is_some_and(|limit| visited >= limit);
+        if filled || !follow || cursor.is_none() {
+            return Ok(cursor);
+        }
+    }
 }
 
 pub(crate) async fn run_filesystem_ls(
@@ -60,18 +93,30 @@ pub(crate) async fn run_filesystem_ls(
         allow_root,
     )
     .map_err(|error| context.fail(kind, error))?;
+    let follow = args.all || args.limit.is_some();
     let streams_pages = args.jsonl || (args.all && !runtime.json);
     if streams_pages {
-        stream_path_entries(
+        let stdout = io::stdout();
+        let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
+        let next_cursor = follow_path_entry_pages(
             &context,
             kind,
             &spec,
             args.limit,
             args.cursor.as_deref(),
-            args.all,
-            args.jsonl,
+            follow,
+            |entries| {
+                write_path_entries_page(&mut stdout, &entries, args.jsonl).map_err(CliError::io)
+            },
         )
         .await?;
+        if let Some(cursor) = next_cursor {
+            // Standard output stays machine-pure in `--jsonl`, so the
+            // continuation signal goes to standard error, where this CLI
+            // already reports progress. Without it a one-page stream would
+            // truncate silently.
+            crate::render::write_stderr_progress(crate::render::more_entries_hint(&cursor));
+        }
         return Ok(CommandOutput {
             kind,
             profile: Some(context.profile_name),
@@ -80,18 +125,20 @@ pub(crate) async fn run_filesystem_ls(
         });
     }
 
-    let (entries, next_cursor) = if args.all {
-        list_all_path_entries(&context, kind, &spec, args.cursor.as_deref()).await?
-    } else if let Some(limit) = args.limit {
-        list_bounded_path_entries(&context, kind, &spec, limit, args.cursor.as_deref()).await?
-    } else {
-        let page = context
-            .target
-            .list_path_entries_page(&spec, None, args.cursor.as_deref())
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        (page.entries, page.next_cursor)
-    };
+    let mut entries = Vec::new();
+    let next_cursor = follow_path_entry_pages(
+        &context,
+        kind,
+        &spec,
+        args.limit,
+        args.cursor.as_deref(),
+        follow,
+        |page| {
+            entries.extend(page);
+            Ok(())
+        },
+    )
+    .await?;
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
@@ -101,104 +148,6 @@ pub(crate) async fn run_filesystem_ls(
             next_cursor,
         },
     })
-}
-
-/// Reads pages until `limit` entries are in hand.
-async fn list_bounded_path_entries(
-    context: &CommandContext,
-    kind: CommandKind,
-    spec: &NamespacePath,
-    limit: u32,
-    cursor: Option<&str>,
-) -> Result<(Vec<loonfs_api::AuthoritativePathEntry>, Option<String>), CommandFailure> {
-    let mut entries = Vec::new();
-    let mut cursor = cursor.map(ToOwned::to_owned);
-    loop {
-        // Servers reject oversized page limits, so ask only for the part of
-        // the total bound that one default deployment page can accept.
-        let remaining = limit.saturating_sub(entries.len() as u32);
-        let page_limit = remaining.min(loonfs_api::DEFAULT_PAGE_LIMIT);
-        let page = context
-            .target
-            .list_path_entries_page(spec, Some(page_limit), cursor.as_deref())
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        entries.extend(page.entries);
-        cursor = page.next_cursor;
-        let filled = entries.len() as u32 >= limit;
-        if filled || cursor.is_none() {
-            return Ok((entries, cursor));
-        }
-    }
-}
-
-/// Reads every page into one result for `--json --all`.
-async fn list_all_path_entries(
-    context: &CommandContext,
-    kind: CommandKind,
-    spec: &NamespacePath,
-    cursor: Option<&str>,
-) -> Result<(Vec<loonfs_api::AuthoritativePathEntry>, Option<String>), CommandFailure> {
-    let mut entries = Vec::new();
-    let mut cursor = cursor.map(ToOwned::to_owned);
-    loop {
-        let page = context
-            .target
-            .list_path_entries_page(spec, None, cursor.as_deref())
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        entries.extend(page.entries);
-        cursor = page.next_cursor;
-        if cursor.is_none() {
-            return Ok((entries, None));
-        }
-    }
-}
-
-/// Writes each page before fetching the next one.
-async fn stream_path_entries(
-    context: &CommandContext,
-    kind: CommandKind,
-    spec: &NamespacePath,
-    limit: Option<u32>,
-    cursor: Option<&str>,
-    all: bool,
-    jsonl: bool,
-) -> Result<(), CommandFailure> {
-    let mut written = 0_u32;
-    let mut cursor = cursor.map(ToOwned::to_owned);
-    loop {
-        let page_limit = limit.map(|limit| {
-            limit
-                .saturating_sub(written)
-                .min(loonfs_api::DEFAULT_PAGE_LIMIT)
-        });
-        let page = context
-            .target
-            .list_path_entries_page(spec, page_limit, cursor.as_deref())
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        written = written.saturating_add(page.entries.len() as u32);
-        crate::render::write_path_entries_page(&page.entries, jsonl)
-            .map_err(|error| context.fail(kind, CliError::io(error)))?;
-        cursor = page.next_cursor;
-
-        let filled = limit.is_some_and(|limit| written >= limit);
-        let follows_cursor = all || limit.is_some();
-        if filled || !follows_cursor || cursor.is_none() {
-            // Standard output stays machine-pure in `--jsonl`, so the
-            // continuation signal goes to standard error, where this CLI
-            // already reports progress. Without it a one-page stream would
-            // truncate silently.
-            if let Some(cursor) = cursor {
-                crate::render::write_stderr_progress(format!(
-                    "more entries exist; continue with --cursor {cursor} or stream everything \
-                     with --all"
-                ));
-            }
-            return Ok(());
-        }
-    }
 }
 
 pub(crate) async fn run_filesystem_stat(
@@ -623,6 +572,23 @@ pub(super) async fn stream_download_to_file(
         .install(destination, force)
         .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
     Ok(bytes_written)
+}
+
+/// Writes one listing page and makes it visible before the next fetch.
+fn write_path_entries_page(
+    stdout: &mut impl Write,
+    entries: &[loonfs_api::AuthoritativePathEntry],
+    jsonl: bool,
+) -> io::Result<()> {
+    for entry in entries {
+        if jsonl {
+            serde_json::to_writer(&mut *stdout, entry).map_err(io::Error::other)?;
+            stdout.write_all(b"\n")?;
+        } else {
+            writeln!(stdout, "{}", crate::render::human_path_entry(entry))?;
+        }
+    }
+    stdout.flush()
 }
 
 /// Writes a download to standard output as it arrives.

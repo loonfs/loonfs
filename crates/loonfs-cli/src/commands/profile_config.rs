@@ -2,7 +2,7 @@
 //! table-driven check that each flag applies to the chosen store kind.
 
 use crate::args::{InitArgs, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior};
-use crate::config::{ProfileConfig, StoreConfig};
+use crate::config::{non_empty_env, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
 use loonfs_objectstore::{
@@ -78,12 +78,8 @@ impl AmbientCredentials {
     }
 }
 
-/// A set variable whose value is blank carries no credential, and is treated
-/// as unset rather than stored and later rejected by validation.
 fn env_secret(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    non_empty_env(name)
 }
 
 // --- provider flag matrix ---

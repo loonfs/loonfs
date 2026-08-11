@@ -3,7 +3,9 @@
 
 use crate::backend::EmbeddedBackend;
 use crate::backend_error::map_runtime_error;
-use crate::config::{load_config, CliConfig, ProfileConfig, StoreConfig};
+use crate::config::{
+    load_config, non_empty_env, CliConfig, ProfileConfig, StoreConfig, NAMESPACE_ENV,
+};
 use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
@@ -65,12 +67,10 @@ pub(crate) fn resolve_namespace(
             namespace: parse_namespace_id(namespace)?,
         });
     }
-    if let Ok(namespace) = std::env::var("LOONFS_NAMESPACE") {
-        if !namespace.trim().is_empty() {
-            return Ok(ResolvedNamespace {
-                namespace: parse_namespace_id(&namespace)?,
-            });
-        }
+    if let Some(namespace) = non_empty_env(NAMESPACE_ENV) {
+        return Ok(ResolvedNamespace {
+            namespace: parse_namespace_id(&namespace)?,
+        });
     }
     let (profile_name, profile) = resolve_profile(config, explicit_profile)?;
     let namespace =

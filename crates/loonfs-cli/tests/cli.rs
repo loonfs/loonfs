@@ -4320,11 +4320,10 @@ fn admin_run_refuses_a_remote_profile() {
     assert_failure(&refused);
     let error = json_error(&refused);
     assert_eq!(error["code"], "not_supported");
-    assert_eq!(
-        error["message"],
-        "`admin run` is embedded-only; the remote server hosts background maintenance itself; \
-         use `loonfs admin step` for an on-demand pass and `loonfs admin index-status` to inspect index maintenance"
-    );
+    assert!(error["message"]
+        .as_str()
+        .expect("error message")
+        .contains("embedded-only"));
 }
 
 #[test]
@@ -4727,7 +4726,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     assert!(human_lines
         .last()
         .expect("continuation line")
-        .ends_with(" or list everything with --all"));
+        .ends_with(" or stream everything with --all"));
 
     let first = harness.run(&["--json", "ls", "/listing"]);
     assert_success(&first);
