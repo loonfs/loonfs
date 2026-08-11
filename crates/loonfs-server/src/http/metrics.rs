@@ -311,8 +311,8 @@ fn write_entry(rendered: &mut String, name: &str, entry: &MetricEntry) {
 
 /// Appends the values that are read when a scrape asks rather than
 /// accumulated as work happens: the runtime's cache counters, what foyer
-/// says about the local block cache, and the transfer slots this server has
-/// free.
+/// says about the local block cache, Linux process RSS, and the transfer
+/// slots this server has free.
 fn render_scrape_gauges(
     rendered: &mut String,
     cache: &RuntimeCacheStats,
@@ -336,6 +336,14 @@ fn render_scrape_gauges(
             let _ = writeln!(rendered, "{name} {value}");
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Some(resident_bytes) = process_resident_bytes() {
+        let name = "loonfs_process_resident_bytes";
+        let description = "Resident set size of the server process, sampled at scrape";
+        let _ = writeln!(rendered, "# HELP {name} {description}");
+        let _ = writeln!(rendered, "# TYPE {name} gauge");
+        let _ = writeln!(rendered, "{name} {resident_bytes}");
+    }
     for (name, description, value) in [
         (
             "loonfs_server_upload_permits_available",
@@ -352,6 +360,16 @@ fn render_scrape_gauges(
         let _ = writeln!(rendered, "# TYPE {name} gauge");
         let _ = writeln!(rendered, "{name} {value}");
     }
+}
+
+/// Reads the Linux-only resident-page count for this process.
+#[cfg(target_os = "linux")]
+fn process_resident_bytes() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    // Neither rustix nor libc is a direct dependency. Every deployment
+    // target shipped by this project uses 4 KiB pages.
+    Some(resident_pages.saturating_mul(4096))
 }
 
 /// What foyer says about the local block cache, as gauges.

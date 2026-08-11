@@ -1224,30 +1224,6 @@ fn seed_local_blocks(
     }
 }
 
-/// The block offsets one recorded slice inserted, in ascending order. Spans
-/// are fetched concurrently, so the order they are offered in is not fixed.
-fn offered_offsets(calls: &[RecordedStoredMetadataBlockCall]) -> Vec<u64> {
-    let mut offsets: Vec<u64> = calls
-        .iter()
-        .filter_map(|call| match call {
-            RecordedStoredMetadataBlockCall::Insert { key, .. } => Some(key.offset),
-            RecordedStoredMetadataBlockCall::Get { .. }
-            | RecordedStoredMetadataBlockCall::Invalidate { .. } => None,
-        })
-        .collect();
-    offsets.sort_unstable();
-    offsets
-}
-
-fn block_offsets(index: &[SegmentIndexEntry], positions: &[usize]) -> Vec<u64> {
-    let mut offsets: Vec<u64> = positions
-        .iter()
-        .map(|position| index[*position].block.offset)
-        .collect();
-    offsets.sort_unstable();
-    offsets
-}
-
 /// One wide read over a whole segment through `cache`, with the per-view
 /// memo a fresh request would carry, and the segment fetches it paid.
 async fn wide_read(
@@ -1339,114 +1315,30 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
     );
 }
 
-/// A wide read over a mixed segment: two blocks already decoded, two held
-/// locally in their stored form, the rest nowhere. Only the blocks nothing
-/// answered are fetched, in one ranged GET per run of consecutive ones, and
-/// exactly those blocks are offered back.
+/// Decoded blocks split a wide selection into coalesced spans around them.
 #[tokio::test]
-async fn a_wide_read_fetches_and_offers_only_the_blocks_no_cache_answered() {
+async fn a_wide_read_coalesces_the_blocks_the_decoded_cache_did_not_answer() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
     let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
 
-    // Positions 0 and 1 are decoded, 3 and 7 are held locally; the rest are
-    // nowhere. That leaves three runs of consecutive misses — {2}, {4, 5, 6},
-    // and {8..} — so three ranged GETs.
-    let decoded = [0usize, 1];
-    let local = [3usize, 7];
-    let missing: Vec<usize> = (0..index.len())
-        .filter(|position| !decoded.contains(position) && !local.contains(position))
-        .collect();
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let cache = table_cache_over(&blocks);
+    let decoded = [0usize, 4];
+    let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
     let object = segment_object_bytes(&store, &descriptor).await;
     seed_decoded_blocks(&cache, &object, &descriptor, &index, &decoded);
-    seed_local_blocks(&blocks, &object, &descriptor, &index, &local);
 
-    let calls_before = blocks.call_count();
     let (read, gets) = wide_read(&store, Some(&cache), &descriptor, &index).await;
-    let calls = blocks.calls();
-    let during = &calls[calls_before..];
 
     assert_eq!(read, expected);
     assert_eq!(
-        gets, 3,
+        gets, 2,
         "one ranged GET per run of consecutive blocks nothing answered"
     );
-    assert_eq!(
-        offered_offsets(during),
-        block_offsets(&index, &missing),
-        "exactly the fetched blocks are offered to the local cache"
-    );
-    let probed: Vec<u64> = during
-        .iter()
-        .filter_map(|call| match call {
-            RecordedStoredMetadataBlockCall::Get { key, .. } => Some(key.offset),
-            RecordedStoredMetadataBlockCall::Insert { .. }
-            | RecordedStoredMetadataBlockCall::Invalidate { .. } => None,
-        })
-        .collect();
-    assert_eq!(
-        probed,
-        (0..index.len())
-            .filter(|position| !decoded.contains(position))
-            .map(|position| index[position].block.offset)
-            .collect::<Vec<_>>(),
-        "a decoded block short-circuits the probe; every other block is probed once, in order"
-    );
 }
 
-/// A cold local cache changes nothing about how a wide read groups its
-/// fetches: it is one more tier consulted per block, and the blocks nothing
-/// answered coalesce exactly as they do without it.
+/// A span load ignores the local stored-block tier in both directions, even
+/// when that tier already holds every selected block.
 #[tokio::test]
-async fn a_cold_local_block_cache_does_not_change_how_a_wide_read_groups_its_fetches() {
-    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
-    let plain = MetadataTableCache::new(MetadataTableCacheConfig::default());
-    let (plain_read, plain_gets) = wide_read(&store, Some(&plain), &descriptor, &index).await;
-
-    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let cold = table_cache_over(&blocks);
-    let (cold_read, cold_gets) = wide_read(&store, Some(&cold), &descriptor, &index).await;
-
-    assert_eq!(cold_read, plain_read);
-    assert_eq!(plain_gets, 1, "a selection nothing answered is one span");
-    assert_eq!(cold_gets, plain_gets);
-    assert_eq!(
-        blocks
-            .calls()
-            .iter()
-            .filter(|call| matches!(
-                call,
-                RecordedStoredMetadataBlockCall::Get { hit: false, .. }
-            ))
-            .count(),
-        index.len(),
-        "the cold tier was consulted for every block"
-    );
-
-    // The same comparison where the grouping is not trivial: two decoded
-    // blocks split the selection into two spans on both sides.
-    let object = segment_object_bytes(&store, &descriptor).await;
-    let split_plain = MetadataTableCache::new(MetadataTableCacheConfig::default());
-    seed_decoded_blocks(&split_plain, &object, &descriptor, &index, &[0, 4]);
-    let (_, split_plain_gets) = wide_read(&store, Some(&split_plain), &descriptor, &index).await;
-    let split_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
-    let split_cold = table_cache_over(&split_blocks);
-    seed_decoded_blocks(&split_cold, &object, &descriptor, &index, &[0, 4]);
-    let (_, split_cold_gets) = wide_read(&store, Some(&split_cold), &descriptor, &index).await;
-
-    assert_eq!(
-        split_plain_gets, 2,
-        "a decoded block in the middle splits the selection into two spans"
-    );
-    assert_eq!(split_cold_gets, split_plain_gets);
-}
-
-/// One local entry inside a span that no longer decodes is dropped, refetched
-/// with the span it falls in, and the read succeeds. What it held was a copy;
-/// object storage still holds the authority.
-#[tokio::test]
-async fn a_corrupt_local_entry_inside_a_span_is_dropped_and_refetched() {
+async fn a_span_load_never_reads_or_writes_the_local_block_cache() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
     let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
 
@@ -1454,40 +1346,76 @@ async fn a_corrupt_local_entry_inside_a_span_is_dropped_and_refetched() {
     let object = segment_object_bytes(&store, &descriptor).await;
     let every_block: Vec<usize> = (0..index.len()).collect();
     seed_local_blocks(&blocks, &object, &descriptor, &index, &every_block);
+    let calls_before = blocks.call_count();
+    let cache = table_cache_over(&blocks);
+
+    let (read, gets) = wide_read(&store, Some(&cache), &descriptor, &index).await;
+
+    assert_eq!(read, expected);
+    assert_eq!(gets, 1, "the unresolved selection should stay one span");
+    assert_eq!(
+        blocks.call_count(),
+        calls_before,
+        "a span load must perform no local-cache gets or inserts"
+    );
+}
+
+/// A corrupt local entry on the narrow path is dropped and refetched once.
+/// What it held was a copy; object storage still holds the authority.
+#[tokio::test]
+async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    let object = segment_object_bytes(&store, &descriptor).await;
     let corrupt = 5usize;
+    let entry = &index[corrupt];
+    let expected = decode_data_block(&stored_block_bytes(&object, &entry.block), &entry.block)
+        .expect("authoritative block should decode");
+    seed_local_blocks(&blocks, &object, &descriptor, &index, &[corrupt]);
     let corrupt_key = stored_key(
         &descriptor,
         StoredMetadataBlockKind::Data,
-        index[corrupt].block.offset,
+        entry.block.offset,
     );
     blocks.corrupt(&corrupt_key);
 
     let cache = table_cache_over(&blocks);
     let calls_before = blocks.call_count();
-    let (read, gets) = wide_read(&store, Some(&cache), &descriptor, &index).await;
+    store.reset();
+    let read = data_block_load::load_segment_data_block(
+        &store,
+        Some(&cache),
+        &load::SessionBlockMemo::default(),
+        &descriptor,
+        entry,
+    )
+    .await
+    .expect("narrow load should recover from a corrupt local copy");
     let calls = blocks.calls();
     let during = &calls[calls_before..];
 
-    assert_eq!(read, expected);
+    assert_eq!(read.as_ref(), &expected);
     assert_eq!(
-        gets, 1,
-        "the bad entry costs one span fetch and no retry loop"
-    );
-    assert_eq!(
-        during
-            .iter()
-            .filter(|call| **call
-                == RecordedStoredMetadataBlockCall::Invalidate {
-                    key: corrupt_key.clone()
-                })
-            .count(),
+        store.count(OperationClass::Read),
         1,
-        "the entry that did not decode should have been dropped once"
+        "the bad entry costs one point fetch and no retry loop"
     );
     assert_eq!(
-        offered_offsets(during),
-        block_offsets(&index, &[corrupt]),
-        "only the refetched block is offered back"
+        during,
+        [
+            RecordedStoredMetadataBlockCall::Get {
+                key: corrupt_key.clone(),
+                hit: true,
+            },
+            RecordedStoredMetadataBlockCall::Invalidate {
+                key: corrupt_key.clone(),
+            },
+            RecordedStoredMetadataBlockCall::Insert {
+                key: corrupt_key,
+                bytes: entry.block.stored_len as usize,
+            },
+        ],
+        "the narrow load should drop the bad copy and offer the fetched bytes"
     );
 }
 

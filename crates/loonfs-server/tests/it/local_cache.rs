@@ -44,17 +44,15 @@ fn test_config_with_local_cache(
     }
 }
 
-/// A restarted server reads every metadata segment section — index, filter,
-/// and data — out of the local cache instead of the store.
+/// A restarted server uses the local cache for point-shaped section loads,
+/// while a directory scan skips it for data blocks.
 ///
 /// The second server starts with empty in-memory caches, so the only thing
-/// carried over is the cache directory the first one closed. Every section it
-/// wants is one the first server fetched and filled, and a section it had to
-/// fetch would show up here twice over: as a miss on the way in and as an
-/// insert on the way back. Zero of both is what makes this a full read with
-/// no segment bytes read at all.
+/// carried over is the cache directory the first one closed. Its index read
+/// hits that tier. Its data span performs no local-cache operation because
+/// the store path can coalesce the selected blocks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restarted_server_reads_every_segment_section_from_its_local_cache() {
+async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     let store_dir = tempdir().expect("store tempdir");
     let cache_dir = tempdir().expect("cache tempdir");
     let namespace = namespace_id("warm");
@@ -133,12 +131,15 @@ async fn a_restarted_server_reads_every_segment_section_from_its_local_cache() {
     assert_eq!(served.entries, warmed.entries);
 
     let restarted = scrape(&second.server_url, Some("test-token")).expect("scrape the second");
-    for kind in ["index", "data"] {
-        assert!(
-            series(&restarted, &gets(kind, "hit")) >= 1.0,
-            "the restarted server should read {kind} sections from the cache"
-        );
-    }
+    assert!(
+        series(&restarted, &gets("index", "hit")) >= 1.0,
+        "the restarted server should read index sections from the cache"
+    );
+    assert_eq!(
+        series(&restarted, &gets("data", "hit")),
+        0.0,
+        "a scan should not read data blocks from the local cache"
+    );
     for kind in BLOCK_KINDS {
         assert_eq!(
             series(&restarted, &gets(kind, "miss")),

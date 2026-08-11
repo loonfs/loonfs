@@ -1,13 +1,14 @@
 //! Fetching, decoding, coalescing, and cache publication for SST data blocks.
 //!
-//! Both loads below consult the same three places [`super::block_fetch`]
-//! describes — the per-view memo, the decoded block cache, and the
-//! node-local cache of stored bytes — before object storage answers, and
-//! offer every block a fetch produced back to the local tier.
+//! Point loads consult the per-view memo, the decoded block cache, and the
+//! node-local cache of stored bytes. Span loads skip the stored-byte tier
+//! because it answers one block per awaited read, turning a wide scan into
+//! tens of thousands of serial point reads. Spans use the decoded caches and
+//! coalesced store GETs, and they do not populate the stored-byte tier.
 
 use super::block_fetch::{
-    load_section_bytes, offer_stored_block, publish_segment_block, segment_block_cache_key,
-    segment_codec_error, stored_block_section,
+    load_section_bytes, offer_stored_block, segment_block_cache_key, segment_codec_error,
+    stored_block_section,
 };
 use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache};
@@ -98,12 +99,11 @@ pub(super) fn decoded_data_cache_block(
     }
 }
 
-/// Bulk path for wide selections: resolve each block against the caches in
-/// turn, group the blocks none of them answered into consecutive spans, and
-/// fetch each span with coalesced ranged GETs instead of one request per
-/// block. Duplicate concurrent span fetches are possible and benign — two
-/// fetches of one block offer the same bytes under the same key; the narrow
-/// path keeps single-flight for the hot point lookups.
+/// Bulk path for wide selections: resolve each block against the memo and
+/// shared decoded cache, group the blocks neither answered into consecutive
+/// spans, and fetch each span with coalesced ranged GETs instead of one
+/// request per block. Duplicate concurrent span fetches are possible and
+/// benign; the narrow path keeps single-flight for the hot point lookups.
 pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -127,31 +127,6 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 blocks[position] = Some(block);
                 continue;
             }
-        }
-        // The local stored-block cache, one tier below the two above. A hit
-        // is decoded and published exactly as a fetched block is; a miss —
-        // including an entry that did not decode, which drops itself — is a
-        // true miss the span grouping below covers.
-        if let Some(decoded) = stored_block_section(
-            table_cache,
-            descriptor,
-            StoredMetadataBlockKind::Data,
-            &handle,
-            decode_data_block,
-        )
-        .await
-        {
-            let block = Arc::new(decoded);
-            publish_segment_block(
-                table_cache,
-                memo,
-                probe_key.clone(),
-                &DecodedMetadataTableBlock::Data {
-                    decoded_byte_len: decoded_manifest_block_weight(descriptor.family, &block.rows),
-                    block: Arc::clone(&block),
-                },
-            );
-            blocks[position] = Some(block);
         }
     }
 
@@ -224,9 +199,8 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
 
 /// Fetches one contiguous span with a single ranged GET, decodes every
 /// block, and publishes them to the per-view memo and (when populating) the
-/// shared cache. Every block the GET covered is also offered to the local
-/// stored-block cache under its own key. Returns the first block's cache
-/// entry for the single-flight cell.
+/// shared cache. Returns the first block's cache entry for the single-flight
+/// cell.
 async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -243,15 +217,6 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
         let handle = entry.block;
         let begin = (handle.offset - first.offset) as usize;
         let stored = &bytes[begin..begin + handle.stored_len as usize];
-        // Every block the span GET produced is offered under its own key, so
-        // a later read of any one of them needs no fetch.
-        offer_stored_block(
-            table_cache,
-            descriptor,
-            StoredMetadataBlockKind::Data,
-            &handle,
-            stored,
-        );
         let decoded = Arc::new(
             decode_data_block(stored, &handle)
                 .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
