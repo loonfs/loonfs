@@ -1274,11 +1274,17 @@ async fn worker_and_service_share_decoded_index_blocks() {
         "the worker must publish decoded blocks to the shared cache"
     );
 
+    let gets_before_query = raw_store.index_segment_get_count();
     let result = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep after worker load");
     assert_eq!(result.matches.len(), 8);
+    assert_eq!(
+        raw_store.index_segment_get_count() - gets_before_query,
+        0,
+        "the service must not refetch index-segment sections the worker warmed"
+    );
     assert!(
         host.block_cache.stats().hits > stats_after_fold.hits,
         "the service must hit blocks inserted by the worker"
