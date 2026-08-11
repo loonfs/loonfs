@@ -87,9 +87,9 @@ impl FsWriter {
     /// published only afterward. `options.behavior` selects create-only or
     /// replace semantics.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.put",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "put",
@@ -149,9 +149,9 @@ impl FsWriter {
     /// because the payload is gone: what this pass measured and hashed on
     /// the way past is what the reconciliation compares.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.put",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "put",
@@ -310,9 +310,9 @@ impl FsWriter {
     /// promptly because garbage collection protects the object only for that
     /// grace period while it remains unpublished.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.prepare",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "prepare",
@@ -347,9 +347,9 @@ impl FsWriter {
     /// SHA-256, same publication path, same guarantees — so callers that
     /// already hold their bytes have no reason to come here.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.prepare",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "prepare",
@@ -378,9 +378,9 @@ impl FsWriter {
     /// Submission and publication perform no content I/O. `options.behavior`
     /// selects create-only or replace semantics.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.put",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "put",
@@ -428,9 +428,9 @@ impl FsWriter {
     /// before publication. Callers that already hold proof should prefer
     /// [`Self::put_file_prepared`].
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.put",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "put",
@@ -465,9 +465,9 @@ impl FsWriter {
     /// GET and digest check. Later prepared publication performs no content
     /// I/O.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.prepare",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "prepare",
@@ -796,7 +796,7 @@ pub(crate) async fn publish_batch_with_engine(
         engine.invalidate_projection();
     }
     {
-        let _span = tracing::info_span!(
+        let _span = tracing::debug_span!(
             "loonfs.phase",
             phase = "batch_update_cache",
             mode = core.trace_mode(),

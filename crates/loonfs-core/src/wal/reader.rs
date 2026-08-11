@@ -129,9 +129,9 @@ pub(crate) enum WalChainLoad {
 /// read past what the caller may pay for. The loader itself keeps no
 /// budget, because foreground reads and the changefeed share it.
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "load_wal_chain_within", key_class = "wal_segment")
 )]
@@ -153,9 +153,9 @@ pub(crate) async fn load_wal_chain_within<S: ObjectStore + ?Sized>(
 }
 
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "load_validated_wal_chain", key_class = "wal_segment")
 )]
@@ -338,9 +338,9 @@ fn validate_pointer_matches_envelope(
 /// walk. Segment bodies and checksums are not validated because this method
 /// only counts pointers; replay paths still load the full validated chain.
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "count_wal_tail_segments", key_class = "wal_segment")
 )]

@@ -92,9 +92,9 @@ pub(super) struct MetadataSstRows {
 }
 
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "write_manifest_tables", key_class = "manifest_table")
 )]

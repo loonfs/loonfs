@@ -399,7 +399,7 @@ pub(super) async fn apply_commit(
         operations,
     };
     let response_result = if let Some((payload_class, preparation)) = put_content_preparation {
-        let span = tracing::info_span!(
+        let span = tracing::debug_span!(
             "loonfs.put",
             operation = "put",
             mode = "remote",

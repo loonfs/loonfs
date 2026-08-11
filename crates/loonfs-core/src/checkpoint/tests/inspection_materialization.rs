@@ -113,9 +113,9 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
 }
 
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "load_manifest_tables", key_class = "manifest_table")
 )]

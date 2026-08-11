@@ -589,9 +589,9 @@ async fn validate_content_size<S: ObjectStore + ?Sized>(
 /// content store first. See [`store_bytes_as_content_with_store_id`] for
 /// what this is for and what it is not.
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     name = "loonfs.phase",
-    err,
+    err(level = "warn"),
     skip_all,
     fields(phase = "write_content_blob", key_class = "content_blob")
 )]

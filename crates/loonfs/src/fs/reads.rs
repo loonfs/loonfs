@@ -33,9 +33,9 @@ impl FsReader {
     /// Resolves an absolute path to its authoritative entry at the current
     /// head, projecting what `options` asks for.
     #[tracing::instrument(
-        level = "info",
+        level = "debug",
         name = "loonfs.stat",
-        err,
+        err(level = "debug"),
         skip_all,
         fields(
             operation = "stat",
