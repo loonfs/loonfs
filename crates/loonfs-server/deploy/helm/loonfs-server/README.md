@@ -137,7 +137,7 @@ deletes it every time it stops.
 | `config.key` | `config.toml` | The entry in that Secret holding the TOML config. |
 | `service.port` | `9400` | The port the Service publishes and the probes call. |
 | `service.annotations` | `{}` | Annotations for the Service. |
-| `terminationGracePeriodSeconds` | `600` | How long the kubelet waits after SIGTERM before SIGKILL. |
+| `terminationGracePeriodSeconds` | `660` | How long the kubelet waits after SIGTERM before SIGKILL. |
 | `localCache.enabled` | `false` | Mount an `emptyDir` at `/var/cache/loonfs`. |
 | `localCache.sizeLimit` | `""` | That `emptyDir`'s `sizeLimit`, such as `100Gi`. Empty means no limit. |
 | `extraEnv` | `[]` | Environment variables for the container, as Kubernetes `EnvVar` entries. |
@@ -179,12 +179,12 @@ loonfs-server --config /etc/loonfs/config.toml --check-config
 
 ## Shutdown
 
-`terminationGracePeriodSeconds` defaults to 600.
+`terminationGracePeriodSeconds` defaults to 660.
 
 The server's shutdown stops accepting, drains the requests in flight, and
-settles its background work. It holds no timeout of its own, and one degraded
-object-store operation is bounded at roughly six minutes. 600 seconds clears
-that case.
+settles its background work. The drain abandons requests still running after
+`shutdown_deadline_ms`, which defaults to 600 seconds. The extra minute lets
+writer and cache settlement finish before the kubelet sends SIGKILL.
 
 The kubelet sends SIGKILL when the grace period runs out. Writer-epoch
 fencing contains what that leaves behind, so a killed process corrupts

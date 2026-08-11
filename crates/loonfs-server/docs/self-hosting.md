@@ -179,10 +179,10 @@ docker run --rm \
 The server is PID 1 and shuts down on SIGTERM, which is what `docker stop`
 and a Kubernetes pod deletion send. It stops accepting, drains the requests
 in flight, settles its background work, and exits zero. Allow enough time for
-that: pass `--timeout 120` to `docker stop`. A process killed before it
+that: pass `--timeout 660` to `docker stop`. A process killed before it
 settles may lose work it had already accepted. The chart below gives the pod
-600 seconds for the same reason, and its README says where that number comes
-from.
+660 seconds: requests drain for `shutdown_deadline_ms` (600 seconds by default),
+then the writer and cache settle.
 
 [`scripts/test-image.sh`](../scripts/test-image.sh) builds the image and runs
 this whole path against it, down to the restart. CI runs the same script on

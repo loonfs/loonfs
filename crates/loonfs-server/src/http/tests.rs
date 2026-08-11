@@ -297,6 +297,72 @@ async fn app_validates_directly_built_configs() {
     }
 }
 
+#[tokio::test]
+#[allow(clippy::disallowed_methods)]
+// The sleeping handler is the controlled work the deadline cancels.
+async fn request_deadline_answers_408_and_leaves_fast_handlers_untouched() {
+    use tower::ServiceExt;
+
+    let request_deadline_ms = 10;
+    let router = axum::Router::new()
+        .route(
+            "/slow",
+            axum::routing::get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                "slow"
+            }),
+        )
+        .route("/fast", axum::routing::get(|| async { "fast" }))
+        .route_layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                super::with_request_deadline(request_deadline_ms, request, next)
+            },
+        ))
+        .layer(axum::middleware::from_fn(super::with_request_id));
+
+    let slow = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/slow")
+                .body(axum::body::Body::empty())
+                .expect("slow request"),
+        )
+        .await
+        .expect("slow response");
+    assert_eq!(slow.status(), axum::http::StatusCode::REQUEST_TIMEOUT);
+    let request_id = slow
+        .headers()
+        .get(super::REQUEST_ID_HEADER)
+        .expect("request id header")
+        .to_str()
+        .expect("request id header text")
+        .to_owned();
+    let body = axum::body::to_bytes(slow.into_body(), usize::MAX)
+        .await
+        .expect("deadline body");
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("deadline envelope");
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded.as_str());
+    assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
+    assert!(error.message.contains("request_deadline_ms"));
+    assert!(error.message.contains("10"));
+
+    let fast = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/fast")
+                .body(axum::body::Body::empty())
+                .expect("fast request"),
+        )
+        .await
+        .expect("fast response");
+    assert_eq!(fast.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(fast.into_body(), usize::MAX)
+        .await
+        .expect("fast body");
+    assert_eq!(&body[..], b"fast");
+}
+
 /// The `[local_cache]` table is the whole switch: without it nothing is
 /// built, and a scrape says nothing about a tier this deployment does not
 /// have.
@@ -353,6 +419,7 @@ async fn graceful_shutdown_closes_the_local_cache() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let mut config = test_config(temp_dir.path(), "shutdown-local-cache-writer");
     config.local_cache = Some(test_local_cache_config(cache_dir.path()));
+    let shutdown_deadline_ms = config.shutdown_deadline_ms;
 
     let (router, state) = app_with_store_and_state(config, store)
         .await
@@ -369,6 +436,7 @@ async fn graceful_shutdown_closes_the_local_cache() {
         router,
         state.writer.clone(),
         state.local_cache.clone(),
+        shutdown_deadline_ms,
         async move {
             let _ = shutdown_rx.await;
         },
@@ -384,6 +452,80 @@ async fn graceful_shutdown_closes_the_local_cache() {
         local_cache.is_closed(),
         "the graceful path closes the cache before it returns"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::disallowed_methods)]
+// The sleeping handler keeps one connection in flight past the drain budget.
+async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_writer() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let writer = test_runtime(store, "shutdown-deadline-writer").await;
+    let handler_started = Arc::new(tokio::sync::Notify::new());
+    let handler_signal = handler_started.clone();
+    let router = axum::Router::new().route(
+        "/slow",
+        axum::routing::get(move || {
+            let handler_signal = handler_signal.clone();
+            async move {
+                handler_signal.notify_one();
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                "late"
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let shutdown_deadline_ms = 25;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve::serve_and_settle(
+        listener,
+        router,
+        writer.clone(),
+        None,
+        shutdown_deadline_ms,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    let client = tokio::spawn(async move {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect client");
+        stream
+            .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("send slow request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read slow response");
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handler_started.notified(),
+    )
+    .await
+    .expect("slow handler starts");
+
+    shutdown_tx.send(()).expect("trigger shutdown");
+    tokio::time::timeout(
+        std::time::Duration::from_millis(shutdown_deadline_ms + 1_000),
+        server,
+    )
+    .await
+    .expect("serve_and_settle returns within the drain deadline plus slack")
+    .expect("join server task")
+    .expect("shutdown settles the writer");
+    assert!(writer.is_shutting_down(), "writer shutdown completed");
+
+    client.abort();
 }
 
 fn test_local_cache_config(root: &Path) -> crate::config::LocalCacheConfig {
@@ -2290,6 +2432,8 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         grep: crate::config::GrepConfig::default(),
         maintenance: crate::config::MaintenanceMode::Automatic,
         min_publish_interval_ms: 0,
+        request_deadline_ms: 60_000,
+        shutdown_deadline_ms: 600_000,
         max_upload_bytes: 256 * 1024 * 1024,
         max_download_bytes: 256 * 1024 * 1024,
         max_concurrent_uploads: 8,

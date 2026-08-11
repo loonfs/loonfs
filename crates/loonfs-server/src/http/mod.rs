@@ -90,6 +90,27 @@ async fn with_request_id(request: Request, next: Next) -> Response {
     response
 }
 
+/// Cancels bounded request work once the deployment's deadline passes.
+async fn with_request_deadline(request_deadline_ms: u64, request: Request, next: Next) -> Response {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(request_deadline_ms),
+        next.run(request),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => ApiResponseError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            ErrorCode::DeadlineExceeded,
+            &format!(
+                "the server cancelled the request at the configured deadline; \
+                 request_deadline_ms is {request_deadline_ms} milliseconds"
+            ),
+        )
+        .into_response(),
+    }
+}
+
 /// Counts and times every request against the route axum matched it to.
 ///
 /// The label is the route template, never the request's own path: a path
@@ -160,7 +181,8 @@ fn router(state: AppState) -> Router {
     } else {
         get(grep_index_not_maintained)
     };
-    Router::new()
+    let request_deadline_ms = state.config.request_deadline_ms;
+    let bounded_routes = Router::new()
         .route("/health", get(health))
         .route("/readiness", get(readiness))
         .route("/metrics", get(serve_metrics))
@@ -176,10 +198,6 @@ fn router(state: AppState) -> Router {
             get(list_path_entries),
         )
         .route("/v0/namespaces/{namespace}/filesystem/stat", get(stat_path))
-        .route(
-            "/v0/namespaces/{namespace}/filesystem/content",
-            get(get_file_bytes),
-        )
         // The read this deployment authorizes rather than performs. It sits
         // beside the proxied read because it answers the same question
         // about the same path; the route exists everywhere and refuses with
@@ -195,18 +213,6 @@ fn router(state: AppState) -> Router {
             grep_status_route,
         )
         .route(
-            "/v0/admin/namespaces/{namespace}/grep/index/enable",
-            enable_grep_route,
-        )
-        .route(
-            "/v0/admin/namespaces/{namespace}/grep/index/disable",
-            disable_grep_route,
-        )
-        .route(
-            "/v0/admin/namespaces/{namespace}/grep/index/gc",
-            grep_gc_route,
-        )
-        .route(
             "/v0/namespaces/{namespace}/filesystem/revisions",
             get(list_file_revisions),
         )
@@ -214,16 +220,11 @@ fn router(state: AppState) -> Router {
             "/v0/namespaces/{namespace}/filesystem/trash",
             get(list_trash),
         )
+        // A commit that reaches the deadline may still land. The publisher
+        // owns an accepted candidate, as after a client disconnect, and the
+        // commit receipt makes retry safe.
         .route("/v0/namespaces/{namespace}/commits", post(apply_commit))
         .route("/v0/namespaces/{namespace}/uploads", post(begin_upload))
-        .route(
-            "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
-            // No body-limit layer: the upload route never buffers its
-            // body, so a framework limit measured against a buffered read
-            // would never fire. `UploadBodyStream` counts the bytes as it
-            // forwards them and enforces `upload.max_content_bytes` itself.
-            put(upload_content),
-        )
         .route(
             "/v0/namespaces/{namespace}/uploads/{upload_id}/parts",
             post(sign_upload_parts),
@@ -249,6 +250,23 @@ fn router(state: AppState) -> Router {
             "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",
             post(release_checkpoint),
         )
+        .route_layer(middleware::from_fn(move |request: Request, next: Next| {
+            with_request_deadline(request_deadline_ms, request, next)
+        }));
+
+    let exempt_routes = Router::new()
+        .route(
+            "/v0/namespaces/{namespace}/filesystem/content",
+            get(get_file_bytes),
+        )
+        .route(
+            "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
+            // No body-limit layer: the upload route never buffers its
+            // body, so a framework limit measured against a buffered read
+            // would never fire. `UploadBodyStream` counts the bytes as it
+            // forwards them and enforces `upload.max_content_bytes` itself.
+            put(upload_content),
+        )
         .route(
             "/v0/admin/namespaces/{namespace}/maintenance/step",
             post(maintenance_step),
@@ -256,6 +274,21 @@ fn router(state: AppState) -> Router {
         // The one admin route whose subject is the store rather than a
         // namespace, so it sits beside them rather than under one.
         .route("/v0/admin/store/probe", post(probe_store))
+        .route(
+            "/v0/admin/namespaces/{namespace}/grep/index/enable",
+            enable_grep_route,
+        )
+        .route(
+            "/v0/admin/namespaces/{namespace}/grep/index/disable",
+            disable_grep_route,
+        )
+        .route(
+            "/v0/admin/namespaces/{namespace}/grep/index/gc",
+            grep_gc_route,
+        );
+
+    bounded_routes
+        .merge(exempt_routes)
         // Unmatched paths and wrong methods answer inside the error
         // contract instead of axum's empty default bodies.
         .fallback(route_not_found)
