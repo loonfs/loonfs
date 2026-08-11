@@ -954,8 +954,6 @@ fn compaction_plan() -> loonfs_core::MetadataCompactionSpec {
     loonfs_core::MetadataCompactionSpec::planned_over_no_runs()
 }
 
-/// Claims the compaction slots of `count` namespaces named `job-0`, `job-1`,
-/// and so on, in order.
 fn claim_all(
     compactions: &BackgroundCompactions,
     count: usize,

@@ -686,15 +686,16 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
 ///
 /// Bounded steps may continue merging newer delta runs. When no bounded merge
 /// can make the required progress, maintenance plans a streaming compaction
-/// of the complete group. The warning is emitted once per step until that job
-/// starts.
+/// of the complete group. This is normal adaptive behavior, so it reports at
+/// debug; the case that never resolves — no compaction runner — has its own
+/// warning where the job would have started.
 fn report_group_bottom_over_budget(
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
     bottom: &OverBudgetRun,
     policy: MetadataLsmPolicy,
 ) {
-    tracing::warn!(
+    tracing::debug!(
         namespace_id = namespace_id.as_str(),
         families = ?group.families(),
         run_seq = bottom.run_seq.0,

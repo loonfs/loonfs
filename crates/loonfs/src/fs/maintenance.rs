@@ -6,6 +6,7 @@
 //! checkpoint calls, and its hosts drive it.
 
 use crate::maintenance_runner::CompactionStart;
+use crate::metrics::{CompactionOutcome, CompactionTotals};
 use crate::FsAdmin;
 use crate::NamespaceStatusResponse;
 use crate::{
@@ -16,6 +17,8 @@ use crate::{
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_core::cache::{load_namespace_fold_basis, load_namespace_head_summary};
+use std::time::Duration;
+use tokio::time::Instant;
 
 #[cfg(test)]
 mod tests;
@@ -452,27 +455,70 @@ impl FsAdmin {
             // No runner behind this handle, so there is no slot to claim and
             // no permit to wait for.
             let cancellation = loonfs_core::MetadataCompactionCancellation::default();
-            return Ok(MetadataCompactionOutcome::Ran(
-                self.run_streaming_compaction(namespace_id, &spec, &cancellation)
-                    .await?,
-            ));
+            let started = Instant::now();
+            let outcome = self
+                .run_streaming_compaction(namespace_id, &spec, &cancellation)
+                .await;
+            self.record_streaming_compaction(&outcome, started.elapsed());
+            return Ok(MetadataCompactionOutcome::Ran(outcome?));
         };
         let Some(mut claim) = compactions.claim(namespace_id, &spec) else {
             return Ok(MetadataCompactionOutcome::AlreadyRunning);
         };
         if !claim.admitted().await {
-            return Ok(MetadataCompactionOutcome::Ran(
-                loonfs_core::MetadataCompactionJobOutcome::Cancelled,
-            ));
+            let outcome = loonfs_core::MetadataCompactionJobOutcome::Cancelled;
+            self.record_streaming_compaction(&Ok(outcome.clone()), Duration::ZERO);
+            return Ok(MetadataCompactionOutcome::Ran(outcome));
         }
+        let started = Instant::now();
         let outcome = self
             .run_streaming_compaction(namespace_id, &spec, claim.cancellation())
             .await;
+        self.record_streaming_compaction(&outcome, started.elapsed());
         claim.finished(matches!(
             outcome,
             Ok(loonfs_core::MetadataCompactionJobOutcome::Published { .. })
         ));
         Ok(MetadataCompactionOutcome::Ran(outcome?))
+    }
+
+    /// Files one compaction ending in this handle's cumulative instruments.
+    pub(crate) fn record_streaming_compaction(
+        &self,
+        outcome: &Result<loonfs_core::MetadataCompactionJobOutcome>,
+        elapsed: Duration,
+    ) {
+        let (outcome, totals) = match outcome {
+            Ok(loonfs_core::MetadataCompactionJobOutcome::Published {
+                rows_read,
+                rows_written,
+                input_bytes,
+                output_bytes,
+                ..
+            }) => (
+                CompactionOutcome::Completed,
+                Some(CompactionTotals {
+                    input_rows: *rows_read,
+                    output_rows: *rows_written,
+                    input_bytes: *input_bytes,
+                    output_bytes: *output_bytes,
+                }),
+            ),
+            Ok(
+                loonfs_core::MetadataCompactionJobOutcome::Abandoned
+                | loonfs_core::MetadataCompactionJobOutcome::Superseded,
+            ) => (CompactionOutcome::Superseded, None),
+            Ok(loonfs_core::MetadataCompactionJobOutcome::Cancelled) => {
+                (CompactionOutcome::Cancelled, None)
+            }
+            Ok(loonfs_core::MetadataCompactionJobOutcome::Fenced) => {
+                (CompactionOutcome::Fenced, None)
+            }
+            Err(_) => (CompactionOutcome::Failed, None),
+        };
+        self.core
+            .instruments()
+            .compaction_finished(outcome, elapsed, totals);
     }
 
     /// Runs one streaming compaction to its end and says what that end was.
@@ -501,6 +547,7 @@ impl FsAdmin {
                 rows_read,
                 rows_written,
                 output_segments,
+                ..
             }) => {
                 // The manifest moved, so every cached view of this namespace
                 // is one manifest behind.

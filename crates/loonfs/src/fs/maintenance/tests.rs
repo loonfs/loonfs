@@ -7,6 +7,7 @@
 //! through [`FsAdmin::starve_reorganization_row_budget`]. Everything else —
 //! planning, admission, the executor, the finalizer — is the shipped path.
 
+use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
     CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsWriter,
     MaintenancePlan, MetadataCompactionOutcome, MetadataMaintenanceOptions, MoveOptions,
@@ -40,9 +41,12 @@ const BINDINGS: MetadataFamilyGroup = MetadataFamilyGroup::Bindings;
 /// admin is the contrast — the same store, but attached to the writer's
 /// runner, so its steps plan under the amortizing policy a writer's own
 /// upkeep runs under.
-async fn manual_deployment(root: &std::path::Path) -> (FsWriter, FsAdmin, FsAdmin) {
+async fn manual_deployment(
+    root: &std::path::Path,
+) -> (FsWriter, FsAdmin, FsAdmin, Arc<DefaultMetricsRecorder>) {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = FsWriter::builder_with_store(Arc::clone(&store))
         .writer_id("manual-writer")
         .background_work(FsBackgroundWork::ManualOnly)
@@ -51,6 +55,7 @@ async fn manual_deployment(root: &std::path::Path) -> (FsWriter, FsAdmin, FsAdmi
         .expect("build the writer");
     let standalone = FsAdmin::builder_with_store(Arc::clone(&store))
         .actor_id("standalone-admin")
+        .metrics_recorder(recorder.clone())
         .build()
         .await
         .expect("build the standalone admin");
@@ -60,7 +65,23 @@ async fn manual_deployment(root: &std::path::Path) -> (FsWriter, FsAdmin, FsAdmi
         .build()
         .await
         .expect("build the writer-backed admin");
-    (writer, standalone, scheduled)
+    (writer, standalone, scheduled, recorder)
+}
+
+fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
+    let entry = snapshot
+        .by_name(name)
+        .find(|entry| entry.labels == labels)
+        .expect("the counter must be registered with these labels");
+    assert!(
+        matches!(entry.value, MetricValue::Counter(_)),
+        "expected a counter, found {:?}",
+        entry.value
+    );
+    let MetricValue::Counter(value) = entry.value else {
+        return 0;
+    };
+    value
 }
 
 fn metadata_plan() -> MaintenancePlan {
@@ -267,7 +288,7 @@ async fn bindings_runs<S: ObjectStore + ?Sized>(
 #[tokio::test]
 async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available() {
     let temp_dir = tempdir().expect("tempdir");
-    let (writer, standalone, scheduled) = manual_deployment(temp_dir.path()).await;
+    let (writer, standalone, scheduled, recorder) = manual_deployment(temp_dir.path()).await;
     let explicit = namespace_id("explicit");
     let automatic = namespace_id("automatic");
     for namespace in [&explicit, &automatic] {
@@ -332,6 +353,27 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         "the rebuild drops the churn below the retention floor: {rows_before} rows became \
          {rows_after}"
     );
+
+    let snapshot = recorder.snapshot();
+    assert_eq!(
+        counter(
+            &snapshot,
+            "loonfs.maintenance.compactions",
+            &[("outcome", "completed")],
+        ),
+        1,
+    );
+    for (name, direction) in [
+        ("loonfs.maintenance.compaction_rows", "input"),
+        ("loonfs.maintenance.compaction_rows", "output"),
+        ("loonfs.maintenance.compaction_bytes", "input"),
+        ("loonfs.maintenance.compaction_bytes", "output"),
+    ] {
+        assert!(
+            counter(&snapshot, name, &[("direction", direction)]) > 0,
+            "`{name}` must report nonzero `{direction}` work"
+        );
+    }
 }
 
 /// A standalone bounded step reports the compaction it cannot run, and the
@@ -343,7 +385,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
 #[tokio::test]
 async fn a_standalone_step_reports_the_compaction_the_explicit_call_runs() {
     let temp_dir = tempdir().expect("tempdir");
-    let (writer, standalone, _scheduled) = manual_deployment(temp_dir.path()).await;
+    let (writer, standalone, _scheduled, _recorder) = manual_deployment(temp_dir.path()).await;
     let namespace = namespace_id("manual");
     namespace_with_a_frozen_base(&writer, &standalone, &namespace).await;
     let store = LocalFsStore::new(temp_dir.path()).expect("create local-fs store");
