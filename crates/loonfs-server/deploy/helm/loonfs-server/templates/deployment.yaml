@@ -35,8 +35,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      # The shutdown drains and settles with no timeout of its own, and one
-      # degraded object-store operation runs for about six minutes.
+      # The kubelet grace outlasts the server's drain deadline and settle time.
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       containers:
         - name: loonfs-server

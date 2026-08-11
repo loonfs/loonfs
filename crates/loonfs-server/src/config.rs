@@ -65,6 +65,14 @@ pub struct ServerConfig {
     /// the embedded default's latency bias.
     #[serde(default = "default_min_publish_interval_ms")]
     pub min_publish_interval_ms: u64,
+    /// Maximum time a metadata or query request may run, in milliseconds.
+    /// Streamed content and long-running operator work are exempt.
+    #[serde(default = "default_request_deadline_ms")]
+    pub request_deadline_ms: u64,
+    /// Maximum time graceful shutdown waits for accepted requests to drain,
+    /// in milliseconds. Writer and cache settlement continue afterward.
+    #[serde(default = "default_shutdown_deadline_ms")]
+    pub shutdown_deadline_ms: u64,
     /// Largest request body accepted for service-proxied upload content
     /// requests (`PUT .../uploads/{upload_id}/content`). Enforced
     /// incrementally while the body streams to the store, so it bounds the
@@ -135,6 +143,14 @@ pub struct TlsServerConfig {
 
 fn default_min_publish_interval_ms() -> u64 {
     1_000
+}
+
+fn default_request_deadline_ms() -> u64 {
+    60_000
+}
+
+fn default_shutdown_deadline_ms() -> u64 {
+    600_000
 }
 
 fn default_max_upload_bytes() -> u64 {
@@ -463,6 +479,18 @@ impl ServerConfig {
         if self.max_upload_bytes == 0 {
             return Err(ServerConfigError::InvalidField {
                 field: "max_upload_bytes",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.request_deadline_ms == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "request_deadline_ms",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.shutdown_deadline_ms == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "shutdown_deadline_ms",
                 reason: "must be greater than zero".to_owned(),
             });
         }
@@ -1132,6 +1160,41 @@ root = "/tmp/loonfs-server"
         );
         let error = load_server_config(&path).expect_err("zero upload limit");
         assert_invalid_field(error, "max_upload_bytes");
+    }
+
+    #[test]
+    fn request_and_shutdown_deadlines_default_and_reject_zero() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let config = load_server_config(&path).expect("valid config");
+        assert_eq!(config.request_deadline_ms, 60_000);
+        assert_eq!(config.shutdown_deadline_ms, 600_000);
+
+        for field in ["request_deadline_ms", "shutdown_deadline_ms"] {
+            let path = write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+{field} = 0
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+            let error = load_server_config(&path).expect_err("zero deadline must be rejected");
+            assert_invalid_field(error, field);
+        }
     }
 
     #[test]

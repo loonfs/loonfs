@@ -40,6 +40,9 @@ pub enum ErrorKind {
     /// precondition (base revision, expected head) no longer holds. Re-read
     /// fresh state, re-plan, and retry if desired.
     Conflict,
+    /// The server cancelled work that exceeded its configured request
+    /// deadline. Reconcile any mutation before deciding whether to retry.
+    DeadlineExceeded,
     /// The system is temporarily unavailable. Back off and retry.
     Unavailable,
     /// The operation may have committed: its acknowledgment was lost. Retry
@@ -147,6 +150,7 @@ error_codes! {
     CommitQueueFull => "commit_queue_full",
     ServerBusy => "server_busy",
     ShuttingDown => "shutting_down",
+    DeadlineExceeded => "deadline_exceeded",
     CheckpointUnavailable => "checkpoint_unavailable",
     MaintenanceRequired => "maintenance_required",
     UploadNotFound => "upload_not_found",
@@ -186,6 +190,7 @@ impl ErrorCode {
             ErrorCode::MethodNotAllowed => ErrorKind::MethodNotAllowed,
             ErrorCode::NamespaceDeleted => ErrorKind::Gone,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
+            ErrorCode::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             // `index_lagging` clears once maintenance catches the index up,
             // so it is served as retryable unavailability.
             ErrorCode::CommitQueueFull

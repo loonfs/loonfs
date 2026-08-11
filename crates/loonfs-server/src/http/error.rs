@@ -138,6 +138,7 @@ fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
         ErrorKind::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
         ErrorKind::Gone => StatusCode::GONE,
         ErrorKind::AlreadyExists | ErrorKind::Conflict => StatusCode::CONFLICT,
+        ErrorKind::DeadlineExceeded => StatusCode::REQUEST_TIMEOUT,
         ErrorKind::NotSupported => StatusCode::NOT_IMPLEMENTED,
         ErrorKind::Unavailable | ErrorKind::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
         ErrorKind::DataCorruption | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,

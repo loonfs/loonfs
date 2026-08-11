@@ -581,6 +581,8 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         },
         maintenance: MaintenanceMode::Automatic,
         min_publish_interval_ms: 0,
+        request_deadline_ms: 60_000,
+        shutdown_deadline_ms: 600_000,
         max_upload_bytes: 1024 * 1024,
         max_download_bytes: 1024 * 1024,
         max_concurrent_uploads: 2,

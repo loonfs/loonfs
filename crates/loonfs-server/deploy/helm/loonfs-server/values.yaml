@@ -40,10 +40,8 @@ service:
   # Annotations for the Service.
   annotations: {}
 
-# How long the kubelet waits after SIGTERM before it sends SIGKILL. The
-# server's shutdown has no timeout of its own and one degraded object-store
-# operation runs for about six minutes, so the default clears that case.
-terminationGracePeriodSeconds: 600
+# The kubelet's grace must outlast shutdown_deadline_ms (default 600s) plus settle time.
+terminationGracePeriodSeconds: 660
 
 localCache:
   # Mount an emptyDir at /var/cache/loonfs for the server's disk cache. The

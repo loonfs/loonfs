@@ -17,8 +17,10 @@ use loonfs_api::NamespaceId;
 use loonfs_grep::{GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use std::ffi::OsString;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
@@ -476,7 +478,7 @@ pub async fn serve_with_shutdown(
 /// The one serving body, over whichever listener the deployment configured.
 /// Plaintext and TLS differ in what `accept` returns and in nothing else:
 /// the same router, the same graceful shutdown, and the same writer settles
-/// after the listener has drained.
+/// after the listener drains or reaches its deadline.
 pub(super) async fn serve_on<L>(
     listener: L,
     config: ServerConfig,
@@ -485,8 +487,17 @@ pub(super) async fn serve_on<L>(
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
+    let shutdown_deadline_ms = config.shutdown_deadline_ms;
     let (router, writer, local_cache) = app(config).await?;
-    serve_and_settle(listener, router, writer, local_cache, shutdown).await
+    serve_and_settle(
+        listener,
+        router,
+        writer,
+        local_cache,
+        shutdown_deadline_ms,
+        shutdown,
+    )
+    .await
 }
 
 /// Serves until the shutdown trigger fires, then settles what this process
@@ -499,17 +510,52 @@ pub(super) async fn serve_and_settle<L>(
     router: Router,
     writer: FsWriter,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
+    shutdown_deadline_ms: u64,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError>
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(ServeError::Serve)?;
-    // Shut down the writer only after the listener drains, so accepted requests
-    // are not rejected by closing mutation admission. Task panics surface here.
+    let (drain_started_tx, mut drain_started_rx) = tokio::sync::oneshot::channel();
+    let shutdown = async move {
+        shutdown.await;
+        let _ = drain_started_tx.send(());
+    };
+    let mut server = Box::pin(
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .into_future(),
+    );
+    // The budget starts when shutdown fires. It does not limit server uptime.
+    let served = tokio::select! {
+        result = server.as_mut() => result,
+        drain_started = &mut drain_started_rx => {
+            if drain_started.is_err() {
+                server.as_mut().await
+            } else {
+                match tokio::time::timeout(
+                    Duration::from_millis(shutdown_deadline_ms),
+                    server.as_mut(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            shutdown_deadline_ms,
+                            "graceful drain deadline passed; remaining requests are abandoned"
+                        );
+                        Ok(())
+                    }
+                }
+            }
+        }
+    };
+    drop(server);
+    served.map_err(ServeError::Serve)?;
+    // Shut down the writer after the drain finishes or its deadline passes.
+    // Accepted requests keep mutation admission through the drain window.
+    // Task panics surface here.
     let settled = writer.shutdown().await.map_err(ServeError::Shutdown);
     // Close the cache after writer shutdown, even when writer shutdown fails.
     // Closing flushes retained memory entries to disk. If both steps fail, report
