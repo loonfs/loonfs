@@ -282,6 +282,8 @@ pub(super) struct MetadataMergeResult {
     pub(super) output_segments: Vec<MetadataFileRef>,
     pub(super) rows_read: u64,
     pub(super) rows_written: u64,
+    pub(super) input_bytes: u64,
+    pub(super) output_bytes: u64,
     pub(super) rows_written_by_family: BTreeMap<MetadataTableFamily, u64>,
     /// Point reads into the snapshot's unbind family, one per reverse bind
     /// row at or below the frozen floor. Zero for a merge that resolves the
@@ -401,6 +403,8 @@ pub enum MetadataCompactionJobOutcome {
         manifest_id: ManifestId,
         rows_read: u64,
         rows_written: u64,
+        input_bytes: u64,
+        output_bytes: u64,
         output_segments: usize,
     },
     /// The cancellation token was set. The manifest never moved and the
@@ -529,6 +533,8 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
 
     let rows_read = result.rows_read;
     let rows_written = result.rows_written;
+    let input_bytes = result.input_bytes;
+    let output_bytes = result.output_bytes;
     let output_segments = result.output_segments.len();
     match finalize_metadata_compaction(
         store,
@@ -555,6 +561,8 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
                 families = ?spec.families(),
                 rows_read,
                 rows_written,
+                input_bytes,
+                output_bytes,
                 output_segments,
                 manifest_id = manifest_id.0,
                 "streaming metadata compaction published"
@@ -563,6 +571,8 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
                 manifest_id,
                 rows_read,
                 rows_written,
+                input_bytes,
+                output_bytes,
                 output_segments,
             })
         }
@@ -936,6 +946,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         reverse_binds: ReverseBindResolution,
         input_rows: Option<u64>,
     ) -> Self {
+        let input_bytes = snapshot
+            .iter()
+            .flat_map(|run| group_run_descriptors(run, group))
+            .map(metadata_segment_bytes)
+            .sum();
         Self {
             store,
             namespace_id,
@@ -950,7 +965,10 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             probe_cache: MetadataTableCache::new(MetadataTableCacheConfig {
                 max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
             }),
-            result: MetadataMergeResult::default(),
+            result: MetadataMergeResult {
+                input_bytes,
+                ..MetadataMergeResult::default()
+            },
             canonical_digest: RowDigest::default(),
             index_digest: RowDigest::default(),
             last_input_key_by_family: BTreeMap::new(),
@@ -1140,6 +1158,10 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
 
         for writer in writers.into_values() {
             let segments = writer.finish(self.store, self.namespace_id).await?;
+            self.result.output_bytes = self
+                .result
+                .output_bytes
+                .saturating_add(segments.iter().map(metadata_segment_bytes).sum());
             self.result.output_segments.extend(segments);
         }
         Ok(ClusterEnd::Merged)
@@ -1384,6 +1406,14 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.index_digest.spell(),
         )))
     }
+}
+
+/// Returns the immutable segment object's stored byte length.
+fn metadata_segment_bytes(descriptor: &MetadataFileRef) -> u64 {
+    descriptor
+        .index_block
+        .offset
+        .saturating_add(u64::from(descriptor.index_block.stored_len))
 }
 
 /// An order-independent digest of the rows one family was written.

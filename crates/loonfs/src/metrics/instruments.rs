@@ -22,6 +22,56 @@ use crate::metrics::LATENCY_SECONDS_BOUNDARIES;
 use crate::{GcResponse, MaintenanceJobId, MaintenanceStepConclusion};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+/// The closed outcome vocabulary for a finished streaming compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionOutcome {
+    Completed,
+    Failed,
+    Superseded,
+    Cancelled,
+    Fenced,
+}
+
+impl CompactionOutcome {
+    const ALL: [Self; 5] = [
+        Self::Completed,
+        Self::Failed,
+        Self::Superseded,
+        Self::Cancelled,
+        Self::Fenced,
+    ];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Superseded => "superseded",
+            Self::Cancelled => "cancelled",
+            Self::Fenced => "fenced",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Completed => 0,
+            Self::Failed => 1,
+            Self::Superseded => 2,
+            Self::Cancelled => 3,
+            Self::Fenced => 4,
+        }
+    }
+}
+
+/// Logical input and output totals from one finished merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompactionTotals {
+    pub(crate) input_rows: u64,
+    pub(crate) output_rows: u64,
+    pub(crate) input_bytes: u64,
+    pub(crate) output_bytes: u64,
+}
 
 /// One reclaimable family: its label, and the count a pass reports for it.
 type GcCategory = (&'static str, fn(&GcResponse) -> u64);
@@ -149,6 +199,40 @@ impl RuntimeInstruments {
             .compactions
             .queued
             .set(i64::try_from(queued).unwrap_or(i64::MAX));
+    }
+
+    /// Reports one finished streaming compaction and any merge it completed.
+    pub(crate) fn compaction_finished(
+        &self,
+        outcome: CompactionOutcome,
+        elapsed: Duration,
+        totals: Option<CompactionTotals>,
+    ) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        let outcome_instruments = &installed.compactions.outcomes[outcome.index()];
+        outcome_instruments.count.increment(1);
+        outcome_instruments.seconds.record(elapsed.as_secs_f64());
+        let Some(totals) = totals else {
+            return;
+        };
+        installed
+            .compactions
+            .input_rows
+            .increment(totals.input_rows);
+        installed
+            .compactions
+            .output_rows
+            .increment(totals.output_rows);
+        installed
+            .compactions
+            .input_bytes
+            .increment(totals.input_bytes);
+        installed
+            .compactions
+            .output_bytes
+            .increment(totals.output_bytes);
     }
 
     /// Reports the candidates a namespace has admitted but not yet taken.
@@ -445,15 +529,51 @@ impl MaintenanceJobInstruments {
     }
 }
 
-/// The two numbers that describe this process's streaming metadata
-/// compactions: how many are running, and how many are waiting to.
+/// The gauges and durable totals for this process's streaming compactions.
 struct CompactionInstruments {
     running: Arc<dyn GaugeHandle>,
     queued: Arc<dyn GaugeHandle>,
+    outcomes: [CompactionOutcomeInstruments; 5],
+    input_rows: Arc<dyn CounterHandle>,
+    output_rows: Arc<dyn CounterHandle>,
+    input_bytes: Arc<dyn CounterHandle>,
+    output_bytes: Arc<dyn CounterHandle>,
+}
+
+struct CompactionOutcomeInstruments {
+    count: Arc<dyn CounterHandle>,
+    seconds: Arc<dyn HistogramHandle>,
 }
 
 impl CompactionInstruments {
     fn register(recorder: &dyn MetricsRecorder) -> Self {
+        let outcomes = CompactionOutcome::ALL.map(|outcome| CompactionOutcomeInstruments {
+            count: recorder.register_counter(
+                "loonfs.maintenance.compactions",
+                "Streaming metadata compactions by outcome.",
+                &[("outcome", outcome.as_str())],
+            ),
+            seconds: recorder.register_histogram(
+                "loonfs.maintenance.compaction_seconds",
+                "Duration of a finished streaming metadata compaction in seconds",
+                &[("outcome", outcome.as_str())],
+                LATENCY_SECONDS_BOUNDARIES,
+            ),
+        });
+        let rows = |direction: &'static str| {
+            recorder.register_counter(
+                "loonfs.maintenance.compaction_rows",
+                "Rows processed by streaming metadata compactions",
+                &[("direction", direction)],
+            )
+        };
+        let bytes = |direction: &'static str| {
+            recorder.register_counter(
+                "loonfs.maintenance.compaction_bytes",
+                "Bytes processed by streaming metadata compactions",
+                &[("direction", direction)],
+            )
+        };
         Self {
             running: recorder.register_gauge(
                 "loonfs.maintenance.compactions_running",
@@ -466,6 +586,11 @@ impl CompactionInstruments {
                  process permit",
                 &[],
             ),
+            outcomes,
+            input_rows: rows("input"),
+            output_rows: rows("output"),
+            input_bytes: bytes("input"),
+            output_bytes: bytes("output"),
         }
     }
 }
@@ -867,6 +992,71 @@ mod tests {
                 &[("job", "metadata")],
             ),
             0
+        );
+    }
+
+    #[test]
+    fn compaction_instruments_register_the_closed_vocabularies() {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let instruments = RuntimeInstruments::new(Some(recorder.clone()));
+
+        instruments.compaction_finished(
+            CompactionOutcome::Completed,
+            Duration::from_millis(25),
+            Some(CompactionTotals {
+                input_rows: 20,
+                output_rows: 10,
+                input_bytes: 2_000,
+                output_bytes: 1_000,
+            }),
+        );
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(
+            snapshot.by_name("loonfs.maintenance.compactions").count(),
+            5
+        );
+        assert_eq!(
+            snapshot
+                .by_name("loonfs.maintenance.compaction_seconds")
+                .count(),
+            5
+        );
+        assert_eq!(
+            snapshot
+                .by_name("loonfs.maintenance.compaction_rows")
+                .count(),
+            2
+        );
+        assert_eq!(
+            snapshot
+                .by_name("loonfs.maintenance.compaction_bytes")
+                .count(),
+            2
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "loonfs.maintenance.compactions",
+                &[("outcome", "completed")],
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "loonfs.maintenance.compaction_rows",
+                &[("direction", "input")],
+            ),
+            20
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "loonfs.maintenance.compaction_bytes",
+                &[("direction", "output")],
+            ),
+            1_000
         );
     }
 
