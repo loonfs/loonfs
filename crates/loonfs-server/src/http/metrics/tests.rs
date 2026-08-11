@@ -150,9 +150,25 @@ fn scrape_time_gauges_carry_every_runtime_cache_counter() {
             .lines()
             .filter(|line| line.starts_with("# TYPE"))
             .count(),
-        20,
-        "eighteen cache counters and the two permit pools"
+        if cfg!(target_os = "linux") { 21 } else { 20 },
+        "eighteen cache counters, the two permit pools, and Linux RSS where available"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scrape_reports_positive_process_resident_bytes() {
+    let mut rendered = String::new();
+    render_scrape_gauges(&mut rendered, &RuntimeCacheStats::default(), None, 0, 0);
+
+    let resident_bytes = rendered
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("loonfs_process_resident_bytes ")
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .expect("a Linux scrape should render process RSS");
+    assert!(resident_bytes > 0);
 }
 
 /// The whole reason the label is the matched template: a route seen twice is

@@ -1,11 +1,10 @@
 //! Fetching, decoding, and cache publication for SST index and filter blocks.
 //!
-//! A load consults three places in order: the per-view memo, the decoded
-//! block cache, and the node-local cache of the same blocks in their stored
-//! form. Only when all three come up empty does object storage answer, and
-//! what that one GET produced is offered back to the local tier section by
-//! section. The data-block loads in [`super::data_block_load`] reach the
-//! local tier through the same two helpers.
+//! Index, filter, and point data loads consult the per-view memo, the decoded
+//! block cache, and the node-local cache of stored bytes. Their fetched
+//! sections, including whole-small-segment loads, are offered to the local
+//! tier. Wide data spans skip that tier because its awaited point reads lose
+//! the coalescing provided by ranged store GETs.
 
 use super::block_load::SessionBlockMemo;
 use super::cache::{
