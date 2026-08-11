@@ -17,6 +17,15 @@ pub(crate) const CONFIG_VERSION: u32 = 1;
 /// Environment override for the config file, and the escape hatch a shell
 /// session reaches for when the default file is one the CLI will not read.
 pub(crate) const CONFIG_PATH_ENV: &str = "LOONFS_CONFIG";
+pub(crate) const NAMESPACE_ENV: &str = "LOONFS_NAMESPACE";
+
+/// A blank environment value carries no usable setting, so treat it as unset
+/// rather than passing it on to validation.
+pub(crate) fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 /// Directory under `$XDG_CONFIG_HOME`.
@@ -452,8 +461,8 @@ pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig, CliError>
     Ok(load_config_if_exists(path)?.unwrap_or_default())
 }
 
-pub(crate) fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliError> {
-    let _lock = lock_config(path)?;
+fn write_config_locked(path: &Path, config: &CliConfig) -> Result<(), CliError> {
+    // The caller already holds the config lock, which is not reentrant.
     config.validate()?;
     let contents = toml::to_string_pretty(config)
         .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
@@ -480,18 +489,11 @@ pub(crate) fn mutate_config<T>(
     let _lock = lock_config(path)?;
     let mut config = load_or_default_config(path)?;
     let value = mutate(&mut config)?;
-    config.validate()?;
-    let contents = toml::to_string_pretty(&config)
-        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
-    persist_config_contents(path, &contents)?;
+    write_config_locked(path, &config)?;
     Ok(value)
 }
 
-struct ConfigLock {
-    _file: File,
-}
-
-fn lock_config(path: &Path) -> Result<ConfigLock, CliError> {
+fn lock_config(path: &Path) -> Result<File, CliError> {
     let parent = path.parent().ok_or_else(|| {
         CliError::invalid_config(format!(
             "config path has no parent directory: {}",
@@ -517,16 +519,12 @@ fn lock_config(path: &Path) -> Result<ConfigLock, CliError> {
     fs4::fs_std::FileExt::lock_exclusive(&file).map_err(|err| {
         CliError::invalid_config(format!("failed to lock `{}`: {err}", lock_path.display()))
     })?;
-    Ok(ConfigLock { _file: file })
+    Ok(file)
 }
 
 fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> {
-    let parent = path.parent().ok_or_else(|| {
-        CliError::invalid_config(format!(
-            "config path has no parent directory: {}",
-            path.display()
-        ))
-    })?;
+    // The caller's config lock already proved that this parent directory exists.
+    let parent = path.parent().expect("locked config path has a parent");
     let mut temp_file = tempfile::Builder::new()
         .prefix(".loonfs-config-")
         .suffix(".tmp")
@@ -554,6 +552,8 @@ fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> 
             err.error
         ))
     })?;
+    // Rename durability is best-effort because some filesystems cannot sync
+    // directories, and the rename itself has already succeeded.
     if let Ok(directory) = File::open(parent) {
         let _ = directory.sync_all();
     }

@@ -10,8 +10,8 @@ use crate::args::{
     CommandKind, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior,
 };
 use crate::config::{
-    load_config, load_config_for_repair, load_config_if_exists, mutate_config, save_config,
-    save_config_table, ConfigLoad, ProfileConfig,
+    load_config, load_config_for_repair, load_config_if_exists, mutate_config, save_config_table,
+    ConfigLoad, ProfileConfig,
 };
 use crate::error::CliError;
 use crate::profiles::{
@@ -153,18 +153,14 @@ fn run_profile_delete(
     let loaded = load_config_for_repair(config_path)
         .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
     let removed = match loaded {
-        ConfigLoad::Valid(mut config) => {
-            let removed = delete_profile(&mut config, name)
-                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-            save_config(config_path, &config).map_err(|error| {
-                fail(
-                    kind,
-                    Some(name.to_owned()),
-                    Some(removed.mode.clone()),
-                    error,
-                )
-            })?;
-            removed
+        ConfigLoad::Valid(_) => {
+            let mut removed_mode = None;
+            mutate_config(config_path, |config| {
+                let removed = delete_profile(config, name)?;
+                removed_mode = Some(removed.mode.clone());
+                Ok(removed)
+            })
+            .map_err(|error| fail(kind, Some(name.to_owned()), removed_mode, error))?
         }
         ConfigLoad::Degraded { mut table, .. } => {
             let removed = delete_profile_in_table(&mut table, name)
@@ -198,11 +194,9 @@ fn run_profile_use(
     let loaded = load_config_for_repair(config_path)
         .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
     match loaded {
-        ConfigLoad::Valid(mut config) => {
-            make_default_profile(&mut config, name)
-                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-            save_config(config_path, &config)
-                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+        ConfigLoad::Valid(_) => {
+            mutate_config(config_path, |config| make_default_profile(config, name))
+                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?
         }
         ConfigLoad::Degraded { mut table, .. } => {
             make_default_profile_in_table(&mut table, name)

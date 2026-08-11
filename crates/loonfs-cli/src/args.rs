@@ -1,7 +1,7 @@
 //! The clap argument grammar for every `loonfs` command.
 
 use crate::progress::ProgressMode;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -22,6 +22,16 @@ pub(crate) struct Cli {
     pub no_progress: bool,
     #[command(subcommand)]
     pub command: Command,
+}
+
+pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
+    if cli.json && matches!(&cli.command, Command::Ls(args) if args.jsonl) {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "the argument '--jsonl' cannot be used with '--json'",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Subcommand)]
@@ -380,7 +390,7 @@ pub(crate) struct FilesystemLsArgs {
     #[arg(long)]
     pub all: bool,
     /// Print one JSON entry per line as pages arrive.
-    #[arg(long, conflicts_with = "json")]
+    #[arg(long)]
     pub jsonl: bool,
 }
 
