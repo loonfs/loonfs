@@ -48,6 +48,8 @@ Selectors
   Commands that address one namespace also accept:
     --namespace <name>
       Namespace to run against, defaulting to the profile's default
+    LOONFS_NAMESPACE=<name>
+      Environment default; --namespace wins, and the profile default follows
 
   Commands that commit (put, mkdir, rm, mv, cp, restore, undelete) accept:
     -m, --message <message>
@@ -80,6 +82,8 @@ Config file location
     3. $XDG_CONFIG_HOME/loonfs/config.toml, when XDG_CONFIG_HOME names an
        absolute directory
     4. ~/.loonfs/config.toml
+  Namespace selection uses --namespace, then LOONFS_NAMESPACE=<name>, then
+  the profile default.
 
   A path given to --config or LOONFS_CONFIG is the file this invocation
   uses whether or not it is there yet, and `loonfs init` creates the

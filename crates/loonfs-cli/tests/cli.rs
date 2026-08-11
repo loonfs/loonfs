@@ -3157,6 +3157,69 @@ fn filesystem_requires_default_namespace_when_omitted() {
 }
 
 #[test]
+fn namespace_resolution_uses_environment_before_profile_default() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "profile-default"]));
+    assert_success(&harness.run(&["namespace", "create", "from-environment"]));
+    assert_success(&harness.run(&["use", "profile-default"]));
+
+    let output = harness.run_with_env(
+        &[("LOONFS_NAMESPACE", "from-environment")],
+        &["--json", "changes"],
+    );
+
+    assert_success(&output);
+    assert_eq!(json_data(&output)["namespace_id"], "from-environment");
+}
+
+#[test]
+fn namespace_resolution_uses_flag_before_environment() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "from-environment"]));
+    assert_success(&harness.run(&["namespace", "create", "from-flag"]));
+
+    let output = harness.run_with_env(
+        &[("LOONFS_NAMESPACE", "from-environment")],
+        &["--json", "changes", "--namespace", "from-flag"],
+    );
+
+    assert_success(&output);
+    assert_eq!(json_data(&output)["namespace_id"], "from-flag");
+}
+
+#[test]
+fn namespace_resolution_gives_invalid_environment_the_flag_error_code() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+
+    let from_environment =
+        harness.run_with_env(&[("LOONFS_NAMESPACE", "bad/name")], &["--json", "changes"]);
+    let from_flag = harness.run(&["--json", "changes", "--namespace", "bad/name"]);
+
+    assert_failure(&from_environment);
+    assert_failure(&from_flag);
+    assert_eq!(
+        json_error(&from_environment)["code"],
+        json_error(&from_flag)["code"]
+    );
+}
+
+#[test]
+fn namespace_resolution_ignores_empty_environment() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "profile-default"]));
+    assert_success(&harness.run(&["use", "profile-default"]));
+
+    let output = harness.run_with_env(&[("LOONFS_NAMESPACE", "")], &["--json", "changes"]);
+
+    assert_success(&output);
+    assert_eq!(json_data(&output)["namespace_id"], "profile-default");
+}
+
+#[test]
 fn embedded_profile_missing_namespace_reports_user_facing_message() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
@@ -5089,15 +5152,15 @@ impl Harness {
         command.args(args).output().expect("run loonfs")
     }
 
-    /// Every invocation starts from the temp home with the config
-    /// environment cleared, so a developer's own `XDG_CONFIG_HOME` or
-    /// `LOONFS_CONFIG` can never decide which file a test reads.
+    /// Every invocation starts from the temp home with CLI selection
+    /// environment cleared, so a developer's shell cannot affect a test.
     fn command(&self) -> Command {
         let mut command = Command::new(loon_binary_path());
         command
             .env("HOME", &self.home_dir)
             .env_remove("XDG_CONFIG_HOME")
-            .env_remove("LOONFS_CONFIG");
+            .env_remove("LOONFS_CONFIG")
+            .env_remove("LOONFS_NAMESPACE");
         command
     }
 
@@ -5116,6 +5179,7 @@ impl Harness {
             .env("HOME", &self.home_dir)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("LOONFS_CONFIG")
+            .env_remove("LOONFS_NAMESPACE")
             .output()
             .expect("replay the printed command")
     }

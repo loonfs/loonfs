@@ -6,7 +6,7 @@ use crate::args::{
     CommandKind, CurrentArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
     NamespaceForkArgs, NamespaceUseArgs, RuntimeBehavior,
 };
-use crate::config::save_config;
+use crate::config::mutate_config;
 use crate::error::CliError;
 use crate::profiles::{default_namespace, set_default_namespace};
 use crate::prompt::prompt_line;
@@ -158,7 +158,7 @@ pub(crate) async fn run_namespace_use(
     args: NamespaceUseArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let mut loaded = load_cli_config(config_path)
+    let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let resolved =
         resolve_target_profile_from_config(&loaded.config, explicit_profile, args.profile.no_retry)
@@ -174,10 +174,10 @@ pub(crate) async fn run_namespace_use(
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
-    set_default_namespace(&mut loaded.config, &resolved.profile_name, &args.namespace)
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
-    save_config(&loaded.path, &loaded.config)
-        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+    mutate_config(&loaded.path, |config| {
+        set_default_namespace(config, &resolved.profile_name, &args.namespace)
+    })
+    .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     Ok(CommandOutput {
         kind,

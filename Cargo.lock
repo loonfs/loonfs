@@ -1413,6 +1413,7 @@ dependencies = [
  "bytes",
  "clap",
  "dialoguer",
+ "fs4",
  "futures",
  "hostname",
  "http",

@@ -39,6 +39,8 @@ pub(crate) enum Command {
         command: NamespaceCommand,
     },
     /// Set the default namespace for a profile.
+    /// This sets the interactive default; concurrent automation should pass
+    /// `--namespace` or set `LOONFS_NAMESPACE`.
     Use(NamespaceUseArgs),
     /// Show the active profile and its default namespace.
     Current(CurrentArgs),
@@ -306,6 +308,8 @@ pub(crate) struct ProfileSelectorArgs {
 pub(crate) struct TargetSelectorArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    /// Namespace to run against. Precedence is `--namespace`,
+    /// `LOONFS_NAMESPACE`, then the profile default.
     #[arg(long)]
     pub namespace: Option<String>,
 }

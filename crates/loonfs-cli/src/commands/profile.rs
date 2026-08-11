@@ -10,8 +10,8 @@ use crate::args::{
     CommandKind, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior,
 };
 use crate::config::{
-    load_config, load_config_for_repair, load_config_if_exists, load_or_default_config,
-    save_config, save_config_table, ConfigLoad, ProfileConfig,
+    load_config, load_config_for_repair, load_config_if_exists, mutate_config, save_config,
+    save_config_table, ConfigLoad, ProfileConfig,
 };
 use crate::error::CliError;
 use crate::profiles::{
@@ -75,10 +75,7 @@ fn run_profile_create(
             &AmbientCredentials::from_env(),
             runtime,
         )?;
-        let mut config = load_or_default_config(config_path)?;
-        let (profile_name, redacted) = add_profile(&mut config, &name, profile)?;
-        save_config(config_path, &config)?;
-        Ok((profile_name, redacted))
+        mutate_config(config_path, |config| add_profile(config, &name, profile))
     })()
     .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
 
@@ -98,8 +95,12 @@ fn run_profile_update(
 ) -> Result<CommandOutput, CommandFailure> {
     let name = args.name.clone();
     let result = (|| -> Result<(String, ProfileConfig), CliError> {
-        let mut config = load_config(config_path)?;
-        let existing = config
+        // The update is gathered before the lock: the interactive editor can
+        // sit at a prompt for minutes, and holding the config lock across it
+        // would block every other writer. `update_profile` re-checks the
+        // profile against the fresh config under the lock, so a profile
+        // deleted meanwhile still fails cleanly.
+        let existing = load_config(config_path)?
             .profiles
             .get(&name)
             .ok_or_else(|| CliError::profile_not_found(&name))?
@@ -115,9 +116,7 @@ fn run_profile_update(
             ));
         };
 
-        let (profile_name, redacted) = update_profile(&mut config, &name, updated)?;
-        save_config(config_path, &config)?;
-        Ok((profile_name, redacted))
+        mutate_config(config_path, |config| update_profile(config, &name, updated))
     })()
     .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
 

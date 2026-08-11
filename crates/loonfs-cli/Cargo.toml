@@ -16,6 +16,7 @@ path = "src/main.rs"
 bytes.workspace = true
 clap.workspace = true
 futures.workspace = true
+fs4.workspace = true
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 hostname = "0.4"
 http.workspace = true

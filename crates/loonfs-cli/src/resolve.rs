@@ -65,6 +65,13 @@ pub(crate) fn resolve_namespace(
             namespace: parse_namespace_id(namespace)?,
         });
     }
+    if let Ok(namespace) = std::env::var("LOONFS_NAMESPACE") {
+        if !namespace.trim().is_empty() {
+            return Ok(ResolvedNamespace {
+                namespace: parse_namespace_id(&namespace)?,
+            });
+        }
+    }
     let (profile_name, profile) = resolve_profile(config, explicit_profile)?;
     let namespace =
         default_namespace(profile).ok_or_else(|| CliError::no_default_namespace(profile_name))?;
