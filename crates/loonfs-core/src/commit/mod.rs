@@ -15,7 +15,6 @@ mod materialize;
 mod metadata_overlay;
 mod ops;
 mod plan;
-mod prepared;
 mod publish;
 mod publish_error;
 mod validate;
@@ -28,15 +27,13 @@ pub(crate) use self::ir::CommitIr;
 pub use self::materialize::MaterializedCommitDelta;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
 pub(crate) use self::ops::{CommitOp, CommitPrecondition, PlannedOp};
-pub(crate) use self::plan::ValidatedOp;
 pub use self::plan::{CommitPlan, ResolvedBinding};
-pub use self::prepared::CommitPrepareError;
-pub(crate) use self::prepared::PreparedCommit;
+pub(crate) use self::plan::{ValidatedCommitPlan, ValidatedOp};
 pub(crate) use self::publish::PreparedCommitHeadPublish;
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 pub use self::publish_error::CommitHeadPublishError;
 pub(crate) use self::validate::{
-    build_commit_plan_for_publish, validate_ops, OpValidationCursor,
-    PublishCommitValidationContext, PublishValidationView,
+    validate_commit_for_publish, validate_ops, OpValidationCursor, PublishCommitValidationContext,
+    PublishValidationView,
 };
 pub use self::validate_error::CommitValidationError;

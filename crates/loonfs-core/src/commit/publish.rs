@@ -183,6 +183,7 @@ fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHead
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit::CommitFingerprint;
     use loonfs_objectstore::keys::wal_segment as wal_segment_key;
 
     #[test]
@@ -244,6 +245,11 @@ mod tests {
         CommitPlan {
             namespace_id,
             commit_id: CommitId::parse("publish-plan").expect("valid commit id"),
+            writer_epoch: WriterEpoch(1),
+            message: None,
+            semantic_identity: CommitFingerprint::new_unchecked(
+                "v0:sha256:publish-plan".to_owned(),
+            ),
             apply_after_seq: ChangeSeq(assigned_seq.0.saturating_sub(1)),
             assigned_seq,
             validated_ops: Vec::new(),

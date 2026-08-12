@@ -5,8 +5,8 @@
 use super::reader::RECENT_SEGMENT_PREFETCH_CONCURRENCY;
 use super::*;
 use crate::commit::{
-    materialize_commit, wal_payload_from_materialized_commit, CommitFingerprint, CommitIr,
-    CommitOp, CommitPlan, MaterializedCommit, PlannedOp, PreparedCommit, ValidatedOp,
+    materialize_commit, wal_payload_from_materialized_commit, CommitFingerprint, CommitPlan,
+    MaterializedCommit, ValidatedOp,
 };
 use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
@@ -29,20 +29,12 @@ fn test_fingerprint() -> CommitFingerprint {
 #[tokio::test]
 async fn build_wal_record_payload_matches_segment_record_payload() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let request = CommitIr {
-        namespace_id: namespace_id.clone(),
-        commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![PlannedOp::unchecked(CommitOp::CreateDirectory {
-            child_inode_id: InodeId(2),
-            parent_inode_id: InodeId(1),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-        })],
-        message: Some("create docs".to_owned()),
-    };
     let plan = CommitPlan {
         namespace_id: namespace_id.clone(),
         commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
+        writer_epoch: WriterEpoch(1),
+        message: Some("create docs".to_owned()),
+        semantic_identity: test_fingerprint(),
         apply_after_seq: ChangeSeq(0),
         assigned_seq: ChangeSeq(1),
         validated_ops: vec![ValidatedOp::CreateDir {
@@ -56,8 +48,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
         }],
         resulting_next_inode_id: InodeId(3),
     };
-    let prepared = PreparedCommit::new(request, plan, test_fingerprint()).expect("prepare commit");
-    let record = materialize_commit(prepared, 4_200);
+    let record = materialize_commit(plan, 4_200);
 
     let segment = prepare_wal_segment(
         namespace_id,
@@ -66,7 +57,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
         std::slice::from_ref(&record),
     )
     .expect("prepare wal segment");
-    let payload = wal_payload_from_materialized_commit(&record).expect("build commit payload");
+    let payload = wal_payload_from_materialized_commit(&record);
 
     assert_eq!(payload, segment.envelope.payload.records[0]);
 }
@@ -433,20 +424,12 @@ fn materialized_create_directory(
     apply_after_seq: ChangeSeq,
     assigned_seq: ChangeSeq,
 ) -> MaterializedCommit {
-    let request = CommitIr {
-        namespace_id: namespace_id.clone(),
-        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![PlannedOp::unchecked(CommitOp::CreateDirectory {
-            child_inode_id: InodeId(2),
-            parent_inode_id: InodeId(1),
-            display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
-        })],
-        message: None,
-    };
     let plan = CommitPlan {
         namespace_id: namespace_id.clone(),
         commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+        writer_epoch: WriterEpoch(1),
+        message: None,
+        semantic_identity: test_fingerprint(),
         apply_after_seq,
         assigned_seq,
         validated_ops: vec![ValidatedOp::CreateDir {
@@ -461,8 +444,7 @@ fn materialized_create_directory(
         }],
         resulting_next_inode_id: InodeId(3),
     };
-    let prepared = PreparedCommit::new(request, plan, test_fingerprint()).expect("prepare commit");
-    materialize_commit(prepared, 4_200)
+    materialize_commit(plan, 4_200)
 }
 
 async fn assert_wal_chain_corruption_rejected(

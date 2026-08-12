@@ -62,6 +62,7 @@ impl CandidateAllocation {
         Ok(allocated)
     }
 
+    #[cfg(test)]
     pub(crate) fn resulting_next_inode_id(&self) -> InodeId {
         self.next
     }

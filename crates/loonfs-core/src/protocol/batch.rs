@@ -7,9 +7,9 @@ use super::candidates::{
 };
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
-    build_commit_plan_for_publish, materialize_commit, prepare_commit_head_publish,
-    publish_commit_head, wal_payload_from_materialized_commit, CommitHeadPublishError,
-    MaterializedCommit, PreparedCommit, PreparedCommitHeadPublish, PublishCommitValidationContext,
+    materialize_commit, prepare_commit_head_publish, publish_commit_head,
+    validate_commit_for_publish, wal_payload_from_materialized_commit, CommitHeadPublishError,
+    MaterializedCommit, PreparedCommitHeadPublish, PublishCommitValidationContext,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
@@ -146,18 +146,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 outcomes[index] = Some(Err(error));
                 continue;
             }
-            let plan = {
-                let span = tracing::debug_span!("loonfs.phase", phase = "build_commit_plan");
-                match build_commit_plan_for_publish(
-                    &request,
-                    context.now_ms,
-                    &allocation,
-                    &validation,
-                )
-                .instrument(span)
-                .await
+            let validated = {
+                let span = tracing::debug_span!("loonfs.phase", phase = "validate_commit");
+                match validate_commit_for_publish(&request, context.now_ms, &validation)
+                    .instrument(span)
+                    .await
                 {
-                    Ok(plan) => plan,
+                    Ok(validated) => validated,
                     Err(error) => {
                         session.discard_candidate(allocation);
                         outcomes[index] = Some(Err(error));
@@ -165,24 +160,22 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                     }
                 }
             };
-            let prepared = {
-                let _span = tracing::debug_span!("loonfs.phase", phase = "PreparedCommit::prepare")
-                    .entered();
-                match PreparedCommit::new(request, plan.clone(), semantic_identity) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        session.discard_candidate(allocation);
-                        outcomes[index] = Some(Err(CoreError::Internal(format!(
-                            "commit preparation failed: {error}"
-                        ))));
-                        continue;
-                    }
+            let resulting_next_inode_id = match session.commit_candidate(allocation) {
+                Ok(resulting_next_inode_id) => resulting_next_inode_id,
+                Err(error) => {
+                    outcomes[index] = Some(Err(error));
+                    continue;
                 }
+            };
+            let plan = {
+                let _span =
+                    tracing::debug_span!("loonfs.phase", phase = "CommitPlan::prepare").entered();
+                validated.prepare(request, semantic_identity, resulting_next_inode_id)
             };
             let materialized = {
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "materialize_commit").entered();
-                materialize_commit(prepared, context.now_ms)
+                materialize_commit(plan, context.now_ms)
             };
             let preview = {
                 let _span = tracing::debug_span!(
@@ -190,23 +183,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                     phase = "wal_payload_from_materialized_commit"
                 )
                 .entered();
-                match wal_payload_from_materialized_commit(&materialized) {
-                    Ok(payload) => payload,
-                    Err(error) => {
-                        session.discard_candidate(allocation);
-                        outcomes[index] = Some(Err(error.into()));
-                        continue;
-                    }
-                }
+                wal_payload_from_materialized_commit(&materialized)
             };
             {
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "apply_committed_wal_record")
                         .entered();
-                if let Err(error) = session.apply_accepted_commit(&preview, &plan, allocation) {
-                    outcomes[index] = Some(Err(error));
-                    continue;
-                }
+                session.apply_accepted_commit(&preview, &materialized.commit);
             }
             accepted.push((index, materialized));
         }
@@ -245,8 +228,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     let last_plan = &records
         .last()
         .expect("accepted records should be non-empty")
-        .prepared
-        .plan;
+        .commit;
     let head_publish = prepare_commit_head_publish(&view.head, last_plan, &wal);
     let head_publish = match head_publish {
         Ok(value) => value,
@@ -280,7 +262,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
         outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
             namespace_id: namespace_id.clone(),
-            commit_id: record.prepared.request.commit_id,
+            commit_id: record.commit.commit_id,
             committed_seq: records[accepted_index].seq,
         }));
     }

@@ -2,7 +2,7 @@
 //! chosen validation view, and delta-index assignment.
 
 use super::super::frame::validate_commit_request_frame;
-use super::super::{CandidateAllocation, CommitIr, CommitPlan, CommitValidationError};
+use super::super::{CommitIr, CommitValidationError, ValidatedCommitPlan};
 use super::checks::{validate_ops, OpValidationCursor};
 use super::view::PublishValidationView;
 use crate::error::CoreError;
@@ -18,12 +18,11 @@ pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
     pub(crate) accepted_rows: &'a MetadataState,
 }
 
-pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
+pub(crate) async fn validate_commit_for_publish<S: ObjectStore + ?Sized>(
     request: &CommitIr,
     committed_at_ms: u64,
-    allocation: &CandidateAllocation,
     context: &PublishCommitValidationContext<'_, S>,
-) -> Result<CommitPlan, CoreError> {
+) -> Result<ValidatedCommitPlan, CoreError> {
     let committed_seq = context
         .head
         .seq
@@ -36,7 +35,6 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
         committed_at_ms,
         context.head,
         committed_seq,
-        allocation,
         PublishValidationView::new(context.metadata_view, context.accepted_rows, committed_seq),
     )
     .await
@@ -47,9 +45,8 @@ async fn build_commit_plan<S: ObjectStore + ?Sized>(
     committed_at_ms: u64,
     head: &HeadState,
     committed_seq: ChangeSeq,
-    allocation: &CandidateAllocation,
     mut metadata_state: PublishValidationView<'_, S>,
-) -> Result<CommitPlan, CoreError> {
+) -> Result<ValidatedCommitPlan, CoreError> {
     validate_commit_request_frame(request, head)?;
 
     let validated_ops = validate_ops(
@@ -61,12 +58,9 @@ async fn build_commit_plan<S: ObjectStore + ?Sized>(
     )
     .await?;
 
-    Ok(CommitPlan {
-        namespace_id: request.namespace_id.clone(),
-        commit_id: request.commit_id.clone(),
-        apply_after_seq: head.seq,
-        assigned_seq: committed_seq,
+    Ok(ValidatedCommitPlan::new(
+        head.seq,
+        committed_seq,
         validated_ops,
-        resulting_next_inode_id: allocation.resulting_next_inode_id(),
-    })
+    ))
 }
