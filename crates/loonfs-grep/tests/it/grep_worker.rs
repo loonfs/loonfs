@@ -394,7 +394,7 @@ async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous()
     let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.manifest_state().lifecycle() else {
         panic!("published root should be backfilling");
     };
-    let checkpoint = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
+    let checkpoint = control::checkpoint_record(&store, &namespace_id, checkpoint_id)
         .await
         .expect("published checkpoint remains readable");
     assert!(matches!(
