@@ -446,116 +446,113 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             let lookup_name_key = component_name_keys.get(wave);
             let is_leaf_wave = wave == component_name_keys.len();
 
-            let want_inode = !self.inode_at_seq_cache.contains_key(&current_inode_id);
-            let want_tombstone = !self.active_tombstone_cache.contains_key(&current_inode_id);
-            let want_parent_binding = !self
-                .latest_parent_binding_cache
-                .contains_key(&current_inode_id);
             let arrived_by_binding = pending_binding.take();
-            let unbind_lookup = arrived_by_binding
-                .as_ref()
-                .filter(|binding| {
-                    !self
-                        .unbind_cache
-                        .contains_key(&BindingCacheKey::from(*binding))
-                })
-                .cloned();
-            let bound_child_lookup = lookup_name_key
-                .filter(|name_key| {
-                    !self.bound_child_cache.contains_key(&ParentNameCacheKey {
-                        parent_inode_id: current_inode_id,
-                        name_key: (*name_key).clone(),
-                    })
-                })
-                .cloned();
-            let want_revision = is_leaf_wave
-                && prefetch_leaf_revision == LeafRevisionPrefetch::Prefetch
-                && !self
-                    .latest_revision_head_cache
-                    .contains_key(&current_inode_id);
+            let prefetch_revision =
+                is_leaf_wave && prefetch_leaf_revision == LeafRevisionPrefetch::Prefetch;
 
             let base = &self.base;
-            let (inode, tombstones, child_bindings, unbinds, bound_rows, revision) = futures::try_join!(
+            let (inode, tombstone, parent_binding, unbind, bound_child, revision) = futures::try_join!(
                 async {
-                    match want_inode {
-                        true => base.inode_at_seq(current_inode_id).await.map(Some),
-                        false => Ok(None),
+                    match self.inode_at_seq_cache.get(&current_inode_id).cloned() {
+                        Some(inode) => Ok(inode),
+                        None => base.inode_at_seq(current_inode_id).await,
                     }
                 },
                 async {
-                    match want_tombstone {
-                        true => base.tombstones_for_root(current_inode_id).await.map(Some),
-                        false => Ok(None),
+                    match self.active_tombstone_cache.get(&current_inode_id).cloned() {
+                        Some(tombstone) => Ok(tombstone),
+                        None => base
+                            .tombstones_for_root(current_inode_id)
+                            .await
+                            .map(|rows| {
+                                super::rows::active_tombstone_from_records(
+                                    rows.iter().cloned(),
+                                    visible_seq,
+                                )
+                            }),
                     }
                 },
                 async {
-                    match want_parent_binding {
-                        true => base
+                    match self
+                        .latest_parent_binding_cache
+                        .get(&current_inode_id)
+                        .cloned()
+                    {
+                        Some(binding) => Ok(binding),
+                        None => base
                             .direntry_binds_for_child(current_inode_id)
                             .await
-                            .map(Some),
-                        false => Ok(None),
+                            .map(|rows| {
+                                rows.iter()
+                                    .filter(|direntry| direntry.bind_seq <= visible_seq)
+                                    .max_by_key(|direntry| {
+                                        (direntry.bind_seq, direntry.bind_delta_index)
+                                    })
+                                    .cloned()
+                            }),
                     }
                 },
                 async {
-                    match &unbind_lookup {
-                        Some(binding) => base.direntry_unbinds_for_binding(binding).await.map(Some),
-                        None => Ok(None),
-                    }
+                    let Some(binding) = &arrived_by_binding else {
+                        return Ok(None);
+                    };
+                    let cache_key = BindingCacheKey::from(binding);
+                    let unbound = match self.unbind_cache.get(&cache_key).copied() {
+                        Some(unbound) => unbound,
+                        None => base
+                            .direntry_unbinds_for_binding(binding)
+                            .await?
+                            .iter()
+                            .any(|unbind| unbind.unbind_seq <= visible_seq),
+                    };
+                    Ok(Some((cache_key, unbound)))
                 },
                 async {
-                    match &bound_child_lookup {
-                        Some(name_key) => base
+                    let Some(name_key) = lookup_name_key else {
+                        return Ok(None);
+                    };
+                    let cache_key = ParentNameCacheKey {
+                        parent_inode_id: current_inode_id,
+                        name_key: name_key.clone(),
+                    };
+                    let binding = match self.bound_child_cache.get(&cache_key).cloned() {
+                        Some(binding) => binding,
+                        None => base
                             .direntry_binds_for_parent_name(current_inode_id, name_key)
-                            .await
-                            .map(Some),
-                        None => Ok(None),
-                    }
+                            .await?
+                            .iter()
+                            .filter(|direntry| direntry.bind_seq <= visible_seq)
+                            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+                            .cloned(),
+                    };
+                    Ok(Some((cache_key, binding)))
                 },
                 async {
-                    match want_revision {
-                        true => base
-                            .latest_revision_record(current_inode_id)
-                            .await
-                            .map(Some),
-                        false => Ok(None),
+                    if !prefetch_revision {
+                        return Ok(None);
+                    }
+                    match self
+                        .latest_revision_head_cache
+                        .get(&current_inode_id)
+                        .cloned()
+                    {
+                        Some(revision) => Ok(revision),
+                        None => base.latest_revision_record(current_inode_id).await,
                     }
                 },
             )?;
 
-            if let Some(inode) = inode {
-                self.inode_at_seq_cache.insert(current_inode_id, inode);
-            }
-            if let Some(tombstones) = tombstones {
-                let active = super::rows::active_tombstone_from_records(
-                    tombstones.iter().cloned(),
-                    visible_seq,
-                );
-                self.active_tombstone_cache.insert(current_inode_id, active);
-            }
-            if let Some(bindings) = child_bindings {
-                let latest = bindings
-                    .iter()
-                    .filter(|direntry| direntry.bind_seq <= visible_seq)
-                    .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
-                    .cloned();
-                self.latest_parent_binding_cache
-                    .insert(current_inode_id, latest);
-            }
-            if let Some(revision) = revision {
+            self.inode_at_seq_cache.insert(current_inode_id, inode);
+            self.active_tombstone_cache
+                .insert(current_inode_id, tombstone);
+            self.latest_parent_binding_cache
+                .insert(current_inode_id, parent_binding);
+            if prefetch_revision {
                 self.latest_revision_head_cache
                     .insert(current_inode_id, revision);
             }
-            if let Some(binding) = &arrived_by_binding {
-                let cache_key = BindingCacheKey::from(binding);
-                let unbound = match unbinds {
-                    Some(rows) => {
-                        let unbound = rows.iter().any(|unbind| unbind.unbind_seq <= visible_seq);
-                        self.unbind_cache.insert(cache_key, unbound);
-                        unbound
-                    }
-                    None => self.unbind_cache.get(&cache_key).copied().unwrap_or(false),
-                };
+            if let Some((cache_key, unbound)) = unbind {
+                self.unbind_cache.insert(cache_key, unbound);
                 if unbound {
                     // The walk dead-ends at the previous component; probing
                     // deeper would warm caches for nothing.
@@ -563,34 +560,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 }
             }
 
-            let Some(name_key) = lookup_name_key else {
+            let Some((cache_key, bound)) = bound_child else {
                 break;
             };
-            let bound = match bound_rows {
-                Some(rows) => {
-                    let latest = rows
-                        .iter()
-                        .filter(|direntry| direntry.bind_seq <= visible_seq)
-                        .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
-                        .cloned();
-                    self.bound_child_cache.insert(
-                        ParentNameCacheKey {
-                            parent_inode_id: current_inode_id,
-                            name_key: name_key.clone(),
-                        },
-                        latest.clone(),
-                    );
-                    latest
-                }
-                None => self
-                    .bound_child_cache
-                    .get(&ParentNameCacheKey {
-                        parent_inode_id: current_inode_id,
-                        name_key: name_key.clone(),
-                    })
-                    .cloned()
-                    .flatten(),
-            };
+            self.bound_child_cache.insert(cache_key, bound.clone());
             let Some(binding) = bound else {
                 break;
             };

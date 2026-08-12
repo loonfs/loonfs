@@ -4,6 +4,7 @@
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
+use crate::error::StoreFailureClass;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState, WriterBlock};
 use loonfs_api::{NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
@@ -21,12 +22,14 @@ pub enum WriterEpochAcquireError {
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error("empty writer id")]
     EmptyWriterId,
-    #[error("missing head etag for `{object_key}`")]
-    MissingHeadEtag { object_key: String },
     #[error("writer epoch overflow from `{active}`")]
     WriterEpochOverflow { active: WriterEpoch },
-    #[error("failed to write head object during writer epoch acquire: {0}")]
-    HeadWrite(String),
+    #[error("failed to write head object `{object_key}` during writer epoch acquire: {message}")]
+    HeadWrite {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
     #[error("writer epoch acquire retries exhausted after {attempts} attempts")]
     RetryExhausted { attempts: usize },
 }
@@ -123,11 +126,20 @@ impl From<ControlUpdateError> for WriterEpochAcquireError {
             ControlUpdateError::Codec {
                 object_key,
                 message,
-            }
-            | ControlUpdateError::Store {
+            } => Self::HeadWrite {
                 object_key,
                 message,
-            } => Self::HeadWrite(format!("`{object_key}`: {message}")),
+                class: StoreFailureClass::Other,
+            },
+            ControlUpdateError::Store {
+                object_key,
+                message,
+                class,
+            } => Self::HeadWrite {
+                object_key,
+                message,
+                class,
+            },
             ControlUpdateError::RetryExhausted { attempts } => Self::RetryExhausted { attempts },
         }
     }
@@ -138,7 +150,7 @@ mod tests {
     use super::*;
     use crate::commit_engine::delete_namespace;
     use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
-    use crate::error::ErrorCode;
+    use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use crate::options::DeleteNamespaceOptions;
@@ -175,6 +187,7 @@ mod tests {
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
+    use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
@@ -252,6 +265,38 @@ mod tests {
         let writer = head.writer.expect("writer block");
         assert_eq!(writer.writer_id, "writer");
         assert_eq!(writer.acquired_at_ms, 2_000);
+    }
+
+    #[tokio::test]
+    async fn a_permission_denied_head_write_is_classified_as_permission_denied() {
+        let temp_dir = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        write_head(
+            &inner,
+            &namespace_id,
+            head_owned_by(&namespace_id, "writer-a", WriterEpoch(7)),
+        )
+        .await;
+        let store = FailStore::new(
+            inner,
+            KeyPredicate::exact(wal_head(namespace_id.as_str())),
+            OperationClass::CompareAndSwap,
+            InjectedError::PermissionDenied("head write forbidden".to_owned()),
+        );
+        store.fail_all();
+
+        let error = acquire_writer_epoch(&store, &namespace_id, &context("writer-b", 2_000))
+            .await
+            .expect_err("permission-denied head write must fail");
+        assert!(matches!(
+            &error,
+            WriterEpochAcquireError::HeadWrite {
+                class: StoreFailureClass::PermissionDenied,
+                ..
+            }
+        ));
+        assert_eq!(CoreError::from(error).code(), ErrorCode::PermissionDenied);
     }
 
     #[tokio::test]

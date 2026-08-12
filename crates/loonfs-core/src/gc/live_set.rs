@@ -556,7 +556,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
 ///
 /// `None` reports that the budget ran out. A pass that cannot pay for this
 /// has no root set at all, the same as any other partial collection.
-async fn select_reference_anchor<S: ObjectStore + ?Sized>(
+pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     grace_window_ms: u64,
@@ -606,18 +606,32 @@ async fn select_reference_anchor<S: ObjectStore + ?Sized>(
     if !budget.try_charge() {
         return Ok(None);
     }
-    // A manifest that will not load is no evidence. Retaining is what the
-    // pass does with every root it cannot resolve.
-    let Ok(Some(manifest)) =
-        load_namespace_manifest_envelope_if_present(store, namespace_id, &manifest_object_id, &key)
-            .await
-    else {
-        tracing::debug!(
-            namespace_id = %namespace_id,
-            object_key = key,
-            "the reference manifest did not load; retaining every aged candidate"
-        );
-        return Ok(Some(ReferenceAnchor::Missing));
+    let manifest = match load_namespace_manifest_envelope_if_present(
+        store,
+        namespace_id,
+        &manifest_object_id,
+        &key,
+    )
+    .await
+    {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return Ok(Some(ReferenceAnchor::Missing)),
+        Err(error) => match error.failure_class() {
+            ManifestLoadFailureClass::Store => {
+                tracing::warn!(
+                    namespace_id = %namespace_id,
+                    object_key = key,
+                    error = %error,
+                    "the reference manifest did not read; retaining every aged candidate"
+                );
+                return Ok(Some(ReferenceAnchor::Missing));
+            }
+            ManifestLoadFailureClass::Corrupt => {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "the reference manifest does not load: {error}"
+                )));
+            }
+        },
     };
     Ok(Some(ReferenceAnchor::Manifest(Box::new(
         AnchoredManifest {

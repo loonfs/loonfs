@@ -1454,18 +1454,7 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
             }
             match verify_durable_content_checksum(store, content_store_id, promised).await {
                 Ok(()) => Ok(CompletionOutcome::Verified(promised.clone())),
-                Err(err) => {
-                    let reason = content_failure_reason(err)?;
-                    // The id is random and still open, so the object nothing
-                    // can name is safe to remove and would otherwise leak.
-                    delete_unpublished_content_object(
-                        store,
-                        content_store_id,
-                        &requested.content_id,
-                    )
-                    .await;
-                    Err(CoreError::InvalidUploadContent(reason))
-                }
+                Err(err) => Ok(CompletionOutcome::Unusable(content_failure_reason(err)?)),
             }
         }
         CompletionPlan::DirectMultipart {
@@ -1554,6 +1543,7 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use loonfs_api::v0::BeginUploadRequest;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::PutMode;
     use tempfile::tempdir;
 
     const BYTES: &[u8] = b"terminal states\n";
@@ -1662,6 +1652,77 @@ mod tests {
             }
         ));
         assert!(store.head(&content_key).await.expect("head").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_direct_put_completion_aborts_and_retries_as_terminal() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        let begin = begin_direct_put_upload_target(
+            &store,
+            &namespace_id,
+            DirectPutContentClaim {
+                size_bytes: BYTES.len() as u64,
+                storage_checksum: StorageChecksum::sha256(BYTES),
+            },
+            &setup,
+        )
+        .await
+        .expect("begin direct put");
+        store
+            .put(
+                &begin.target.object_key,
+                Bytes::from(vec![b'x'; BYTES.len()]),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("write mismatched direct-put bytes");
+        let content_store_id = load_namespace_content_store_id(&store, &namespace_id)
+            .await
+            .expect("content store id");
+
+        let error = complete_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &begin.upload_id,
+            &CompleteUploadRequest::for_content_ref(begin.target.content_ref.clone()),
+            &context(2_000),
+        )
+        .await
+        .expect_err("mismatched bytes cannot complete");
+        assert!(matches!(error, CoreError::InvalidUploadContent(_)));
+        let state = read_upload_session_state(&store, &namespace_id, &begin.upload_id)
+            .await
+            .expect("session remains readable");
+        assert!(matches!(
+            state.state,
+            UploadSessionLifecycle::Aborted {
+                aborted_at_ms: 2_000
+            }
+        ));
+        assert!(store
+            .head(&begin.target.object_key)
+            .await
+            .expect("head mismatched content")
+            .is_none());
+
+        let retry = complete_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &begin.upload_id,
+            &CompleteUploadRequest::for_content_ref(begin.target.content_ref),
+            &context(3_000),
+        )
+        .await
+        .expect_err("an aborted direct put stays terminal");
+        assert!(matches!(retry, CoreError::UploadNotFound { .. }));
     }
 
     /// Completion is terminal in the other direction. An abort cannot

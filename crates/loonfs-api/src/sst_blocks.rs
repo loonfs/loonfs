@@ -374,7 +374,7 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
     while cursor < entries.len() {
         let shared_len = read_varint(entries, &mut cursor)? as usize;
         let suffix_len = read_varint(entries, &mut cursor)? as usize;
-        if shared_len > previous_key.len() {
+        if shared_len > previous_key.len() || !previous_key.is_char_boundary(shared_len) {
             return Err(SstBlockCodecError::Malformed(
                 "shared prefix exceeds previous key".to_owned(),
             ));
@@ -962,6 +962,34 @@ mod tests {
             matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("row-key order")),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn decoding_rejects_a_shared_prefix_inside_a_utf8_code_point() {
+        let (_, _, row) = inode_row(1);
+        let mut row_bytes = Vec::new();
+        ciborium::ser::into_writer(&row, &mut row_bytes).expect("encode row");
+        let mut payload = Vec::new();
+        write_varint(&mut payload, 0);
+        write_varint(&mut payload, "é".len() as u64);
+        payload.extend_from_slice("é".as_bytes());
+        write_varint(&mut payload, row_bytes.len() as u64);
+        payload.extend_from_slice(&row_bytes);
+        write_varint(&mut payload, 1);
+        write_varint(&mut payload, 0);
+        write_varint(&mut payload, row_bytes.len() as u64);
+        payload.extend_from_slice(&row_bytes);
+        payload.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut bytes = Vec::new();
+        let handle = append_section(&mut bytes, &payload, true).expect("append section");
+        let error = decode_data_block(&bytes, &handle)
+            .expect_err("a partial utf-8 prefix should be rejected");
+        assert!(matches!(
+            &error,
+            SstBlockCodecError::Malformed(message)
+                if message == "shared prefix exceeds previous key"
+        ));
     }
 
     #[test]

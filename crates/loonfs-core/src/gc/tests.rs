@@ -3,8 +3,9 @@
 use super::budget::PassBudget;
 use super::config::GcConfig;
 use super::cursor::{CandidateFamily, GcCursor};
-use super::live_set::{recollect_live_set, LiveSet};
+use super::live_set::{recollect_live_set, select_reference_anchor, LiveSet, ReferenceAnchor};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
+use super::uploads::{collect_referenced_content, CollectedReferences};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::tests::{
@@ -1182,6 +1183,137 @@ async fn namespace_with_a_scan_worth_bounding(
         )
         .await;
     }
+}
+
+#[tokio::test]
+async fn content_reference_scan_surfaces_a_manifest_corrupted_after_marking() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
+    let live = live_set(&store, &namespace_id, &setup).await;
+    let manifest_object_id = live.manifests.iter().next().expect("live manifest").clone();
+    let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
+    store
+        .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
+        .await
+        .expect("corrupt marked manifest");
+    let mut budget = PassBudget::new(None);
+
+    let error = collect_referenced_content(&store, &namespace_id, &live, &mut budget)
+        .await
+        .expect_err("corruption after marking must still surface");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(error.message().contains(&manifest_key));
+}
+
+#[tokio::test]
+async fn content_reference_scan_is_unavailable_when_a_marked_manifest_does_not_read() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
+    let live = live_set(&inner, &namespace_id, &setup).await;
+    let store = FailStore::new(
+        inner,
+        KeyPredicate::prefix(metadata_manifest_prefix(namespace_id.as_str())),
+        OperationClass::Read,
+        InjectedError::Transport("marked manifest timed out".to_owned()),
+    );
+    store.fail_all();
+    let mut budget = PassBudget::new(None);
+
+    let references = collect_referenced_content(&store, &namespace_id, &live, &mut budget)
+        .await
+        .expect("a manifest store failure remains conservative");
+    assert!(matches!(references, CollectedReferences::Unavailable));
+}
+
+#[tokio::test]
+async fn content_reference_scan_surfaces_corrupt_metadata_rows() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
+    let (upload_id, content_ref, content_store_id, _) =
+        complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
+    let table_keys = store
+        .list_prefix(&metadata_table_prefix(namespace_id.as_str()))
+        .await
+        .expect("list metadata tables");
+    assert!(
+        !table_keys.is_empty(),
+        "the fixture must publish metadata tables"
+    );
+    for key in &table_keys {
+        let mut bytes = store
+            .get(key, None)
+            .await
+            .expect("read metadata table")
+            .expect("metadata table exists")
+            .to_vec();
+        bytes[0] ^= 0xff;
+        store
+            .put_overwrite(key, Bytes::from(bytes))
+            .await
+            .expect("corrupt metadata table");
+    }
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+
+    let error = gc_namespace(&store, &namespace_id, &config(), &past)
+        .await
+        .expect_err("corrupt content-reference rows must fail the pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(table_keys.iter().any(|key| error.message().contains(key)));
+    assert!(store
+        .head(&content_key)
+        .await
+        .expect("head content")
+        .is_some());
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_some());
+}
+
+#[tokio::test]
+async fn content_reference_scan_retains_content_when_metadata_rows_do_not_read() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
+    let (upload_id, content_ref, content_store_id, _) =
+        complete_upload_for_gc(&inner, &namespace_id, b"unpublished\n", &setup).await;
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+    let store = FailStore::new(
+        inner,
+        KeyPredicate::prefix(metadata_table_prefix(namespace_id.as_str())),
+        OperationClass::Read,
+        InjectedError::Transport("metadata rows timed out".to_owned()),
+    );
+    store.fail_all();
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+
+    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+        .await
+        .expect("a metadata-row store failure retains conservatively");
+    assert_eq!(report.deleted_content_objects, 0);
+    assert_eq!(report.deleted_upload_sessions, 0);
+    assert!(store
+        .inner()
+        .head(&content_key)
+        .await
+        .expect("head content")
+        .is_some());
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_some());
 }
 
 /// A budget with room for the roots and one candidate a pass has nothing
@@ -3611,6 +3743,67 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     stat_root(&store, &source).await;
 }
 
+#[tokio::test]
+async fn gc_surfaces_a_corrupt_fork_target_head() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("namespace id");
+    let clone = NamespaceId::parse("clone").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &source, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    fork_namespace(&store, &source, &clone, &setup)
+        .await
+        .expect("fork");
+    store
+        .put_overwrite(&wal_head(clone.as_str()), Bytes::from_static(b"not json"))
+        .await
+        .expect("corrupt target head");
+    let before = namespace_keys(&store, &source).await;
+
+    let error = gc_namespace(&store, &source, &config(), &setup)
+        .await
+        .expect_err("a corrupt target head must fail the source pass");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(error.message().contains(&wal_head(clone.as_str())));
+    assert_eq!(namespace_keys(&store, &source).await, before);
+}
+
+#[tokio::test]
+async fn gc_retains_a_fork_checkpoint_when_the_target_head_does_not_read() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("namespace id");
+    let clone = NamespaceId::parse("clone").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &source, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&inner, &source, "/docs/one.txt", "gc-one", &setup).await;
+    fork_namespace(&inner, &source, &clone, &setup)
+        .await
+        .expect("fork");
+    let fork_record = read_fork_record(&inner, &source).await;
+    let store = FailStore::new(
+        inner,
+        KeyPredicate::exact(wal_head(clone.as_str())),
+        OperationClass::Read,
+        InjectedError::Transport("target head timed out".to_owned()),
+    );
+    store.fail_all();
+
+    let report = gc_namespace(&store, &source, &config(), &setup)
+        .await
+        .expect("an unreadable target is retained conservatively");
+    assert_eq!(report.released_fork_checkpoints, 0);
+    assert_eq!(
+        checkpoint_lifecycle(store.inner(), &source, &fork_record.checkpoint_id).await,
+        CheckpointRecordLifecycle::Active {}
+    );
+}
+
 /// A finished fork owns its source pin for as long as the target lives.
 /// The lease bounds the attempt, not the result: once the target head is
 /// there, no number of passes at any clock past the lease can release the
@@ -3911,6 +4104,69 @@ async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
         before,
         "a failed pass deletes nothing"
     );
+}
+
+#[tokio::test]
+async fn corrupt_reference_anchor_manifest_fails_instead_of_becoming_missing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+    let manifest_key = store
+        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
+        .await
+        .expect("list manifests")
+        .into_iter()
+        .next()
+        .expect("published manifest");
+    store
+        .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
+        .await
+        .expect("corrupt reference manifest");
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let mut budget = PassBudget::new(None);
+
+    let error = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
+        .await
+        .expect_err("a corrupt reference anchor must surface");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(error.message().contains(&manifest_key));
+}
+
+#[tokio::test]
+async fn unreadable_reference_anchor_manifest_remains_conservative() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&inner, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    create_checkpoint(&inner, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
+    let store = FailStore::new(
+        inner,
+        KeyPredicate::prefix(metadata_manifest_prefix(namespace_id.as_str())),
+        OperationClass::Read,
+        InjectedError::Transport("reference manifest timed out".to_owned()),
+    );
+    store.fail_all();
+    let mut budget = PassBudget::new(None);
+
+    let anchor = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
+        .await
+        .expect("a store failure keeps a missing anchor");
+    assert!(matches!(anchor, Some(ReferenceAnchor::Missing)));
 }
 
 /// The manifest arm of the same split: a rooted manifest that reads but
