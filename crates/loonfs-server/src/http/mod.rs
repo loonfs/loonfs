@@ -434,7 +434,7 @@ async fn serve_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     // Read at scrape time rather than accumulated: these are levels, and a
     // level is only true when it is asked for.
     let rendered = state.metrics.render(

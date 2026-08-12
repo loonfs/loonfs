@@ -42,12 +42,13 @@
 
 use super::block_fetch::{load_segment_filter, segment_object_len};
 use super::block_load::SessionBlockMemo;
+use super::build::MetadataTableDestination;
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::compaction_lease::{CompactionLease, LeaseHold};
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping, SegmentRowIterator,
 };
-use super::compaction_output::{MergeOutput, MergeSegmentWriter};
+use super::compaction_output::MergeSegmentWriter;
 use super::compaction_retention::{KeptRow, RetentionRule};
 use super::error::ManifestLoadError;
 use super::flush::ensure_metadata_publication_budget;
@@ -331,7 +332,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
         group,
         placement,
         frozen_floor_seq,
-        MergeOutput::Tables,
+        MetadataTableDestination::Published { namespace_id },
         policy,
         &cancellation,
         runs.to_vec(),
@@ -374,7 +375,10 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
         spec.group,
         spec.placement,
         spec.frozen_floor_seq,
-        MergeOutput::JobPrefix(spec.job_id()),
+        MetadataTableDestination::CompactionStaging {
+            namespace_id,
+            job_id: spec.job_id(),
+        },
         policy,
         cancellation,
         resolve_snapshot_runs(tables, spec)?,
@@ -913,7 +917,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// sequence every segment carries and whether rows may be dropped at all.
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
-    output: MergeOutput<'a>,
+    destination: MetadataTableDestination<'a>,
     policy: MetadataLsmPolicy,
     cancellation: &'a MetadataCompactionCancellation,
     snapshot: Vec<MetadataRunManifest>,
@@ -939,7 +943,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         group: MetadataFamilyGroup,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
-        output: MergeOutput<'a>,
+        destination: MetadataTableDestination<'a>,
         policy: MetadataLsmPolicy,
         cancellation: &'a MetadataCompactionCancellation,
         snapshot: Vec<MetadataRunManifest>,
@@ -957,7 +961,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             group,
             placement,
             frozen_floor_seq,
-            output,
+            destination,
             policy,
             cancellation,
             snapshot,
@@ -1087,7 +1091,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .map(|family| {
                 (
                     *family,
-                    MergeSegmentWriter::new(*family, self.output, self.placement),
+                    MergeSegmentWriter::new(*family, self.destination, self.placement),
                 )
             })
             .collect();
@@ -1157,7 +1161,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         }
 
         for writer in writers.into_values() {
-            let segments = writer.finish(self.store, self.namespace_id).await?;
+            let segments = writer.finish(self.store).await?;
             self.result.output_bytes = self
                 .result
                 .output_bytes
@@ -1222,9 +1226,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .get_mut(&family)
             .expect("a cluster writes only the families it merges");
         writer.push(row);
-        writer
-            .roll_full_segments(self.store, self.namespace_id, self.policy)
-            .await
+        writer.roll_full_segments(self.store, self.policy).await
     }
 
     /// Remembers a below-floor unbind for the reverse pass, when the merge is

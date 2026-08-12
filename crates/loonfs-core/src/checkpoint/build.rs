@@ -13,8 +13,8 @@ use futures::future::try_join_all;
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
-use loonfs_api::{sha256_digest, ChangeSeq, MetadataTableId, NamespaceId};
-use loonfs_objectstore::keys::metadata_table;
+use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataTableId, NamespaceId};
+use loonfs_objectstore::keys::{metadata_compaction_table, metadata_table};
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroUsize;
 
@@ -110,6 +110,7 @@ where
     S: ObjectStore + ?Sized,
     RowsForFamily: FnMut(MetadataTableFamily) -> Vec<MetadataRow>,
 {
+    let destination = MetadataTableDestination::Published { namespace_id };
     let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
     for family in CHECKPOINT_TABLE_FAMILIES {
         let rows = rows_for_family(family);
@@ -126,12 +127,7 @@ where
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
                 .map_err(|_| CoreError::Internal("metadata SST index overflow".to_owned()))?;
-            let table_id = MetadataTableId::generate();
-            let object_key = metadata_table(namespace_id.as_str(), table_id.as_str());
-            requests.push(MetadataSstWriteRequest::new(
-                namespace_id,
-                table_id,
-                object_key,
+            requests.push(destination.write_request(
                 run_seq,
                 level,
                 family,
@@ -167,44 +163,71 @@ where
     Ok(tables)
 }
 
+/// The two physical locations a logically identical metadata table may use.
+/// Keeping namespace and staging-job identity here makes the object key a
+/// consequence of the destination instead of a caller-supplied coordinate.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum MetadataTableDestination<'a> {
+    Published {
+        namespace_id: &'a NamespaceId,
+    },
+    CompactionStaging {
+        namespace_id: &'a NamespaceId,
+        job_id: &'a MetadataCompactionId,
+    },
+}
+
+impl<'a> MetadataTableDestination<'a> {
+    fn namespace_id(self) -> &'a NamespaceId {
+        match self {
+            Self::Published { namespace_id } | Self::CompactionStaging { namespace_id, .. } => {
+                namespace_id
+            }
+        }
+    }
+
+    fn object_key(self, table_id: &MetadataTableId) -> String {
+        match self {
+            Self::Published { namespace_id } => {
+                metadata_table(namespace_id.as_str(), table_id.as_str())
+            }
+            Self::CompactionStaging {
+                namespace_id,
+                job_id,
+            } => {
+                metadata_compaction_table(namespace_id.as_str(), job_id.as_str(), table_id.as_str())
+            }
+        }
+    }
+
+    pub(super) fn write_request(
+        self,
+        run_seq: ChangeSeq,
+        level: u32,
+        family: MetadataTableFamily,
+        segment_index: u32,
+        rows: Vec<MetadataRow>,
+    ) -> MetadataSstWriteRequest<'a> {
+        MetadataSstWriteRequest {
+            destination: self,
+            table_id: MetadataTableId::generate(),
+            run_seq,
+            level,
+            family,
+            segment_index,
+            rows,
+        }
+    }
+}
+
 pub(super) struct MetadataSstWriteRequest<'a> {
-    namespace_id: &'a NamespaceId,
+    destination: MetadataTableDestination<'a>,
     table_id: MetadataTableId,
     run_seq: ChangeSeq,
     level: u32,
     family: MetadataTableFamily,
     segment_index: u32,
     rows: Vec<MetadataRow>,
-    object_key: String,
-}
-
-impl<'a> MetadataSstWriteRequest<'a> {
-    /// One segment to write. The caller supplies the object key rather than
-    /// having it derived, because a streaming compaction writes the same
-    /// segment shape to the staging directory instead of to
-    /// `metadata/tables/` (format spec, "Compaction").
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        namespace_id: &'a NamespaceId,
-        table_id: MetadataTableId,
-        object_key: String,
-        run_seq: ChangeSeq,
-        level: u32,
-        family: MetadataTableFamily,
-        segment_index: u32,
-        rows: Vec<MetadataRow>,
-    ) -> Self {
-        Self {
-            namespace_id,
-            table_id,
-            run_seq,
-            level,
-            family,
-            segment_index,
-            rows,
-            object_key,
-        }
-    }
 }
 
 /// Largest filter block inlined into the segment's manifest descriptor, in
@@ -219,6 +242,7 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
     request: MetadataSstWriteRequest<'_>,
 ) -> Result<MetadataFileRef> {
+    let object_key = request.destination.object_key(&request.table_id);
     let mut builder = SegmentBlocksBuilder::default();
     for row in &request.rows {
         let row_key = row.row_key_for_family(request.family);
@@ -226,27 +250,27 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         builder.push(&row_key, &filter_key, row).map_err(|err| {
             CoreError::Internal(format!(
                 "failed to build metadata SST `{}`: {err}",
-                request.object_key
+                object_key
             ))
         })?;
     }
     let built = builder.finish().map_err(|err| {
         CoreError::Internal(format!(
             "failed to build metadata SST `{}`: {err}",
-            request.object_key
+            object_key
         ))
     })?;
     store
-        .put_immutable_verified(&request.object_key, Bytes::from(built.bytes.clone()))
+        .put_immutable_verified(&object_key, Bytes::from(built.bytes.clone()))
         .await?;
     let filter_inline = (built.filter.stored_len <= INLINE_SEGMENT_FILTER_MAX_BYTES).then(|| {
         let start = built.filter.offset as usize;
         hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])
     });
     Ok(MetadataFileRef {
-        owner_namespace_id: request.namespace_id.clone(),
+        owner_namespace_id: request.destination.namespace_id().clone(),
         table_id: request.table_id,
-        object_key: request.object_key,
+        object_key,
         run_seq: request.run_seq,
         level: request.level,
         family: request.family,
@@ -282,4 +306,37 @@ pub(super) fn segment_rows_by_row_key_range(
             rows: rows.to_vec(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+
+    #[test]
+    fn destinations_preserve_published_and_staging_layouts() {
+        let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
+        let job_id =
+            MetadataCompactionId::parse("cmp_00000000000000000000000000000001").expect("job id");
+        let table_id =
+            MetadataTableId::parse("tbl_00000000000000000000000000000001").expect("table id");
+
+        assert_eq!(
+            MetadataTableDestination::Published {
+                namespace_id: &namespace_id,
+            }
+            .object_key(&table_id),
+            "namespaces/ns-1/metadata/tables/\
+             tbl_00000000000000000000000000000001.sst.zst",
+        );
+        assert_eq!(
+            MetadataTableDestination::CompactionStaging {
+                namespace_id: &namespace_id,
+                job_id: &job_id,
+            }
+            .object_key(&table_id),
+            "namespaces/ns-1/metadata/compactions/\
+             cmp_00000000000000000000000000000001/tables/\
+             tbl_00000000000000000000000000000001.sst.zst",
+        );
+    }
 }
