@@ -18,7 +18,7 @@ use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
 use super::validate::{validate_manifest_materialization_ranges, validate_namespace_manifest};
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
-use crate::namespace::basis::{genesis_next_inode_id, MetadataBasis};
+use crate::namespace::basis::{genesis_next_inode_id, MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use loonfs_api::wire::control::{genesis_commit_id, HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
@@ -92,9 +92,10 @@ pub(super) fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceMan
     }
 }
 
-/// The materialized tables a basis resolves to, plus the in-memory rows the
-/// WAL tail replays over.
-pub(crate) struct BasisMetadataTables<'a, S: ObjectStore + ?Sized> {
+/// One verified basis load: its semantic identity, materialized tables, and
+/// the in-memory rows the WAL tail replays over.
+pub(crate) struct LoadedMetadataBasis<'a, S: ObjectStore + ?Sized> {
+    pub(crate) identity: MetadataBasisIdentity,
     pub(crate) tables: VerifiedMetadataTables<'a, S>,
     /// Rows the basis contributes outside any SST: the genesis root inode,
     /// and nothing at all once a manifest exists.
@@ -113,13 +114,16 @@ pub(crate) async fn load_basis_metadata_tables<'a, S: ObjectStore + ?Sized>(
     table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
     basis: &MetadataBasis,
-) -> crate::error::Result<BasisMetadataTables<'a, S>> {
+) -> crate::error::Result<LoadedMetadataBasis<'a, S>> {
     let Some(manifest) = basis.manifest() else {
-        return Ok(BasisMetadataTables {
-            tables: VerifiedMetadataTables::synthesized(
-                store,
-                genesis_basis_manifest(namespace_id),
+        let tables =
+            VerifiedMetadataTables::synthesized(store, genesis_basis_manifest(namespace_id));
+        return Ok(LoadedMetadataBasis {
+            identity: MetadataBasisIdentity::from_verified_basis(
+                basis.clone(),
+                tables.manifest().payload.head_seq,
             ),
+            tables,
             base_state: bootstrap_metadata_state(),
         });
     };
@@ -143,7 +147,9 @@ pub(crate) async fn load_basis_metadata_tables<'a, S: ObjectStore + ?Sized>(
             tables.manifest().payload_checksum,
         )));
     }
-    Ok(BasisMetadataTables {
+    let manifest_head_seq = tables.manifest().payload.head_seq;
+    Ok(LoadedMetadataBasis {
+        identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), manifest_head_seq),
         tables,
         base_state: MetadataState::default(),
     })

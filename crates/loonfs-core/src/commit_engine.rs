@@ -19,9 +19,7 @@ use crate::storage::content_admission::{ContentAdmission, ContentTokenError, Pre
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
-use loonfs_api::{
-    ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, ManifestId, NamespaceId,
-};
+use loonfs_api::{ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -220,7 +218,6 @@ pub struct ResultingReadState {
     /// Metadata basis used for replay. The published head still references this
     /// basis, so a seeded read cache matches the next store-backed read.
     pub basis: MetadataBasis,
-    pub manifest_id: ManifestId,
     pub manifest_head_seq: ChangeSeq,
     pub tail_rows: Arc<MetadataState>,
 }
@@ -462,13 +459,12 @@ impl NamespaceCommitEngine {
         // Seedable only when the CAS landed unambiguously and the updated
         // projection survived (it carries the post-publish tail and etag).
         let resulting_read_state = match (resulting_head, self.publish_tail_projection.as_ref()) {
-            (Some(head), Some(projection)) if projection.head_seq == head.seq => {
+            (Some(head), Some(projection)) if projection.head_seq() == head.seq => {
                 Some(ResultingReadState {
                     head,
-                    head_etag: projection.head_etag.clone(),
-                    basis: projection.basis.clone(),
-                    manifest_id: projection.manifest_id,
-                    manifest_head_seq: projection.manifest_head_seq,
+                    head_etag: projection.head_etag().to_owned(),
+                    basis: projection.basis().clone(),
+                    manifest_head_seq: projection.manifest_head_seq(),
                     tail_rows: Arc::new(projection.tail_state.clone()),
                 })
             }
@@ -524,8 +520,7 @@ impl NamespaceCommitEngine {
                 for record in &records {
                     projection.tail_state.apply_committed_wal_record_mut(record);
                 }
-                projection.head_seq = head.seq;
-                projection.head_etag = head_etag;
+                projection.reanchor(head.seq, head_etag);
                 if projection.within_limits(tail_options) {
                     self.publish_tail_projection = Some(projection);
                 } else {

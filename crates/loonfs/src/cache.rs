@@ -362,6 +362,7 @@ impl ReadCore {
         }
         let max_cached_namespaces = self.inner.config.runtime_cache.max_cached_namespaces;
         let head_seq = state.head.seq;
+        let manifest_id = state.basis.manifest_id();
         self.inner.control_cache().insert_namespace_head(
             namespace_id,
             CachedNamespaceAnchor {
@@ -378,7 +379,7 @@ impl ReadCore {
         self.inner.wal_tail_projection_cache.insert(
             loonfs_core::cache::WalTailProjectionCacheKey {
                 namespace_id: namespace_id.clone(),
-                manifest_id: state.manifest_id,
+                manifest_id,
                 manifest_head_seq: state.manifest_head_seq,
                 head_seq,
                 head_etag: state.head_etag,
