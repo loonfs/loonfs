@@ -1,7 +1,5 @@
 //! What `max_objects` meters, and what a pass does when it runs out.
 
-use super::config::GcConfig;
-
 /// The work one garbage-collection pass is allowed to do, from its first
 /// read to its last. Marking is inside the bound, not before it.
 ///
@@ -47,10 +45,6 @@ impl PassBudget {
             max_objects,
             spent: 0,
         }
-    }
-
-    pub(super) fn of(config: &GcConfig) -> Self {
-        Self::new(config.max_objects)
     }
 
     /// True once nothing further may be charged: the caller stops where it

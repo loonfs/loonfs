@@ -26,6 +26,7 @@ use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ContentId, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// Rows read from one metadata table per request while collecting content
 /// references. Each wave is one page of rows and costs one budget unit, so
@@ -67,7 +68,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     grace_window_ms: u64,
-    references: &mut ContentReferences<'_>,
+    references: &mut ContentReferences,
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<UploadSessionSweep> {
@@ -249,13 +250,13 @@ enum CollectedReferences {
 /// only when an aged completed session needs it. It is not stored in the
 /// pagination cursor because the cursor records position, not permission to
 /// delete. A resumed invocation performs a new budgeted scan.
-pub(super) struct ContentReferences<'a> {
-    live: &'a LiveSet,
+pub(super) struct ContentReferences {
+    live: Arc<LiveSet>,
     collected: CollectedReferences,
 }
 
-impl<'a> ContentReferences<'a> {
-    pub(super) fn over(live: &'a LiveSet) -> Self {
+impl ContentReferences {
+    pub(super) fn over(live: Arc<LiveSet>) -> Self {
         Self {
             live,
             collected: CollectedReferences::NotYet,
@@ -273,7 +274,7 @@ impl<'a> ContentReferences<'a> {
             self.collected = if self.live.degraded {
                 CollectedReferences::Unavailable
             } else {
-                collect_referenced_content(store, namespace_id, self.live, budget).await?
+                collect_referenced_content(store, namespace_id, &self.live, budget).await?
             };
         }
         Ok(match &self.collected {
