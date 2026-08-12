@@ -322,7 +322,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
         }
         .await;
-        if !matches!(outcome, Ok(GrepEnableOutcome::Enabled { .. })) {
+        if matches!(
+            &outcome,
+            Ok(GrepEnableOutcome::AlreadyEnabled { .. } | GrepEnableOutcome::Superseded)
+        ) {
             self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
                 .await?;
         }
@@ -532,7 +535,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 .map_err(GrepError::from)
         }
         .await;
-        if published.is_err() {
+        if matches!(&published, Err(GrepError::PublicationConflict { .. })) {
             self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
                 .await?;
         }

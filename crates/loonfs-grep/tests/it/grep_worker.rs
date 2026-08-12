@@ -13,9 +13,7 @@ use loonfs::{
     SharedObjectStore,
 };
 use loonfs_api::wire::control::CheckpointRecordLifecycle;
-use loonfs_api::{
-    sha256_digest, ChangeSeq, CheckpointId, GrepRequest, GrepResponse, IndexSegmentId,
-};
+use loonfs_api::{sha256_digest, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId};
 use loonfs_grep::keyspace::{
     manifest_key, manifests_prefix, namespace_prefix, root_key, segment_key,
 };
@@ -340,13 +338,13 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
 }
 
 #[tokio::test]
-async fn enable_releases_its_checkpoint_when_the_root_reload_fails() {
+async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("enable-root-failure").expect("namespace id");
+    let namespace_id = NamespaceId::parse("ambiguous-enable").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("enable-root-failure-writer")
+        .writer_id("ambiguous-enable-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -355,22 +353,28 @@ async fn enable_releases_its_checkpoint_when_the_root_reload_fails() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    let host = GrepHost::new(&store, "enable-root-failure-admin").await;
+    let host = GrepHost::new(&store, "ambiguous-enable-admin").await;
     let grep_root_key = root_key(&namespace_id);
-    let root_loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed_root_loads = Arc::clone(&root_loads);
-    let failing_store = Arc::new(FailStore::matching(
-        store.clone(),
-        move |context: &OperationContext<'_>| {
-            context.key() == grep_root_key
-                && matches!(context.kind(), OperationKind::GetWithMetadata)
-                && observed_root_loads.fetch_add(1, Ordering::SeqCst) == 1
-        },
-        InjectedError::Transport("injected grep-root reload failure".to_owned()),
-    ));
-    failing_store.fail_all();
+    let failing_store = Arc::new(
+        FailStore::matching(
+            store.clone(),
+            move |context: &OperationContext<'_>| {
+                context.key() == grep_root_key
+                    && matches!(
+                        context.kind(),
+                        OperationKind::Put {
+                            mode: PutMode::CreateIfAbsent,
+                            ..
+                        }
+                    )
+            },
+            InjectedError::Transport("injected failure after root publication".to_owned()),
+        )
+        .apply_then_fail(),
+    );
+    failing_store.fail_next(1);
     let worker = GrepWorker::with_block_cache(
-        failing_store,
+        failing_store.clone(),
         host.reader.clone(),
         host.admin.clone(),
         Arc::clone(&host.block_cache),
@@ -379,30 +383,23 @@ async fn enable_releases_its_checkpoint_when_the_root_reload_fails() {
     let error = worker
         .enable(&namespace_id)
         .await
-        .expect_err("the second root load fails after checkpoint creation");
+        .expect_err("root publication acknowledgement fails");
     assert!(matches!(error, GrepError::StoreUnavailable { .. }));
+    assert_eq!(failing_store.attempts(), 1);
 
-    let prefix = checkpoint_prefix(namespace_id.as_str());
-    let checkpoint_keys = store
-        .list_prefix(&prefix)
+    let root = load_grep_root(&*store, &namespace_id)
         .await
-        .expect("list checkpoint records");
-    let [checkpoint_key] = checkpoint_keys.as_slice() else {
-        panic!("enable should have created exactly one checkpoint: {checkpoint_keys:?}");
+        .expect("load published root")
+        .expect("the root write landed");
+    let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.manifest_state().lifecycle() else {
+        panic!("published root should be backfilling");
     };
-    let checkpoint_id = CheckpointId::parse(
-        checkpoint_key
-            .strip_prefix(&prefix)
-            .and_then(|name| name.strip_suffix(".json"))
-            .expect("checkpoint key uses the checkpoint layout"),
-    )
-    .expect("checkpoint id from key");
     let checkpoint = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
         .await
-        .expect("checkpoint record remains until core GC");
+        .expect("published checkpoint remains readable");
     assert!(matches!(
         checkpoint.state,
-        CheckpointRecordLifecycle::Released { .. }
+        CheckpointRecordLifecycle::Active {}
     ));
     writer.shutdown().await.expect("shutdown");
 }
