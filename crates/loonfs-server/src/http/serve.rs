@@ -14,7 +14,10 @@ use loonfs::{
     TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
-use loonfs_grep::{GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
+use loonfs_grep::{
+    GrepBlockCache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
+    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, GREP_INDEX_JOB,
+};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
@@ -182,17 +185,25 @@ pub(super) async fn app_with_store_and_direct_transfers(
     )
     .await?;
     let probe_store = writer.object_store();
+    let grep_block_cache = Arc::new(GrepBlockCache::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES));
     // A deployment that maintains the index needs a worker whether or not it
     // answers queries with one. It runs on the writer's own instrumented
     // client, so the grep-owned traffic is measured like every other
     // request instead of escaping on a second, raw client.
-    let grep_worker = (config.grep.mode.serves_grep() || config.grep.mode.maintains_index())
-        .then(|| GrepWorker::new(writer.object_store(), reader.clone(), admin.clone()));
+    let grep_worker =
+        (config.grep.mode.serves_grep() || config.grep.mode.maintains_index()).then(|| {
+            GrepWorker::with_block_cache(
+                writer.object_store(),
+                reader.clone(),
+                admin.clone(),
+                Arc::clone(&grep_block_cache),
+            )
+        });
     let grep_service = config
         .grep
         .mode
         .serves_grep()
-        .then(|| Arc::new(GrepService::new()));
+        .then(|| Arc::new(GrepService::with_block_cache(Arc::clone(&grep_block_cache))));
     let grep_maintenance = if maintains_grep_index {
         let policy = config
             .grep

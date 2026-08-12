@@ -15,7 +15,9 @@ use loonfs::{
 };
 use loonfs_api::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
-use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepWorker};
+use loonfs_grep::{
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -1201,116 +1203,91 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// Fold steps and grep queries deliberately use separate decoded-block
-/// caches: warming grep must not warm the worker's folding cache.
-///
-/// Two identically shaped delta folds run through one runtime — eight
-/// one-file rounds each, explicit worker steps folding on the eighth. The
-/// first fold runs cold and is the in-test control; before the second, a
-/// grep warms seven of its eight inputs in the grep-private cache. The two
-/// identically shaped folds must therefore issue the same section reads.
+/// A worker's partial fold leaves its input segments query-visible. The
+/// service composed over the same cache must hit those worker-loaded blocks
+/// instead of retaining and reading a second decoded copy.
 #[tokio::test]
-async fn a_fold_does_not_reuse_grep_private_index_blocks() {
+async fn worker_and_service_share_decoded_index_blocks() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
-    let namespace_id = NamespaceId::parse("grams-fold-cache").expect("namespace id");
+    let namespace_id = NamespaceId::parse("grams-shared-cache").expect("namespace id");
 
     let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("grams-fold-writer")
+        .writer_id("grams-shared-cache-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
-    // The host's query service and the worker keep separate block caches:
-    // one warms on posting probes, the other on folding.
-    let host = GrepHost::new(&store, "grams-fold-admin").await;
+    let host = GrepHost::new(&store, "grams-shared-cache-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
-    drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
-    // One delta segment per round; the explicit fold step tiers the deltas
-    // into a mid run on the eighth round.
-    let put_round = |round: u32| {
-        let writer = writer.clone();
-        let namespace_id = namespace_id.clone();
-        let grep_worker = &host.worker;
-        async move {
-            writer
-                .put_file_bytes(
-                    &namespace_id,
-                    &format!("/notes/needle-{round:02}.txt"),
-                    format!("a needle numbered {round}\n").as_bytes(),
-                    PutFileOptions::default(),
-                )
-                .await
-                .expect("write file");
-            drive_worker_step(grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-        }
-    };
-
-    for round in 1..8u32 {
-        put_round(round).await;
+    // Build eight separate delta runs without invoking reorganization.
+    for round in 1..=8u32 {
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/notes/needle-{round:02}.txt"),
+                format!("a needle numbered {round}\n").as_bytes(),
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("write file");
+        host.worker
+            .build_step(&namespace_id, GramIndexBuildPolicy::default())
+            .await
+            .expect("build delta segment");
     }
-    let before_cold_fold = raw_store.index_segment_get_count();
-    put_round(8).await;
-    let cold_fold_gets = raw_store.index_segment_get_count() - before_cold_fold;
+
+    // One decoded row cannot exhaust the fold, so its loaded snapshot
+    // segments remain visible to the following service read.
+    let fold_policy = GramIndexBuildPolicy {
+        max_decoded_input_rows_per_step: nonzero_usize(1),
+        ..GramIndexBuildPolicy::default()
+    };
+    let gets_before_fold = raw_store.index_segment_get_count();
+    let stats_before_fold = host.block_cache.stats();
+    let fold = host
+        .worker
+        .reorganize_step(&namespace_id, fold_policy)
+        .await
+        .expect("partial fold");
+    assert!(matches!(
+        fold.outcome,
+        GrepReorganizeOutcome::StepPublished {
+            completed: false,
+            ..
+        }
+    ));
     assert!(
-        cold_fold_gets > 0,
-        "the eighth round's fold must read its snapshot segments from the store"
+        raw_store.index_segment_get_count() > gets_before_fold,
+        "the worker must load its snapshot's segment blocks"
+    );
+    let stats_after_fold = host.block_cache.stats();
+    assert!(
+        stats_after_fold.inserts > stats_before_fold.inserts,
+        "the worker must publish decoded blocks to the shared cache"
     );
 
-    for round in 9..16u32 {
-        put_round(round).await;
-    }
-    // The warm-up: one grep that matches every file decodes the pending
-    // delta segments' index and posting blocks into the shared cache.
-    let warm = host
+    let gets_before_query = raw_store.index_segment_get_count();
+    let result = host
         .grep(&namespace_id, &request("needle"))
         .await
-        .expect("warming grep");
-    assert_eq!(warm.matches.len(), 15);
-
-    let before_warm_fold = raw_store.index_segment_get_count();
-    put_round(16).await;
-    let warm_fold_gets = raw_store.index_segment_get_count() - before_warm_fold;
-    assert!(
-        warm_fold_gets > 0,
-        "the sixteenth round's fold must still read the delta its own step wrote"
-    );
+        .expect("grep after worker load");
+    assert_eq!(result.matches.len(), 8);
     assert_eq!(
-        warm_fold_gets, cold_fold_gets,
-        "grep-private cache entries must not alter worker fold reads: cold \
-         fold read {cold_fold_gets} sections, query-warmed fold read \
-         {warm_fold_gets}"
+        raw_store.index_segment_get_count() - gets_before_query,
+        0,
+        "the service must not refetch index-segment sections the worker warmed"
     );
-
-    // The premise of the comparison: both rounds really did fold, leaving
-    // two mid runs and no deltas.
-    let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
-        .await
-        .expect("load grep root")
-        .expect("grep root exists");
-    let grams: Vec<(u32, u64)> = root
-        .manifest_state()
-        .segments()
-        .iter()
-        .map(|segment| (segment.level, segment.run_ordinal))
-        .collect();
     assert!(
-        grams.iter().all(|(level, _)| *level == 1),
-        "sixteen one-delta rounds must leave only mid-level segments, got {grams:?}"
-    );
-    let mid_runs: std::collections::BTreeSet<u64> =
-        grams.iter().map(|(_, run_seq)| *run_seq).collect();
-    assert_eq!(
-        mid_runs.len(),
-        2,
-        "each eight-round batch must have folded into its own mid run, got {grams:?}"
+        host.block_cache.stats().hits > stats_after_fold.hits,
+        "the service must hit blocks inserted by the worker"
     );
 
     writer.shutdown().await.expect("writer shutdown");

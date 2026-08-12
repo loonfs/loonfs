@@ -2,7 +2,8 @@
 //! of a namespace.
 
 use crate::cache::{
-    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind, MAX_CACHED_GREP_BLOCKS,
+    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind,
+    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use crate::codec::{lookup, Gram, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
 use crate::index_read::{
@@ -125,12 +126,44 @@ impl GrepIndexSnapshot {
             block_kind: GrepBlockKind::Manifest,
             block_offset: 0,
         };
-        let state = match service.block_cache.get(&cache_key) {
-            Some(DecodedGrepBlock::Manifest(state)) => state,
-            Some(
-                DecodedGrepBlock::Filter(_)
-                | DecodedGrepBlock::Index(_)
-                | DecodedGrepBlock::Data(_),
+        let state = match service
+            .block_cache
+            .get_or_load(&cache_key, || async {
+                let manifest = load_grep_manifest(store, namespace_id, pointer.pointer())
+                    .await
+                    .map_err(GrepError::from)?
+                    .ok_or_else(|| GrepError::CorruptIndex {
+                        message: format!(
+                            "grep root `{}` names missing manifest `{}`",
+                            pointer.object_key(),
+                            manifest_key(namespace_id, manifest_id)
+                        ),
+                    })?;
+                let state = Arc::new(manifest.manifest_state().clone());
+                // As with the metadata manifest cache, JSON-backed decoded
+                // state is weighted at twice its canonical payload bytes to
+                // cover both owned strings and decoded structure overhead.
+                let decoded_byte_len = serde_json::to_vec(manifest.manifest_state())
+                    .map_err(|error| {
+                        CoreError::Internal(format!(
+                            "failed to size decoded grep manifest `{}`: {error}",
+                            manifest_key(namespace_id, manifest_id)
+                        ))
+                    })?
+                    .len()
+                    .saturating_mul(2);
+                Ok(DecodedGrepBlock::Manifest {
+                    state,
+                    decoded_byte_len,
+                })
+            })
+            .await
+        {
+            Ok(DecodedGrepBlock::Manifest { state, .. }) => state,
+            Ok(
+                DecodedGrepBlock::Filter { .. }
+                | DecodedGrepBlock::Index { .. }
+                | DecodedGrepBlock::Data { .. },
             ) => {
                 return Self::from_error(GrepError::CorruptIndex {
                     message: format!(
@@ -139,27 +172,7 @@ impl GrepIndexSnapshot {
                     ),
                 });
             }
-            None => {
-                let manifest =
-                    match load_grep_manifest(store, namespace_id, pointer.pointer()).await {
-                        Ok(Some(manifest)) => manifest,
-                        Ok(None) => {
-                            return Self::from_error(GrepError::CorruptIndex {
-                                message: format!(
-                                    "grep root `{}` names missing manifest `{}`",
-                                    pointer.object_key(),
-                                    manifest_key(namespace_id, manifest_id)
-                                ),
-                            });
-                        }
-                        Err(error) => return Self::from_error(error.into()),
-                    };
-                let state = Arc::new(manifest.manifest_state().clone());
-                service
-                    .block_cache
-                    .insert(cache_key, DecodedGrepBlock::Manifest(state.clone()));
-                state
-            }
+            Err(error) => return Self::from_error(error),
         };
         if state.namespace_id() != namespace_id {
             return Self::from_error(GrepError::CorruptIndex {
@@ -212,18 +225,23 @@ impl GrepIndexSnapshot {
     }
 }
 
-/// Namespace-independent grep execution with its own decoded-block cache.
+/// Namespace-independent grep execution over a decoded-block cache.
 #[derive(Debug)]
 pub struct GrepService {
-    block_cache: GrepBlockCache,
+    block_cache: Arc<GrepBlockCache>,
 }
 
 impl GrepService {
-    /// Creates a service with the fixed grep-private block-cache bound.
+    /// Creates a service with a fresh default-sized block cache.
     pub fn new() -> Self {
-        Self {
-            block_cache: GrepBlockCache::new(MAX_CACHED_GREP_BLOCKS),
-        }
+        Self::with_block_cache(Arc::new(GrepBlockCache::new(
+            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+        )))
+    }
+
+    /// Creates a service over a host-composed process-wide grep block cache.
+    pub fn with_block_cache(block_cache: Arc<GrepBlockCache>) -> Self {
+        Self { block_cache }
     }
 }
 

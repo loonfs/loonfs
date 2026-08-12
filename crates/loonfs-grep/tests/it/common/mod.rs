@@ -12,9 +12,11 @@ use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, GrepInde
 use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId};
 use loonfs_grep::root::GrepLifecycle;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
-    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
+    GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
+    GrepIndexSnapshot, GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
+    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
+use std::sync::Arc;
 
 pub(crate) struct GrepHost {
     pub(crate) store: SharedObjectStore,
@@ -22,6 +24,7 @@ pub(crate) struct GrepHost {
     pub(crate) admin: FsAdmin,
     pub(crate) service: GrepService,
     pub(crate) worker: GrepWorker<SharedObjectStore>,
+    pub(crate) block_cache: Arc<GrepBlockCache>,
 }
 
 impl GrepHost {
@@ -35,12 +38,19 @@ impl GrepHost {
             .build()
             .await
             .expect("build admin");
+        let block_cache = Arc::new(GrepBlockCache::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES));
         Self {
             store: store.clone(),
             reader: reader.clone(),
             admin: admin.clone(),
-            service: GrepService::new(),
-            worker: GrepWorker::new(store.clone(), reader, admin),
+            service: GrepService::with_block_cache(Arc::clone(&block_cache)),
+            worker: GrepWorker::with_block_cache(
+                store.clone(),
+                reader,
+                admin,
+                Arc::clone(&block_cache),
+            ),
+            block_cache,
         }
     }
 
