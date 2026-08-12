@@ -1,12 +1,12 @@
-//! [`ClientError`]: every failure the blocking client surfaces.
+//! [`ClientError`]: every failure the async client surfaces.
 
 use loonfs_api::{ErrorCode, ErrorDetails, ErrorKind};
 use thiserror::Error;
 
-/// Error returned by the blocking HTTP client.
+/// Error returned by the async HTTP client.
 ///
-/// Foreign causes (io, json, ureq) are captured as message strings rather
-/// than `#[source]` chains.
+/// Foreign causes (I/O, JSON, and HTTP transport) are captured as message
+/// strings rather than `#[source]` chains.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ClientError {

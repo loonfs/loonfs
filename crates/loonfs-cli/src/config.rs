@@ -1,9 +1,9 @@
 //! The CLI config file: profiles, defaults, and strict TOML loading.
 
 use crate::error::CliError;
-use loonfs_api::NamespaceId;
+use loonfs_api::{NamespaceId, SecretString};
 use loonfs_client::ClientConfig;
-use loonfs_objectstore::{SecretString, StoreConfigError};
+use loonfs_objectstore::StoreConfigError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};

@@ -9,7 +9,7 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
-use loonfs_api::{ErrorCode, NamespaceId};
+use loonfs_api::{ErrorCode, NamespaceId, SecretString};
 use loonfs_client::{Client, ClientConfig};
 use loonfs_grep::{GrepBlockCache, GrepService, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
 use std::sync::Arc;
@@ -126,7 +126,7 @@ impl ResolvedTarget {
                 ..
             } => Ok(Self::Remote(RemoteTarget::new(
                 server_url,
-                auth_token.as_ref().map(|token| token.expose()),
+                auth_token.clone(),
                 ca_cert_path.as_deref(),
                 no_retry,
             )?)),
@@ -207,13 +207,13 @@ impl EmbeddedTarget {
 impl RemoteTarget {
     fn new(
         server_url: &str,
-        auth_token: Option<&str>,
+        auth_token: Option<SecretString>,
         ca_cert_path: Option<&str>,
         no_retry: bool,
     ) -> Result<Self, CliError> {
         let client = Client::new(ClientConfig {
             server_url: server_url.to_owned(),
-            auth_token: auth_token.map(ToOwned::to_owned),
+            auth_token,
             request_timeout_ms: None,
             disable_transient_retry: no_retry,
             ca_cert_path: ca_cert_path.map(ToOwned::to_owned),

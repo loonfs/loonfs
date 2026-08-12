@@ -2,12 +2,12 @@
 
 use super::{ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::object_store::Result;
-use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs_api::SecretString;
 use object_store::azure::MicrosoftAzureBuilder;
 use std::sync::Arc;
 

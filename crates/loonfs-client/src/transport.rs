@@ -316,7 +316,7 @@ impl Client {
         let mut builder = self.http.request(request.method.clone(), &request.url);
         if request.authenticate {
             if let Some(token) = &self.auth_token {
-                builder = builder.bearer_auth(token);
+                builder = builder.bearer_auth(token.expose());
             }
         }
         for (name, value) in &request.headers {

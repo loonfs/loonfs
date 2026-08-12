@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 // This file is imported as a helper module by provider tests and also compiled as its own test target.
 
+use loonfs_api::SecretString;
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
@@ -53,9 +54,9 @@ pub(crate) struct AwsS3ConformanceConfig {
     pub bucket: String,
     pub region: String,
     pub endpoint: Option<String>,
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: Option<String>,
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
+    pub session_token: Option<SecretString>,
     pub prefix: String,
 }
 
@@ -64,8 +65,8 @@ pub(crate) struct CloudflareR2ConformanceConfig {
     pub bucket: String,
     pub account_id: String,
     pub endpoint: String,
-    pub access_key_id: String,
-    pub secret_access_key: String,
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
     pub prefix: String,
 }
 
@@ -80,7 +81,7 @@ pub(crate) struct GcpGcsConformanceConfig {
 pub(crate) struct AzureAbsConformanceConfig {
     pub account_name: String,
     pub container_name: String,
-    pub access_key: String,
+    pub access_key: SecretString,
     pub endpoint: Option<String>,
     pub prefix: String,
 }
@@ -99,9 +100,9 @@ impl AwsS3ConformanceConfig {
             bucket: required_env("LOONFS_TEST_S3_BUCKET")?,
             region: required_env("LOONFS_TEST_S3_REGION")?,
             endpoint: optional_env("LOONFS_TEST_S3_ENDPOINT"),
-            access_key_id: required_env("LOONFS_TEST_S3_ACCESS_KEY_ID")?,
-            secret_access_key: required_env("LOONFS_TEST_S3_SECRET_ACCESS_KEY")?,
-            session_token: optional_env("LOONFS_TEST_S3_SESSION_TOKEN"),
+            access_key_id: required_env("LOONFS_TEST_S3_ACCESS_KEY_ID")?.into(),
+            secret_access_key: required_env("LOONFS_TEST_S3_SECRET_ACCESS_KEY")?.into(),
+            session_token: optional_env("LOONFS_TEST_S3_SESSION_TOKEN").map(Into::into),
             prefix: optional_env("LOONFS_TEST_S3_PREFIX")
                 .unwrap_or_else(|| default_prefix("aws-s3")),
         })
@@ -114,8 +115,8 @@ impl CloudflareR2ConformanceConfig {
             bucket: required_env("LOONFS_TEST_R2_BUCKET")?,
             account_id: required_env("LOONFS_TEST_R2_ACCOUNT_ID")?,
             endpoint: required_env("LOONFS_TEST_R2_ENDPOINT")?,
-            access_key_id: required_env("LOONFS_TEST_R2_ACCESS_KEY_ID")?,
-            secret_access_key: required_env("LOONFS_TEST_R2_SECRET_ACCESS_KEY")?,
+            access_key_id: required_env("LOONFS_TEST_R2_ACCESS_KEY_ID")?.into(),
+            secret_access_key: required_env("LOONFS_TEST_R2_SECRET_ACCESS_KEY")?.into(),
             prefix: optional_env("LOONFS_TEST_R2_PREFIX").unwrap_or_else(|| default_prefix("r2")),
         })
     }
@@ -137,7 +138,7 @@ impl AzureAbsConformanceConfig {
         Ok(Self {
             account_name: required_env("LOONFS_TEST_ABS_ACCOUNT_NAME")?,
             container_name: required_env("LOONFS_TEST_ABS_CONTAINER_NAME")?,
-            access_key: required_env("LOONFS_TEST_ABS_ACCESS_KEY")?,
+            access_key: required_env("LOONFS_TEST_ABS_ACCESS_KEY")?.into(),
             endpoint: optional_env("LOONFS_TEST_ABS_ENDPOINT"),
             prefix: optional_env("LOONFS_TEST_ABS_PREFIX")
                 .unwrap_or_else(|| default_prefix("azure-abs")),

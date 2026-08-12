@@ -13,9 +13,9 @@ use crate::configured::{
 };
 use crate::gcs::GcpGcsStoreConfig;
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
-use crate::secret::SecretString;
 use crate::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 use http::Uri;
+use loonfs_api::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -541,8 +541,8 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{StoreConfig, StoreConfigError};
-    use crate::secret::SecretString;
     use crate::ConfiguredObjectStoreKind;
+    use loonfs_api::SecretString;
 
     fn parse(contents: &str) -> StoreConfig {
         toml::from_str(contents).expect("parse store config")

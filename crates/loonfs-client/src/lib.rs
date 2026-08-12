@@ -38,7 +38,7 @@ use loonfs_api::{
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
     NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
-    StorageChecksum, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
+    SecretString, StorageChecksum, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_UPLOADS_DIRECT_MULTIPART, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
@@ -127,7 +127,7 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 #[derive(Debug, Clone)]
 pub struct Client {
     base_url: String,
-    auth_token: Option<String>,
+    auth_token: Option<SecretString>,
     http: reqwest::Client,
     /// Whether transient server errors are retried (see
     /// [`ClientConfig::disable_transient_retry`]).
@@ -196,7 +196,7 @@ impl DirectDownloadStream {
                 self.size_bytes = self.size_bytes.saturating_add(chunk.len() as u64);
                 if self.size_bytes > self.expected.size_bytes {
                     self.finished = true;
-                    return Err(ClientError::Http(format!(
+                    return Err(ClientError::Protocol(format!(
                         "direct download of `{}` sent more than the {} bytes the grant named",
                         self.path, self.expected.size_bytes
                     )));
@@ -214,7 +214,7 @@ impl DirectDownloadStream {
             None => {
                 self.finished = true;
                 if self.size_bytes != self.expected.size_bytes {
-                    return Err(ClientError::Http(format!(
+                    return Err(ClientError::Protocol(format!(
                         "direct download of `{}` ended after {} bytes, not the {} the grant named",
                         self.path, self.size_bytes, self.expected.size_bytes
                     )));
@@ -228,7 +228,7 @@ impl DirectDownloadStream {
                 )
                 .finish();
                 if observed != expected {
-                    return Err(ClientError::Http(format!(
+                    return Err(ClientError::Protocol(format!(
                         "direct download of `{}` produced {}:{}, not the {}:{} the grant named",
                         self.path,
                         observed.algorithm,
@@ -355,7 +355,7 @@ fn presigned_put_request(access: &ObjectTransferAccess) -> Result<WireRequest> {
         ..
     } = access;
     if method != "PUT" {
-        return Err(ClientError::Http(format!(
+        return Err(ClientError::Protocol(format!(
             "unsupported presigned upload method `{method}`"
         )));
     }
@@ -424,7 +424,7 @@ impl MultipartParts<'_> {
             Self::Streamed(reader) => reader
                 .next_part()
                 .await
-                .map_err(|error| ClientError::Http(format!("reading the payload failed: {error}"))),
+                .map_err(|error| ClientError::Io(format!("reading the payload failed: {error}"))),
         }
     }
 }
@@ -451,7 +451,7 @@ fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<Object
         .find(|part| part.part_number == part_number)
         .map(|part| part.access.clone())
         .ok_or_else(|| {
-            ClientError::Http(format!(
+            ClientError::Protocol(format!(
                 "server authorized no upload for part {part_number}"
             ))
         })
@@ -463,7 +463,9 @@ fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<Object
 /// out, from what the deployment advertises, so a different mode coming
 /// back is a broken server rather than something to fall back from.
 fn negotiated_a_different_upload_mode() -> ClientError {
-    ClientError::Http("the server answered with a different upload mode than negotiated".to_owned())
+    ClientError::Protocol(
+        "the server answered with a different upload mode than negotiated".to_owned(),
+    )
 }
 
 /// A path qualified by namespace.
@@ -501,7 +503,10 @@ impl Client {
             auth_token: config.auth_token,
             http: builder
                 .build()
-                .map_err(|err| ClientError::Http(err.to_string()))?,
+                .map_err(|err| ClientError::ConfigValidation {
+                    field: "http_client",
+                    reason: format!("failed to build: {err}"),
+                })?,
             transient_retry: !config.disable_transient_retry,
             capabilities: Arc::new(OnceLock::new()),
         })
@@ -627,30 +632,28 @@ impl Client {
         spec: &NamespacePath,
         options: &ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
-        let mut entries = Vec::new();
-        let mut envelope = None;
-        let mut cursor = None;
-        loop {
+        let first_page = self
+            .list_path_entries_page_with_options(spec, None, None, options)
+            .await?;
+        let mut envelope = ListPathEntriesResponse {
+            namespace_id: first_page.namespace_id,
+            absolute_path: first_page.absolute_path,
+            head_seq: first_page.head_seq,
+            entries: first_page.entries,
+            next_cursor: None,
+        };
+        let mut next_cursor = first_page.next_cursor;
+        while let Some(cursor) = next_cursor {
             let page = self
-                .list_path_entries_page_with_options(spec, None, cursor.as_deref(), options)
+                .list_path_entries_page_with_options(spec, None, Some(&cursor), options)
                 .await?;
-            let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
-                namespace_id: page.namespace_id.clone(),
-                absolute_path: page.absolute_path.clone(),
-                head_seq: page.head_seq,
-                entries: Vec::new(),
-                next_cursor: None,
-            });
-            envelope_ref.head_seq = envelope_ref.head_seq.max(page.head_seq);
-            entries.extend(page.entries);
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                // Pages arrive in canonical name-key order; concatenation
-                // preserves it, so aggregation must not re-sort.
-                envelope_ref.entries = entries;
-                return Ok(envelope.expect("first page initializes response envelope"));
-            }
+            envelope.head_seq = envelope.head_seq.max(page.head_seq);
+            envelope.entries.extend(page.entries);
+            next_cursor = page.next_cursor;
         }
+        // Pages arrive in canonical name-key order; concatenation preserves
+        // it, so aggregation must not re-sort.
+        Ok(envelope)
     }
 
     /// Lists one page of a directory. Entries carry no attributes;
@@ -832,7 +835,7 @@ impl Client {
             ..
         } = &download.access;
         if method != "GET" {
-            return Err(ClientError::Http(format!(
+            return Err(ClientError::Protocol(format!(
                 "unsupported presigned download method `{method}`"
             )));
         }
@@ -1044,7 +1047,7 @@ impl Client {
             ..
         } = access;
         if method != "PUT" {
-            return Err(ClientError::Http(format!(
+            return Err(ClientError::Protocol(format!(
                 "unsupported presigned part method `{method}`"
             )));
         }
@@ -1062,7 +1065,7 @@ impl Client {
             .get(http::header::ETAG)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| {
-                ClientError::Http(format!("part {part_number} upload returned no etag"))
+                ClientError::Protocol(format!("part {part_number} upload returned no etag"))
             })?
             .to_owned();
         Ok(CompletedUploadPart {
@@ -1820,8 +1823,9 @@ impl Client {
         part_size_bytes: u64,
         continuity: UploadContinuity<'_>,
     ) -> Result<UploadedObject> {
-        let part_size = usize::try_from(part_size_bytes)
-            .map_err(|_| ClientError::Http("part size does not fit this platform".to_owned()))?;
+        let part_size = usize::try_from(part_size_bytes).map_err(|_| {
+            ClientError::Protocol("part size does not fit this platform".to_owned())
+        })?;
         let landed = continuity
             .resume
             .map_or::<&[CompletedUploadPart], _>(&[], |resume| &resume.parts);
@@ -1888,9 +1892,15 @@ impl Client {
         let signed = self
             .sign_upload_parts(namespace_id, upload_id, claims)
             .await?;
+        let authorized = wave
+            .into_iter()
+            .map(|part| {
+                let access = signed_access(&signed.parts, part.claim.part_number)?;
+                Ok((part, access))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut in_flight = tokio::task::JoinSet::new();
-        for part in wave {
-            let access = signed_access(&signed.parts, part.claim.part_number)?;
+        for (part, access) in authorized {
             let client = self.clone();
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.clone();
@@ -1903,8 +1913,7 @@ impl Client {
         let mut uploaded = Vec::new();
         let mut failure = None;
         while let Some(joined) = in_flight.join_next().await {
-            match joined.map_err(|err| ClientError::Http(format!("part upload task failed: {err}")))
-            {
+            match joined.map_err(|err| ClientError::Io(format!("part upload task failed: {err}"))) {
                 // Every task is drained before the first failure surfaces,
                 // so no part upload outlives the wave that started it.
                 Ok(Ok(part)) => uploaded.push(part),
@@ -1930,19 +1939,24 @@ impl Client {
         mut access: ObjectTransferAccess,
     ) -> Result<CompletedUploadPart> {
         let part_number = part.claim.part_number;
-        for attempt in 1..=DIRECT_MULTIPART_PART_ATTEMPTS {
-            let result = self
+        for attempt in 1..DIRECT_MULTIPART_PART_ATTEMPTS {
+            match self
                 .upload_part_via_presigned_url(
                     part_number,
                     &access,
                     part.claim.crc64nvme.clone(),
                     part.bytes.clone(),
                 )
-                .await;
-            match result {
+                .await
+            {
                 Ok(uploaded) => return Ok(uploaded),
-                Err(error) if attempt == DIRECT_MULTIPART_PART_ATTEMPTS => return Err(error),
-                Err(_) => {
+                Err(error) => {
+                    tracing::warn!(
+                        part_number,
+                        attempt,
+                        error = %error,
+                        "part upload failed; refreshing authorization before retry"
+                    );
                     let signed = self
                         .sign_upload_parts(namespace_id, upload_id, vec![part.claim.clone()])
                         .await?;
@@ -1950,10 +1964,8 @@ impl Client {
                 }
             }
         }
-        // The loop above returns on its last attempt.
-        Err(ClientError::Http(format!(
-            "part {part_number} upload made no attempt"
-        )))
+        self.upload_part_via_presigned_url(part_number, &access, part.claim.crc64nvme, part.bytes)
+            .await
     }
 
     async fn stage_bytes_via_server(
@@ -2730,6 +2742,27 @@ mod tests {
             ),
             "unexpected error: {error:?}"
         );
+    }
+
+    #[test]
+    fn client_and_config_debug_redact_the_auth_token() {
+        let raw_token = "client-debug-secret";
+        let config = ClientConfig {
+            server_url: "http://example.com".to_owned(),
+            auth_token: Some(raw_token.into()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        };
+
+        let config_debug = format!("{config:?}");
+        assert!(!config_debug.contains(raw_token), "{config_debug}");
+        assert!(config_debug.contains("<redacted>"), "{config_debug}");
+
+        let client = Client::new(config).expect("valid client config");
+        let client_debug = format!("{client:?}");
+        assert!(!client_debug.contains(raw_token), "{client_debug}");
+        assert!(client_debug.contains("<redacted>"), "{client_debug}");
     }
 
     /// A CA bundle that cannot be read or is not PEM fails at construction,
