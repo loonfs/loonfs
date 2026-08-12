@@ -946,7 +946,10 @@ fn store_probe_response(report: StoreProbeReport) -> StoreProbeResponse {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{map_runtime_error, resolve_cli_page_limit, GrepError, StepBudget, GREP_INDEX_JOB};
+    use super::{
+        map_runtime_error, resolve_cli_page_limit, GrepError, StepBudget, GREP_GC_JOB,
+        GREP_INDEX_JOB,
+    };
     use crate::backend_error::map_namespace_scoped_grep_error;
     use crate::config::StoreConfig;
     use crate::resolve::EmbeddedTarget;
@@ -974,13 +977,14 @@ mod tests {
             .get()
     }
 
-    /// The three jobs `admin run` hosts by default, in the order it drives
+    /// The four jobs `admin run` hosts by default, in the order it drives
     /// them.
-    fn every_job() -> [MaintenanceJobId; 3] {
+    fn every_job() -> [MaintenanceJobId; 4] {
         [
             MaintenanceJobId::METADATA,
             MaintenanceJobId::GC,
             GREP_INDEX_JOB,
+            GREP_GC_JOB,
         ]
     }
 
@@ -1069,8 +1073,8 @@ mod tests {
             "an unbudgeted drain settles every key: {:?}",
             progress.keys
         );
-        assert_eq!(progress.keys.len(), 6, "three jobs over two namespaces");
-        assert!(progress.steps >= 6, "every key took at least one step");
+        assert_eq!(progress.keys.len(), 8, "four jobs over two namespaces");
+        assert!(progress.steps >= 8, "every key took at least one step");
         // A namespace with no grep root has nothing for that job to
         // maintain, and saying so is a settled conclusion like any other.
         let unindexed_grep = progress

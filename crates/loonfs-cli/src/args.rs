@@ -741,7 +741,7 @@ pub(crate) struct AdminRunArgs {
     /// namespaces.
     #[arg(long = "namespace", required = true)]
     pub namespaces: Vec<String>,
-    /// Maintenance job to host. Repeat the flag to select more; all three
+    /// Maintenance job to host. Repeat the flag to select more; all four
     /// when omitted. `core-gc` selects the runtime's collection job, which
     /// logs and settles under its own name, `gc`.
     #[arg(long = "job")]

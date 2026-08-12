@@ -6,7 +6,8 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CreateNamespaceOptions, ErrorCode, MaintenancePlan, ManifestId,
+    ChangeSeq, CheckpointOwnerSummary, CommitId, CreateCheckpointOptions, CreateNamespaceOptions,
+    DeleteNamespaceOptions, ErrorCode, FsAdmin, FsWriter, MaintenancePlan, ManifestId,
     MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeError,
     SharedObjectStore, WalFlushStepOutcome,
 };
@@ -728,4 +729,94 @@ fn checkpoint_and_retention_hooks_are_available() {
         .advance_retention_floor_blocking(&namespace_id)
         .expect("advance retention");
     assert_eq!(retention.retention_floor_seq, checkpoint.checkpoint_seq);
+}
+
+#[test]
+fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = store(temp_dir.path());
+    let fs = open_runtime(store.clone(), "checkpoint-tombstone-setup");
+    let source = namespace_id("source");
+    let target = namespace_id("target");
+
+    fs.create_namespace_blocking(&source, CreateNamespaceOptions::default())
+        .expect("create source namespace");
+    fs.put_file_bytes_blocking(
+        &source,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::default(),
+    )
+    .expect("put source file");
+    fs.fork_namespace_blocking(&source, &target)
+        .expect("fork source namespace");
+    let user_checkpoint = fs
+        .create_checkpoint_blocking(&source)
+        .expect("create user checkpoint");
+
+    let before_delete =
+        block_on(fs.admin.list_checkpoints(&source)).expect("list checkpoints before deletion");
+    let fork_checkpoint = before_delete
+        .checkpoints
+        .iter()
+        .find(|checkpoint| {
+            matches!(
+                &checkpoint.owner,
+                CheckpointOwnerSummary::Fork {
+                    target_namespace_id
+                } if target_namespace_id == &target
+            )
+        })
+        .expect("fork-owned checkpoint")
+        .checkpoint_id
+        .clone();
+
+    let deleter = block_on(
+        FsWriter::builder_with_store(store.clone())
+            .writer_id("checkpoint-tombstone-deleter")
+            .build(),
+    )
+    .expect("build deleting writer");
+    block_on(deleter.delete_namespace(&source, DeleteNamespaceOptions::default()))
+        .expect("delete source namespace");
+
+    let admin = block_on(
+        FsAdmin::builder_with_store(store)
+            .actor_id("checkpoint-tombstone-observer")
+            .build(),
+    )
+    .expect("build post-delete admin");
+    let listed =
+        block_on(admin.list_checkpoints(&source)).expect("list checkpoints on deleted namespace");
+    assert_eq!(listed.checkpoints.len(), 2);
+    assert!(listed
+        .checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.checkpoint_id == user_checkpoint.checkpoint_id));
+    assert!(listed
+        .checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.checkpoint_id == fork_checkpoint));
+
+    let released = block_on(admin.release_checkpoint(&source, &user_checkpoint.checkpoint_id))
+        .expect("release user checkpoint on deleted namespace");
+    assert!(released.was_active);
+    assert_core_error_kind(
+        block_on(admin.release_checkpoint(&source, &fork_checkpoint)),
+        ErrorCode::InvalidRequest,
+    );
+    assert_core_error_kind(
+        block_on(admin.namespace_status(&source)),
+        ErrorCode::NamespaceDeleted,
+    );
+    assert_core_error_kind(
+        block_on(admin.create_checkpoint(
+            &source,
+            CreateCheckpointOptions {
+                name: "after-delete".to_owned(),
+                ttl_ms: None,
+            },
+        )),
+        ErrorCode::NamespaceDeleted,
+    );
 }

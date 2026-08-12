@@ -66,6 +66,9 @@ That config names them at `/etc/loonfs/gcs-service-account.json`,
 `config.key` names the entry holding the TOML, and the container reads
 `/etc/loonfs/<key>`. The default is `config.toml`.
 
+The init container must repeat the server container's `env` and `envFrom`
+entries because Kubernetes containers do not inherit each other's environment.
+
 Patch this optional init container into the Deployment pod spec to gate startup:
 
 ```yaml
@@ -74,6 +77,12 @@ Patch this optional init container into the Deployment pod spec to gate startup:
 #   - name: probe-store
 #     image: ghcr.io/loonfs/loonfs-server:vX.Y.Z
 #     args: ["--probe-store", "--config", "/etc/loonfs/config.toml"]
+#     env:
+#       - name: AWS_REGION
+#         value: us-east-1
+#     envFrom:
+#       - secretRef:
+#           name: loonfs-server-secrets
 #     volumeMounts:
 #       - {name: config, mountPath: /etc/loonfs, readOnly: true}
 ```
@@ -132,8 +141,9 @@ for 6400 files.
 
 Changing `disk_bytes` across a restart is safe either way. Growing it keeps
 what the directory already holds. Shrinking it starts the directory empty.
-Nothing in the cache is durable, so deleting it is always safe, and the pod
-deletes it every time it stops.
+Nothing in the cache is durable, so deleting it is always safe. A process
+restart with the same directory preserves cache entries, but a replacement
+pod gets a new `emptyDir` and starts cold.
 
 ## Values
 
@@ -187,6 +197,9 @@ config itself with the server's own flag:
 ```bash
 loonfs-server --config /etc/loonfs/config.toml --check-config
 ```
+
+Validate chart changes with `helm template` or a real install. `helm lint`
+does not fail on template-level errors.
 
 ## Shutdown
 
