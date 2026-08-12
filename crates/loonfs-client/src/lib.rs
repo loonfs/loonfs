@@ -22,11 +22,11 @@ use futures::StreamExt as _;
 use loonfs_api::{
     v0::{
         AbortUploadResponse, BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest,
-        BeginUploadResponse, ChangesResponse, CommitResponse as ApiCommitResponse, CommittedChange,
+        BeginUploadResponse, ChangesResponse, CommitResponse as ApiCommitResponse,
         CompleteUploadRequest, CompleteUploadResponse, CompletedUploadPart,
         DirectMultipartContentClaim, DirectMultipartUploadOptions, DirectPutContentClaim,
-        DisableGrepIndexResponse, EnableGrepIndexResponse, FilesystemChange, GrepGcRequest,
-        GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
+        DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse,
+        GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
         SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest, StoreProbeResponse,
         UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
         ValidatedContentToken,
@@ -37,13 +37,15 @@ use loonfs_api::{
     DeleteNamespaceResponse, ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest,
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutRetryAttempt,
+    PutRetryErrorClassification, PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo,
     SecretString, StorageChecksum, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_UPLOADS_DIRECT_MULTIPART, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 /// Payload size from which a put stops holding its bytes whole.
 ///
@@ -64,49 +66,29 @@ const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 /// its signature.
 const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
 
-/// What a reuse conflict says the commit id already landed as: where, and
-/// the semantic identity of the mutation that landed there.
-///
-/// The server decides the conflict against a durable receipt, and the
-/// receipt holds both, so the error body carries both. They are absent only
-/// when nothing has committed under the id yet — two conflicting requests
-/// claiming it at once — and then there is nothing to read back.
-fn reported_commit_receipt(error: &ClientError) -> Option<(ChangeSeq, String)> {
-    match error {
-        ClientError::Api { details, .. } => {
-            let details = details.as_ref()?;
-            Some((
-                details.committed_seq?,
-                details.committed_fingerprint.clone()?,
-            ))
+fn classify_put_retry_error(error: &ClientError) -> PutRetryErrorClassification {
+    match error.code() {
+        Some(ErrorCode::CommitIdReuseConflict) => {
+            let receipt = match error {
+                ClientError::Api { details, .. } => details.as_ref().and_then(|details| {
+                    Some(PutRetryReceipt {
+                        committed_seq: details.committed_seq?,
+                        committed_fingerprint: details.committed_fingerprint.clone()?,
+                    })
+                }),
+                _ => None,
+            };
+            PutRetryErrorClassification::CommitIdReuseConflict(receipt)
         }
-        _ => None,
+        Some(ErrorCode::RebootstrapRequired) => PutRetryErrorClassification::RebootstrapRequired,
+        _ => PutRetryErrorClassification::Other,
     }
-}
-
-/// The content one committed change wrote, when it wrote exactly one.
-///
-/// A single put's commit produces exactly one content-bearing event: the
-/// file's `created` or `content_changed`. Auto-created parent directories
-/// appear as `created` without a content ref, and no other change kind
-/// carries content at all, so "exactly one" holds for a put however many
-/// directories it had to make. Anything else — nothing, or several — is not
-/// the commit a single put produces, and the caller leaves the conflict
-/// standing rather than picking one.
-fn sole_committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
-    let mut content = change.events.iter().filter_map(|event| match event {
-        FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
-        FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
-        _ => None,
-    });
-    let only = content.next()?;
-    content.next().is_none().then_some(only)
 }
 
 pub use config::ClientConfig;
 pub use error::ClientError;
 pub use payload::{PayloadSource, PayloadStream};
-use transport::{WireRequest, IO_INACTIVITY_TIMEOUT};
+use transport::{StdMonotonicTimer, TransportRetryPolicy, WireRequest, IO_INACTIVITY_TIMEOUT};
 pub use ClientError as Error;
 
 /// Per-operation options, defined once in `loonfs-api` and shared with the
@@ -129,9 +111,18 @@ pub struct Client {
     base_url: String,
     auth_token: Option<SecretString>,
     http: reqwest::Client,
-    /// Whether transient server errors are retried (see
+    /// Optional timeout configured for each HTTP attempt.
+    ///
+    /// Replay-safe requests use the smaller of this value and the time left in
+    /// the total retry budget.
+    request_timeout: Option<Duration>,
+    /// Whether the client retries eligible network and server errors (see
     /// [`ClientConfig::disable_transient_retry`]).
-    transient_retry: bool,
+    transport_retry_enabled: bool,
+    /// Attempt count, delay, and total duration limits for replay-safe requests.
+    transport_retry: TransportRetryPolicy,
+    /// Monotonic clock used to enforce the total retry limit.
+    timer: Arc<dyn transport::MonotonicTimer>,
     /// Capability document cache, shared by clones and filled on first use.
     capabilities: Arc<OnceLock<CapabilityDocument>>,
 }
@@ -484,13 +475,14 @@ impl Client {
     /// validation.
     pub fn new(config: ClientConfig) -> Result<Self> {
         config.validate()?;
+        let request_timeout = config.request_timeout_ms.map(Duration::from_millis);
         let mut builder = reqwest::Client::builder()
             // Bounds a stalled connection without cutting off a slow but
             // progressing transfer, which a whole-request deadline would.
             .read_timeout(IO_INACTIVITY_TIMEOUT)
             .connect_timeout(IO_INACTIVITY_TIMEOUT);
-        if let Some(timeout_ms) = config.request_timeout_ms {
-            builder = builder.timeout(std::time::Duration::from_millis(timeout_ms));
+        if let Some(request_timeout) = request_timeout {
+            builder = builder.timeout(request_timeout);
         }
         // Additive: the platform roots stay in place, so one configured
         // private CA does not cost this client every public one.
@@ -506,7 +498,10 @@ impl Client {
                     field: "http_client",
                     reason: format!("failed to build: {err}"),
                 })?,
-            transient_retry: !config.disable_transient_retry,
+            request_timeout,
+            transport_retry_enabled: !config.disable_transient_retry,
+            transport_retry: TransportRetryPolicy::DEFAULT,
+            timer: Arc::new(StdMonotonicTimer::default()),
             capabilities: Arc::new(OnceLock::new()),
         })
     }
@@ -901,7 +896,7 @@ impl Client {
 
     pub async fn health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
-        self.call_with_transient_retry(&self.get(&url), None)
+        self.call_with_transport_retry(&self.get(&url), None)
             .await?;
         Ok(())
     }
@@ -1012,7 +1007,7 @@ impl Client {
         // provider takes the last write, and the checksum rides the
         // signature either way.
         let response = self
-            .call_with_transient_retry_headers(&request, Some(&bytes))
+            .call_content_with_transport_retry_headers(&request, Some(&bytes))
             .await?;
         let etag = response
             .get(http::header::ETAG)
@@ -1068,7 +1063,7 @@ impl Client {
         // Proxied uploads are the request most likely to hit the server's
         // concurrency cap; staging the same bytes again is idempotent.
         let response = self
-            .call_with_transient_retry(&request, Some(&Bytes::copy_from_slice(bytes)))
+            .call_content_with_transport_retry(&request, Some(&Bytes::copy_from_slice(bytes)))
             .await?;
         serde_json::from_slice(&response).map_err(|err| ClientError::Json(err.to_string()))
     }
@@ -2181,23 +2176,13 @@ impl Client {
         }
     }
 
-    /// Decides whether a reused commit id already did this exact work.
+    /// Checks whether a commit-ID conflict came from retrying the same PUT.
     ///
-    /// The proof is the commit's whole semantic identity, not a selection of
-    /// its parts. The conflict reports the fingerprint the server's receipt
-    /// holds; this reads the one change that commit id landed, rebuilds this
-    /// request's fingerprint with the committed content reference in place
-    /// of the freshly uploaded one, and requires the two to be equal. That
-    /// covers the path, the replacement behavior, the expected revision, the
-    /// annotation, and that the original commit was this one put — every
-    /// field a future request gains is covered the day it joins the
-    /// preimage. What the fingerprint cannot speak to is whether the two
-    /// content objects hold the same bytes, so digest evidence answers that
-    /// separately.
-    ///
-    /// Nothing weaker counts: every way of failing to prove the two requests
-    /// are the same — including the upload having no answer to give — leaves
-    /// the original conflict standing, never agreement.
+    /// The shared helper loads the original change and compares the complete
+    /// request fingerprint. It also verifies that the new upload contains the
+    /// same bytes as the content from the original commit. If either check
+    /// cannot be completed or does not match, this method returns the original
+    /// conflict.
     async fn reconcile_commit_id_reuse(
         &self,
         spec: &NamespacePath,
@@ -2207,68 +2192,19 @@ impl Client {
         conflict: ClientError,
     ) -> Result<ApiCommitResponse> {
         let namespace_id = spec.namespace();
-        let Some((committed_seq, committed_fingerprint)) = reported_commit_receipt(&conflict)
-        else {
-            return Err(conflict);
-        };
-        let Some(committed) = self
-            .read_committed_change(namespace_id, commit_id, committed_seq)
-            .await?
-        else {
-            return Err(conflict);
-        };
-        let Some(content_ref) = sole_committed_content_ref(&committed) else {
-            return Err(conflict);
-        };
-        let retried = loonfs_api::put_retry_fingerprint(
-            namespace_id,
-            spec.absolute_path(),
-            options.behavior,
-            options.expected_revision_no,
-            options.message.as_deref(),
-            content_ref,
-        );
-        if retried.ok().as_deref() != Some(committed_fingerprint.as_str()) {
-            return Err(conflict);
-        }
-        if !content_ref.matches_evidence(uploaded) {
-            return Err(conflict);
-        }
-        Ok(ApiCommitResponse {
-            namespace_id: namespace_id.clone(),
-            commit_id: committed.commit_id,
-            committed_seq: committed.seq,
-        })
-    }
-
-    /// Reads the one change a reuse conflict said the commit id landed at.
-    ///
-    /// There is no by-commit-id read on the wire, but the conflict already
-    /// named the sequence, so this is one feed page positioned on it rather
-    /// than a search. `None` means the evidence is not there to compare —
-    /// the sequence has fallen below the retention floor, or the row at it
-    /// belongs to some other commit — and the caller turns that into the
-    /// conflict rather than into a guess.
-    async fn read_committed_change(
-        &self,
-        namespace_id: &NamespaceId,
-        commit_id: &CommitId,
-        committed_seq: ChangeSeq,
-    ) -> Result<Option<CommittedChange>> {
-        let after_seq = ChangeSeq(committed_seq.0.saturating_sub(1));
-        let page = match self.list_changes(namespace_id, after_seq, Some(1)).await {
-            Ok(page) => page,
-            // Retention gave up the replay promise below the floor: the
-            // commit landed, but what it wrote can no longer be read back.
-            Err(error) if error.code() == Some(ErrorCode::RebootstrapRequired) => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        Ok(page
-            .changes
-            .into_iter()
-            .find(|change| change.seq == committed_seq && &change.commit_id == commit_id))
+        loonfs_api::reconcile_put_commit_id_reuse(
+            PutRetryAttempt {
+                namespace_id,
+                path: spec.absolute_path(),
+                commit_id,
+                options,
+                staged: uploaded,
+            },
+            conflict,
+            |after_seq| self.list_changes(namespace_id, after_seq, Some(1)),
+            classify_put_retry_error,
+        )
+        .await
     }
 
     pub async fn create_directory(
@@ -2523,7 +2459,7 @@ mod streaming_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{transient_failure, MAX_TRANSIENT_ATTEMPTS};
+    use crate::transport::{retryable_transport_failure, TransportRetryPolicy};
     use loonfs_api::{ContentId, ErrorCode};
     use std::fs;
     use tempfile::tempdir;
@@ -2638,7 +2574,7 @@ mod tests {
     /// a served status whose body was not the error envelope — surfaces
     /// immediately.
     #[test]
-    fn transient_failure_covers_transport_and_retryable_unavailability_only() {
+    fn retryable_transport_failure_covers_transport_and_unavailability_only() {
         let api = |code: &str| ClientError::Api {
             status: 503,
             code: code.to_owned(),
@@ -2647,18 +2583,27 @@ mod tests {
             request_id: None,
             details: None,
         };
-        assert!(transient_failure(
+        assert!(retryable_transport_failure(
             true,
             &ClientError::Http("reset".to_owned())
         ));
-        assert!(transient_failure(false, &api("server_busy")));
-        assert!(transient_failure(false, &api("commit_queue_full")));
-        assert!(transient_failure(false, &api("shutting_down")));
-        assert!(!transient_failure(false, &api("server_error")));
-        assert!(!transient_failure(false, &api("checkpoint_unavailable")));
-        assert!(!transient_failure(false, &api("maintenance_required")));
-        assert!(!transient_failure(false, &api("index_lagging")));
-        assert!(!transient_failure(
+        assert!(retryable_transport_failure(false, &api("server_busy")));
+        assert!(retryable_transport_failure(
+            false,
+            &api("commit_queue_full")
+        ));
+        assert!(retryable_transport_failure(false, &api("shutting_down")));
+        assert!(!retryable_transport_failure(false, &api("server_error")));
+        assert!(!retryable_transport_failure(
+            false,
+            &api("checkpoint_unavailable")
+        ));
+        assert!(!retryable_transport_failure(
+            false,
+            &api("maintenance_required")
+        ));
+        assert!(!retryable_transport_failure(false, &api("index_lagging")));
+        assert!(!retryable_transport_failure(
             false,
             &ClientError::Http("http status 502 with a non-envelope body".to_owned())
         ));
@@ -2669,7 +2614,8 @@ mod tests {
     #[tokio::test]
     async fn transport_failures_resend_up_to_the_attempt_cap() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let transport = crate::transport::test_transport::failures(MAX_TRANSIENT_ATTEMPTS as usize);
+        let max_attempts = TransportRetryPolicy::DEFAULT.max_retries as usize + 1;
+        let transport = crate::transport::test_transport::failures(max_attempts);
         let retrying = Client::new(ClientConfig {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
@@ -2683,7 +2629,7 @@ mod tests {
             .await
             .expect_err("dropped connections must fail");
         assert!(matches!(error, ClientError::Http(_)), "{error:?}");
-        assert_eq!(transport.attempts(), MAX_TRANSIENT_ATTEMPTS as usize);
+        assert_eq!(transport.attempts(), max_attempts);
         drop(transport);
 
         let transport = crate::transport::test_transport::failures(1);

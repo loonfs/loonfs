@@ -1,54 +1,51 @@
-//! Commit identity fingerprints (format spec, "Commit identity
-//! fingerprints"): a stable digest over a mutation's semantic content, used
-//! to decide whether a reused commit id carries the same mutation or a
-//! conflicting one.
+//! Generates stable fingerprints for filesystem mutations (format spec,
+//! "Commit identity fingerprints"). A fingerprint lets LoonFS determine
+//! whether two requests that use the same commit ID describe the same
+//! mutation.
 //!
-//! This lives beside [`FilesystemOperation`], the one operation language it
-//! hashes, because every surface has to compute the same value from it: the
-//! engine stamps it on a commit receipt, and a client reconciling a
-//! reused-id conflict recomputes it to prove the retry is the same request.
-//! One function is the authority; nobody re-derives the rules.
+//! The runtime and HTTP client use the functions in this module so that they
+//! apply the same identity rules. The runtime stores a fingerprint in the
+//! commit receipt. A client can later recompute it when retrying a request.
 //!
-//! The commit id is not in the preimage. The id is the key a mutation is
-//! filed under; the fingerprint is what was filed. Comparing the two is the
-//! whole of the reuse check.
+//! The commit ID is not part of the fingerprint input. The commit ID selects
+//! a receipt, while the fingerprint describes the mutation stored in that
+//! receipt.
 
 use crate::{
-    AbsolutePath, AttributeRevisionNo, AttributeValue, ChangeSeq, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
-    RevisionNo,
+    AbsolutePath, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId, ContentEvidence,
+    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId,
+    NamespaceId, RevisionNo,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::future::Future;
 use thiserror::Error;
 
-/// Domain separator for the one mutation fingerprint preimage.
+/// Domain separator included in every mutation fingerprint input.
 const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v0";
 
-/// Scheme-and-algorithm tag carried by every stored fingerprint value.
+/// Scheme and hash algorithm included in every stored fingerprint.
 ///
-/// `v0` names the canonicalization rules (domain string plus the frozen v0
-/// preimage encoding; format spec, "Commit identity fingerprints") and
-/// `sha256` the digest algorithm, so either can change later without
-/// re-interpreting values already stored in WAL records and commit receipts.
+/// `v0` identifies the canonical encoding rules, and `sha256` identifies the
+/// hash algorithm. Including both values allows future versions to change
+/// either rule without changing the meaning of existing fingerprints.
 const FINGERPRINT_SCHEME: &str = "v0:sha256";
 
-/// A canonical preimage that could not be encoded.
+/// Error returned when the canonical fingerprint input cannot be encoded.
 ///
-/// The preimage is built here from validated types with no encoding failure
-/// modes, so this reports a bug in the encoder rather than anything a caller
-/// did.
+/// The input contains validated types, so this error indicates an internal
+/// encoding bug rather than invalid caller data.
 #[derive(Debug, Error)]
 #[error("failed to encode the commit fingerprint preimage: {0}")]
 pub struct SemanticFingerprintError(#[from] serde_json::Error);
 
-/// Computes a stored fingerprint value (`v0:sha256:<64 lowercase hex>`) from
-/// a canonical preimage.
+/// Computes a stored fingerprint (`v0:sha256:<64 lowercase hex>`) from a
+/// canonical input.
 ///
-/// The preimage's compact JSON encoding is the durable contract: the
-/// pinned-value tests below fail if it drifts.
+/// The compact JSON encoding is part of the durable format. The fixed-value
+/// tests detect changes to that encoding.
 fn fingerprint_digest<T>(preimage: &T) -> Result<String, SemanticFingerprintError>
 where
     T: Serialize,
@@ -271,9 +268,10 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             expected_inode_id,
             expected_attributes_revision_no,
         } => {
-            // Canonicalizing the removal list is this function's job, not the
-            // wire type's: the wire keeps the caller's list so a duplicate can
-            // be rejected by name, and identity is what the list asks for.
+            // The wire type preserves the caller's list so validation can
+            // report duplicate keys. The fingerprint uses the sorted, unique
+            // set because order and duplicate entries do not change the
+            // requested mutation.
             let mut remove: Vec<&str> = remove.iter().map(|key| key.as_str()).collect();
             remove.sort_unstable();
             remove.dedup();
@@ -291,12 +289,10 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
     }
 }
 
-/// The semantic identity of one mutation request: what a reused commit id is
-/// compared against.
+/// Computes the semantic fingerprint used to validate a reused commit ID.
 ///
-/// A one-operation convenience call and a one-element batch are the same
-/// request, so they reach this function with the same shape and fingerprint
-/// identically; there is no separate single-operation form to keep in step.
+/// A single-operation helper and a one-item batch produce the same input and
+/// therefore the same fingerprint.
 pub fn semantic_commit_fingerprint(
     namespace_id: &NamespaceId,
     message: Option<&str>,
@@ -318,17 +314,15 @@ pub fn semantic_commit_fingerprint(
     })
 }
 
-/// The fingerprint the original request must have had, if this retry is the
-/// same single put with only the content id renamed.
+/// Computes the fingerprint for a retried single-file PUT using the content
+/// reference from the original commit.
 ///
-/// Rerunning a whole upload-then-commit sequence stages a fresh content
-/// object, so the retry's own fingerprint can never match a landed one. This
-/// substitutes the committed reference for the staged one and fingerprints
-/// the request that results: everything else a put can ask for — the path,
-/// the replacement behavior, the expected revision, the annotation, and that
-/// the commit was this one operation and nothing more — has to agree for the
-/// value to match. Whether the two content objects hold the same bytes is a
-/// separate question, answered by digest evidence rather than by this.
+/// Retrying an upload creates a new content object, so its content ID differs
+/// from the ID stored by the original commit. This function substitutes the
+/// original content reference before computing the fingerprint. The path,
+/// destination behavior, expected revision, message, and operation count must
+/// still match. The caller must separately verify that both content objects
+/// contain the same bytes.
 pub fn put_retry_fingerprint(
     namespace_id: &NamespaceId,
     path: &AbsolutePath,
@@ -344,6 +338,123 @@ pub fn put_retry_fingerprint(
         expected_revision_no,
     };
     semantic_commit_fingerprint(namespace_id, message, std::slice::from_ref(&operation))
+}
+
+/// Receipt data needed to verify a PUT that reused a commit ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutRetryReceipt {
+    /// Sequence number assigned to the original commit.
+    pub committed_seq: ChangeSeq,
+    /// Semantic fingerprint stored in the original commit receipt.
+    pub committed_fingerprint: String,
+}
+
+/// Classification of an error encountered while verifying a retried PUT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PutRetryErrorClassification {
+    /// The commit ID was already used. The receipt is included when available.
+    CommitIdReuseConflict(Option<PutRetryReceipt>),
+    /// Retention removed the change record needed to verify the retry.
+    RebootstrapRequired,
+    /// Any error that does not have special handling during retry verification.
+    Other,
+}
+
+/// Details of the retried PUT being compared with an existing receipt.
+#[derive(Debug, Clone, Copy)]
+pub struct PutRetryAttempt<'a> {
+    /// Namespace targeted by the PUT.
+    pub namespace_id: &'a NamespaceId,
+    /// Absolute path targeted by the PUT.
+    pub path: &'a AbsolutePath,
+    /// Commit ID that was already used.
+    pub commit_id: &'a CommitId,
+    /// PUT options supplied by the caller.
+    pub options: &'a crate::options::PutFileOptions,
+    /// Checksum or byte evidence for the new upload.
+    pub staged: ContentEvidence<'a>,
+}
+
+/// Checks whether a PUT rejected for commit-ID reuse is an exact retry of an
+/// earlier successful PUT.
+///
+/// `read_change` receives the change-feed sequence immediately before the
+/// sequence in the receipt. It must return a page containing at most the
+/// expected change.
+///
+/// The function returns the original commit response only when both the
+/// request fingerprint and the uploaded content match the original commit.
+/// It returns the original conflict when the receipt or change record is
+/// missing, the retained history is unavailable, or either comparison fails.
+/// Other errors from `read_change` are returned unchanged.
+pub async fn reconcile_put_commit_id_reuse<E, ReadChange, ReadChangeFuture, ClassifyError>(
+    attempt: PutRetryAttempt<'_>,
+    conflict: E,
+    read_change: ReadChange,
+    classify_error: ClassifyError,
+) -> Result<crate::v0::CommitResponse, E>
+where
+    ReadChange: FnOnce(ChangeSeq) -> ReadChangeFuture,
+    ReadChangeFuture: Future<Output = Result<crate::v0::ChangesResponse, E>>,
+    ClassifyError: Fn(&E) -> PutRetryErrorClassification,
+{
+    let PutRetryErrorClassification::CommitIdReuseConflict(Some(receipt)) =
+        classify_error(&conflict)
+    else {
+        return Err(conflict);
+    };
+    let after_seq = ChangeSeq(receipt.committed_seq.0.saturating_sub(1));
+    let page = match read_change(after_seq).await {
+        Ok(page) => page,
+        Err(error)
+            if matches!(
+                classify_error(&error),
+                PutRetryErrorClassification::RebootstrapRequired
+            ) =>
+        {
+            return Err(conflict);
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(committed) = page.changes.into_iter().find(|change| {
+        change.seq == receipt.committed_seq && &change.commit_id == attempt.commit_id
+    }) else {
+        return Err(conflict);
+    };
+    let Some(content_ref) = sole_committed_content_ref(&committed) else {
+        return Err(conflict);
+    };
+    let retried = put_retry_fingerprint(
+        attempt.namespace_id,
+        attempt.path,
+        attempt.options.behavior,
+        attempt.options.expected_revision_no,
+        attempt.options.message.as_deref(),
+        content_ref,
+    );
+    if retried.ok().as_deref() != Some(receipt.committed_fingerprint.as_str())
+        || !content_ref.matches_evidence(attempt.staged)
+    {
+        return Err(conflict);
+    }
+    Ok(crate::v0::CommitResponse {
+        namespace_id: attempt.namespace_id.clone(),
+        commit_id: committed.commit_id,
+        committed_seq: committed.seq,
+    })
+}
+
+/// Returns the content reference when a committed change wrote exactly one
+/// file.
+fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&ContentRef> {
+    let mut content = change.events.iter().filter_map(|event| match event {
+        crate::v0::FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
+        crate::v0::FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
+        _ => None,
+    });
+    let only = content.next()?;
+    content.next().is_none().then_some(only)
 }
 
 #[cfg(test)]
@@ -929,5 +1040,109 @@ mod tests {
                 "a changed {label} must change the fingerprint"
             );
         }
+    }
+
+    /// Tests the shared retry logic without using the HTTP or embedded-runtime
+    /// adapters.
+    #[test]
+    fn put_retry_reconciliation_agrees_on_receipt_mismatch_and_unavailable_evidence() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        enum ReconciliationError {
+            Conflict(PutRetryReceipt),
+            EvidenceUnavailable,
+        }
+
+        fn classify(error: &ReconciliationError) -> PutRetryErrorClassification {
+            match error {
+                ReconciliationError::Conflict(receipt) => {
+                    PutRetryErrorClassification::CommitIdReuseConflict(Some(receipt.clone()))
+                }
+                ReconciliationError::EvidenceUnavailable => {
+                    PutRetryErrorClassification::RebootstrapRequired
+                }
+            }
+        }
+
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let path = AbsolutePath::parse("/report.txt").expect("valid path");
+        let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+        let committed_seq = ChangeSeq(7);
+        let bytes = b"stable bytes";
+        let content_ref = ContentRef::blob_v1(ContentId::generate(), bytes);
+        let options = crate::options::PutFileOptions {
+            commit_id: Some(commit_id.clone()),
+            ..crate::options::PutFileOptions::default()
+        };
+        let receipt = PutRetryReceipt {
+            committed_seq,
+            committed_fingerprint: put_retry_fingerprint(
+                &namespace_id,
+                &path,
+                options.behavior,
+                options.expected_revision_no,
+                options.message.as_deref(),
+                &content_ref,
+            )
+            .expect("fingerprint"),
+        };
+        let page = crate::v0::ChangesResponse {
+            namespace_id: namespace_id.clone(),
+            after_seq: ChangeSeq(6),
+            through_seq: committed_seq,
+            next_after_seq: None,
+            changes: vec![crate::v0::CommittedChange {
+                seq: committed_seq,
+                commit_id: commit_id.clone(),
+                committed_at_ms: 1,
+                message: None,
+                events: vec![crate::v0::FilesystemChange::ContentChanged {
+                    inode_id: InodeId(2),
+                    revision_no: RevisionNo(1),
+                    content_ref,
+                }],
+            }],
+        };
+
+        let matching_attempt = PutRetryAttempt {
+            namespace_id: &namespace_id,
+            path: &path,
+            commit_id: &commit_id,
+            options: &options,
+            staged: ContentEvidence::Bytes(bytes),
+        };
+        let reconciled = futures::executor::block_on(reconcile_put_commit_id_reuse(
+            matching_attempt,
+            ReconciliationError::Conflict(receipt.clone()),
+            |after_seq| {
+                assert_eq!(after_seq, ChangeSeq(6));
+                std::future::ready(Ok(page.clone()))
+            },
+            classify,
+        ))
+        .expect("matching receipt and evidence reconcile");
+        assert_eq!(reconciled.commit_id, commit_id);
+        assert_eq!(reconciled.committed_seq, committed_seq);
+
+        let mismatch = futures::executor::block_on(reconcile_put_commit_id_reuse(
+            PutRetryAttempt {
+                staged: ContentEvidence::Bytes(b"different bytes"),
+                ..matching_attempt
+            },
+            ReconciliationError::Conflict(receipt.clone()),
+            |_| std::future::ready(Ok(page.clone())),
+            classify,
+        ));
+        assert_eq!(
+            mismatch,
+            Err(ReconciliationError::Conflict(receipt.clone()))
+        );
+
+        let unavailable = futures::executor::block_on(reconcile_put_commit_id_reuse(
+            matching_attempt,
+            ReconciliationError::Conflict(receipt.clone()),
+            |_| std::future::ready(Err(ReconciliationError::EvidenceUnavailable)),
+            classify,
+        ));
+        assert_eq!(unavailable, Err(ReconciliationError::Conflict(receipt)));
     }
 }

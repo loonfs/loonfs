@@ -34,5 +34,8 @@ zstd.workspace = true
 [features]
 openapi = ["dep:utoipa"]
 
+[dev-dependencies]
+futures.workspace = true
+
 [lints]
 workspace = true

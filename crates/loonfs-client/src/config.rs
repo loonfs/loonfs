@@ -20,10 +20,12 @@ pub struct ClientConfig {
     pub server_url: String,
     /// Optional bearer token.
     pub auth_token: Option<SecretString>,
-    /// Optional overall per-request deadline in milliseconds. Unset means no
-    /// whole-request deadline: requests are bounded only by the built-in
-    /// 60-second socket inactivity timeouts, so slow-but-progressing large
-    /// transfers are not cut off while a stalled connection still fails.
+    /// Optional timeout for one HTTP request, in milliseconds.
+    ///
+    /// When this value is not set, content transfers may continue as long as
+    /// the connection makes progress. They still use a 60-second inactivity
+    /// timeout and a limited number of attempts. Other replay-safe requests
+    /// also have a built-in 90-second total retry limit.
     #[serde(default)]
     pub request_timeout_ms: Option<u64>,
     /// Disables the bounded automatic retry of quick-clearing transient
@@ -75,7 +77,7 @@ impl ClientConfig {
         if self.request_timeout_ms == Some(0) {
             return Err(ClientError::ConfigValidation {
                 field: "request_timeout_ms",
-                reason: "must be greater than zero; omit it for no deadline".to_owned(),
+                reason: "must be greater than zero; omit it for built-in deadlines only".to_owned(),
             });
         }
         if let Some(path) = &self.ca_cert_path {

@@ -10,48 +10,29 @@ use crate::{
     MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
     UpdateAttributesOptions,
 };
-use crate::{CommittedChange, FilesystemChange};
 use crate::{Result, RuntimeError};
-use loonfs_api::{ContentEvidence, EffectiveLimit, ErrorCode};
+use loonfs_api::{
+    ContentEvidence, EffectiveLimit, ErrorCode, PutRetryAttempt, PutRetryErrorClassification,
+    PutRetryReceipt,
+};
 use loonfs_core::NamespaceEngine;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-/// What a reuse conflict says the commit id already landed as: where, and
-/// the semantic identity of the mutation that landed there.
-///
-/// The publisher decides the conflict against a durable receipt, and the
-/// receipt holds both, so the error carries both. They are absent only when
-/// nothing has committed under the id yet — two conflicting requests
-/// claiming it at once — and then there is nothing to read back.
-fn reported_commit_receipt(error: &RuntimeError) -> Option<(ChangeSeq, String)> {
-    match error {
-        RuntimeError::Core(CoreError::CommitIdReuseConflict {
-            committed_seq,
-            committed_fingerprint,
-            ..
-        }) => Some(((*committed_seq)?, committed_fingerprint.clone()?)),
-        _ => None,
+fn classify_put_retry_error(error: &RuntimeError) -> PutRetryErrorClassification {
+    match error.code() {
+        ErrorCode::CommitIdReuseConflict => {
+            let receipt = error.details().and_then(|details| {
+                Some(PutRetryReceipt {
+                    committed_seq: details.committed_seq?,
+                    committed_fingerprint: details.committed_fingerprint?,
+                })
+            });
+            PutRetryErrorClassification::CommitIdReuseConflict(receipt)
+        }
+        ErrorCode::RebootstrapRequired => PutRetryErrorClassification::RebootstrapRequired,
+        _ => PutRetryErrorClassification::Other,
     }
-}
-
-/// The content one committed change wrote, when it wrote exactly one.
-///
-/// A single put's commit produces exactly one content-bearing event: the
-/// file's `Created` or `ContentChanged`. Auto-created parent directories
-/// appear as `Created` without a content ref, and no other change kind
-/// carries content at all, so "exactly one" holds for a put however many
-/// directories it had to make. Anything else — nothing, or several — is not
-/// the commit a single put produces, and the caller leaves the conflict
-/// standing rather than picking one.
-fn sole_committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
-    let mut content = change.events.iter().filter_map(|event| match event {
-        FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
-        FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
-        _ => None,
-    });
-    let only = content.next()?;
-    content.next().is_none().then_some(only)
 }
 
 impl FsWriter {
@@ -213,14 +194,13 @@ impl FsWriter {
         }
     }
 
-    /// Determines whether a commit-id conflict is an idempotent retry of the
-    /// same file write.
+    /// Checks whether a commit-ID conflict came from retrying the same file
+    /// write.
     ///
-    /// The runtime compares the durable receipt's full request fingerprint with a
-    /// fingerprint rebuilt using the committed content reference. It separately
-    /// verifies that the newly staged payload matches the committed bytes. If
-    /// either comparison is unavailable or differs, the original conflict is
-    /// returned.
+    /// The shared helper compares the full request fingerprint and verifies
+    /// that the new upload contains the same bytes as the original commit. If
+    /// either check cannot be completed or does not match, this method returns
+    /// the original conflict.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
@@ -230,73 +210,28 @@ impl FsWriter {
         staged: ContentEvidence<'_>,
         conflict: RuntimeError,
     ) -> Result<CommitResponse> {
-        let Some((committed_seq, committed_fingerprint)) = reported_commit_receipt(&conflict)
-        else {
+        let Ok(path) = loonfs_core::path::parse_mutation_path(absolute_path) else {
             return Err(conflict);
         };
-        let Some(committed) = self
-            .read_committed_change(namespace_id, commit_id, committed_seq)
-            .await?
-        else {
-            return Err(conflict);
-        };
-        let Some(content_ref) = sole_committed_content_ref(&committed) else {
-            return Err(conflict);
-        };
-        let retried = loonfs_core::path::parse_mutation_path(absolute_path)
-            .ok()
-            .and_then(|path| {
-                loonfs_api::put_retry_fingerprint(
-                    namespace_id,
-                    &path,
-                    attempt.behavior,
-                    attempt.expected_revision_no,
-                    attempt.message.as_deref(),
-                    content_ref,
-                )
-                .ok()
-            });
-        if retried.as_deref() != Some(committed_fingerprint.as_str()) {
-            return Err(conflict);
-        }
-        if !content_ref.matches_evidence(staged) {
-            return Err(conflict);
-        }
-        Ok(CommitResponse {
-            namespace_id: namespace_id.clone(),
-            commit_id: committed.commit_id,
-            committed_seq: committed.seq,
-        })
-    }
-
-    /// Reads the committed change identified by a reuse conflict.
-    ///
-    /// The conflict supplies the sequence, so one change-feed page can read the
-    /// expected row directly. Returns `None` when retention removed the row or
-    /// when the row belongs to another commit; the caller then preserves the
-    /// original conflict.
-    async fn read_committed_change(
-        &self,
-        namespace_id: &NamespaceId,
-        commit_id: &CommitId,
-        committed_seq: ChangeSeq,
-    ) -> Result<Option<CommittedChange>> {
-        let after_seq = ChangeSeq(committed_seq.0.saturating_sub(1));
-        let page = match self
-            .engine(namespace_id)
-            .list_changes_after(after_seq, EffectiveLimit::new(NonZeroU32::MIN))
-            .await
-        {
-            Ok(page) => page,
-            // Retention gave up the replay promise below the floor: the
-            // commit landed, but what it wrote can no longer be read back.
-            Err(error) if error.code() == ErrorCode::RebootstrapRequired => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(page
-            .changes
-            .into_iter()
-            .find(|change| change.seq == committed_seq && &change.commit_id == commit_id))
+        let engine = self.engine(namespace_id);
+        loonfs_api::reconcile_put_commit_id_reuse(
+            PutRetryAttempt {
+                namespace_id,
+                path: &path,
+                commit_id,
+                options: attempt,
+                staged,
+            },
+            conflict,
+            |after_seq| async move {
+                engine
+                    .list_changes_after(after_seq, EffectiveLimit::new(NonZeroU32::MIN))
+                    .await
+                    .map_err(RuntimeError::from)
+            },
+            classify_put_retry_error,
+        )
+        .await
     }
 
     /// Stores file bytes and returns proof that they are ready to publish.

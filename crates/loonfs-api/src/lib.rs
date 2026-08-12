@@ -13,12 +13,10 @@
 //! surfaces, so this crate — the shared vocabulary — owns the single
 //! definition rather than each surface keeping its own copy to drift.
 //!
-//! One module is a function rather than a shape: `commit_identity` computes
-//! the durable fingerprint of a mutation. It lives here for the same reason
-//! the operation language does — the engine that stamps a fingerprint on a
-//! commit receipt and the client that recomputes one to prove a retry is the
-//! same request must produce identical values, so there is one implementation
-//! and no second reading of the rules.
+//! The `commit_identity` module contains shared logic rather than wire types.
+//! It computes durable mutation fingerprints and verifies retried PUT requests
+//! against existing commit receipts. Keeping this logic here ensures that the
+//! embedded runtime and HTTP client apply the same identity and content checks.
 //!
 //! Module rule: v0 HTTP shapes live in [`v0`]; the crate root keeps the
 //! ids/paths/errors/wire-format modules and re-exports the common v0
@@ -113,7 +111,8 @@ pub use capability::{
     PROFILE_QUERY_V0, PROTOCOL_VERSION, UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES,
 };
 pub use commit_identity::{
-    put_retry_fingerprint, semantic_commit_fingerprint, SemanticFingerprintError,
+    put_retry_fingerprint, reconcile_put_commit_id_reuse, semantic_commit_fingerprint,
+    PutRetryAttempt, PutRetryErrorClassification, PutRetryReceipt, SemanticFingerprintError,
 };
 pub use content::{
     ChecksumAlgorithm, ContentEvidence, ContentRef, ContentRefKind, ContentRefValidationError,
