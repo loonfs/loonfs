@@ -150,8 +150,6 @@ enum OperationFingerprintInput<'a> {
 /// fingerprint, so a string and a one-item string list produce different
 /// fingerprints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-// Keep `type` as the discriminator because changing it would alter existing
-// commit fingerprints.
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AttributeValueFingerprintInput<'a> {
     Text { text: &'a str },

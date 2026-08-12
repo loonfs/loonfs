@@ -124,7 +124,6 @@ pub struct GrepResponse {
 /// when the index is in the `Steady` phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// Keep `phase` as the discriminator for wire-format compatibility.
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum GrepIndexLifecycle {
     /// No index is maintained for this namespace.

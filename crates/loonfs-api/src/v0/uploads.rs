@@ -89,7 +89,6 @@ pub enum UploadMode {
 /// combinations are rejected during decoding. The `mode` field is required.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// Keep `mode` as the discriminator for wire-format compatibility.
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BeginUploadRequest {
     // Empty braces make serde reject fields from another transport. A unit
@@ -257,7 +256,6 @@ pub struct ValidatedContentToken {
 /// response fields are accepted for forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// Keep `mode` as the discriminator for wire-format compatibility.
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum BeginUploadResponse {
     /// The service will receive the bytes and write the content object.
@@ -351,7 +349,6 @@ pub struct UploadContentResponse {
 /// completion type matches the transport stored in the upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// Keep `completion` as the discriminator for wire-format compatibility.
 #[serde(tag = "completion", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompleteUploadRequest {
     /// Completes a session the server named a content object for: the
@@ -416,7 +413,6 @@ pub struct CompleteUploadResponse {
 /// the content to be uploaded again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// Keep `state` as the discriminator for wire-format compatibility.
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum UploadSessionStatus {
     /// Accepting content until its lease passes.
