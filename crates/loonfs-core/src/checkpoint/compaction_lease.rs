@@ -32,14 +32,14 @@
 //! unowned; collection stops before it can race a job whose fence it cannot
 //! verify.
 
-use crate::control_load::{
+use crate::control_object::{
     core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
+    ControlObjectLoadError,
 };
 use crate::error::{CoreError, Result};
 use crate::limits::{
     METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS, METADATA_COMPACTION_LEASE_EXPIRY_MS,
 };
-use crate::namespace::control::ControlObjectLoadError;
 use crate::timing::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{

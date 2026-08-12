@@ -4,20 +4,17 @@
 use super::budget::PassBudget;
 use super::fork_checkpoints::fork_target_proven_gone;
 use super::reap::{lease_expired, manifest_object_id_of};
+use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::checkpoint::{load_namespace_manifest_envelope_if_present, ManifestLoadFailureClass};
 use crate::context::MutationContext;
-use crate::control_load::{core_control_load_error, expect_namespace, load_control_object};
+use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::{
     read_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
 };
-use crate::namespace::control::ControlObjectLoadError;
 use crate::wal::{load_wal_chain_within, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
-use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
-    NamespaceState,
-};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle, NamespaceState};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
@@ -339,13 +336,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         if !budget.try_charge() {
             return Ok(LiveSetCollection::BudgetExhausted);
         }
-        let loaded = load_control_object(
-            store,
-            key.clone(),
-            ControlObjectKind::CheckpointRecord,
-            |state: &CheckpointRecordState| expect_namespace(namespace_id, &state.namespace_id),
-        )
-        .await;
+        let loaded = load_checkpoint_record_at_key(store, &key).await;
         let record = match loaded {
             Ok(loaded) => loaded.state,
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,

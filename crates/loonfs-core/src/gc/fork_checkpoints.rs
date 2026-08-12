@@ -1,16 +1,15 @@
 //! Release rules for fork-owned and missing-basis checkpoint records.
 
 use super::reap::lease_expired;
-use crate::checkpoint::record::{encode_checkpoint_record, release_checkpoint_record};
-use crate::context::MutationContext;
-use crate::control_load::{
-    core_control_load_error, expect_key_namespace, expect_namespace, load_control_object,
+use crate::checkpoint::record::{
+    encode_checkpoint_record, load_checkpoint_record_at_key, release_checkpoint_record,
 };
+use crate::context::MutationContext;
+use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::{read_head_object, ControlObjectLoadError};
+use crate::namespace::control::read_head_object;
 use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
-    NamespaceState,
+    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState, NamespaceState,
 };
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -40,13 +39,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     grace_window_ms: u64,
     context: &MutationContext,
 ) -> Result<bool> {
-    let loaded = load_control_object(
-        store,
-        key.to_owned(),
-        ControlObjectKind::CheckpointRecord,
-        |state: &CheckpointRecordState| expect_namespace(namespace_id, &state.namespace_id),
-    )
-    .await;
+    let loaded = load_checkpoint_record_at_key(store, key).await;
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(false),
@@ -82,13 +75,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     key: &str,
     context: &MutationContext,
 ) -> Result<ForkCheckpointSweep> {
-    let loaded = load_control_object(
-        store,
-        key.to_owned(),
-        ControlObjectKind::CheckpointRecord,
-        |state: &CheckpointRecordState| expect_key_namespace(key, &state.namespace_id),
-    )
-    .await;
+    let loaded = load_checkpoint_record_at_key(store, key).await;
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => {

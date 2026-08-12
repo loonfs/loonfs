@@ -2,13 +2,13 @@
 
 use super::load::{ensure_root_matches_manifest, load_verified_manifest_tables};
 use crate::context::MutationContext;
+use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{
     read_head_object, read_metadata_root_object_if_present, read_wal_floor_object,
-    ControlObjectLoadError,
 };
 use bytes::Bytes;
 use loonfs_api::wire::control::{

@@ -1,15 +1,15 @@
 //! Typed loaders for the namespace's control objects: head, metadata root,
 //! and WAL floor.
 
-use crate::control_load::{expect_namespace, load_control_object, LoadedControl};
-use crate::error::StoreFailureClass;
+use crate::control_object::{
+    expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
+};
 use crate::namespace::basis::{read_head_and_metadata_basis, MetadataBasis};
 use loonfs_api::wire::control::{ControlObjectKind, HeadState, MetadataRootState, WalFloorState};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::{metadata_root, wal_floor, wal_head};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 pub(crate) type LoadedHeadObject = LoadedControl<HeadState>;
 pub(crate) type LoadedMetadataRootObject = LoadedControl<MetadataRootState>;
@@ -39,43 +39,6 @@ pub struct LoadedHeadControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
     pub state: HeadState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum ControlObjectLoadError {
-    #[error("missing control object `{object_key}`")]
-    MissingObject { object_key: String },
-    #[error(
-        "metadata root references seq `{root_manifest_head_seq}` beyond the reloaded head seq `{head_seq}`"
-    )]
-    RootAheadOfHead {
-        root_manifest_head_seq: loonfs_api::ChangeSeq,
-        head_seq: loonfs_api::ChangeSeq,
-    },
-    #[error(
-        "control object namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    NamespaceMismatch {
-        object_key: String,
-        expected: NamespaceId,
-        actual: NamespaceId,
-    },
-    #[error(
-        "control object checksum mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    ChecksumMismatch {
-        object_key: String,
-        expected: String,
-        actual: String,
-    },
-    #[error("control object codec error for `{object_key}`: {message}")]
-    Codec { object_key: String, message: String },
-    #[error("control object store error for `{object_key}`: {message}")]
-    Store {
-        object_key: String,
-        message: String,
-        class: StoreFailureClass,
-    },
 }
 
 pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(

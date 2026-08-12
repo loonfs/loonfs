@@ -66,7 +66,7 @@
 mod checkpoint;
 mod commit_engine;
 mod context;
-mod control_load;
+mod control_object;
 mod control_update;
 mod engine;
 mod error;
@@ -127,14 +127,15 @@ pub mod cache {
 /// Typed loaders for namespace control objects and verified catalog state.
 /// Used by `loonfs` read and write paths and by layout tests.
 pub mod control {
+    pub use crate::control_object::ControlObjectLoadError;
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
     };
     pub use crate::namespace::control::{
         load_namespace_checkpoint_record_control, load_namespace_head_control,
         load_namespace_metadata_root_control, load_namespace_read_anchor,
-        load_namespace_wal_floor_control, ControlObjectIdentity, ControlObjectLoadError,
-        LoadedHeadControl, LoadedMetadataRootControl, LoadedWalFloorControl,
+        load_namespace_wal_floor_control, ControlObjectIdentity, LoadedHeadControl,
+        LoadedMetadataRootControl, LoadedWalFloorControl,
     };
     pub use crate::namespace::{BasisManifest, MetadataBasis};
 }

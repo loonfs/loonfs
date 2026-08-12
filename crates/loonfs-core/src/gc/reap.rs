@@ -11,13 +11,12 @@
 //! age and decides the rest itself, from the reference anchor in
 //! `gc/live_set.rs`.
 
-use crate::checkpoint::record::encode_checkpoint_record;
+use crate::checkpoint::record::{encode_checkpoint_record, load_checkpoint_record_at_key};
 use crate::context::MutationContext;
-use crate::control_load::{core_control_load_error, expect_namespace, load_control_object};
+use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::ControlObjectLoadError;
 use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
+    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
 };
 use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, NamespaceId, RetainedReason};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -60,13 +59,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     namespace_deleted: bool,
     context: &MutationContext,
 ) -> Result<CheckpointSweep> {
-    let loaded = load_control_object(
-        store,
-        key.to_owned(),
-        ControlObjectKind::CheckpointRecord,
-        |state: &CheckpointRecordState| expect_namespace(namespace_id, &state.namespace_id),
-    )
-    .await;
+    let loaded = load_checkpoint_record_at_key(store, key).await;
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(CheckpointSweep::Retain),

@@ -1,12 +1,12 @@
 //! Read-modify-write loops for control objects: load, edit, and
 //! compare-and-swap the head or an upload session on its etag.
 
-use crate::control_load::{
+use crate::control_object::{
     core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
-    LoadedControl,
+    ControlObjectLoadError, LoadedControl,
 };
 use crate::error::CoreError;
-use crate::namespace::control::{read_head_object, ControlObjectLoadError, LoadedHeadObject};
+use crate::namespace::control::{read_head_object, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, UploadSessionEnvelope,

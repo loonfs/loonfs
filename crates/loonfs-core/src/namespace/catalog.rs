@@ -1,7 +1,8 @@
 //! The namespace catalog: the namespace's immutable identity — its content
 //! store and name policy — read from the head that carries them.
 
-use crate::namespace::control::{read_head_object, ControlObjectLoadError};
+use crate::control_object::ControlObjectLoadError;
+use crate::namespace::control::read_head_object;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;

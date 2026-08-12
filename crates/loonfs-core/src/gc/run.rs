@@ -14,10 +14,10 @@ use super::reap::{
 };
 use super::uploads::{sweep_upload_session, ContentReferences, UploadSessionSweep};
 use crate::context::MutationContext;
+use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
 use crate::namespace::basis::read_head_and_metadata_basis;
-use crate::namespace::control::ControlObjectLoadError;
 use futures::StreamExt;
 use loonfs_api::v0::GcResponse;
 use loonfs_api::{ContentStoreId, NamespaceId, RetainedReason, UploadId};

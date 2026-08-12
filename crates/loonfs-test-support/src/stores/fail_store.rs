@@ -19,6 +19,8 @@ type Predicate = dyn for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync;
 pub enum InjectedError {
     /// A provider precondition failure.
     PreconditionFailed,
+    /// A provider authorization failure carrying the supplied message.
+    PermissionDenied(String),
     /// A transport failure carrying the supplied message.
     Transport(String),
 }
@@ -28,6 +30,10 @@ impl InjectedError {
         match self {
             Self::PreconditionFailed => ObjectStoreError::PreconditionFailed {
                 object_key: key.to_owned(),
+            },
+            Self::PermissionDenied(message) => ObjectStoreError::PermissionDenied {
+                object_key: key.to_owned(),
+                message: message.clone(),
             },
             Self::Transport(message) => ObjectStoreError::transport(key, message),
         }

@@ -14,10 +14,10 @@
 //!    against the identity and checksum the head recorded. A mismatch is
 //!    corruption, never a fallback.
 
+use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
 use crate::namespace::control::{
-    read_head_and_metadata_root_if_present, read_wal_floor_object, ControlObjectLoadError,
-    LoadedHeadObject,
+    read_head_and_metadata_root_if_present, read_wal_floor_object, LoadedHeadObject,
 };
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{manifest_object_id_manifest_id, ChangeSeq, ManifestId, ManifestObjectId};

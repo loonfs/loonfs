@@ -2,8 +2,8 @@
 //! sessions from publishing interleaved commits.
 
 use crate::context::MutationContext;
+use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
-use crate::namespace::control::ControlObjectLoadError;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState, WriterBlock};
 use loonfs_api::{NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
