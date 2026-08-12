@@ -90,10 +90,20 @@ impl FsWriter {
     /// Returns this writer's shared publication service.
     ///
     /// Direct mutation methods and integrations that submit classified
-    /// candidates use the same per-namespace publishers. [`Self::shutdown`]
-    /// closes the service; callers should not manage its lifecycle separately.
+    /// candidates use the same per-namespace publishers. Shutdown closes the
+    /// service; callers should not manage its lifecycle separately.
     pub fn publisher(&self) -> PublisherRegistry {
         self.publisher.clone()
+    }
+
+    /// Closes maintenance and publication admission before shutdown drains.
+    ///
+    /// Later mutations fail with `shutting_down`, maintenance nudges are
+    /// ignored, and work already admitted keeps running. Calling this more
+    /// than once has no additional effect.
+    pub fn close_admission_for_shutdown(&self) {
+        self.bits.maintenance.close_admission();
+        self.publisher.close_admission();
     }
 
     /// Whether [`Self::shutdown`] has begun on this writer or any clone of
@@ -189,10 +199,7 @@ impl FsWriter {
     /// may be called from any clone because all clones share the same shutdown
     /// state. Task panics are returned as runtime errors.
     pub async fn shutdown(&self) -> Result<()> {
-        // Both closes belong above the first await, for the reason the doc
-        // gives. Nothing may move below `drain`.
-        self.bits.maintenance.close_admission();
-        self.publisher.close_admission();
+        self.close_admission_for_shutdown();
         self.publisher.drain().await?;
         self.bits.maintenance.drain().await
     }
