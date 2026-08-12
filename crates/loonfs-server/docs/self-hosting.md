@@ -125,6 +125,14 @@ The crate's [`config/`](../config) directory holds one worked example per
 object store, each documenting its provider credentials and the optional
 settings this guide leaves out.
 
+### Cloud bucket setup
+
+Configure the provider's incomplete multipart upload lifecycle rule.
+Amazon S3 and Google Cloud Storage both name the action
+`AbortIncompleteMultipartUpload`. It removes provider parts when an abort
+fails or an abandoned session stays open until its 24-hour lease and GC grace
+pass.
+
 ## Running it in a container
 
 Every release publishes the server image:
@@ -490,6 +498,16 @@ expose the two-job limit either, so the lever for everything a step does —
 flushing, folding, collecting — remains how often maintenance runs, not how
 much each run may do. The rebuild above is the one piece of upkeep that lever
 does not pace, because it is not paced at all.
+
+## Resource sizing
+
+A defensible memory limit starts above `max_concurrent_uploads` (8 by default)
+times the 8 MiB upload part, plus `max_concurrent_downloads` (16 by default)
+times `max_download_bytes` (256 MiB by default), plus configured
+`local_cache.memory_bytes` and headroom for metadata maintenance. This sum is
+a sizing floor, not a guarantee, so the limit should comfortably exceed it.
+
+Example: 8 x 8 MiB + 16 x 256 MiB + 64 MiB = 4224 MiB before maintenance headroom.
 
 ## The optional local cache
 

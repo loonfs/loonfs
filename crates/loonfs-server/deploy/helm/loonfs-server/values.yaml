@@ -47,6 +47,9 @@ localCache:
   # Mount an emptyDir at /var/cache/loonfs for the server's disk cache. The
   # chart writes nothing into the config: the config's [local_cache] table
   # has to name /var/cache/loonfs as its `path`.
+  # The cache holds every 16 MiB disk block file open. Set the process's
+  # open-file limit above disk_bytes divided by 16 MiB; 100 GiB needs about
+  # 6400 files.
   enabled: false
   # The emptyDir's sizeLimit, as a quantity such as "100Gi". The chart
   # requires it when the cache is enabled, and it must comfortably exceed
