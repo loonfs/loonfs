@@ -128,19 +128,22 @@ impl ReadCore {
         instruments: Arc<RuntimeInstruments>,
     ) -> Self {
         let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
-            Arc::new(MetadataTableCache::with_stored_block_cache(
+            Arc::new(MetadataTableCache::with_stored_block_cache_and_observer(
                 config.runtime_cache.metadata_table_cache.clone(),
                 stored_metadata_block_cache,
+                instruments.metadata_table_cache_observer(),
             ))
         });
-        let wal_tail_projection_cache =
-            Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
+        let wal_tail_projection_cache = Arc::new(WalTailProjectionCache::with_observer(
+            WalTailProjectionCacheConfig {
                 max_entries: config.runtime_cache.max_cached_namespaces,
                 max_rows: config.runtime_cache.max_cached_wal_tail_projection_rows,
                 max_decoded_bytes: config
                     .runtime_cache
                     .max_cached_wal_tail_projection_decoded_bytes,
-            }));
+            },
+            instruments.wal_tail_projection_cache_observer(),
+        ));
         Self {
             inner: Arc::new(ReadCoreInner {
                 store,
@@ -148,7 +151,7 @@ impl ReadCore {
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
                 wal_tail_projection_cache,
-                cache_stats: RuntimeCacheStatsInner::default(),
+                cache_stats: RuntimeCacheStatsInner::new(Arc::clone(&instruments)),
                 instruments,
             }),
         }

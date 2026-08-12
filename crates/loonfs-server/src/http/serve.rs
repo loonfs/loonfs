@@ -185,7 +185,10 @@ pub(super) async fn app_with_store_and_direct_transfers(
     )
     .await?;
     let probe_store = writer.object_store();
-    let grep_block_cache = Arc::new(GrepBlockCache::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES));
+    let grep_block_cache = Arc::new(GrepBlockCache::with_metrics(
+        DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+        metrics.recorder().as_ref(),
+    ));
     // A deployment that maintains the index needs a worker whether or not it
     // answers queries with one. It runs on the writer's own instrumented
     // client, so the grep-owned traffic is measured like every other

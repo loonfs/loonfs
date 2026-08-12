@@ -22,6 +22,7 @@ use crate::metrics::LATENCY_SECONDS_BOUNDARIES;
 use crate::{
     GcResponse, MaintenanceJobId, MaintenanceStepConclusion, MetadataCompactionJobOutcome,
 };
+use loonfs_core::cache::{MetadataTableCacheObserver, WalTailProjectionCacheObserver};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -100,6 +101,7 @@ struct Installed {
     compactions: CompactionInstruments,
     publisher: PublisherInstruments,
     gc: GcInstruments,
+    cache: RuntimeCacheInstruments,
 }
 
 impl RuntimeInstruments {
@@ -111,11 +113,35 @@ impl RuntimeInstruments {
                 compactions: CompactionInstruments::register(recorder.as_ref()),
                 publisher: PublisherInstruments::register(recorder.as_ref()),
                 gc: GcInstruments::register(recorder.as_ref()),
+                cache: RuntimeCacheInstruments::register(recorder.as_ref()),
                 object_store: Mutex::new(HashMap::new()),
                 maintenance: Mutex::new(HashMap::new()),
                 recorder,
             }),
         })
+    }
+
+    /// Reports one latest-view read through the runtime cache path.
+    pub(crate) fn latest_metadata_view_read(&self) {
+        if let Some(installed) = &self.installed {
+            installed.cache.latest_metadata_view_reads.increment(1);
+        }
+    }
+
+    /// The decoded metadata-table cache's metrics observer, when installed.
+    pub(crate) fn metadata_table_cache_observer(
+        &self,
+    ) -> Option<Arc<dyn MetadataTableCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.cache.metadata_table);
+        Some(observer)
+    }
+
+    /// The WAL-tail projection cache's metrics observer, when installed.
+    pub(crate) fn wal_tail_projection_cache_observer(
+        &self,
+    ) -> Option<Arc<dyn WalTailProjectionCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.cache.wal_tail_projection);
+        Some(observer)
     }
 
     /// An object-store recorder that bridges samples into these
@@ -540,6 +566,214 @@ impl MaintenanceJobInstruments {
     }
 }
 
+/// Runtime-owned cache instruments, registered as one closed set.
+struct RuntimeCacheInstruments {
+    latest_metadata_view_reads: Arc<dyn CounterHandle>,
+    metadata_table: Arc<MetadataTableCacheInstruments>,
+    wal_tail_projection: Arc<WalTailProjectionCacheInstruments>,
+}
+
+struct MetadataTableCacheInstruments {
+    hits: Arc<dyn CounterHandle>,
+    misses: Arc<dyn CounterHandle>,
+    inserts: Arc<dyn CounterHandle>,
+    evictions: Arc<dyn CounterHandle>,
+    filter_skips: Arc<dyn CounterHandle>,
+    filter_false_positives: Arc<dyn CounterHandle>,
+}
+
+struct WalTailProjectionCacheInstruments {
+    hits: Arc<dyn CounterHandle>,
+    misses: Arc<dyn CounterHandle>,
+    inserts: Arc<dyn CounterHandle>,
+    evictions: Arc<dyn CounterHandle>,
+    evicted_rows: Arc<dyn CounterHandle>,
+    evicted_decoded_bytes: Arc<dyn CounterHandle>,
+    rejections: Arc<dyn CounterHandle>,
+    rejected_rows: Arc<dyn CounterHandle>,
+    rejected_decoded_bytes: Arc<dyn CounterHandle>,
+    retained_rows: Arc<dyn GaugeHandle>,
+    retained_decoded_bytes: Arc<dyn GaugeHandle>,
+}
+
+impl RuntimeCacheInstruments {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
+        Self {
+            latest_metadata_view_reads: recorder.register_counter(
+                "loonfs.runtime_cache.latest_metadata_view_reads",
+                "Latest metadata reads served through the metadata-view path",
+                &[],
+            ),
+            metadata_table: Arc::new(MetadataTableCacheInstruments::register(recorder)),
+            wal_tail_projection: Arc::new(WalTailProjectionCacheInstruments::register(recorder)),
+        }
+    }
+}
+
+impl MetadataTableCacheInstruments {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
+        let get = |result| {
+            recorder.register_counter(
+                "loonfs.metadata_table_cache.gets",
+                "Decoded metadata-table cache lookups, by outcome",
+                &[("result", result)],
+            )
+        };
+        Self {
+            hits: get("hit"),
+            misses: get("miss"),
+            inserts: recorder.register_counter(
+                "loonfs.metadata_table_cache.inserts",
+                "Blocks inserted into the decoded metadata-table cache",
+                &[],
+            ),
+            evictions: recorder.register_counter(
+                "loonfs.metadata_table_cache.evictions",
+                "Blocks evicted from the decoded metadata-table cache",
+                &[],
+            ),
+            filter_skips: recorder.register_counter(
+                "loonfs.metadata_table_cache.filter_skips",
+                "Segments skipped after their filter ruled out a lookup",
+                &[],
+            ),
+            filter_false_positives: recorder.register_counter(
+                "loonfs.metadata_table_cache.filter_false_positives",
+                "Filter admissions that matched no metadata rows",
+                &[],
+            ),
+        }
+    }
+}
+
+impl MetadataTableCacheObserver for MetadataTableCacheInstruments {
+    fn hit(&self) {
+        self.hits.increment(1);
+    }
+
+    fn miss(&self) {
+        self.misses.increment(1);
+    }
+
+    fn insert(&self) {
+        self.inserts.increment(1);
+    }
+
+    fn evict(&self) {
+        self.evictions.increment(1);
+    }
+
+    fn filter_skip(&self) {
+        self.filter_skips.increment(1);
+    }
+
+    fn filter_false_positive(&self) {
+        self.filter_false_positives.increment(1);
+    }
+}
+
+impl WalTailProjectionCacheInstruments {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
+        let get = |result| {
+            recorder.register_counter(
+                "loonfs.wal_tail_projection_cache.gets",
+                "WAL-tail projection cache lookups, by outcome",
+                &[("result", result)],
+            )
+        };
+        Self {
+            hits: get("hit"),
+            misses: get("miss"),
+            inserts: recorder.register_counter(
+                "loonfs.wal_tail_projection_cache.inserts",
+                "WAL-tail projections inserted into the cache",
+                &[],
+            ),
+            evictions: recorder.register_counter(
+                "loonfs.wal_tail_projection_cache.evictions",
+                "WAL-tail projections evicted or invalidated",
+                &[],
+            ),
+            evicted_rows: recorder.register_counter(
+                "loonfs.wal_tail_projection_cache.evicted_rows",
+                "Metadata rows dropped with evicted WAL-tail projections",
+                &[],
+            ),
+            evicted_decoded_bytes: recorder.register_counter(
+                "loonfs.wal_tail_projection_cache.evicted_decoded_bytes",
+                "Decoded bytes dropped with evicted WAL-tail projections",
+                &[],
+            ),
+            rejections: recorder.register_counter(
+                "loonfs.wal_tail_projection_cache.rejections",
+                "WAL-tail projections rejected because they exceeded a cache limit",
+                &[],
+            ),
+            rejected_rows: recorder.register_counter(
+                "loonfs.wal_tail_projection_cache.rejected_rows",
+                "Metadata rows in rejected WAL-tail projections",
+                &[],
+            ),
+            rejected_decoded_bytes: recorder.register_counter(
+                "loonfs.wal_tail_projection_cache.rejected_decoded_bytes",
+                "Decoded bytes in rejected WAL-tail projections",
+                &[],
+            ),
+            retained_rows: recorder.register_gauge(
+                "loonfs.wal_tail_projection_cache.retained_rows",
+                "Metadata rows currently retained in WAL-tail projections",
+                &[],
+            ),
+            retained_decoded_bytes: recorder.register_gauge(
+                "loonfs.wal_tail_projection_cache.retained_decoded_bytes",
+                "Decoded bytes currently retained in WAL-tail projections",
+                &[],
+            ),
+        }
+    }
+}
+
+impl WalTailProjectionCacheObserver for WalTailProjectionCacheInstruments {
+    fn hit(&self) {
+        self.hits.increment(1);
+    }
+
+    fn miss(&self) {
+        self.misses.increment(1);
+    }
+
+    fn insert(&self) {
+        self.inserts.increment(1);
+    }
+
+    fn evict(&self, rows: usize, decoded_bytes: usize) {
+        self.evictions.increment(1);
+        self.evicted_rows.increment(metric_count(rows));
+        self.evicted_decoded_bytes
+            .increment(metric_count(decoded_bytes));
+    }
+
+    fn reject(&self, rows: usize, decoded_bytes: usize) {
+        self.rejections.increment(1);
+        self.rejected_rows.increment(metric_count(rows));
+        self.rejected_decoded_bytes
+            .increment(metric_count(decoded_bytes));
+    }
+
+    fn retained(&self, rows: usize, decoded_bytes: usize) {
+        self.retained_rows.set(metric_level(rows));
+        self.retained_decoded_bytes.set(metric_level(decoded_bytes));
+    }
+}
+
+fn metric_count(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn metric_level(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 /// The gauges and durable totals for this process's streaming compactions.
 struct CompactionInstruments {
     running: Arc<dyn GaugeHandle>,
@@ -772,6 +1006,113 @@ mod tests {
             MetricValue::Counter(value) => value,
             ref other => panic!("expected a counter, found {other:?}"),
         }
+    }
+
+    fn gauge(snapshot: &MetricsSnapshot, name: &str) -> i64 {
+        let entry = snapshot
+            .by_name(name)
+            .next()
+            .unwrap_or_else(|| panic!("no `{name}` registered"));
+        match entry.value {
+            MetricValue::Gauge(value) => value,
+            ref other => panic!("expected a gauge, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_cache_events_reach_the_registered_instruments() {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let instruments = RuntimeInstruments::new(Some(recorder.clone()));
+        instruments.latest_metadata_view_read();
+
+        let metadata = instruments
+            .metadata_table_cache_observer()
+            .expect("metadata observer");
+        metadata.hit();
+        metadata.miss();
+        metadata.insert();
+        metadata.evict();
+        metadata.filter_skip();
+        metadata.filter_false_positive();
+
+        let wal = instruments
+            .wal_tail_projection_cache_observer()
+            .expect("WAL-tail observer");
+        wal.hit();
+        wal.miss();
+        wal.insert();
+        wal.evict(7, 70);
+        wal.reject(11, 110);
+        wal.retained(13, 130);
+
+        let snapshot = recorder.snapshot();
+        for (name, labels, value) in [
+            (
+                "loonfs.runtime_cache.latest_metadata_view_reads",
+                &[][..],
+                1,
+            ),
+            (
+                "loonfs.metadata_table_cache.gets",
+                &[("result", "hit")][..],
+                1,
+            ),
+            (
+                "loonfs.metadata_table_cache.gets",
+                &[("result", "miss")][..],
+                1,
+            ),
+            ("loonfs.metadata_table_cache.inserts", &[][..], 1),
+            ("loonfs.metadata_table_cache.evictions", &[][..], 1),
+            ("loonfs.metadata_table_cache.filter_skips", &[][..], 1),
+            (
+                "loonfs.metadata_table_cache.filter_false_positives",
+                &[][..],
+                1,
+            ),
+            (
+                "loonfs.wal_tail_projection_cache.gets",
+                &[("result", "hit")][..],
+                1,
+            ),
+            (
+                "loonfs.wal_tail_projection_cache.gets",
+                &[("result", "miss")][..],
+                1,
+            ),
+            ("loonfs.wal_tail_projection_cache.inserts", &[][..], 1),
+            ("loonfs.wal_tail_projection_cache.evictions", &[][..], 1),
+            ("loonfs.wal_tail_projection_cache.evicted_rows", &[][..], 7),
+            (
+                "loonfs.wal_tail_projection_cache.evicted_decoded_bytes",
+                &[][..],
+                70,
+            ),
+            ("loonfs.wal_tail_projection_cache.rejections", &[][..], 1),
+            (
+                "loonfs.wal_tail_projection_cache.rejected_rows",
+                &[][..],
+                11,
+            ),
+            (
+                "loonfs.wal_tail_projection_cache.rejected_decoded_bytes",
+                &[][..],
+                110,
+            ),
+        ] {
+            assert_eq!(counter(&snapshot, name, labels), value, "counter `{name}`");
+        }
+        assert_eq!(
+            gauge(&snapshot, "loonfs.wal_tail_projection_cache.retained_rows"),
+            13
+        );
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "loonfs.wal_tail_projection_cache.retained_decoded_bytes"
+            ),
+            130
+        );
     }
 
     #[test]

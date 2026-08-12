@@ -2,6 +2,7 @@
 
 use crate::codec::IndexRow;
 use crate::root::GrepManifestState;
+use loonfs::metrics::{CounterHandle, MetricsRecorder};
 use loonfs::Recency;
 use loonfs_api::wire::sst_blocks::{
     DecodedDataBlock, SegmentFilter, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
@@ -87,14 +88,26 @@ impl DecodedGrepBlock {
 }
 
 /// A process-shareable cache of immutable decoded grep blocks.
-#[derive(Debug)]
 pub struct GrepBlockCache {
     max_decoded_bytes: usize,
     inner: Mutex<GrepBlockCacheInner>,
     stats: GrepBlockCacheStatsInner,
+    metrics: Option<GrepBlockCacheMetrics>,
     /// One cell per in-flight block fetch, keyed by immutable block identity,
     /// so concurrent readers share a single object-store read per block.
     in_flight: Mutex<HashMap<GrepBlockCacheKey, Arc<OnceCell<DecodedGrepBlock>>>>,
+}
+
+impl std::fmt::Debug for GrepBlockCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GrepBlockCache")
+            .field("max_decoded_bytes", &self.max_decoded_bytes)
+            .field("inner", &self.inner)
+            .field("stats", &self.stats)
+            .field("in_flight", &self.in_flight)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -120,6 +133,13 @@ struct GrepBlockCacheStatsInner {
     evictions: AtomicUsize,
 }
 
+struct GrepBlockCacheMetrics {
+    hits: Arc<dyn CounterHandle>,
+    misses: Arc<dyn CounterHandle>,
+    inserts: Arc<dyn CounterHandle>,
+    evictions: Arc<dyn CounterHandle>,
+}
+
 impl GrepBlockCache {
     /// Creates a cache with the supplied decoded-byte budget.
     pub fn new(max_decoded_bytes: usize) -> Self {
@@ -127,6 +147,18 @@ impl GrepBlockCache {
             max_decoded_bytes,
             inner: Mutex::new(GrepBlockCacheInner::default()),
             stats: GrepBlockCacheStatsInner::default(),
+            metrics: None,
+            in_flight: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Creates a cache whose activity is registered with `recorder`.
+    pub fn with_metrics(max_decoded_bytes: usize, recorder: &dyn MetricsRecorder) -> Self {
+        Self {
+            max_decoded_bytes,
+            inner: Mutex::new(GrepBlockCacheInner::default()),
+            stats: GrepBlockCacheStatsInner::default(),
+            metrics: Some(GrepBlockCacheMetrics::register(recorder)),
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -196,10 +228,16 @@ impl GrepBlockCache {
             .expect("grep block cache lock should not be poisoned");
         let Some(block) = inner.entries.get(key).map(|slot| slot.block.clone()) else {
             self.stats.misses.fetch_add(1, Ordering::SeqCst);
+            if let Some(metrics) = &self.metrics {
+                metrics.misses.increment(1);
+            }
             return None;
         };
         inner.touch(key);
         self.stats.hits.fetch_add(1, Ordering::SeqCst);
+        if let Some(metrics) = &self.metrics {
+            metrics.hits.increment(1);
+        }
         Some(block)
     }
 
@@ -226,6 +264,9 @@ impl GrepBlockCache {
         inner.decoded_byte_len = inner.decoded_byte_len.saturating_add(decoded_byte_len);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
+        if let Some(metrics) = &self.metrics {
+            metrics.inserts.increment(1);
+        }
         let GrepBlockCacheInner {
             entries,
             order,
@@ -239,6 +280,9 @@ impl GrepBlockCache {
             if let Some(slot) = entries.remove(&candidate) {
                 *decoded_byte_len = decoded_byte_len.saturating_sub(slot.block.decoded_byte_len());
                 self.stats.evictions.fetch_add(1, Ordering::SeqCst);
+                if let Some(metrics) = &self.metrics {
+                    metrics.evictions.increment(1);
+                }
             }
         }
     }
@@ -269,9 +313,39 @@ fn slot_is_live(
         .is_some_and(|slot| slot.last_touch == stamp)
 }
 
+impl GrepBlockCacheMetrics {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
+        let get = |result| {
+            recorder.register_counter(
+                "loonfs.grep_block_cache.gets",
+                "Decoded grep block cache lookups, by outcome",
+                &[("result", result)],
+            )
+        };
+        Self {
+            hits: get("hit"),
+            misses: get("miss"),
+            inserts: recorder.register_counter(
+                "loonfs.grep_block_cache.inserts",
+                "Blocks inserted into the decoded grep block cache",
+                &[],
+            ),
+            evictions: recorder.register_counter(
+                "loonfs.grep_block_cache.evictions",
+                "Blocks evicted from the decoded grep block cache",
+                &[],
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+    // A reading of the wrong kind is a bug in the test fixture.
+
     use super::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind};
+    use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
     use loonfs_api::wire::sst_blocks::DecodedDataBlock;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -292,6 +366,53 @@ mod tests {
             block_kind: GrepBlockKind::Data,
             block_offset: 0,
         }
+    }
+
+    fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
+        let entry = snapshot
+            .by_name(name)
+            .find(|entry| entry.labels == labels)
+            .expect("grep cache counter should be registered");
+        match entry.value {
+            MetricValue::Counter(value) => value,
+            ref other => panic!("expected a counter, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_activity_reaches_the_metrics_recorder() {
+        let recorder = DefaultMetricsRecorder::new();
+        let cache = GrepBlockCache::with_metrics(1_000, &recorder);
+        cache.insert(key("a"), block(600));
+        cache.insert(key("b"), block(600));
+        assert!(cache.get(&key("a")).is_none());
+        assert!(cache.get(&key("b")).is_some());
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(
+            counter(
+                &snapshot,
+                "loonfs.grep_block_cache.gets",
+                &[("result", "hit")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "loonfs.grep_block_cache.gets",
+                &[("result", "miss")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter(&snapshot, "loonfs.grep_block_cache.inserts", &[]),
+            2
+        );
+        assert_eq!(
+            counter(&snapshot, "loonfs.grep_block_cache.evictions", &[]),
+            1
+        );
     }
 
     #[tokio::test]

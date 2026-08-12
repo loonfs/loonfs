@@ -5,7 +5,8 @@
 //! used; nothing here weakens read-after-write consistency.
 
 use crate::fs::{should_invalidate_after_result, ReadCore};
-use crate::{CommitResponse, CoreError, NamespaceId, RuntimeCacheConfig};
+use crate::metrics::RuntimeInstruments;
+use crate::{CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_core::cache::{MetadataTableCacheStats, WalTailProjectionCacheStats};
@@ -15,19 +16,22 @@ use loonfs_core::control::{
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
 use loonfs_objectstore::keys::wal_head;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeControlCache {
     namespaces: HashMap<NamespaceId, NamespaceControlCacheEntry>,
-    namespace_order: VecDeque<NamespaceId>,
+    namespace_order: Recency<NamespaceId>,
 }
 
 #[derive(Debug, Default)]
 struct NamespaceControlCacheEntry {
     head: Option<CachedNamespaceAnchor>,
+    /// Stamp of this entry's newest queue position; older positions for the
+    /// same namespace are ghosts.
+    last_touch: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -90,12 +94,19 @@ pub struct RuntimeCacheStats {
     pub metadata_table_cache_filter_false_positives: usize,
 }
 
-#[derive(Debug, Default)]
 pub(crate) struct RuntimeCacheStatsInner {
     latest_metadata_view_reads: AtomicUsize,
+    instruments: Arc<RuntimeInstruments>,
 }
 
 impl RuntimeCacheStatsInner {
+    pub(crate) fn new(instruments: Arc<RuntimeInstruments>) -> Self {
+        Self {
+            latest_metadata_view_reads: AtomicUsize::new(0),
+            instruments,
+        }
+    }
+
     pub(crate) fn snapshot(
         &self,
         metadata_table_cache: MetadataTableCacheStats,
@@ -131,6 +142,7 @@ impl RuntimeCacheStatsInner {
     pub(crate) fn record_latest_metadata_view_read(&self) {
         self.latest_metadata_view_reads
             .fetch_add(1, Ordering::SeqCst);
+        self.instruments.latest_metadata_view_read();
     }
 }
 
@@ -164,8 +176,6 @@ impl RuntimeControlCache {
     /// Namespace-terminal removal: the whole entry goes.
     fn remove_namespace(&mut self, namespace_id: &NamespaceId) {
         self.namespaces.remove(namespace_id);
-        self.namespace_order
-            .retain(|candidate| candidate != namespace_id);
     }
 
     fn namespace_entry(
@@ -175,22 +185,44 @@ impl RuntimeControlCache {
     ) -> &mut NamespaceControlCacheEntry {
         self.namespaces.entry(namespace_id.clone()).or_default();
         self.touch_namespace(namespace_id);
-        while self.namespaces.len() > max_cached_namespaces {
-            let Some(evicted) = self.namespace_order.pop_front() else {
+        let Self {
+            namespaces,
+            namespace_order,
+        } = self;
+        while namespaces.len() > max_cached_namespaces {
+            let Some(evicted) = namespace_order
+                .pop_oldest(|key, stamp| namespace_slot_is_live(namespaces, key, stamp))
+            else {
                 break;
             };
-            self.namespaces.remove(&evicted);
+            namespaces.remove(&evicted);
         }
-        self.namespaces
+        namespaces
             .get_mut(namespace_id)
             .expect("namespace cache entry should exist")
     }
 
     fn touch_namespace(&mut self, namespace_id: &NamespaceId) {
+        let stamp = self.namespace_order.touch(namespace_id);
+        if let Some(entry) = self.namespaces.get_mut(namespace_id) {
+            entry.last_touch = stamp;
+        }
+        let namespaces = &self.namespaces;
         self.namespace_order
-            .retain(|candidate| candidate != namespace_id);
-        self.namespace_order.push_back(namespace_id.clone());
+            .compact(namespaces.len(), |key, stamp| {
+                namespace_slot_is_live(namespaces, key, stamp)
+            });
     }
+}
+
+fn namespace_slot_is_live(
+    namespaces: &HashMap<NamespaceId, NamespaceControlCacheEntry>,
+    namespace_id: &NamespaceId,
+    stamp: u64,
+) -> bool {
+    namespaces
+        .get(namespace_id)
+        .is_some_and(|entry| entry.last_touch == stamp)
 }
 
 impl ReadCore {

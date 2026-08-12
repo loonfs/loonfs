@@ -113,9 +113,10 @@ pub mod cache {
     pub use crate::checkpoint::cache::DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES;
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
-        MetadataTableCacheStats, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError,
-        StoredMetadataBlockKey, StoredMetadataBlockKind, WalTailProjectionCache,
-        WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+        MetadataTableCacheObserver, MetadataTableCacheStats, StoredMetadataBlockCache,
+        StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
+        WalTailProjectionCache, WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
+        WalTailProjectionCacheObserver, WalTailProjectionCacheStats,
         DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{

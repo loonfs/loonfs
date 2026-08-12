@@ -13,7 +13,6 @@ use loonfs::metrics::{
     CounterHandle, DefaultMetricsRecorder, HistogramHandle, MetricEntry, MetricValue,
     MetricsRecorder, MetricsSnapshot, LATENCY_SECONDS_BOUNDARIES,
 };
-use loonfs::RuntimeCacheStats;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -116,19 +115,12 @@ impl ServerMetrics {
     /// are read at scrape time rather than accumulated.
     pub(super) fn render(
         &self,
-        cache: &RuntimeCacheStats,
         local_cache: Option<FoyerCacheStats>,
         upload_permits: usize,
         download_permits: usize,
     ) -> String {
         let mut rendered = render_snapshot(&self.recorder.snapshot());
-        render_scrape_gauges(
-            &mut rendered,
-            cache,
-            local_cache,
-            upload_permits,
-            download_permits,
-        );
+        render_scrape_gauges(&mut rendered, local_cache, upload_permits, download_permits);
         rendered
     }
 
@@ -310,20 +302,15 @@ fn write_entry(rendered: &mut String, name: &str, entry: &MetricEntry) {
     }
 }
 
-/// Appends the values that are read when a scrape asks rather than
-/// accumulated as work happens: the runtime's cache counters, what foyer
-/// says about the local block cache, Linux process RSS, and the transfer
-/// slots this server has free.
+/// Appends values that are read when a scrape asks rather than accumulated:
+/// what foyer says about the local block cache, Linux process RSS, and the
+/// transfer slots this server has free.
 fn render_scrape_gauges(
     rendered: &mut String,
-    cache: &RuntimeCacheStats,
     local_cache: Option<FoyerCacheStats>,
     upload_permits: usize,
     download_permits: usize,
 ) {
-    for (name, description, value) in cache_gauges(cache) {
-        write_gauge(rendered, name, description, value);
-    }
     // Absent when this deployment keeps no local cache, so a scrape reports
     // nothing about a tier that does not exist rather than reporting zeros
     // that read like an idle one.
@@ -388,9 +375,8 @@ fn process_resident_bytes() -> Option<u64> {
 /// misses, and inserts are reported through the runtime's recorder like
 /// every other instrument and are already in the snapshot above.
 ///
-/// Destructured without a rest pattern for the same reason the runtime
-/// counters are: a field added to [`FoyerCacheStats`] and not exported here
-/// fails to compile.
+/// Destructured without a rest pattern so a field added to [`FoyerCacheStats`]
+/// and not exported here fails to compile.
 fn local_cache_gauges(stats: &FoyerCacheStats) -> [(&'static str, &'static str, u64); 6] {
     let FoyerCacheStats {
         memory_bytes,
@@ -430,125 +416,6 @@ fn local_cache_gauges(stats: &FoyerCacheStats) -> [(&'static str, &'static str, 
             "loonfs_local_cache_queue_channel_overflows",
             "Inserts the local block cache dropped with a full submit queue",
             queue_channel_overflows,
-        ),
-    ]
-}
-
-/// The runtime cache counters, named as their fields are.
-///
-/// Destructured without a rest pattern on purpose: a counter added to
-/// [`RuntimeCacheStats`] and not exported here fails to compile.
-fn cache_gauges(stats: &RuntimeCacheStats) -> [(&'static str, &'static str, usize); 18] {
-    let RuntimeCacheStats {
-        latest_metadata_view_reads,
-        wal_tail_projection_cache_hits,
-        wal_tail_projection_cache_misses,
-        wal_tail_projection_cache_inserts,
-        wal_tail_projection_cache_evictions,
-        wal_tail_projection_cache_evicted_rows,
-        wal_tail_projection_cache_evicted_decoded_bytes,
-        wal_tail_projection_cache_uncacheable_count,
-        wal_tail_projection_cache_uncacheable_rows,
-        wal_tail_projection_cache_uncacheable_decoded_bytes,
-        wal_tail_projection_cache_cached_rows,
-        wal_tail_projection_cache_cached_decoded_bytes,
-        metadata_table_cache_hits,
-        metadata_table_cache_misses,
-        metadata_table_cache_inserts,
-        metadata_table_cache_evictions,
-        metadata_table_cache_filter_skips,
-        metadata_table_cache_filter_false_positives,
-    } = *stats;
-    [
-        (
-            "loonfs_cache_latest_metadata_view_reads",
-            "Runtime cache counter `latest_metadata_view_reads`",
-            latest_metadata_view_reads,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_hits",
-            "Runtime cache counter `wal_tail_projection_cache_hits`",
-            wal_tail_projection_cache_hits,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_misses",
-            "Runtime cache counter `wal_tail_projection_cache_misses`",
-            wal_tail_projection_cache_misses,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_inserts",
-            "Runtime cache counter `wal_tail_projection_cache_inserts`",
-            wal_tail_projection_cache_inserts,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_evictions",
-            "Runtime cache counter `wal_tail_projection_cache_evictions`",
-            wal_tail_projection_cache_evictions,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_evicted_rows",
-            "Runtime cache counter `wal_tail_projection_cache_evicted_rows`",
-            wal_tail_projection_cache_evicted_rows,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_evicted_decoded_bytes",
-            "Runtime cache counter `wal_tail_projection_cache_evicted_decoded_bytes`",
-            wal_tail_projection_cache_evicted_decoded_bytes,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_uncacheable_count",
-            "Runtime cache counter `wal_tail_projection_cache_uncacheable_count`",
-            wal_tail_projection_cache_uncacheable_count,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_uncacheable_rows",
-            "Runtime cache counter `wal_tail_projection_cache_uncacheable_rows`",
-            wal_tail_projection_cache_uncacheable_rows,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_uncacheable_decoded_bytes",
-            "Runtime cache counter `wal_tail_projection_cache_uncacheable_decoded_bytes`",
-            wal_tail_projection_cache_uncacheable_decoded_bytes,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_cached_rows",
-            "Runtime cache counter `wal_tail_projection_cache_cached_rows`",
-            wal_tail_projection_cache_cached_rows,
-        ),
-        (
-            "loonfs_cache_wal_tail_projection_cache_cached_decoded_bytes",
-            "Runtime cache counter `wal_tail_projection_cache_cached_decoded_bytes`",
-            wal_tail_projection_cache_cached_decoded_bytes,
-        ),
-        (
-            "loonfs_cache_metadata_table_cache_hits",
-            "Runtime cache counter `metadata_table_cache_hits`",
-            metadata_table_cache_hits,
-        ),
-        (
-            "loonfs_cache_metadata_table_cache_misses",
-            "Runtime cache counter `metadata_table_cache_misses`",
-            metadata_table_cache_misses,
-        ),
-        (
-            "loonfs_cache_metadata_table_cache_inserts",
-            "Runtime cache counter `metadata_table_cache_inserts`",
-            metadata_table_cache_inserts,
-        ),
-        (
-            "loonfs_cache_metadata_table_cache_evictions",
-            "Runtime cache counter `metadata_table_cache_evictions`",
-            metadata_table_cache_evictions,
-        ),
-        (
-            "loonfs_cache_metadata_table_cache_filter_skips",
-            "Runtime cache counter `metadata_table_cache_filter_skips`",
-            metadata_table_cache_filter_skips,
-        ),
-        (
-            "loonfs_cache_metadata_table_cache_filter_false_positives",
-            "Runtime cache counter `metadata_table_cache_filter_false_positives`",
-            metadata_table_cache_filter_false_positives,
         ),
     ]
 }
