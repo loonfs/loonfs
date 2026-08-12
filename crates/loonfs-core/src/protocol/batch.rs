@@ -8,8 +8,8 @@ use super::candidates::{
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
     materialize_commit, prepare_commit_head_publish, publish_commit_head,
-    validate_commit_for_publish, wal_payload_from_materialized_commit, CommitHeadPublishError,
-    MaterializedCommit, PreparedCommitHeadPublish, PublishCommitValidationContext,
+    wal_payload_from_materialized_commit, CommitHeadPublishError, MaterializedCommit,
+    PreparedCommitHeadPublish,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
@@ -129,13 +129,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                     continue;
                 }
             };
-            let validation = PublishCommitValidationContext {
-                head: session.head(),
-                metadata_view: view
-                    .metadata_view()
-                    .with_durable_cache(session.durable_cache()),
-                accepted_rows: session.accepted_rows(),
-            };
             let request = candidate_request.request;
             let semantic_identity = candidate_request.semantic_identity;
             let allocation = candidate_request.allocation;
@@ -148,7 +141,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             }
             let validated = {
                 let span = tracing::debug_span!("loonfs.phase", phase = "validate_commit");
-                match validate_commit_for_publish(&request, context.now_ms, &validation)
+                match session
+                    .validate_commit(&request, view.metadata_view(), context.now_ms)
                     .instrument(span)
                     .await
                 {
@@ -314,10 +308,7 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
     let result = async {
         let wal = prepare_wal_segment(
             namespace_id.clone(),
-            view.acquired_writer
-                .as_ref()
-                .expect("publish view should carry acquired writer")
-                .writer_epoch,
+            view.acquired_writer.writer_epoch,
             view.head.visible_wal_tip.clone(),
             records,
         )

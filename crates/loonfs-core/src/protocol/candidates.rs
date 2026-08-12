@@ -133,10 +133,6 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     committed_at_ms: u64,
     dedup: &mut BatchDedup,
 ) -> Result<CandidateAdmission> {
-    let acquired_writer = view
-        .acquired_writer
-        .as_ref()
-        .expect("publish view should carry acquired writer");
     let mutation = candidate.request();
     let semantic_identity = candidate.semantic_identity(namespace_id)?;
     if let Some(admission) = resolve_commit_id_reuse(
@@ -172,7 +168,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         request: CoreCommitRequest {
             namespace_id: namespace_id.clone(),
             commit_id: mutation.commit_id.clone(),
-            writer_epoch: acquired_writer.writer_epoch,
+            writer_epoch: view.acquired_writer.writer_epoch,
             ops: planned.ops,
             message: mutation.message.clone(),
         },

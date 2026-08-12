@@ -3,7 +3,10 @@
 
 use super::intent::CommitRequest;
 use super::planner::{plan_commit_against_publish_view, PlannedCommit};
-use crate::commit::{CandidateAllocation, CommitPlan, InodeAllocator};
+use crate::commit::{
+    validate_commit_for_publish, CandidateAllocation, CommitIr, CommitPlan, InodeAllocator,
+    ValidatedCommitPlan,
+};
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
@@ -41,14 +44,7 @@ impl PublishPlanningSession {
         }
     }
 
-    pub(crate) fn head(&self) -> &HeadState {
-        &self.head
-    }
-
-    pub(crate) fn accepted_rows(&self) -> &MetadataState {
-        &self.accepted_rows
-    }
-
+    #[cfg(test)]
     pub(crate) fn durable_cache(&self) -> &DurableVisibilityCache {
         &self.durable_cache
     }
@@ -80,6 +76,22 @@ impl PublishPlanningSession {
         .await
     }
 
+    pub(crate) async fn validate_commit<S: ObjectStore + ?Sized>(
+        &self,
+        request: &CommitIr,
+        base_view: MetadataView<'_, '_, S>,
+        committed_at_ms: u64,
+    ) -> Result<ValidatedCommitPlan> {
+        validate_commit_for_publish(
+            request,
+            committed_at_ms,
+            &self.head,
+            base_view.with_durable_cache(&self.durable_cache),
+            &self.accepted_rows,
+        )
+        .await
+    }
+
     /// Commits the candidate-local allocator fork and returns the new
     /// authoritative batch position.
     pub(crate) fn commit_candidate(
@@ -107,7 +119,7 @@ mod tests {
     use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::load_namespace_head_control;
-    use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
+    use crate::path::read::{load_metadata_view, ReadLoadContext};
     use crate::storage::content::store_bytes_as_content;
     use crate::storage::content_admission::{ContentAdmission, PreparedContent};
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
@@ -234,16 +246,9 @@ mod tests {
         .remove(0)
         .expect("seed publish");
 
-        let (view, _projection) = load_publish_metadata_view(
-            &store,
-            None,
-            &namespace_id,
-            None,
-            None,
-            &PublishTailOptions::default(),
-        )
-        .await
-        .expect("load publish view");
+        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+            .await
+            .expect("load metadata view");
         let session = PublishPlanningSession::new(view.head());
 
         let first_request = CommitRequest::single(
@@ -260,7 +265,7 @@ mod tests {
         session
             .plan_commit(
                 &first_request,
-                view.metadata_view(),
+                view.projected_metadata_view(),
                 1,
                 &mut first_allocation,
             )
@@ -283,7 +288,7 @@ mod tests {
         session
             .plan_commit(
                 &second_request,
-                view.metadata_view(),
+                view.projected_metadata_view(),
                 1,
                 &mut second_allocation,
             )

@@ -21,17 +21,12 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     content_store_id: ContentStoreId,
     pub(super) head: HeadState,
     pub(super) head_etag: String,
-    pub(super) acquired_writer: Option<AcquiredWriter>,
+    pub(super) acquired_writer: AcquiredWriter,
     manifest_tables: VerifiedMetadataTables<'a, S>,
     tail_state: MetadataState,
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
-    #[cfg(test)]
-    pub(crate) fn head(&self) -> &HeadState {
-        &self.head
-    }
-
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
         MetadataView::from_loaded_head(&self.head, &self.manifest_tables, &self.tail_state)
     }
@@ -126,7 +121,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
-    acquired_writer: Option<AcquiredWriter>,
+    acquired_writer: AcquiredWriter,
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
@@ -144,9 +139,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    if let Some(acquired_writer) = &acquired_writer {
-        ensure_publish_head_matches_acquired_writer(&head, acquired_writer)?;
-    }
+    ensure_publish_head_matches_acquired_writer(&head, &acquired_writer)?;
     let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
     let basis = load_basis_metadata_tables(store, table_cache, namespace_id, &loaded.basis).await?;
     let manifest_tables = basis.tables;
@@ -179,13 +172,8 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     };
 
     let tail_state = projection.tail_state.clone();
-    ensure_publish_head_etag_still_current(
-        store,
-        namespace_id,
-        &head_etag,
-        acquired_writer.as_ref(),
-    )
-    .await?;
+    ensure_publish_head_etag_still_current(store, namespace_id, &head_etag, &acquired_writer)
+        .await?;
 
     Ok((
         PublishMetadataView {
@@ -298,7 +286,7 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     loaded_head_etag: &str,
-    acquired_writer: Option<&AcquiredWriter>,
+    acquired_writer: &AcquiredWriter,
 ) -> Result<()> {
     let object_key = wal_head(namespace_id.as_str());
     let metadata = store
@@ -326,15 +314,13 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
         })
     })?;
     if current_head_etag != loaded_head_etag {
-        if let Some(acquired_writer) = acquired_writer {
-            let moved_head = read_head_object(store, namespace_id)
-                .await
-                .map_err(|error| {
-                    CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-                })?
-                .state;
-            ensure_publish_head_matches_acquired_writer(&moved_head, acquired_writer)?;
-        }
+        let moved_head = read_head_object(store, namespace_id)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+            })?
+            .state;
+        ensure_publish_head_matches_acquired_writer(&moved_head, acquired_writer)?;
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::HeadChangedDuringLoad {
                 object_key,

@@ -8,7 +8,7 @@
 #![allow(clippy::panic)]
 
 use super::super::{CommitIr, CommitOp, PlannedOp};
-use super::{validate_commit_for_publish, PublishCommitValidationContext};
+use super::validate_commit_for_publish;
 use crate::commit::{
     materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator,
 };
@@ -225,15 +225,9 @@ async fn build_commit_plan(
     let result = validate_commit_for_publish(
         request,
         committed_at_ms,
-        &PublishCommitValidationContext {
-            head: &context.head,
-            metadata_view: InMemoryMetadataView::in_memory(
-                context.metadata_state,
-                None,
-                context.head.seq,
-            ),
-            accepted_rows: &accepted_rows,
-        },
+        &context.head,
+        InMemoryMetadataView::in_memory(context.metadata_state, None, context.head.seq),
+        &accepted_rows,
     )
     .await;
 
