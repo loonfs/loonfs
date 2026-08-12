@@ -110,6 +110,18 @@ fn steps_phrase(steps: u64) -> String {
     }
 }
 
+fn maintenance_assignment(namespaces: &[NamespaceId], jobs: &[String]) -> String {
+    format!(
+        "{} for {}",
+        jobs.join(", "),
+        namespaces
+            .iter()
+            .map(NamespaceId::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// Who a checkpoint record answers to, in one column: the label a user pin
 /// carries, or the fork target that keeps a lease standing. A fork lease is
 /// marked as such because `admin checkpoint-release` refuses it — it goes
@@ -609,42 +621,33 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 format!("{opening}; {}", grep_index_state_summary(state))
             }
         }
-        CommandData::MaintenanceHosted {
+        CommandData::MaintenanceHosted { namespaces, jobs } => format!(
+            "hosted {}; stopped on signal",
+            maintenance_assignment(namespaces, jobs)
+        ),
+        CommandData::MaintenanceDrained {
             namespaces,
             jobs,
-            drained,
             keys,
             steps,
             budget_exhausted,
         } => {
-            let assignment = format!(
-                "{} for {}",
-                jobs.join(", "),
-                namespaces
-                    .iter()
-                    .map(NamespaceId::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            if !*drained {
-                format!("hosted {assignment}; stopped on signal")
+            let assignment = maintenance_assignment(namespaces, jobs);
+            let settled = keys.iter().filter(|key| key.settled).count();
+            let mut lines: Vec<String> = keys.iter().map(maintenance_key_line).collect();
+            lines.push(if *budget_exhausted {
+                format!(
+                    "gave up on {assignment}: {settled} of {} keys settled after {}",
+                    keys.len(),
+                    steps_phrase(*steps)
+                )
             } else {
-                let settled = keys.iter().filter(|key| key.settled).count();
-                let mut lines: Vec<String> = keys.iter().map(maintenance_key_line).collect();
-                lines.push(if *budget_exhausted {
-                    format!(
-                        "gave up on {assignment}: {settled} of {} keys settled after {}",
-                        keys.len(),
-                        steps_phrase(*steps)
-                    )
-                } else {
-                    format!(
-                        "drained {assignment}: {settled} keys settled after {}",
-                        steps_phrase(*steps)
-                    )
-                });
-                lines.join("\n")
-            }
+                format!(
+                    "drained {assignment}: {settled} keys settled after {}",
+                    steps_phrase(*steps)
+                )
+            });
+            lines.join("\n")
         }
         CommandData::StoreProbed(response) => {
             let failed = response

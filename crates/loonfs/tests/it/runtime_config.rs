@@ -158,9 +158,14 @@ async fn async_runtime_methods_are_the_engine_boundary() {
     .await
     .expect("put file");
 
-    let async_stat = FsReader::stat_path(&fs.reader, &namespace_id, "/docs/hello.txt")
-        .await
-        .expect("async stat");
+    let async_stat = FsReader::stat_path(
+        &fs.reader,
+        &namespace_id,
+        "/docs/hello.txt",
+        Default::default(),
+    )
+    .await
+    .expect("async stat");
 
     assert_eq!(async_stat.absolute_path, "/docs/hello.txt");
     assert_eq!(async_stat.size_bytes(), Some(5));

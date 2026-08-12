@@ -222,15 +222,19 @@ async fn warm_phase_request_accounting() {
         .build()
         .await
         .expect("build reader");
-    let limit = PaginationPolicy::from_values(1_000, 1_000)
-        .expect("valid pagination policy")
+    let limit = PaginationPolicy::default()
         .resolve_limit(Some(1_000))
         .expect("valid limit");
     let mut listed = 0usize;
     let mut cursor = None;
     loop {
         let page = reader
-            .list_path_entries_page(&namespace_id, "/hot", PageRequest { limit, cursor })
+            .list_path_entries_page(
+                &namespace_id,
+                "/hot",
+                PageRequest { limit, cursor },
+                Default::default(),
+            )
             .await
             .expect("list page");
         listed += page.entries.len();
@@ -245,7 +249,7 @@ async fn warm_phase_request_accounting() {
     report("warm full list", &log.take_gets(), &tables);
 
     reader
-        .stat_path(&namespace_id, "/hot/file-04999.txt")
+        .stat_path(&namespace_id, "/hot/file-04999.txt", Default::default())
         .await
         .expect("stat");
     report("warm stat", &log.take_gets(), &tables);

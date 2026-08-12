@@ -238,7 +238,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .expect("create directory");
     let directory_entry = harness
         .client
-        .stat_path(&directory)
+        .stat_path(&directory, &Default::default())
         .await
         .expect("stat directory");
     assert_eq!(directory_entry.inode_kind(), InodeKind::Directory);
@@ -262,7 +262,11 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     assert_eq!(written.commit_id.as_str(), "smoke-write-1");
     assert_eq!(written.committed_seq, ChangeSeq(2));
 
-    let entry = harness.client.stat_path(&target).await.expect("stat path");
+    let entry = harness
+        .client
+        .stat_path(&target, &Default::default())
+        .await
+        .expect("stat path");
     assert_eq!(entry.size_bytes(), Some(16));
 
     let bytes = harness
@@ -362,12 +366,12 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     let source_entry = harness
         .client
-        .stat_path(&source_path)
+        .stat_path(&source_path, &Default::default())
         .await
         .expect("source stat");
     let clone_entry = harness
         .client
-        .stat_path(&clone_path)
+        .stat_path(&clone_path, &Default::default())
         .await
         .expect("clone stat");
     assert_eq!(source_entry.content_ref(), clone_entry.content_ref());

@@ -1,6 +1,6 @@
 //! [`ClientError`]: every failure the async client surfaces.
 
-use loonfs_api::{ErrorCode, ErrorDetails, ErrorKind};
+use loonfs_api::{ErrorCode, ErrorDetails};
 use thiserror::Error;
 
 /// Error returned by the async HTTP client.
@@ -72,32 +72,5 @@ impl ClientError {
             ClientError::Api { code, .. } => ErrorCode::parse(code),
             _ => None,
         }
-    }
-
-    /// Returns the caller-action category for [`ClientError::Api`] errors.
-    ///
-    /// Known codes classify through [`ErrorCode::kind`]. Unknown codes (a
-    /// newer server) fall back to the HTTP status class, so retry decisions
-    /// still work: 503 is [`ErrorKind::Unavailable`], other 5xx are
-    /// [`ErrorKind::Internal`], and 4xx are [`ErrorKind::InvalidRequest`].
-    pub fn kind(&self) -> Option<ErrorKind> {
-        match self {
-            ClientError::Api { status, code, .. } => match ErrorCode::parse(code) {
-                Some(code) => Some(code.kind()),
-                None => kind_for_status_class(*status),
-            },
-            _ => None,
-        }
-    }
-}
-
-/// Coarse status-class fallback for error codes this build does not know.
-pub(crate) fn kind_for_status_class(status: u16) -> Option<ErrorKind> {
-    match status {
-        // 503 stays retryable even when the code is unknown.
-        503 => Some(ErrorKind::Unavailable),
-        400..=499 => Some(ErrorKind::InvalidRequest),
-        500..=599 => Some(ErrorKind::Internal),
-        _ => None,
     }
 }

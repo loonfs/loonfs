@@ -8,9 +8,13 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use thiserror::Error;
 
-/// Default page size for endpoints that can return unbounded result sets.
+/// Contract page size for endpoints that omit a caller-supplied limit.
+///
+/// This value is deliberately fixed and advertised through capabilities.
 pub const DEFAULT_PAGE_LIMIT: u32 = 1_000;
-/// Default maximum accepted page size.
+/// Contract maximum accepted page size.
+///
+/// This value is deliberately fixed and advertised through capabilities.
 pub const DEFAULT_MAX_PAGE_LIMIT: u32 = 1_000;
 
 /// Wire cursor format version.
@@ -42,7 +46,7 @@ impl EffectiveLimit {
     }
 }
 
-/// Deployment or namespace policy for paginated endpoints.
+/// Fixed pagination contract for endpoints with potentially unbounded results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaginationPolicy {
     default_limit: NonZeroU32,
@@ -50,31 +54,6 @@ pub struct PaginationPolicy {
 }
 
 impl PaginationPolicy {
-    /// Creates a policy, requiring the default to be no larger than the max.
-    pub fn new(
-        default_limit: NonZeroU32,
-        max_limit: NonZeroU32,
-    ) -> Result<Self, PaginationPolicyError> {
-        if default_limit > max_limit {
-            return Err(PaginationPolicyError::DefaultExceedsMax {
-                default_limit: default_limit.get(),
-                max_limit: max_limit.get(),
-            });
-        }
-        Ok(Self {
-            default_limit,
-            max_limit,
-        })
-    }
-
-    /// Creates a policy from raw integers.
-    pub fn from_values(default_limit: u32, max_limit: u32) -> Result<Self, PaginationPolicyError> {
-        let default_limit =
-            NonZeroU32::new(default_limit).ok_or(PaginationPolicyError::ZeroDefaultLimit)?;
-        let max_limit = NonZeroU32::new(max_limit).ok_or(PaginationPolicyError::ZeroMaxLimit)?;
-        Self::new(default_limit, max_limit)
-    }
-
     /// Returns the page size applied when callers omit `limit`.
     pub fn default_limit(self) -> NonZeroU32 {
         self.default_limit
@@ -116,6 +95,9 @@ impl PaginationPolicy {
 
 impl Default for PaginationPolicy {
     fn default() -> Self {
+        // These are protocol constants, not configuration defaults. Keeping
+        // them together here makes every consumer enforce and advertise the
+        // same deliberate contract.
         let default_limit = const { NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap() };
         let max_limit = const { NonZeroU32::new(DEFAULT_MAX_PAGE_LIMIT).unwrap() };
         Self {
@@ -123,25 +105,6 @@ impl Default for PaginationPolicy {
             max_limit,
         }
     }
-}
-
-/// Invalid pagination policy configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum PaginationPolicyError {
-    /// The configured default limit was zero.
-    #[error("pagination default limit must be greater than zero")]
-    ZeroDefaultLimit,
-    /// The configured max limit was zero.
-    #[error("pagination max limit must be greater than zero")]
-    ZeroMaxLimit,
-    /// The configured default limit exceeded the configured max.
-    #[error("pagination default limit `{default_limit}` exceeds max limit `{max_limit}`")]
-    DefaultExceedsMax {
-        /// Default page size rejected by policy construction.
-        default_limit: u32,
-        /// Maximum page size the rejected default exceeded.
-        max_limit: u32,
-    },
 }
 
 /// Invalid caller-supplied page size.
@@ -450,17 +413,6 @@ mod tests {
             Err(LimitError::ExceedsMax {
                 requested: DEFAULT_MAX_PAGE_LIMIT + 1,
                 max_limit: DEFAULT_MAX_PAGE_LIMIT,
-            })
-        );
-    }
-
-    #[test]
-    fn policy_rejects_default_above_max() {
-        assert_eq!(
-            PaginationPolicy::from_values(10, 5),
-            Err(PaginationPolicyError::DefaultExceedsMax {
-                default_limit: 10,
-                max_limit: 5,
             })
         );
     }

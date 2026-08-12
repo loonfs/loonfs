@@ -43,7 +43,11 @@ pub enum ErrorKind {
     /// The server cancelled work that exceeded its configured request
     /// deadline. Reconcile any mutation before deciding whether to retry.
     DeadlineExceeded,
-    /// The system is temporarily unavailable. Back off and retry.
+    /// Status grouping for conditions served as unavailable.
+    ///
+    /// This kind is not a retry predicate: some grouped conditions require
+    /// maintenance before another attempt can succeed. Use
+    /// [`ErrorCode::retryable_without_operator_action`] for that decision.
     Unavailable,
     /// The operation may have committed: its acknowledgment was lost. Retry
     /// with the same commit id or reconcile against namespace state; do not
@@ -191,8 +195,6 @@ impl ErrorCode {
             ErrorCode::NamespaceDeleted => ErrorKind::Gone,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
             ErrorCode::DeadlineExceeded => ErrorKind::DeadlineExceeded,
-            // `index_lagging` clears once maintenance catches the index up,
-            // so it is served as retryable unavailability.
             ErrorCode::CommitQueueFull
             | ErrorCode::ServerBusy
             | ErrorCode::ShuttingDown
@@ -226,6 +228,54 @@ impl ErrorCode {
             | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
         }
     }
+
+    /// Returns whether this condition can clear without caller or operator action.
+    ///
+    /// This predicate is deliberately narrower than [`ErrorKind::Unavailable`]:
+    /// it includes only admission pressure and shutdown handoff that settle on
+    /// their own. Transport failures are classified separately by clients.
+    /// Reconciliation, request changes, and maintenance are caller or operator
+    /// actions and therefore return `false` here.
+    pub fn retryable_without_operator_action(self) -> bool {
+        match self {
+            ErrorCode::CommitQueueFull | ErrorCode::ServerBusy | ErrorCode::ShuttingDown => true,
+            ErrorCode::InvalidRequest
+            | ErrorCode::Unauthorized
+            | ErrorCode::PermissionDenied
+            | ErrorCode::ContentTooLarge
+            | ErrorCode::NotSupported
+            | ErrorCode::RouteNotFound
+            | ErrorCode::MethodNotAllowed
+            | ErrorCode::NamespaceNotFound
+            | ErrorCode::NamespaceDeleted
+            | ErrorCode::NamespaceExists
+            | ErrorCode::ContentNotPrepared
+            | ErrorCode::PathNotFound
+            | ErrorCode::RevisionNotFound
+            | ErrorCode::PathConflict
+            | ErrorCode::DirectoryNotEmpty
+            | ErrorCode::StaleHead
+            | ErrorCode::StaleRevision
+            | ErrorCode::StaleAttributes
+            | ErrorCode::NotDeleted
+            | ErrorCode::WriterFenced
+            | ErrorCode::WouldCycle
+            | ErrorCode::CommitIdReuseConflict
+            | ErrorCode::CommitOutcomeUnknown
+            | ErrorCode::DeadlineExceeded
+            | ErrorCode::CheckpointUnavailable
+            | ErrorCode::MaintenanceRequired
+            | ErrorCode::UploadNotFound
+            | ErrorCode::UploadAlreadyCompleted
+            | ErrorCode::UploadContentConflict
+            | ErrorCode::RebootstrapRequired
+            | ErrorCode::QueryUnindexable
+            | ErrorCode::IndexLagging
+            | ErrorCode::IndexCorrupt
+            | ErrorCode::NamespaceCorrupt
+            | ErrorCode::ServerError => false,
+        }
+    }
 }
 
 impl fmt::Display for ErrorCode {
@@ -255,5 +305,22 @@ mod tests {
             assert_eq!(parsed, code);
         }
         assert!(serde_json::from_str::<ErrorCode>("\"not_a_code\"").is_err());
+    }
+
+    #[test]
+    fn retryability_is_limited_to_self_clearing_admission_conditions() {
+        let retryable: Vec<_> = ErrorCode::ALL
+            .into_iter()
+            .filter(|code| code.retryable_without_operator_action())
+            .collect();
+
+        assert_eq!(
+            retryable,
+            [
+                ErrorCode::CommitQueueFull,
+                ErrorCode::ServerBusy,
+                ErrorCode::ShuttingDown,
+            ]
+        );
     }
 }

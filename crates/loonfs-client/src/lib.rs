@@ -303,13 +303,12 @@ enum UploadTransport {
     Proxied,
 }
 
-/// A payload length this client has actually measured, as against the one a
-/// source declared.
+/// A payload length this client has actually measured, as against a source's
+/// file-metadata hint.
 ///
-/// Only a measured length may end an upload. `PayloadSource::sized_stream`
-/// documents its length as a hint — a source is free to deliver a different
-/// number of bytes — so a refusal built on one would turn a wrong hint into
-/// a failed upload. Threading the distinction through the type is what makes
+/// Only a measured length may end an upload. A file can change before it is
+/// read, so a refusal built on metadata would turn a stale hint into a failed
+/// upload. Threading the distinction through the type is what makes
 /// [`ClientError::UploadTooLarge`] unconstructible from a hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MeasuredBytes(u64);
@@ -611,29 +610,15 @@ impl Client {
     /// resumes in name-key order against the head the server has loaded —
     /// so aggregation never restarts. The envelope's `head_seq` reports the
     /// newest head that served a page. Use
-    /// [`Self::list_path_entries_page`] for page-level control. Entries carry
-    /// no attributes; [`Self::list_path_entries_all_with_options`] projects
-    /// them.
+    /// [`Self::list_path_entries_page`] for page-level control. `options`
+    /// selects the entry projection.
     pub async fn list_path_entries_all(
-        &self,
-        spec: &NamespacePath,
-    ) -> Result<ListPathEntriesResponse> {
-        self.list_path_entries_all_with_options(spec, &ListPathEntriesOptions::default())
-            .await
-    }
-
-    /// [`Self::list_path_entries_all`], projecting what `options` asks for.
-    ///
-    /// Every entry it returns came through
-    /// [`Self::list_path_entries_page_with_options`], which checks each one
-    /// against the projection, so the aggregate does not re-check them.
-    pub async fn list_path_entries_all_with_options(
         &self,
         spec: &NamespacePath,
         options: &ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
         let first_page = self
-            .list_path_entries_page_with_options(spec, None, None, options)
+            .list_path_entries_page(spec, None, None, options)
             .await?;
         let mut envelope = ListPathEntriesResponse {
             namespace_id: first_page.namespace_id,
@@ -645,7 +630,7 @@ impl Client {
         let mut next_cursor = first_page.next_cursor;
         while let Some(cursor) = next_cursor {
             let page = self
-                .list_path_entries_page_with_options(spec, None, Some(&cursor), options)
+                .list_path_entries_page(spec, None, Some(&cursor), options)
                 .await?;
             envelope.head_seq = envelope.head_seq.max(page.head_seq);
             envelope.entries.extend(page.entries);
@@ -656,25 +641,8 @@ impl Client {
         Ok(envelope)
     }
 
-    /// Lists one page of a directory. Entries carry no attributes;
-    /// [`Self::list_path_entries_page_with_options`] projects them.
+    /// Lists one page of a directory, projecting what `options` asks for.
     pub async fn list_path_entries_page(
-        &self,
-        spec: &NamespacePath,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<ListPathEntriesResponse> {
-        self.list_path_entries_page_with_options(
-            spec,
-            limit,
-            cursor,
-            &ListPathEntriesOptions::default(),
-        )
-        .await
-    }
-
-    /// [`Self::list_path_entries_page`], projecting what `options` asks for.
-    pub async fn list_path_entries_page_with_options(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
@@ -698,15 +666,8 @@ impl Client {
         self.request_json::<(), _>(self.get(&url), None).await
     }
 
-    /// Stats one path, projecting the inode's attributes.
-    /// [`Self::stat_path_with_options`] chooses otherwise.
-    pub async fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry> {
-        self.stat_path_with_options(spec, &StatPathOptions::default())
-            .await
-    }
-
-    /// [`Self::stat_path`], projecting what `options` asks for.
-    pub async fn stat_path_with_options(
+    /// Stats one path, projecting what `options` asks for.
+    pub async fn stat_path(
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
@@ -2563,7 +2524,7 @@ mod streaming_tests;
 mod tests {
     use super::*;
     use crate::transport::{transient_failure, MAX_TRANSIENT_ATTEMPTS};
-    use loonfs_api::{ContentId, ErrorCode, ErrorKind};
+    use loonfs_api::{ContentId, ErrorCode};
     use std::fs;
     use tempfile::tempdir;
 
@@ -2694,7 +2655,9 @@ mod tests {
         assert!(transient_failure(false, &api("commit_queue_full")));
         assert!(transient_failure(false, &api("shutting_down")));
         assert!(!transient_failure(false, &api("server_error")));
+        assert!(!transient_failure(false, &api("checkpoint_unavailable")));
         assert!(!transient_failure(false, &api("maintenance_required")));
+        assert!(!transient_failure(false, &api("index_lagging")));
         assert!(!transient_failure(
             false,
             &ClientError::Http("http status 502 with a non-envelope body".to_owned())
@@ -2967,47 +2930,27 @@ mod tests {
     }
 
     #[test]
-    fn api_errors_with_known_codes_classify_through_the_registry() {
-        let error = api_error(409, "stale_revision");
-        assert_eq!(error.code(), Some(ErrorCode::StaleRevision));
-        assert_eq!(error.kind(), Some(ErrorKind::Conflict));
-
-        let error = api_error(409, "content_not_prepared");
-        assert_eq!(error.code(), Some(ErrorCode::ContentNotPrepared));
-        assert_eq!(error.kind(), Some(ErrorKind::Conflict));
-
-        let error = api_error(410, "namespace_deleted");
-        assert_eq!(error.code(), Some(ErrorCode::NamespaceDeleted));
-        assert_eq!(error.kind(), Some(ErrorKind::Gone));
-
-        let error = api_error(503, "commit_outcome_unknown");
-        assert_eq!(error.code(), Some(ErrorCode::CommitOutcomeUnknown));
-        assert_eq!(error.kind(), Some(ErrorKind::OutcomeUnknown));
-
-        let error = api_error(500, "index_corrupt");
-        assert_eq!(error.code(), Some(ErrorCode::IndexCorrupt));
-        assert_eq!(error.kind(), Some(ErrorKind::DataCorruption));
-    }
-
-    #[test]
-    fn api_errors_with_unknown_codes_fall_back_to_the_status_class() {
-        for (status, kind) in [
-            (400, ErrorKind::InvalidRequest),
-            (404, ErrorKind::InvalidRequest),
-            (500, ErrorKind::Internal),
-            (503, ErrorKind::Unavailable),
+    fn api_errors_expose_known_registry_codes() {
+        for (wire, expected) in [
+            ("stale_revision", ErrorCode::StaleRevision),
+            ("content_not_prepared", ErrorCode::ContentNotPrepared),
+            ("namespace_deleted", ErrorCode::NamespaceDeleted),
+            ("commit_outcome_unknown", ErrorCode::CommitOutcomeUnknown),
+            ("index_corrupt", ErrorCode::IndexCorrupt),
         ] {
-            let error = api_error(status, "code_from_a_newer_server");
-            assert_eq!(error.code(), None);
-            assert_eq!(error.kind(), Some(kind), "status {status}");
+            assert_eq!(api_error(500, wire).code(), Some(expected));
         }
     }
 
     #[test]
-    fn non_api_errors_have_no_code_or_kind() {
+    fn api_errors_tolerate_unknown_registry_codes() {
+        assert_eq!(api_error(503, "code_from_a_newer_server").code(), None);
+    }
+
+    #[test]
+    fn non_api_errors_have_no_code() {
         let error = ClientError::Http("connection refused".to_owned());
         assert_eq!(error.code(), None);
-        assert_eq!(error.kind(), None);
     }
 
     #[test]

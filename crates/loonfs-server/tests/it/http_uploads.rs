@@ -213,7 +213,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
     let stat = harness
         .client
-        .stat_path(&target)
+        .stat_path(&target, &Default::default())
         .await
         .expect("stat committed file");
     assert_eq!(stat.inode_id, InodeId(2));

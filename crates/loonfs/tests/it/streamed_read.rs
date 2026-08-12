@@ -163,7 +163,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
     // Same length, different bytes: nothing but the digest can tell, which
     // is the case the read exists to catch.
     let entry = reader
-        .stat_path(&namespace_id, PATH)
+        .stat_path(&namespace_id, PATH, Default::default())
         .await
         .expect("stat file");
     let content_ref = entry.content_ref().cloned().expect("a file has content");

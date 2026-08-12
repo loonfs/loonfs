@@ -1258,7 +1258,11 @@ async fn runtime_created_state_is_readable_through_http() {
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
-    let stat = harness.client.stat_path(&target).await.expect("stat file");
+    let stat = harness
+        .client
+        .stat_path(&target, &Default::default())
+        .await
+        .expect("stat file");
     assert_eq!(stat.absolute_path, "/notes/hello.txt");
     assert_eq!(stat.size_bytes(), Some(18));
     let bytes = harness
@@ -1358,7 +1362,10 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
 
     let target = NamespacePath::parse("missing", "/").expect("target");
     assert_api_error(
-        harness.client.list_path_entries_all(&target).await,
+        harness
+            .client
+            .list_path_entries_all(&target, &Default::default())
+            .await,
         404,
         "namespace_not_found",
         Some("namespace `missing` does not exist"),
@@ -1487,7 +1494,10 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         .expect("put recreates the subtree");
     let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
     assert_api_error(
-        harness.client.stat_path(&old_child).await,
+        harness
+            .client
+            .stat_path(&old_child, &Default::default())
+            .await,
         404,
         "path_not_found",
         None,

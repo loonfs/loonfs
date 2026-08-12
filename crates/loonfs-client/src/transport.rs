@@ -447,13 +447,9 @@ fn render_send_error(
 /// the retryable-unavailability codes.
 pub(crate) fn transient_failure(transport: bool, error: &ClientError) -> bool {
     transport
-        || matches!(
-            error,
-            ClientError::Api { code, .. }
-                if code == ErrorCode::ServerBusy.as_str()
-                    || code == ErrorCode::CommitQueueFull.as_str()
-                    || code == ErrorCode::ShuttingDown.as_str()
-        )
+        || error
+            .code()
+            .is_some_and(ErrorCode::retryable_without_operator_action)
 }
 
 /// Deterministic doubling, the same shape as the object-store transport

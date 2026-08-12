@@ -13,7 +13,9 @@ use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
     NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_api::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
+use loonfs_api::{
+    decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest, DEFAULT_MAX_PAGE_LIMIT,
+};
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
@@ -125,16 +127,18 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
 
     // Request validation precedes feature materialization; snapshot
     // construction must preserve that error ordering.
-    let mut invalid_limit = request("needle");
-    invalid_limit.limit = Some(0);
-    let error = host
-        .grep(&namespace_id, &invalid_limit)
-        .await
-        .expect_err("invalid limit must win before the missing feature");
-    let GrepError::Runtime(core) = &error else {
-        panic!("expected a grep core passthrough, got {error:?}");
-    };
-    assert_eq!(core.code(), ErrorCode::InvalidRequest);
+    for limit in [0, DEFAULT_MAX_PAGE_LIMIT + 1] {
+        let mut invalid_limit = request("needle");
+        invalid_limit.limit = Some(limit);
+        let error = host
+            .grep(&namespace_id, &invalid_limit)
+            .await
+            .expect_err("invalid limit must win before the missing feature");
+        let GrepError::Runtime(core) = &error else {
+            panic!("expected a grep core passthrough, got {error:?}");
+        };
+        assert_eq!(core.code(), ErrorCode::InvalidRequest);
+    }
 
     // Before enablement, grep names the missing data half.
     let error = host

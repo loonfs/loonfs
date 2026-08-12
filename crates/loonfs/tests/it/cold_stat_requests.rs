@@ -202,7 +202,11 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .expect("build reader");
     let _ = log.take_gets();
     let entry = reader
-        .stat_path(&namespace_id, "/tree/dir-000000/file-000000042.txt")
+        .stat_path(
+            &namespace_id,
+            "/tree/dir-000000/file-000000042.txt",
+            Default::default(),
+        )
         .await
         .expect("cold stat");
     assert_eq!(

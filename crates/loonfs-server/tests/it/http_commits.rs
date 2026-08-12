@@ -288,7 +288,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
         let spec = NamespacePath::parse("demo", path).expect("path");
         let missing = harness
             .client
-            .stat_path(&spec)
+            .stat_path(&spec, &Default::default())
             .await
             .expect_err("the aborted batch wrote nothing");
         match missing {
@@ -798,7 +798,10 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
     // create published.
     let unchanged = harness
         .client
-        .stat_path(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
+        .stat_path(
+            &NamespacePath::parse("demo", FIRST_FILE).expect("path"),
+            &Default::default(),
+        )
         .await
         .expect("the file is still there");
     assert_eq!(unchanged.revision_no(), Some(RevisionNo(1)));
@@ -814,7 +817,10 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
     .expect("the guard spelled correctly commits");
     let replaced = harness
         .client
-        .stat_path(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
+        .stat_path(
+            &NamespacePath::parse("demo", FIRST_FILE).expect("path"),
+            &Default::default(),
+        )
         .await
         .expect("the replace landed");
     assert_eq!(replaced.revision_no(), Some(RevisionNo(2)));

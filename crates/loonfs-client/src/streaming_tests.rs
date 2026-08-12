@@ -111,20 +111,7 @@ fn watched_source(payload: &[u8], chunk_bytes: usize) -> (PayloadSource, Arc<Ret
         }))
     }))
     .boxed();
-    let size_bytes = payload.len() as u64;
-    (PayloadSource::sized_stream(stream, size_bytes), retention)
-}
-
-/// A source that declares a length it does not deliver.
-///
-/// `PayloadSource::sized_stream` documents its length as a hint, and this is
-/// what a wrong one looks like: the bytes are what they are, and only they
-/// may decide what is claimed or refused.
-fn source_declaring(payload: &[u8], declared: u64, chunk_bytes: usize) -> PayloadSource {
-    let chunks: Vec<Vec<u8>> = payload.chunks(chunk_bytes).map(<[u8]>::to_vec).collect();
-    let stream =
-        futures::stream::iter(chunks.into_iter().map(|bytes| Ok(Bytes::from(bytes)))).boxed();
-    PayloadSource::sized_stream(stream, declared)
+    (PayloadSource::stream(stream), retention)
 }
 
 fn payload(len: usize) -> Vec<u8> {
@@ -407,13 +394,12 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     let interrupted = client_without_retry()
         .put_file_stream_resumable(
             &spec(),
-            PayloadSource::sized_stream(
+            PayloadSource::stream(
                 futures::stream::once({
                     let payload = payload.clone();
                     async move { Ok(Bytes::from(payload)) }
                 })
                 .boxed(),
-                payload.len() as u64,
             ),
             &PutFileOptions::default(),
             &journal,
@@ -493,33 +479,6 @@ async fn a_direct_multipart_put_holds_only_its_window() {
     );
 }
 
-/// Nothing about the flow depends on knowing the length first: a source
-/// that cannot say how long it is takes the same path and the same window.
-#[tokio::test]
-async fn an_unknown_length_source_uploads_the_same_way() {
-    let payload = payload(TEST_PAYLOAD_BYTES);
-    let (sized, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
-    let (stream, size_bytes) = sized.into_stream();
-    assert_eq!(size_bytes, Some(TEST_PAYLOAD_BYTES as u64));
-    // Throw the length away: this is the pipe's view of the same bytes.
-    let source = PayloadSource::stream(stream);
-    assert_eq!(source.size_bytes(), None);
-    let _transport =
-        test_transport::script(multipart_script(TEST_PAYLOAD_PARTS, content_ref(&payload)));
-
-    client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
-        .await
-        .expect("a length-less source should upload");
-
-    assert_eq!(retention.total_bytes(), TEST_PAYLOAD_BYTES as u64);
-    assert!(
-        retention.peak_live_bytes() <= DIRECT_MULTIPART_PARTS_IN_FLIGHT as u64 * TEST_PART_BYTES,
-        "peak was {}",
-        retention.peak_live_bytes()
-    );
-}
-
 /// A deployment that cannot authorize part uploads gets the same source as
 /// a request body, and the client accumulates none of it.
 #[tokio::test]
@@ -562,7 +521,7 @@ async fn a_proxied_put_streams_its_body() {
 /// The document is read once and cached, so the round trip is paid at most
 /// once per client however many puts follow.
 #[tokio::test]
-async fn a_small_sized_source_proxies_against_the_advertised_cap() {
+async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
     let payload = payload(1_000);
     let uploaded = content_ref(&payload);
     let (source, _) = watched_source(&payload, 512);
@@ -647,10 +606,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
 async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     let payload = payload(64 * 1024);
     let uploaded = content_ref(&payload);
-    let (sized, retention) = watched_source(&payload, 4 * 1024);
-    let (stream, _) = sized.into_stream();
-    // The pipe's view of the same bytes: no length to route on.
-    let source = PayloadSource::stream(stream);
+    let (source, retention) = watched_source(&payload, 4 * 1024);
     assert_eq!(source.size_bytes(), None);
 
     let transport = test_transport::script(vec![
@@ -699,9 +655,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
 async fn a_small_unknown_length_payload_still_proxies() {
     let payload = payload(1_000);
     let uploaded = content_ref(&payload);
-    let (sized, _) = watched_source(&payload, 512);
-    let (stream, _) = sized.into_stream();
-    let source = PayloadSource::stream(stream);
+    let (source, _) = watched_source(&payload, 512);
     assert_eq!(source.size_bytes(), None);
 
     let transport = test_transport::script(vec![
@@ -788,64 +742,6 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
         "one body piece was larger than a source read: {} bytes",
         object_write.largest_body_chunk()
     );
-}
-
-/// A declared length is a hint, so a wrong one may not end an upload. Here
-/// it says nothing can carry the payload; the measuring pass finds that
-/// something can, and the upload lands.
-#[tokio::test]
-async fn a_wrong_size_hint_does_not_refuse_an_upload_that_actually_fits() {
-    let payload = payload(2_000);
-    let uploaded = content_ref(&payload);
-    // Declares far more than the largest transport would take.
-    let source = source_declaring(&payload, 100_000, 512);
-    let _transport = test_transport::script(vec![
-        capabilities_for(Advertised {
-            direct_put: Some(ChecksumAlgorithm::Sha256),
-            proxy_max_bytes: Some(1_024),
-            direct_put_max_bytes: Some(4_096),
-            ..Advertised::default()
-        }),
-        begin_direct_put(uploaded.clone()),
-        Outcome::Success(Vec::new()),
-        completed(uploaded),
-        commit_landed(),
-    ]);
-
-    client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
-        .await
-        .expect("a payload that actually fits must not be refused on a hint");
-}
-
-/// When nothing really can carry the payload, the refusal reports what the
-/// client measured — never the length the source declared.
-#[tokio::test]
-async fn a_refusal_reports_the_measured_length_not_the_declared_one() {
-    let payload = payload(50_000);
-    let source = source_declaring(&payload, 100_000, 512);
-    let _transport = test_transport::script(vec![capabilities_for(Advertised {
-        direct_put: Some(ChecksumAlgorithm::Sha256),
-        proxy_max_bytes: Some(1_024),
-        direct_put_max_bytes: Some(4_096),
-        ..Advertised::default()
-    })]);
-
-    let error = client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
-        .await
-        .expect_err("no transport can carry this payload");
-    match error {
-        ClientError::UploadTooLarge { size_bytes, reason } => {
-            assert_eq!(
-                size_bytes,
-                payload.len() as u64,
-                "the refusal must name the measured length, not the declared one"
-            );
-            assert!(reason.contains("4096"), "{reason}");
-        }
-        other => panic!("expected an upload-too-large refusal, got {other:?}"),
-    }
 }
 
 #[tokio::test]
@@ -952,8 +848,11 @@ async fn request_head_for(source: PayloadSource) -> String {
 /// oversized body before reading it.
 #[tokio::test]
 async fn a_sized_source_frames_its_body_with_a_content_length() {
-    let stream = futures::stream::iter(vec![Ok(Bytes::from_static(b"0123456789"))]).boxed();
-    let head = request_head_for(PayloadSource::sized_stream(stream, 10)).await;
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("payload.bin");
+    std::fs::write(&path, b"0123456789").expect("write payload");
+    let source = PayloadSource::open_file(path).await.expect("open payload");
+    let head = request_head_for(source).await;
 
     assert!(head.contains("content-length: 10"), "{head}");
     assert!(

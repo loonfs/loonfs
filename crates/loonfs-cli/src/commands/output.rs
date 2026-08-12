@@ -115,16 +115,18 @@ pub(crate) enum CommandData {
         /// True when a budget stopped the wait before the target.
         budget_exhausted: bool,
     },
-    /// What an assigned-namespace maintenance host did.
+    /// Assignment a maintenance host ran until it received a signal.
     MaintenanceHosted {
         /// The assignment, sorted and deduplicated.
         namespaces: Vec<NamespaceId>,
         jobs: Vec<String>,
-        /// True when the host caught the assignment up and exited instead of
-        /// hosting until a signal.
-        drained: bool,
-        /// Where each key got to. Empty for a hosted run: the runner ran
-        /// those steps, and durable state is what reports them.
+    },
+    /// Measured report from a maintenance host that drained its assignment.
+    MaintenanceDrained {
+        /// The assignment, sorted and deduplicated.
+        namespaces: Vec<NamespaceId>,
+        jobs: Vec<String>,
+        /// Where each key got to.
         keys: Vec<MaintenanceKeyReport>,
         /// Steps the drain ran across every key.
         steps: u64,
@@ -254,7 +256,7 @@ impl CommandData {
             // Same for a drain that ran out of budget: the per-key progress
             // it prints is real, and the assignment it was asked to catch
             // up is not caught up.
-            | CommandData::MaintenanceHosted {
+            | CommandData::MaintenanceDrained {
                 budget_exhausted, ..
             } => *budget_exhausted,
             // A probe that found a broken store prints every check's verdict

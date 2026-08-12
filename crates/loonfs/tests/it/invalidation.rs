@@ -390,7 +390,7 @@ async fn read_after_write_is_served_from_seeded_caches() {
             .expect("warmup put");
     }
     reader
-        .stat_path(&namespace_id, "/docs/warm-0.txt")
+        .stat_path(&namespace_id, "/docs/warm-0.txt", Default::default())
         .await
         .expect("warmup stat");
 
@@ -432,7 +432,7 @@ async fn read_after_write_is_served_from_seeded_caches() {
     );
 
     reader
-        .stat_path(&namespace_id, "/docs/fresh.txt")
+        .stat_path(&namespace_id, "/docs/fresh.txt", Default::default())
         .await
         .expect("read after write");
     let read_gets = recording.take_get_keys();

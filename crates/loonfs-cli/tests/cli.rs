@@ -4145,7 +4145,8 @@ fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
     ]);
     assert_success(&drained);
     let data = json_data(&drained);
-    assert_eq!(data["drained"], true);
+    assert_eq!(data["kind"], "maintenance_drained");
+    assert!(data.get("drained").is_none());
     assert_eq!(data["budget_exhausted"], false);
     let keys = data["keys"].as_array().expect("json array");
     assert_eq!(keys.len(), 8, "four jobs over two namespaces: {data}");
@@ -4292,7 +4293,7 @@ fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     ]);
     assert_success(&paced);
     let (plain, paced) = (json_data(&plain), json_data(&paced));
-    for field in ["drained", "budget_exhausted", "jobs"] {
+    for field in ["budget_exhausted", "jobs"] {
         assert_eq!(
             paced[field], plain[field],
             "a drain reports the same `{field}` with the cadence flag as without it"

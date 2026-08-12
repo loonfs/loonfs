@@ -20,10 +20,9 @@ use loonfs::{
 use loonfs_api::v0::{ChangesResponse, FilesystemChange};
 use loonfs_api::{
     decode_cursor, AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, ContentRef,
-    DirectoryPageCursor, EffectiveLimit, InodeId, NamespaceId, Page, PageRequest, RevisionNo,
-    DEFAULT_MAX_PAGE_LIMIT,
+    DirectoryPageCursor, EffectiveLimit, InodeId, LimitError, NamespaceId, Page, PageRequest,
+    PaginationPolicy, RevisionNo,
 };
-use std::num::NonZeroU32;
 
 /// One namespace's filesystem reads, borrowed from a reader handle.
 ///
@@ -85,7 +84,7 @@ impl<'a> NamespaceReads<'a> {
                 self.namespace_id,
                 checkpoint_id,
                 PageRequest {
-                    limit: page_limit(limit),
+                    limit: page_limit(limit).map_err(invalid_page_limit)?,
                     cursor,
                 },
             )
@@ -108,7 +107,7 @@ impl<'a> NamespaceReads<'a> {
                 self.namespace_id,
                 after_seq,
                 ListChangesOptions {
-                    limit: Some(page_limit(limit)),
+                    limit: Some(page_limit(limit).map_err(invalid_page_limit)?),
                 },
             )
             .await?)
@@ -141,7 +140,7 @@ impl<'a> NamespaceReads<'a> {
     ) -> Result<AuthoritativePathEntry> {
         Ok(self
             .reader
-            .stat_path_with_options(
+            .stat_path(
                 self.namespace_id,
                 absolute_path.as_str(),
                 StatPathOptions {
@@ -164,9 +163,10 @@ impl<'a> NamespaceReads<'a> {
                 self.namespace_id,
                 absolute_path.as_str(),
                 PageRequest {
-                    limit: page_limit(limit),
+                    limit: page_limit(limit).map_err(invalid_page_limit)?,
                     cursor,
                 },
+                loonfs::ListPathEntriesOptions::default(),
             )
             .await?;
         // The handle hands back the wire cursor every client resumes with;
@@ -253,25 +253,33 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
     }
 }
 
-/// Clamps a caller's page size to what a page request can carry.
-fn page_limit(limit: usize) -> EffectiveLimit {
-    let limit = u32::try_from(limit)
-        .unwrap_or(DEFAULT_MAX_PAGE_LIMIT)
-        .clamp(1, DEFAULT_MAX_PAGE_LIMIT);
-    EffectiveLimit::new(NonZeroU32::new(limit).expect("a clamped page limit is non-zero"))
+/// Validates an internal page request against the public pagination contract.
+fn page_limit(limit: usize) -> std::result::Result<EffectiveLimit, LimitError> {
+    let requested = u32::try_from(limit).unwrap_or(u32::MAX);
+    PaginationPolicy::default().resolve_limit(Some(requested))
+}
+
+fn invalid_page_limit(error: LimitError) -> GrepError {
+    CoreError::InvalidQuery(error.to_string()).into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{page_limit, resolve_batch_size};
     use loonfs::MAX_RESOLVE_CURRENT_FILES;
-    use loonfs_api::DEFAULT_MAX_PAGE_LIMIT;
+    use loonfs_api::{LimitError, DEFAULT_MAX_PAGE_LIMIT};
 
     #[test]
-    fn page_limits_clamp_into_the_pagination_policy() {
-        assert_eq!(page_limit(0).get(), 1);
-        assert_eq!(page_limit(7).get(), 7);
-        assert_eq!(page_limit(usize::MAX).get(), DEFAULT_MAX_PAGE_LIMIT);
+    fn page_limits_enforce_the_pagination_contract() {
+        assert_eq!(page_limit(0), Err(LimitError::Zero));
+        assert_eq!(page_limit(7).expect("valid limit").get(), 7);
+        assert_eq!(
+            page_limit(usize::MAX),
+            Err(LimitError::ExceedsMax {
+                requested: u32::MAX,
+                max_limit: DEFAULT_MAX_PAGE_LIMIT,
+            })
+        );
     }
 
     #[test]
