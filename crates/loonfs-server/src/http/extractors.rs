@@ -2,7 +2,7 @@
 
 use super::error::ApiResponseError;
 use super::serve::AppState;
-use crate::config::ServerConfig;
+use crate::config::AuthPolicy;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, Path as AxumPath, Query};
 use axum::http::request::Parts;
@@ -29,17 +29,18 @@ pub(super) fn server_busy_error(what: &str) -> ApiResponseError {
 }
 
 pub(super) fn authorize(
-    config: &ServerConfig,
+    policy: AuthPolicy<'_>,
     headers: &HeaderMap,
 ) -> Result<(), ApiResponseError> {
-    let Some(expected) = &config.auth_token else {
-        return Ok(());
+    let expected = match policy {
+        AuthPolicy::Unauthenticated => return Ok(()),
+        AuthPolicy::BearerToken(expected) => expected,
     };
     let actual = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    let expected = format!("Bearer {}", expected.expose());
+    let expected = format!("Bearer {expected}");
     if constant_time_eq(actual.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
@@ -209,7 +210,7 @@ where
         req: axum::extract::Request,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorize(&state.config, req.headers())?;
+        authorize(state.config.auth_policy(), req.headers())?;
         extract_json(req, state, json_body_too_large_error)
             .await
             .map(AppJson)
@@ -331,7 +332,7 @@ impl FromRequest<AppState> for UploadBodyStream {
         req: axum::extract::Request,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorize(&state.config, req.headers())?;
+        authorize(state.config.auth_policy(), req.headers())?;
         let permit = state
             .upload_permits
             .clone()
@@ -402,7 +403,7 @@ where
         req: axum::extract::Request,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorize(&state.config, req.headers())?;
+        authorize(state.config.auth_policy(), req.headers())?;
         let body = axum::body::to_bytes(req.into_body(), MAX_OPTIONAL_JSON_BODY_BYTES)
             .await
             .map_err(|error| {

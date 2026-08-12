@@ -57,7 +57,7 @@ pub(super) async fn capabilities(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let mut capabilities = state.reader.capabilities();
     // Each direct transport is advertised from the issuer that performs it,
     // so a provider that signs whole-object writes but has no multipart API
@@ -212,7 +212,7 @@ pub(super) async fn namespace_status(
     namespace: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::NamespaceStatusResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let status = state
         .admin
@@ -250,7 +250,7 @@ pub(super) async fn delete_namespace(
     query: AppQuery<DeleteNamespaceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::DeleteNamespaceResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let options = DeleteNamespaceOptions {
@@ -358,7 +358,7 @@ pub(super) async fn list_checkpoints(
     namespace: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let response = state
         .admin
@@ -394,7 +394,7 @@ pub(super) async fn release_checkpoint(
     path: AppPath<CheckpointPathParams>,
     headers: HeaderMap,
 ) -> Result<Json<ReleaseCheckpointResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let CheckpointPathParams { checkpoint_id } = path.into_params()?;
     let checkpoint_id = parse_checkpoint_id(&checkpoint_id)?;

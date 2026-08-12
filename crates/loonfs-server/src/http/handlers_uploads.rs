@@ -3,7 +3,6 @@
 
 use super::error::ApiResponseError;
 use super::{authorize, AppJson, AppPath, AppState, NamespaceIdPath, UploadBodyStream};
-use crate::config::ServerConfig;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -45,6 +44,45 @@ pub(super) enum PutContentPreparation {
     /// Every supplied token was rejected, each paired with the content ref
     /// it was supplied for. Never empty.
     Rejected(Vec<(ContentId, ContentTokenError)>),
+}
+
+/// The deployment material allowed to verify and mint content tokens.
+/// Keeping it separate means upload helpers cannot reach unrelated server
+/// configuration while handling a proof.
+#[derive(Clone, Copy)]
+pub(super) struct ContentTokenVerifier<'a> {
+    secret: &'a str,
+}
+
+impl<'a> ContentTokenVerifier<'a> {
+    pub(super) fn new(secret: &'a str) -> Self {
+        Self { secret }
+    }
+
+    async fn prepare(
+        self,
+        writer: &FsWriter,
+        namespace_id: &NamespaceId,
+        token: &ValidatedContentToken,
+        now_ms: u64,
+    ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
+        writer
+            .prepare_content_token(namespace_id, self.secret, token, now_ms)
+            .await
+            .map_err(|error| ApiResponseError::runtime_for_namespace(namespace_id, error))
+    }
+
+    fn mint_receipt(
+        self,
+        receipt: Option<&CompletedUploadReceipt>,
+    ) -> Result<Option<String>, ApiResponseError> {
+        let Some(receipt) = receipt else {
+            return Ok(None);
+        };
+        let token = mint_content_token(self.secret, receipt, current_unix_ms()?)
+            .map_err(content_token_error)?;
+        Ok(Some(token))
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -337,7 +375,7 @@ pub(super) fn presign_time() -> SystemTime {
 /// loud even when the request it arrived in went on to publish.
 pub(super) async fn content_preparation_for_puts(
     writer: &FsWriter,
-    config: &ServerConfig,
+    verifier: ContentTokenVerifier<'_>,
     namespace_id: &NamespaceId,
     content_refs: &[&ContentRef],
     tokens: &[ValidatedContentToken],
@@ -351,10 +389,9 @@ pub(super) async fn content_preparation_for_puts(
         .cloned()
         .collect::<Vec<_>>();
     for token in &matching_tokens {
-        match writer
-            .prepare_content_token(namespace_id, config.content_token_secret(), token, now_ms)
-            .await
-            .map_err(|error| ApiResponseError::runtime_for_namespace(namespace_id, error))?
+        match verifier
+            .prepare(writer, namespace_id, token, now_ms)
+            .await?
         {
             Ok(prepared) => prepared_content.push(prepared),
             Err(error) => {
@@ -534,7 +571,9 @@ pub(super) async fn complete_upload(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let mut response = completed.response;
-    response.validated_content_token = mint_receipt(&state.config, completed.receipt.as_ref())?;
+    response.validated_content_token =
+        ContentTokenVerifier::new(state.config.content_token_secret())
+            .mint_receipt(completed.receipt.as_ref())?;
     Ok(Json(response))
 }
 
@@ -568,7 +607,7 @@ pub(super) async fn read_upload_status(
     // A completed session answers with a freshly minted content-validation
     // token, which is a capability to commit that content. Authorization
     // runs before the id is even parsed, as everywhere else.
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
@@ -582,7 +621,8 @@ pub(super) async fn read_upload_status(
         ..
     } = &mut response.status
     {
-        *validated_content_token = mint_receipt(&state.config, receipt.as_ref())?;
+        *validated_content_token = ContentTokenVerifier::new(state.config.content_token_secret())
+            .mint_receipt(receipt.as_ref())?;
     }
     Ok(Json(response))
 }
@@ -615,7 +655,7 @@ pub(super) async fn abort_upload(
     namespace: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
 ) -> Result<Json<AbortUploadResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
@@ -625,23 +665,6 @@ pub(super) async fn abort_upload(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
-}
-
-/// Signs a receipt the core layer already proved is mintable.
-///
-/// Core decides *whether* a receipt exists — only a durable completed
-/// session inside its receipt window yields one — and the server owns the
-/// secret that signs it, so neither side can mint on its own.
-fn mint_receipt(
-    config: &ServerConfig,
-    receipt: Option<&CompletedUploadReceipt>,
-) -> Result<Option<String>, ApiResponseError> {
-    let Some(receipt) = receipt else {
-        return Ok(None);
-    };
-    let token = mint_content_token(config.content_token_secret(), receipt, current_unix_ms()?)
-        .map_err(content_token_error)?;
-    Ok(Some(token))
 }
 
 fn parse_upload_id(value: &str) -> Result<UploadId, ApiResponseError> {

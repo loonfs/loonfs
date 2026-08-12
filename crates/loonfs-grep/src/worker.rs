@@ -597,13 +597,19 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         unit: CollectedIndexUnit,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildReport> {
-        let rows = gram_postings_rows(unit.postings)?;
+        let CollectedIndexUnit {
+            postings,
+            stats,
+            progress,
+        } = unit;
+        let run_seq = progress.run_seq();
+        let rows = gram_postings_rows(postings)?;
         let timer = StdMonotonicTimer::default();
         let publication_started_ms = timer.monotonic_now_ms();
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
-            unit.run_seq,
+            run_seq,
             current.manifest_state().index().next_run_ordinal,
             rows,
             policy.max_rows_per_segment,
@@ -618,36 +624,63 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         // A finished backfill turns steady at exactly the sequence its
         // checkpoint captured: the walk answered that state and no other, so
         // the watermark it hands the change feed is the target it reached.
-        let (lifecycle, completed_checkpoint_id) = match current.manifest_state().lifecycle() {
-            GrepLifecycle::Backfilling {
+        let (lifecycle, completed_checkpoint_id, built_through_seq) = match progress {
+            CollectedProgress::Backfill {
                 target_seq,
-                checkpoint_id,
-                ..
-            } => match unit.backfill_cursor {
-                Some(after_inode_id) => (
-                    GrepLifecycle::Backfilling {
-                        target_seq: *target_seq,
-                        cursor: Some(after_inode_id),
-                        checkpoint_id: checkpoint_id.clone(),
+                next_cursor,
+            } => {
+                let checkpoint_id = match current.manifest_state().lifecycle() {
+                    GrepLifecycle::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
+                    _ => {
+                        return Err(CoreError::Internal(
+                            "a collected grep backfill unit no longer matches its root".to_owned(),
+                        )
+                        .into())
+                    }
+                };
+                match next_cursor {
+                    Some(after_inode_id) => (
+                        GrepLifecycle::Backfilling {
+                            target_seq,
+                            cursor: Some(after_inode_id),
+                            checkpoint_id,
+                        },
+                        None,
+                        target_seq,
+                    ),
+                    None => (
+                        GrepLifecycle::Steady {
+                            built_through_seq: target_seq,
+                            next_event_index: 0,
+                        },
+                        Some(checkpoint_id),
+                        target_seq,
+                    ),
+                }
+            }
+            CollectedProgress::Incremental {
+                run_seq: _,
+                built_through_seq,
+                next_event_index,
+            } => {
+                if !matches!(
+                    current.manifest_state().lifecycle(),
+                    GrepLifecycle::Steady { .. }
+                ) {
+                    return Err(CoreError::Internal(
+                        "a collected incremental grep unit no longer matches its root".to_owned(),
+                    )
+                    .into());
+                }
+                (
+                    GrepLifecycle::Steady {
+                        built_through_seq,
+                        next_event_index,
                     },
                     None,
-                ),
-                None => (
-                    GrepLifecycle::Steady {
-                        built_through_seq: unit.built_through_seq,
-                        next_event_index: unit.next_event_index,
-                    },
-                    Some(checkpoint_id.clone()),
-                ),
-            },
-            GrepLifecycle::Steady { .. } => (
-                GrepLifecycle::Steady {
-                    built_through_seq: unit.built_through_seq,
-                    next_event_index: unit.next_event_index,
-                },
-                None,
-            ),
-            GrepLifecycle::Disabled => unreachable!("disabled returned before collection"),
+                    built_through_seq,
+                )
+            }
         };
         let materialized = matches!(lifecycle, GrepLifecycle::Steady { .. });
         let next = GrepManifestState::new(
@@ -670,9 +703,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 Ok(build_report(
                     namespace_id,
                     GrepBuildOutcome::Published {
-                        built_through_seq: unit.built_through_seq,
-                        indexed_revisions: unit.indexed_revisions,
-                        skipped_revisions: unit.skipped_revisions,
+                        built_through_seq,
+                        indexed_revisions: stats.indexed_revisions,
+                        skipped_revisions: stats.skipped_revisions,
                         segments_written,
                         materialized,
                     },
@@ -737,12 +770,38 @@ fn root_names_checkpoint(root: &GrepManifestState, checkpoint_id: &CheckpointId)
 
 struct CollectedIndexUnit {
     postings: BTreeMap<Gram, Vec<GramPosting>>,
+    stats: IndexingStats,
+    progress: CollectedProgress,
+}
+
+#[derive(Default)]
+struct IndexingStats {
     indexed_revisions: u64,
     skipped_revisions: u64,
-    run_seq: ChangeSeq,
-    built_through_seq: ChangeSeq,
-    next_event_index: u32,
-    backfill_cursor: Option<InodeId>,
+}
+
+/// The resume state collected by one worker step. Naming the two modes here
+/// prevents a backfill cursor from ever being paired with change-feed
+/// progress, which used to be possible in the flat unit record.
+enum CollectedProgress {
+    Backfill {
+        target_seq: ChangeSeq,
+        next_cursor: Option<InodeId>,
+    },
+    Incremental {
+        run_seq: ChangeSeq,
+        built_through_seq: ChangeSeq,
+        next_event_index: u32,
+    },
+}
+
+impl CollectedProgress {
+    fn run_seq(&self) -> ChangeSeq {
+        match self {
+            Self::Backfill { target_seq, .. } => *target_seq,
+            Self::Incremental { run_seq, .. } => *run_seq,
+        }
+    }
 }
 
 /// Collects one backfill step from the files the checkpoint pins.
@@ -761,15 +820,9 @@ async fn collect_backfill_unit(
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
 ) -> Result<Option<CollectedIndexUnit>> {
-    let mut unit = CollectedIndexUnit {
-        postings: BTreeMap::new(),
-        indexed_revisions: 0,
-        skipped_revisions: 0,
-        run_seq: target_seq,
-        built_through_seq: target_seq,
-        next_event_index: 0,
-        backfill_cursor: cursor,
-    };
+    let mut postings = BTreeMap::new();
+    let mut stats = IndexingStats::default();
+    let mut next_cursor = cursor;
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
     let mut files_remaining = policy.max_files_per_step.get();
@@ -793,7 +846,7 @@ async fn collect_backfill_unit(
         for file in page.files {
             files_remaining = files_remaining.saturating_sub(1);
             if file.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
-                unit.skipped_revisions += 1;
+                stats.skipped_revisions += 1;
             } else {
                 planned_content_bytes += file.size_bytes;
                 pending.push(PendingRevisionContent {
@@ -802,7 +855,7 @@ async fn collect_backfill_unit(
                     content_ref: file.content_ref,
                 });
             }
-            unit.backfill_cursor = Some(file.inode_id);
+            next_cursor = Some(file.inode_id);
             if planned_content_bytes >= policy.max_content_bytes_per_step.get() {
                 budget_reached = true;
                 break;
@@ -814,7 +867,7 @@ async fn collect_backfill_unit(
         if page_exhausted_family {
             // Every file the checkpoint pins is indexed; the next published
             // root leaves backfill for the change feed.
-            unit.backfill_cursor = None;
+            next_cursor = None;
             break;
         }
         cursor = page.next_cursor;
@@ -822,8 +875,15 @@ async fn collect_backfill_unit(
             break;
         }
     }
-    load_and_fold_revision_contents(reads, &pending, &mut unit).await?;
-    Ok(Some(unit))
+    load_and_fold_revision_contents(reads, &pending, &mut postings, &mut stats).await?;
+    Ok(Some(CollectedIndexUnit {
+        postings,
+        stats,
+        progress: CollectedProgress::Backfill {
+            target_seq,
+            next_cursor,
+        },
+    }))
 }
 
 /// Collects one incremental step from the semantic change feed.
@@ -842,15 +902,11 @@ async fn collect_incremental_unit(
     if feed.changes.is_empty() {
         return Ok(None);
     }
-    let mut unit = CollectedIndexUnit {
-        postings: BTreeMap::new(),
-        indexed_revisions: 0,
-        skipped_revisions: 0,
-        run_seq: built_through_seq,
-        built_through_seq,
-        next_event_index,
-        backfill_cursor: None,
-    };
+    let mut postings = BTreeMap::new();
+    let mut stats = IndexingStats::default();
+    let mut run_seq = built_through_seq;
+    let mut collected_through_seq = built_through_seq;
+    let mut collected_next_event_index = next_event_index;
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
@@ -877,9 +933,9 @@ async fn collect_incremental_unit(
                     > policy.max_content_bytes_per_step.get();
             if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
                 if event_index > 0 {
-                    unit.built_through_seq = change.seq;
-                    unit.run_seq = change.seq;
-                    unit.next_event_index = u32::try_from(event_index).map_err(|_| {
+                    collected_through_seq = change.seq;
+                    run_seq = change.seq;
+                    collected_next_event_index = u32::try_from(event_index).map_err(|_| {
                         CoreError::Internal("grep event cursor overflow".to_owned())
                     })?;
                 }
@@ -887,7 +943,7 @@ async fn collect_incremental_unit(
             }
             examined_files += 1;
             if revision.content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
-                unit.skipped_revisions += 1;
+                stats.skipped_revisions += 1;
             } else {
                 planned_content_bytes += revision.content_ref.size_bytes;
                 pending.push(PendingRevisionContent {
@@ -899,30 +955,39 @@ async fn collect_incremental_unit(
             if examined_files >= policy.max_files_per_step.get()
                 || planned_content_bytes >= policy.max_content_bytes_per_step.get()
             {
-                unit.built_through_seq = change.seq;
-                unit.run_seq = change.seq;
+                collected_through_seq = change.seq;
+                run_seq = change.seq;
                 let next_event_index = event_index
                     .checked_add(1)
                     .ok_or_else(|| CoreError::Internal("grep event cursor overflow".to_owned()))?;
                 if next_event_index < change.events.len() {
-                    unit.next_event_index = u32::try_from(next_event_index).map_err(|_| {
+                    collected_next_event_index = u32::try_from(next_event_index).map_err(|_| {
                         CoreError::Internal("grep event cursor overflow".to_owned())
                     })?;
                 } else {
-                    unit.next_event_index = 0;
+                    collected_next_event_index = 0;
                 }
                 break 'changes;
             }
         }
-        unit.built_through_seq = change.seq;
-        unit.run_seq = change.seq;
-        unit.next_event_index = 0;
+        collected_through_seq = change.seq;
+        run_seq = change.seq;
+        collected_next_event_index = 0;
     }
-    if unit.built_through_seq == built_through_seq && unit.next_event_index == next_event_index {
+    if collected_through_seq == built_through_seq && collected_next_event_index == next_event_index
+    {
         return Ok(None);
     }
-    load_and_fold_revision_contents(reads, &pending, &mut unit).await?;
-    Ok(Some(unit))
+    load_and_fold_revision_contents(reads, &pending, &mut postings, &mut stats).await?;
+    Ok(Some(CollectedIndexUnit {
+        postings,
+        stats,
+        progress: CollectedProgress::Incremental {
+            run_seq,
+            built_through_seq: collected_through_seq,
+            next_event_index: collected_next_event_index,
+        },
+    }))
 }
 
 struct PendingRevisionContent {
@@ -934,7 +999,8 @@ struct PendingRevisionContent {
 async fn load_and_fold_revision_contents(
     reads: &NamespaceReads<'_>,
     pending: &[PendingRevisionContent],
-    unit: &mut CollectedIndexUnit,
+    postings: &mut BTreeMap<Gram, Vec<GramPosting>>,
+    stats: &mut IndexingStats,
 ) -> Result<()> {
     for chunk in pending.chunks(MAX_GREP_WORKER_IO) {
         let contents = try_join_all(chunk.iter().map(|revision| {
@@ -945,7 +1011,7 @@ async fn load_and_fold_revision_contents(
         .await?;
         for (revision, content) in chunk.iter().zip(contents) {
             if !is_indexable_text_content(&content) {
-                unit.skipped_revisions += 1;
+                stats.skipped_revisions += 1;
                 continue;
             }
             let posting = GramPosting {
@@ -953,9 +1019,9 @@ async fn load_and_fold_revision_contents(
                 revision_no: revision.revision_no,
             };
             for gram in extract_grams(&content) {
-                unit.postings.entry(gram).or_default().push(posting);
+                postings.entry(gram).or_default().push(posting);
             }
-            unit.indexed_revisions += 1;
+            stats.indexed_revisions += 1;
         }
     }
     Ok(())

@@ -4,7 +4,7 @@
 
 use super::error::ApiResponseError;
 use super::handlers_uploads::{
-    content_preparation_for_puts, current_unix_ms, PutContentPreparation,
+    content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
 };
 use super::{authorize, AppJson, AppQuery, AppState, NamespaceIdPath};
 use axum::extract::State;
@@ -102,7 +102,7 @@ pub(super) async fn list_path_entries(
     headers: HeaderMap,
     query: AppQuery<ListPathPageQuery>,
 ) -> Result<Json<loonfs_api::ListPathEntriesResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let path = query.path;
@@ -156,7 +156,7 @@ pub(super) async fn stat_path(
     headers: HeaderMap,
     query: AppQuery<PathQuery>,
 ) -> Result<Json<loonfs_api::AuthoritativePathEntry>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let path = query.path;
@@ -202,7 +202,7 @@ pub(super) async fn get_file_bytes(
     headers: HeaderMap,
     query: AppQuery<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     // Held for the read below: content reads buffer the whole file, so the
@@ -261,7 +261,7 @@ pub(super) async fn list_trash(
     headers: HeaderMap,
     query: AppQuery<PageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let response = state
@@ -307,7 +307,7 @@ pub(super) async fn list_file_revisions(
     headers: HeaderMap,
     query: AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let path = query.path;
@@ -384,7 +384,7 @@ pub(super) async fn apply_commit(
             payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
             content_preparation_for_puts(
                 &state.writer,
-                &state.config,
+                ContentTokenVerifier::new(state.config.content_token_secret()),
                 &namespace_id,
                 &put_content_refs,
                 &content_tokens,
@@ -467,7 +467,7 @@ pub(super) async fn list_changes(
     headers: HeaderMap,
     query: AppQuery<ChangesQuery>,
 ) -> Result<Json<ChangesResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let after_seq = loonfs_api::ChangeSeq(query.after_seq);

@@ -14,6 +14,13 @@ use thiserror::Error;
 
 pub use loonfs_objectstore::StoreConfig;
 
+/// The only request-authentication decisions exposed to HTTP helpers.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AuthPolicy<'a> {
+    Unauthenticated,
+    BearerToken(&'a str),
+}
+
 /// Environment fallback for [`ServerConfig::auth_token`].
 const AUTH_TOKEN_ENV: &str = "LOONFS_AUTH_TOKEN";
 /// Environment fallback for [`ServerConfig::content_token_secret`].
@@ -305,44 +312,20 @@ impl GrepMode {
 }
 
 /// The server's `[grep]` table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GrepConfig {
     pub mode: GrepMode,
-    pub max_files_per_step: usize,
-    pub max_content_bytes_per_step: u64,
-    pub max_rows_per_segment: usize,
-    pub max_l0_runs: usize,
-    pub max_mid_runs: usize,
-    pub max_decoded_input_rows_per_step: usize,
+    /// Flattening preserves the existing `[grep]` keys while leaving the
+    /// worker policy itself as their one in-memory owner.
+    #[serde(flatten)]
+    pub worker: GrepWorkerConfig,
 }
 
 impl GrepConfig {
     /// Returns the shared bounded-step configuration represented by this table.
     pub fn worker_config(self) -> GrepWorkerConfig {
-        GrepWorkerConfig {
-            max_files_per_step: self.max_files_per_step,
-            max_content_bytes_per_step: self.max_content_bytes_per_step,
-            max_rows_per_segment: self.max_rows_per_segment,
-            max_l0_runs: self.max_l0_runs,
-            max_mid_runs: self.max_mid_runs,
-            max_decoded_input_rows_per_step: self.max_decoded_input_rows_per_step,
-        }
-    }
-}
-
-impl Default for GrepConfig {
-    fn default() -> Self {
-        let worker = GrepWorkerConfig::default();
-        Self {
-            mode: GrepMode::default(),
-            max_files_per_step: worker.max_files_per_step,
-            max_content_bytes_per_step: worker.max_content_bytes_per_step,
-            max_rows_per_segment: worker.max_rows_per_segment,
-            max_l0_runs: worker.max_l0_runs,
-            max_mid_runs: worker.max_mid_runs,
-            max_decoded_input_rows_per_step: worker.max_decoded_input_rows_per_step,
-        }
+        self.worker
     }
 }
 
@@ -366,6 +349,13 @@ pub enum ServerConfigError {
 }
 
 impl ServerConfig {
+    pub(crate) fn auth_policy(&self) -> AuthPolicy<'_> {
+        match &self.auth_token {
+            Some(token) => AuthPolicy::BearerToken(token.expose()),
+            None => AuthPolicy::Unauthenticated,
+        }
+    }
+
     pub(crate) fn content_token_secret(&self) -> &str {
         self.content_token_secret.expose()
     }
@@ -1789,6 +1779,7 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("load config");
         assert_eq!(config.grep, super::GrepConfig::default());
         assert_eq!(config.grep.mode, super::GrepMode::ServeAndMaintain);
+        assert_eq!(config.grep.worker, loonfs_grep::GrepWorkerConfig::default());
         assert_eq!(
             config
                 .grep

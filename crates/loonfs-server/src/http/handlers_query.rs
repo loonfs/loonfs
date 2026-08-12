@@ -74,7 +74,7 @@ pub(super) async fn grep_queries_not_served(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     Err(ApiResponseError::not_supported(
         FEATURE_QUERY_GREP,
         "this deployment does not serve grep queries; set `[grep].mode` to `serve_only` \
@@ -88,7 +88,7 @@ pub(super) async fn grep_index_not_maintained(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     Err(ApiResponseError::not_supported(
         FEATURE_ADMIN_GREP_INDEX,
         "this deployment does not maintain the grep index; set `[grep].mode` to \
@@ -121,7 +121,7 @@ pub(super) async fn enable_grep_index(
     namespace: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<EnableGrepIndexResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let outcome = state
         .grep_worker
@@ -180,7 +180,7 @@ pub(super) async fn grep_index_status(
     namespace: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let root = state
         .grep_worker
@@ -232,7 +232,7 @@ pub(super) async fn disable_grep_index(
     namespace: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<DisableGrepIndexResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     // Disabling is one durable compare-and-swap and nothing else. A step
     // already running loses its own publication race to this one and
@@ -293,7 +293,7 @@ pub(super) async fn gc_grep_index(
     headers: HeaderMap,
     AppJson(request): AppJson<GrepGcRequest>,
 ) -> Result<Json<GrepGcResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let report = state
         .grep_worker
