@@ -6,7 +6,10 @@ use super::context::{
     fail, namespace_path, parse_user_path, render_target, resolve_command_context, CommandContext,
     UndeleteHint,
 };
-use super::output::{CommandData, CommandFailure, CommandOutput, TrashListing};
+use super::output::{
+    CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
+    TrashListing,
+};
 use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
 use crate::args::{
@@ -23,8 +26,9 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
-    AttributeKey, AttributeRevisionNo, AttributeValue, CommitId, CommitResponse,
-    DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeId, InodeKind, RevisionNo,
+    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId,
+    CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeId, InodeKind,
+    ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use loonfs_client::{
     CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions, UpdateAttributesOptions,
@@ -46,6 +50,14 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
         .transpose()
 }
 
+struct FollowedPathEntryPages {
+    namespace_id: NamespaceId,
+    absolute_path: AbsolutePath,
+    head_seq: ChangeSeq,
+    head_drift: Option<ListingHeadDrift>,
+    next_cursor: Option<String>,
+}
+
 async fn follow_path_entry_pages(
     context: &CommandContext,
     kind: CommandKind,
@@ -54,9 +66,10 @@ async fn follow_path_entry_pages(
     cursor: Option<&str>,
     follow: bool,
     mut visit: impl FnMut(Vec<loonfs_api::AuthoritativePathEntry>) -> Result<(), CliError>,
-) -> Result<Option<String>, CommandFailure> {
+) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut visited = 0_u32;
     let mut cursor = cursor.map(ToOwned::to_owned);
+    let mut heads = ListingHeadObservation::default();
     loop {
         let page_limit = limit.map(|limit| {
             limit
@@ -68,13 +81,29 @@ async fn follow_path_entry_pages(
             .list_path_entries_page(spec, page_limit, cursor.as_deref())
             .await
             .map_err(|error| context.fail(kind, error))?;
-        visited = visited.saturating_add(page.entries.len() as u32);
-        visit(page.entries).map_err(|error| context.fail(kind, error))?;
-        cursor = page.next_cursor;
+        let ListPathEntriesResponse {
+            namespace_id,
+            absolute_path,
+            head_seq,
+            entries,
+            next_cursor,
+        } = page;
+        heads.observe(head_seq);
+        visited = visited.saturating_add(entries.len() as u32);
+        visit(entries).map_err(|error| context.fail(kind, error))?;
+        cursor = next_cursor;
 
         let filled = limit.is_some_and(|limit| visited >= limit);
         if filled || !follow || cursor.is_none() {
-            return Ok(cursor);
+            return Ok(FollowedPathEntryPages {
+                namespace_id,
+                absolute_path,
+                head_seq: heads
+                    .last()
+                    .expect("a listing observes the page it just received"),
+                head_drift: heads.drift(),
+                next_cursor: cursor,
+            });
         }
     }
 }
@@ -98,7 +127,7 @@ pub(crate) async fn run_filesystem_ls(
     if streams_pages {
         let stdout = io::stdout();
         let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
-        let next_cursor = follow_path_entry_pages(
+        let followed = follow_path_entry_pages(
             &context,
             kind,
             &spec,
@@ -110,12 +139,17 @@ pub(crate) async fn run_filesystem_ls(
             },
         )
         .await?;
-        if let Some(cursor) = next_cursor {
+        if let Some(cursor) = followed.next_cursor {
             // Standard output stays machine-pure in `--jsonl`, so the
             // continuation signal goes to standard error, where this CLI
             // already reports progress. Without it a one-page stream would
             // truncate silently.
             crate::render::write_stderr_progress(crate::render::more_entries_hint(&cursor));
+        }
+        // Like the continuation signal above, the drift note is operational
+        // and goes to standard error in every streaming mode.
+        if let Some(drift) = followed.head_drift {
+            crate::render::write_listing_drift_warning(&drift);
         }
         return Ok(CommandOutput {
             kind,
@@ -126,7 +160,7 @@ pub(crate) async fn run_filesystem_ls(
     }
 
     let mut entries = Vec::new();
-    let next_cursor = follow_path_entry_pages(
+    let followed = follow_path_entry_pages(
         &context,
         kind,
         &spec,
@@ -139,13 +173,22 @@ pub(crate) async fn run_filesystem_ls(
         },
     )
     .await?;
+    if !runtime.json {
+        if let Some(drift) = followed.head_drift.as_ref() {
+            crate::render::write_listing_drift_warning(drift);
+        }
+    }
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::PathEntries {
+            namespace_id: followed.namespace_id,
+            absolute_path: followed.absolute_path,
+            head_seq: followed.head_seq,
+            head_drift: followed.head_drift,
             entries,
-            next_cursor,
+            next_cursor: followed.next_cursor,
         },
     })
 }

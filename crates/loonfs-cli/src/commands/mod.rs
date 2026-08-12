@@ -11,7 +11,9 @@ mod profile;
 mod profile_config;
 mod recursive;
 
-pub(crate) use self::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
+pub(crate) use self::output::{
+    CommandData, CommandFailure, CommandOutput, ListingHeadDrift, MaintenanceKeyReport,
+};
 
 use crate::args::{Cli, Command, RuntimeBehavior};
 use crate::config::resolve_config_location;

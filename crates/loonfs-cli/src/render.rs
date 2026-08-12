@@ -1,7 +1,9 @@
 //! Renders command outcomes as human-readable text or `--json`.
 
 use crate::args::CommandKind;
-use crate::commands::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
+use crate::commands::{
+    CommandData, CommandFailure, CommandOutput, ListingHeadDrift, MaintenanceKeyReport,
+};
 use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
@@ -314,6 +316,17 @@ pub(crate) fn write_stderr_progress(message: impl std::fmt::Display) {
     let _ = writeln!(io::stderr().lock(), "{message}");
 }
 
+pub(crate) fn listing_drift_warning(drift: &ListingHeadDrift) -> String {
+    format!(
+        "namespace advanced during the listing (head seq {} to {}); entries may mix states; re-run for a settled view",
+        drift.first_head_seq.0, drift.last_head_seq.0
+    )
+}
+
+pub(crate) fn write_listing_drift_warning(drift: &ListingHeadDrift) {
+    write_stderr_warning(listing_drift_warning(drift));
+}
+
 pub(crate) fn more_entries_hint(cursor: &str) -> String {
     format!("more entries exist; continue with --cursor {cursor} or stream everything with --all")
 }
@@ -590,6 +603,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         CommandData::PathEntries {
             entries,
             next_cursor,
+            ..
         } => {
             let mut lines: Vec<String> = entries.iter().map(human_path_entry).collect();
             if let Some(cursor) = next_cursor {
@@ -804,6 +818,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             files,
             directories,
             failures,
+            ..
         } => {
             let verb = match output.kind {
                 CommandKind::FilesystemGet => "downloaded",
@@ -950,7 +965,10 @@ fn escape_control_characters(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{human_success, json_error, json_success, AttributeValue};
+    use super::{
+        human_success, json_error, json_success, listing_drift_warning, AttributeValue,
+        ListingHeadDrift,
+    };
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
     use crate::config::{ProfileConfig, StoreConfig};
@@ -1152,5 +1170,16 @@ mod tests {
             &json_error(&failure).expect("json error renders")
         )
         .expect("rendered error is valid json"));
+    }
+
+    #[test]
+    fn listing_drift_warning_names_the_span_and_recovery() {
+        assert_eq!(
+            listing_drift_warning(&ListingHeadDrift {
+                first_head_seq: loonfs_api::ChangeSeq(5),
+                last_head_seq: loonfs_api::ChangeSeq(8),
+            }),
+            "namespace advanced during the listing (head seq 5 to 8); entries may mix states; re-run for a settled view"
+        );
     }
 }

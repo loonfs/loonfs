@@ -1420,6 +1420,10 @@ changes between pages. Only a cursor minted ahead of the serving head
 answers `rebootstrap_required` — drift tolerance runs forward, never
 backward. (A malformed cursor, or one replayed against a different target,
 stays `invalid_request`.)
+The CLI reports the last page's head as `head_seq` and, for multi-page and
+recursive reads, reports the first and last observed heads as `head_drift`
+when they differ; a caller that needs a settled tree re-lists until the
+observed heads stop moving.
 An unrecognized cursor version is also rejected as `invalid_request`.
 
 ```json

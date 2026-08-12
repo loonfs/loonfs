@@ -10,7 +10,10 @@
 //! aborting a giant transaction.
 
 use super::context::CommandContext;
-use super::output::{CommandData, CommandFailure, CommandOutput, TreeTransferFailure};
+use super::output::{
+    CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
+    TreeTransferFailure,
+};
 use crate::args::{CommandKind, RuntimeBehavior};
 use crate::error::CliError;
 use crate::payload::LocalPayload;
@@ -96,6 +99,7 @@ fn output(
     source: String,
     destination: String,
     tally: TreeTally,
+    head_drift: Option<ListingHeadDrift>,
 ) -> CommandOutput {
     CommandOutput {
         kind,
@@ -106,6 +110,7 @@ fn output(
             destination,
             files: tally.files,
             directories: tally.directories,
+            head_drift,
             failures: tally.failures,
         },
     }
@@ -246,6 +251,7 @@ pub(crate) async fn run_put_tree(
         local_root.display().to_string(),
         format!("{}:{}", context.namespace, remote_root),
         tally,
+        None,
     ))
 }
 
@@ -273,6 +279,12 @@ pub(crate) async fn run_get_tree(
         .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
     tally.directories += 1;
     let listing = walk_remote_tree(context, kind, remote_root).await?;
+    if !runtime.json {
+        if let Some(drift) = listing.head_drift.as_ref() {
+            crate::render::write_listing_drift_warning(drift);
+        }
+    }
+    let head_drift = listing.head_drift;
 
     for components in &listing.directories {
         let local_dir = local_root.join(components.join("/"));
@@ -359,6 +371,7 @@ pub(crate) async fn run_get_tree(
         format!("{}:{}", context.namespace, remote_root),
         local_root.display().to_string(),
         tally,
+        head_drift,
     ))
 }
 
@@ -374,6 +387,12 @@ pub(crate) async fn run_copy_tree(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let listing = walk_remote_tree(context, kind, source_root).await?;
+    if !runtime.json {
+        if let Some(drift) = listing.head_drift.as_ref() {
+            crate::render::write_listing_drift_warning(drift);
+        }
+    }
+    let head_drift = listing.head_drift;
     let mut tally = TreeTally::new();
 
     // The destination root materializes its own ancestors; every deeper
@@ -474,6 +493,7 @@ pub(crate) async fn run_copy_tree(
         format!("{}:{}", context.namespace, source_root),
         format!("{}:{}", context.namespace, destination_root),
         tally,
+        head_drift,
     ))
 }
 
@@ -567,6 +587,7 @@ struct RemoteTree {
     /// File jobs: `local` holds the relative path, `remote` the absolute
     /// namespace path.
     files: Vec<FileJob>,
+    head_drift: Option<ListingHeadDrift>,
 }
 
 /// Breadth-first remote walk from `root`. Each directory lists at its own
@@ -580,7 +601,9 @@ async fn walk_remote_tree(
     let mut tree = RemoteTree {
         directories: Vec::new(),
         files: Vec::new(),
+        head_drift: None,
     };
+    let mut heads = ListingHeadObservation::default();
     let mut queue = std::collections::VecDeque::new();
     queue.push_back((root.trim_end_matches('/').to_owned(), Vec::<String>::new()));
     while let Some((remote_dir, components)) = queue.pop_front() {
@@ -591,12 +614,16 @@ async fn walk_remote_tree(
         };
         let spec = NamespacePath::parse(context.namespace.as_str(), listed)
             .map_err(|error| context.fail(kind, CliError::invalid_input(error.to_string())))?;
-        let entries = context
+        let response = context
             .target
             .list_path_entries_all(&spec)
             .await
             .map_err(|error| context.fail(kind, error))?;
-        for entry in entries {
+        let response_head_seq = response.head_seq;
+        for entry in response.entries {
+            // Aggregated entries retain the head of the page that supplied
+            // them, in page order; the envelope carries the final page head.
+            heads.observe(entry.head_seq);
             let Some(name) = entry.display_name.as_ref() else {
                 continue;
             };
@@ -621,7 +648,9 @@ async fn walk_remote_tree(
                 }),
             }
         }
+        heads.observe(response_head_seq);
     }
+    tree.head_drift = heads.drift();
     Ok(tree)
 }
 

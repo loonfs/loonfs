@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -4772,8 +4772,9 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
 
     let default_human = harness.run(&["ls", "/listing"]);
     assert_success(&default_human);
-    let default_human = stdout_string(&default_human);
-    let human_lines = default_human.lines().collect::<Vec<_>>();
+    assert!(stderr_string(&default_human).is_empty());
+    let default_human_stdout = stdout_string(&default_human);
+    let human_lines = default_human_stdout.lines().collect::<Vec<_>>();
     assert_eq!(
         human_lines.len(),
         loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
@@ -4790,6 +4791,10 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     let first = harness.run(&["--json", "ls", "/listing"]);
     assert_success(&first);
     let first_data = json_data(&first);
+    assert_eq!(first_data["namespace_id"], "demo");
+    assert_eq!(first_data["absolute_path"], "/listing");
+    assert!(first_data["head_seq"].is_u64());
+    assert!(first_data.get("head_drift").is_none());
     let first_entries = first_data["entries"].as_array().expect("first page");
     assert_eq!(first_entries.len(), loonfs_api::DEFAULT_PAGE_LIMIT as usize);
     let cursor = first_data["next_cursor"]
@@ -4814,6 +4819,10 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     let all_json = harness.run(&["--json", "ls", "/listing", "--all"]);
     assert_success(&all_json);
     let all_json_data = json_data(&all_json);
+    assert_eq!(all_json_data["namespace_id"], "demo");
+    assert_eq!(all_json_data["absolute_path"], "/listing");
+    assert!(all_json_data["head_seq"].is_u64());
+    assert!(all_json_data.get("head_drift").is_none());
     assert_eq!(
         all_json_data["entries"]
             .as_array()
@@ -4855,6 +4864,136 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
         "/listing/f0999.txt"
     );
     assert_eq!(second_entries[0]["absolute_path"], "/listing/f1000.txt");
+}
+
+/// A two-page wire fixture makes the otherwise racy between-page commit
+/// deterministic while still exercising the CLI process, client, command,
+/// JSON envelope, and standard-error rendering together.
+#[test]
+fn ls_surfaces_head_drift_from_paged_responses() {
+    let harness = Harness::new();
+
+    let (server_url, server) = json_response_server(vec![
+        serde_json::json!({
+            "namespace_id": "demo",
+            "absolute_path": "/docs",
+            "head_seq": 5,
+            "entries": [],
+            "next_cursor": "resume-after-first-page",
+        }),
+        serde_json::json!({
+            "namespace_id": "demo",
+            "absolute_path": "/docs",
+            "head_seq": 8,
+            "entries": [],
+        }),
+    ]);
+    harness.write_remote_listing_config(&server_url);
+    let json = harness.run(&["--json", "ls", "/docs", "--all"]);
+    assert_success(&json);
+    assert!(json.stderr.is_empty());
+    let data = json_data(&json);
+    assert_eq!(data["namespace_id"], "demo");
+    assert_eq!(data["absolute_path"], "/docs");
+    assert_eq!(data["head_seq"], 8);
+    assert_eq!(
+        data["head_drift"],
+        serde_json::json!({
+            "first_head_seq": 5,
+            "last_head_seq": 8,
+        })
+    );
+    server.join().expect("listing server");
+
+    let (server_url, server) = json_response_server(vec![
+        serde_json::json!({
+            "namespace_id": "demo",
+            "absolute_path": "/docs",
+            "head_seq": 11,
+            "entries": [],
+            "next_cursor": "resume-after-first-page",
+        }),
+        serde_json::json!({
+            "namespace_id": "demo",
+            "absolute_path": "/docs",
+            "head_seq": 12,
+            "entries": [],
+        }),
+    ]);
+    harness.write_remote_listing_config(&server_url);
+    let human = harness.run(&["ls", "/docs", "--all"]);
+    assert_success(&human);
+    let stderr = stderr_string(&human);
+    assert_eq!(
+        stderr,
+        "warning: namespace advanced during the listing (head seq 11 to 12); entries may mix states; re-run for a settled view\n"
+    );
+    assert_eq!(
+        stderr
+            .matches("namespace advanced during the listing")
+            .count(),
+        1
+    );
+    server.join().expect("listing server");
+}
+
+#[test]
+fn recursive_get_surfaces_drift_across_directory_listings() {
+    let harness = Harness::new();
+    let (server_url, server) = json_response_server(vec![
+        serde_json::json!({
+            "namespace_id": "demo",
+            "absolute_path": "/docs",
+            "inode_id": 2,
+            "inode_kind": "directory",
+            "head_seq": 20,
+            "parent_inode_id": 1,
+            "display_name": "docs",
+        }),
+        serde_json::json!({
+            "namespace_id": "demo",
+            "absolute_path": "/docs",
+            "head_seq": 20,
+            "entries": [{
+                "namespace_id": "demo",
+                "absolute_path": "/docs/sub",
+                "inode_id": 3,
+                "inode_kind": "directory",
+                "head_seq": 20,
+                "parent_inode_id": 2,
+                "display_name": "sub",
+            }],
+        }),
+        serde_json::json!({
+            "namespace_id": "demo",
+            "absolute_path": "/docs/sub",
+            "head_seq": 21,
+            "entries": [],
+        }),
+    ]);
+    harness.write_remote_listing_config(&server_url);
+    let destination = harness.temp_dir.path().join("drifted-download");
+    let get = harness.run(&[
+        "--json",
+        "--no-progress",
+        "get",
+        "-r",
+        "/docs",
+        destination.to_str().expect("utf-8 destination"),
+    ]);
+    assert_success(&get);
+    assert!(get.stderr.is_empty());
+    let data = json_data(&get);
+    assert_eq!(data["files"], 0);
+    assert_eq!(data["directories"], 2);
+    assert_eq!(
+        data["head_drift"],
+        serde_json::json!({
+            "first_head_seq": 20,
+            "last_head_seq": 21,
+        })
+    );
+    server.join().expect("listing server");
 }
 
 /// `ls --limit` bounds the total, and incompatible output bounds fail in
@@ -5241,9 +5380,33 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             profile,
         ]);
         assert_success(&bounded_gc);
-        assert!(json_data(&bounded_gc)["next_cursor"]
+        let bounded_data = json_data(&bounded_gc);
+        let cursor = bounded_data["next_cursor"]
             .as_str()
-            .is_some_and(|cursor| !cursor.is_empty()));
+            .filter(|cursor| !cursor.is_empty())
+            .expect("bounded pass returns a cursor")
+            .to_owned();
+
+        // Resumption skips the candidates the first pass enumerated. A
+        // restart over this unchanged keyspace would return the same token.
+        let resumed_gc = harness.run(&[
+            "--json",
+            "admin",
+            "gc",
+            "--max-objects",
+            "8",
+            "--cursor",
+            &cursor,
+            "--profile",
+            profile,
+        ]);
+        assert_success(&resumed_gc);
+        assert_ne!(
+            json_data(&resumed_gc)
+                .get("next_cursor")
+                .and_then(Value::as_str),
+            Some(cursor.as_str())
+        );
 
         // Admin failures surface the registry code in both modes.
         let missing = harness.run(&[
@@ -5408,6 +5571,20 @@ impl Harness {
         fs::write(&self.config_path, contents).expect("write cli config");
     }
 
+    fn write_remote_listing_config(&self, server_url: &str) {
+        self.write_cli_config(format!(
+            r#"config_version = 1
+default_profile = "remote"
+
+[profiles.remote]
+mode = "remote"
+server_url = "{server_url}"
+default_namespace = "demo"
+auth_token = "test-token"
+"#,
+        ));
+    }
+
     fn write_server_config(&self, name: &str, key_prefix: &str) -> PathBuf {
         self.write_server_config_with(name, key_prefix, "")
     }
@@ -5462,6 +5639,33 @@ key_prefix = "{key_prefix}"
             server_config_path.display()
         );
     }
+}
+
+fn json_response_server(responses: Vec<Value>) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind JSON server");
+    let address = listener.local_addr().expect("JSON server address");
+    let server = thread::spawn(move || {
+        for response in responses {
+            let (mut stream, _) = listener.accept().expect("accept JSON request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read JSON request");
+                assert!(read > 0, "JSON request ended before its headers");
+                request.extend_from_slice(&chunk[..read]);
+            }
+
+            let body = serde_json::to_vec(&response).expect("encode JSON response");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write JSON response headers");
+            stream.write_all(&body).expect("write JSON response");
+        }
+    });
+    (format!("http://{address}"), server)
 }
 
 struct ExternalServer {

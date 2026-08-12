@@ -313,14 +313,13 @@ impl ResolvedTarget {
     pub(crate) async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
-    ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
+    ) -> Result<ListPathEntriesResponse, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.list_path_entries_all(spec).await,
             Self::Remote(target) => Ok(target
                 .client
                 .list_path_entries_all(spec, &ListPathEntriesOptions::default())
-                .await?
-                .entries),
+                .await?),
         }
     }
 

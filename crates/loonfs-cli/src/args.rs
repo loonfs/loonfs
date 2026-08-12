@@ -864,6 +864,10 @@ pub(crate) struct AdminGcArgs {
     /// pass. Omit to loop bounded passes through completion.
     #[arg(long)]
     pub max_objects: Option<u64>,
+    /// Resume token from a previous pass's next_cursor; only valid for the
+    /// same namespace.
+    #[arg(long, value_name = "TOKEN")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]

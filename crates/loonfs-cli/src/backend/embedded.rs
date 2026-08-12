@@ -192,13 +192,11 @@ impl EmbeddedBackend {
     pub(super) async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
-    ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
-        Ok(self
-            .reader
+    ) -> Result<ListPathEntriesResponse, BackendError> {
+        self.reader
             .list_path_entries_all(spec.namespace(), spec.absolute_path().as_str())
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?
-            .entries)
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
     pub(super) async fn list_path_entries_page(
