@@ -9,6 +9,7 @@
 mod durable_adapter;
 mod frame;
 mod identity;
+mod inode_allocator;
 mod ir;
 mod materialize;
 mod metadata_overlay;
@@ -22,6 +23,7 @@ mod validate_error;
 
 pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
 pub use self::identity::CommitFingerprint;
+pub(crate) use self::inode_allocator::{CandidateAllocation, InodeAllocator};
 pub(crate) use self::ir::CommitIr;
 pub use self::materialize::MaterializedCommitDelta;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
@@ -34,7 +36,7 @@ pub(crate) use self::publish::PreparedCommitHeadPublish;
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 pub use self::publish_error::CommitHeadPublishError;
 pub(crate) use self::validate::{
-    allocates_inode, build_commit_plan_for_publish, validate_ops, OpValidationCursor,
+    build_commit_plan_for_publish, validate_ops, OpValidationCursor,
     PublishCommitValidationContext, PublishValidationView,
 };
 pub use self::validate_error::CommitValidationError;

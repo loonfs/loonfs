@@ -3,7 +3,7 @@
 
 use super::intent::CommitRequest;
 use super::planner::{plan_commit_against_publish_view, PlannedCommit};
-use crate::commit::CommitPlan;
+use crate::commit::{CandidateAllocation, CommitPlan, InodeAllocator};
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
@@ -23,6 +23,7 @@ use loonfs_objectstore::ObjectStore;
 /// namespace.
 pub(crate) struct PublishPlanningSession {
     head: HeadState,
+    inode_allocator: InodeAllocator,
     accepted_rows: MetadataState,
     /// Durable-layer lookups memoized across the whole batch attempt; the
     /// accepted-rows overlay is the only layer that changes between
@@ -34,6 +35,7 @@ impl PublishPlanningSession {
     pub(crate) fn new(head: &HeadState) -> Self {
         Self {
             head: head.clone(),
+            inode_allocator: InodeAllocator::new(head.next_inode_id),
             accepted_rows: MetadataState::default(),
             durable_cache: DurableVisibilityCache::default(),
         }
@@ -51,11 +53,20 @@ impl PublishPlanningSession {
         &self.durable_cache
     }
 
+    pub(crate) fn begin_candidate(&self) -> CandidateAllocation {
+        self.inode_allocator.begin_candidate()
+    }
+
+    pub(crate) fn discard_candidate(&self, allocation: CandidateAllocation) {
+        self.inode_allocator.discard_candidate(allocation);
+    }
+
     pub(crate) async fn plan_commit<S: ObjectStore + ?Sized>(
         &self,
         request: &CommitRequest,
         base_view: MetadataView<'_, '_, S>,
         committed_at_ms: u64,
+        allocation: &mut CandidateAllocation,
     ) -> Result<PlannedCommit> {
         let cached_view = base_view.with_durable_cache(&self.durable_cache);
         plan_commit_against_publish_view(
@@ -64,16 +75,24 @@ impl PublishPlanningSession {
             cached_view,
             &self.accepted_rows,
             committed_at_ms,
+            allocation,
         )
         .await
     }
 
     /// Folds an accepted commit into the session so later candidates in the
     /// same batch plan and validate against it.
-    pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
+    pub(crate) fn apply_accepted_commit(
+        &mut self,
+        preview: &WalCommitPayload,
+        plan: &CommitPlan,
+        allocation: CandidateAllocation,
+    ) -> Result<()> {
+        let resulting_next_inode_id = self.inode_allocator.commit_candidate(allocation)?;
         self.accepted_rows.apply_committed_wal_record_mut(preview);
         self.head.seq = plan.assigned_seq;
-        self.head.next_inode_id = plan.resulting_next_inode_id;
+        self.head.next_inode_id = resulting_next_inode_id;
+        Ok(())
     }
 }
 
@@ -85,10 +104,11 @@ mod tests {
     use crate::context::MutationContext;
     use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::control::load_namespace_head_control;
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
     use crate::storage::content_admission::{ContentAdmission, PreparedContent};
-    use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior};
+    use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -140,6 +160,53 @@ mod tests {
         )
     }
 
+    fn create_directory_candidate(commit_id: &str, absolute_path: &str) -> CommitCandidate {
+        CommitCandidate::new(CommitRequest::single(
+            CommitId::parse(commit_id).expect("valid commit id"),
+            None,
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse(absolute_path).expect("path"),
+                parents: false,
+            },
+        ))
+    }
+
+    fn candidate_that_allocates_then_fails(commit_id: &str) -> CommitCandidate {
+        CommitCandidate::new(CommitRequest {
+            commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+            message: None,
+            operations: vec![
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/discarded").expect("path"),
+                    parents: false,
+                },
+                FilesystemOperation::DeletePath {
+                    path: AbsolutePath::parse("/missing").expect("path"),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: None,
+                },
+            ],
+        })
+    }
+
+    async fn visible_inode_id(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> InodeId {
+        crate::path::read::load_metadata_view(
+            store,
+            namespace_id,
+            crate::path::read::ReadLoadContext::latest(),
+        )
+        .await
+        .expect("load view")
+        .resolve_path(absolute_path, crate::path::read::AttributeProjection::Omit)
+        .await
+        .expect("visible path")
+        .inode_id
+    }
+
     /// Two plans through one session share the durable-layer memo: the
     /// second plan's path walk answers from cache instead of re-scanning
     /// the manifest for the components both paths share.
@@ -187,10 +254,17 @@ mod tests {
                 expected_revision_no: None,
             },
         );
+        let mut first_allocation = session.begin_candidate();
         session
-            .plan_commit(&first_request, view.metadata_view(), 1)
+            .plan_commit(
+                &first_request,
+                view.metadata_view(),
+                1,
+                &mut first_allocation,
+            )
             .await
             .expect("first plan");
+        session.discard_candidate(first_allocation);
         let after_first = session.durable_cache().stats();
 
         let second_request = CommitRequest::single(
@@ -203,10 +277,17 @@ mod tests {
                 expected_revision_no: None,
             },
         );
+        let mut second_allocation = session.begin_candidate();
         session
-            .plan_commit(&second_request, view.metadata_view(), 1)
+            .plan_commit(
+                &second_request,
+                view.metadata_view(),
+                1,
+                &mut second_allocation,
+            )
             .await
             .expect("second plan");
+        session.discard_candidate(second_allocation);
         let after_second = session.durable_cache().stats();
 
         assert!(
@@ -254,18 +335,76 @@ mod tests {
         let second = results[1].as_ref().expect("second create succeeds");
         assert!(second.committed_seq > first.committed_seq);
 
-        for path in ["/wide/a.txt", "/wide/b.txt"] {
-            crate::path::read::load_metadata_view(
-                &store,
-                &namespace_id,
-                crate::path::read::ReadLoadContext::latest(),
-            )
+        assert_eq!(
+            visible_inode_id(&store, &namespace_id, "/wide").await,
+            InodeId(2)
+        );
+        assert_eq!(
+            visible_inode_id(&store, &namespace_id, "/wide/a.txt").await,
+            InodeId(3)
+        );
+        assert_eq!(
+            visible_inode_id(&store, &namespace_id, "/wide/b.txt").await,
+            InodeId(4)
+        );
+        let head = load_namespace_head_control(&store, &namespace_id)
             .await
-            .expect("load view")
-            .resolve_path(path, crate::path::read::AttributeProjection::Omit)
+            .expect("load head");
+        assert_eq!(head.state.next_inode_id, InodeId(5));
+    }
+
+    #[tokio::test]
+    async fn accepted_candidate_followed_by_rejected_candidate_does_not_consume_rejected_ids() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+
+        let results = publish_namespace_commits_batch(
+            &store,
+            &namespace_id,
+            vec![
+                create_directory_candidate("accept-first", "/kept"),
+                candidate_that_allocates_then_fails("reject-second"),
+            ],
+            &context,
+        )
+        .await;
+
+        results[0].as_ref().expect("first candidate accepted");
+        results[1].as_ref().expect_err("second candidate rejected");
+        assert_eq!(
+            visible_inode_id(&store, &namespace_id, "/kept").await,
+            InodeId(2)
+        );
+        let head = load_namespace_head_control(&store, &namespace_id)
             .await
-            .expect("published file is visible");
-        }
+            .expect("load head");
+        assert_eq!(head.state.next_inode_id, InodeId(3));
+    }
+
+    #[tokio::test]
+    async fn rejected_candidate_followed_by_accepted_candidate_reuses_the_rejected_id() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+
+        let results = publish_namespace_commits_batch(
+            &store,
+            &namespace_id,
+            vec![
+                candidate_that_allocates_then_fails("reject-first"),
+                create_directory_candidate("accept-second", "/kept"),
+            ],
+            &context,
+        )
+        .await;
+
+        results[0].as_ref().expect_err("first candidate rejected");
+        results[1].as_ref().expect("second candidate accepted");
+        assert_eq!(
+            visible_inode_id(&store, &namespace_id, "/kept").await,
+            InodeId(2)
+        );
+        let head = load_namespace_head_control(&store, &namespace_id)
+            .await
+            .expect("load head");
+        assert_eq!(head.state.next_inode_id, InodeId(3));
     }
 
     #[tokio::test]

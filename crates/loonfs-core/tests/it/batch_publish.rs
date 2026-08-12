@@ -660,6 +660,33 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         visible_segment.payload.records[0].commit_id,
         CommitId::parse("retry-after-orphan").expect("valid commit id")
     );
+    let orphan_wal = store
+        .get(orphan_keys[0], None)
+        .await
+        .expect("read orphan wal")
+        .expect("orphan wal exists");
+    let orphan_segment =
+        decode_wal_segment_envelope_zstd(&orphan_wal).expect("decode orphan segment");
+    let visible_created_ids = visible_segment.payload.records[0]
+        .deltas
+        .iter()
+        .filter_map(|delta| match &delta.delta {
+            WalDelta::CreateInode { inode_id, .. } => Some(*inode_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let orphan_created_ids = orphan_segment.payload.records[0]
+        .deltas
+        .iter()
+        .filter_map(|delta| match &delta.delta {
+            WalDelta::CreateInode { inode_id, .. } => Some(*inode_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        visible_created_ids, orphan_created_ids,
+        "retrying from the unchanged head must assign the same inode ids"
+    );
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
         .await

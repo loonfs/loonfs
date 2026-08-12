@@ -3,24 +3,21 @@
 //! and same-batch primaries.
 
 use super::publish_view::PublishMetadataView;
-use crate::commit::{CommitFingerprint, CommitIr as CoreCommitRequest};
+use crate::commit::{CandidateAllocation, CommitFingerprint, CommitIr as CoreCommitRequest};
 use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::ContentAdmission;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
-use loonfs_api::{CommitId, ContentRef, ContentStoreId, InodeId, NamespaceId};
+use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
 pub(super) struct CandidateCoreRequest {
     pub(super) request: CoreCommitRequest,
     pub(super) semantic_identity: CommitFingerprint,
-    /// The next free inode id the planner predicted for this request. The
-    /// commit plan derives the same value from the operation list; the
-    /// publish path checks that the two agree.
-    pub(super) predicted_next_inode_id: InodeId,
+    pub(super) allocation: CandidateAllocation,
 }
 
 /// How one batch candidate resolved during admission.
@@ -155,9 +152,22 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         return Ok(admission);
     }
     validate_new_primary(candidate)?;
-    let planned = session
-        .plan_commit(mutation, view.metadata_view(), committed_at_ms)
-        .await?;
+    let mut allocation = session.begin_candidate();
+    let planned = match session
+        .plan_commit(
+            mutation,
+            view.metadata_view(),
+            committed_at_ms,
+            &mut allocation,
+        )
+        .await
+    {
+        Ok(planned) => planned,
+        Err(error) => {
+            session.discard_candidate(allocation);
+            return Err(error);
+        }
+    };
     Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
         request: CoreCommitRequest {
             namespace_id: namespace_id.clone(),
@@ -167,7 +177,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             message: mutation.message.clone(),
         },
         semantic_identity,
-        predicted_next_inode_id: planned.resulting_next_inode_id,
+        allocation,
     }))
 }
 

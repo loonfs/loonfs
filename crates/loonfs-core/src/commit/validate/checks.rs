@@ -41,7 +41,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     cursor: &mut OpValidationCursor,
     committed_seq: ChangeSeq,
     committed_at_ms: u64,
-    allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
 ) -> Result<Vec<ValidatedOp>, CoreError> {
     let mut validated_ops = Vec::with_capacity(ops.len());
     let next_delta_index = &mut cursor.next_delta_index;
@@ -58,6 +57,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
         validate_explicit_preconditions(&planned.preconditions, metadata_state).await?;
         let validated_op = match &planned.op {
             CommitOp::CreateDirectory {
+                child_inode_id,
                 parent_inode_id,
                 display_name,
             } => {
@@ -70,15 +70,13 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    child_inode_id: next_allocated_inode(
-                        allocated_inode_ids,
-                        CommitValidationError::NextInodeOverflow,
-                    )?,
+                    child_inode_id: *child_inode_id,
                     create_inode_delta_index: reserve_delta_index(next_delta_index)?,
                     bind_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
             CommitOp::CreateFile {
+                child_inode_id,
                 parent_inode_id,
                 display_name,
                 content_ref,
@@ -92,10 +90,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    child_inode_id: next_allocated_inode(
-                        allocated_inode_ids,
-                        CommitValidationError::NextInodeOverflow,
-                    )?,
+                    child_inode_id: *child_inode_id,
                     content_ref: content_ref.clone(),
                     create_inode_delta_index: reserve_delta_index(next_delta_index)?,
                     bind_delta_index: reserve_delta_index(next_delta_index)?,
@@ -435,13 +430,6 @@ async fn validate_explicit_preconditions<S: ObjectStore + ?Sized>(
     }
 
     Ok(())
-}
-
-fn next_allocated_inode(
-    allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
-    error: CommitValidationError,
-) -> Result<InodeId, CommitValidationError> {
-    allocated_inode_ids.next().ok_or(error)
 }
 
 fn reserve_delta_index(next_delta_index: &mut u32) -> Result<u32, CommitValidationError> {

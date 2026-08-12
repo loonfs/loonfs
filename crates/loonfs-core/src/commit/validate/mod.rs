@@ -11,7 +11,5 @@ mod tests;
 mod view;
 
 pub(crate) use checks::{validate_ops, OpValidationCursor};
-pub(crate) use plan_build::{
-    allocates_inode, build_commit_plan_for_publish, PublishCommitValidationContext,
-};
+pub(crate) use plan_build::{build_commit_plan_for_publish, PublishCommitValidationContext};
 pub(crate) use view::PublishValidationView;

@@ -2,20 +2,14 @@
 //! chosen validation view, and delta-index assignment.
 
 use super::super::frame::validate_commit_request_frame;
-use super::super::{CommitIr, CommitOp, CommitPlan, CommitValidationError, PlannedOp};
+use super::super::{CandidateAllocation, CommitIr, CommitPlan, CommitValidationError};
 use super::checks::{validate_ops, OpValidationCursor};
 use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{ChangeSeq, InodeId};
+use loonfs_api::ChangeSeq;
 use loonfs_objectstore::ObjectStore;
-
-struct CommitShape {
-    assigned_seq: ChangeSeq,
-    allocated_inode_ids: Vec<InodeId>,
-    resulting_next_inode_id: InodeId,
-}
 
 #[derive(Clone, Copy)]
 pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
@@ -27,15 +21,22 @@ pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
 pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
     request: &CommitIr,
     committed_at_ms: u64,
+    allocation: &CandidateAllocation,
     context: &PublishCommitValidationContext<'_, S>,
 ) -> Result<CommitPlan, CoreError> {
-    let shape = compute_commit_shape(request, context.head)?;
-    let committed_seq = shape.assigned_seq;
+    let committed_seq = context
+        .head
+        .seq
+        .0
+        .checked_add(1)
+        .map(ChangeSeq)
+        .ok_or(CommitValidationError::SeqOverflow)?;
     build_commit_plan(
         request,
         committed_at_ms,
         context.head,
-        shape,
+        committed_seq,
+        allocation,
         PublishValidationView::new(context.metadata_view, context.accepted_rows, committed_seq),
     )
     .await
@@ -45,7 +46,8 @@ async fn build_commit_plan<S: ObjectStore + ?Sized>(
     request: &CommitIr,
     committed_at_ms: u64,
     head: &HeadState,
-    shape: CommitShape,
+    committed_seq: ChangeSeq,
+    allocation: &CandidateAllocation,
     mut metadata_state: PublishValidationView<'_, S>,
 ) -> Result<CommitPlan, CoreError> {
     validate_commit_request_frame(request, head)?;
@@ -54,9 +56,8 @@ async fn build_commit_plan<S: ObjectStore + ?Sized>(
         &request.ops,
         &mut metadata_state,
         &mut OpValidationCursor::new(),
-        shape.assigned_seq,
+        committed_seq,
         committed_at_ms,
-        &mut shape.allocated_inode_ids.iter().copied(),
     )
     .await?;
 
@@ -64,60 +65,8 @@ async fn build_commit_plan<S: ObjectStore + ?Sized>(
         namespace_id: request.namespace_id.clone(),
         commit_id: request.commit_id.clone(),
         apply_after_seq: head.seq,
-        assigned_seq: shape.assigned_seq,
+        assigned_seq: committed_seq,
         validated_ops,
-        resulting_next_inode_id: shape.resulting_next_inode_id,
-    })
-}
-
-/// Counts the inode ids a commit allocates, in operation order. The planner
-/// predicts these same ids while resolving operations, so this is the one
-/// allocator both agree on.
-pub(crate) fn allocates_inode(op: &CommitOp) -> bool {
-    matches!(
-        op,
-        CommitOp::CreateDirectory { .. } | CommitOp::CreateFile { .. }
-    )
-}
-
-fn compute_commit_shape(
-    request: &CommitIr,
-    head: &HeadState,
-) -> Result<CommitShape, CommitValidationError> {
-    let assigned_seq = head
-        .seq
-        .0
-        .checked_add(1)
-        .map(ChangeSeq)
-        .ok_or(CommitValidationError::SeqOverflow)?;
-    let create_op_count = request
-        .ops
-        .iter()
-        .filter(|planned: &&PlannedOp| allocates_inode(&planned.op))
-        .count();
-    let allocated_inode_ids = (0..create_op_count)
-        .map(|offset| {
-            let offset =
-                u64::try_from(offset).map_err(|_| CommitValidationError::NextInodeOverflow)?;
-            head.next_inode_id
-                .0
-                .checked_add(offset)
-                .map(InodeId)
-                .ok_or(CommitValidationError::NextInodeOverflow)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let resulting_next_inode_id = head
-        .next_inode_id
-        .0
-        .checked_add(
-            u64::try_from(create_op_count).map_err(|_| CommitValidationError::NextInodeOverflow)?,
-        )
-        .map(InodeId)
-        .ok_or(CommitValidationError::NextInodeOverflow)?;
-
-    Ok(CommitShape {
-        assigned_seq,
-        allocated_inode_ids,
-        resulting_next_inode_id,
+        resulting_next_inode_id: allocation.resulting_next_inode_id(),
     })
 }

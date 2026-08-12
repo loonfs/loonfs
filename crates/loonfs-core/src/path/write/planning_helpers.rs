@@ -1,6 +1,6 @@
 //! Shared publish-planning preconditions and visible-ancestor walks.
 
-use crate::commit::PlannedOp;
+use crate::commit::{CandidateAllocation, PlannedOp};
 use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
@@ -44,10 +44,6 @@ impl PlannedOperation {
 }
 
 pub(super) struct PublishPathPlanningView<'a, 'b, 'store, S: ObjectStore + ?Sized> {
-    /// The next inode id this request has not yet handed out. Operations
-    /// predict the ids of the directories they create from it, in the same
-    /// order the commit plan allocates them.
-    pub(super) next_inode_id: InodeId,
     pub(super) metadata_state: &'a MetadataView<'b, 'store, S>,
 }
 
@@ -184,7 +180,7 @@ pub(super) async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     ops: &mut Vec<ApiCommitOp>,
-    next_inode_id: &mut InodeId,
+    allocation: &mut CandidateAllocation,
 ) -> Result<InodeId> {
     let components = absolute_path.components();
     if components.len() <= 1 {
@@ -218,13 +214,13 @@ pub(super) async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
             creating_missing_ancestors = true;
         }
 
+        let child_inode_id = allocation.allocate()?;
         ops.push(ApiCommitOp::CreateDirectory {
+            child_inode_id,
             parent_inode_id: current_inode,
             display_name,
         });
-        let allocated = *next_inode_id;
-        *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
-        current_inode = allocated;
+        current_inode = child_inode_id;
     }
     Ok(current_inode)
 }

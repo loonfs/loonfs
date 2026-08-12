@@ -11,23 +11,19 @@ use super::plan_restore::plan_publish_restore_revision;
 use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
 use super::planning_helpers::{PlannedOperation, PublishPathPlanningView};
 use crate::commit::{
-    allocates_inode, validate_ops, CommitFingerprint, CommitOp, OpValidationCursor, PlannedOp,
+    validate_ops, CandidateAllocation, CommitFingerprint, OpValidationCursor, PlannedOp,
     PublishValidationView,
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{ChangeSeq, InodeId, NamespaceId};
+use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 /// One mutation request compiled into a commit's operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlannedCommit {
     pub(crate) ops: Vec<PlannedOp>,
-    /// The next free inode id the planner predicted while resolving. The
-    /// commit plan recomputes it from the operation list; a disagreement
-    /// means prediction and allocation drifted.
-    pub(crate) resulting_next_inode_id: InodeId,
 }
 
 /// Computes the semantic fingerprint of a mutation request.
@@ -64,6 +60,7 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
     base_view: MetadataView<'_, '_, S>,
     accepted_rows: &MetadataState,
     committed_at_ms: u64,
+    allocation: &mut CandidateAllocation,
 ) -> Result<PlannedCommit> {
     if request.operations.is_empty() {
         return Err(CoreError::InvalidCommitRequest(
@@ -79,23 +76,19 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
 
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
     let mut cursor = OpValidationCursor::new();
-    let mut next_inode_id = head.next_inode_id;
     let mut ops: Vec<PlannedOp> = Vec::new();
     let operation_count = request.operations.len();
     for (index, operation) in request.operations.iter().enumerate() {
         let unit = {
             let resolution_view = resolved.view();
             let view = PublishPathPlanningView {
-                next_inode_id,
                 metadata_state: &resolution_view,
             };
-            plan_operation(operation, &view)
+            plan_operation(operation, &view, allocation)
                 .await
                 .map_err(|error| attribute(error, index, operation_count))?
         };
         let unit_ops = unit.into_planned_ops();
-        let allocated = allocate_inode_ids(&unit_ops, &mut next_inode_id)?;
-        debug_assert_parents_are_allocated(&unit_ops, next_inode_id);
         if operation_count > 1 {
             validate_ops(
                 &unit_ops,
@@ -103,7 +96,6 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
                 &mut cursor,
                 committed_seq,
                 committed_at_ms,
-                &mut allocated.iter().copied(),
             )
             .await
             .map_err(|error| attribute(error, index, operation_count))?;
@@ -111,19 +103,17 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
         ops.extend(unit_ops);
     }
 
-    Ok(PlannedCommit {
-        ops,
-        resulting_next_inode_id: next_inode_id,
-    })
+    Ok(PlannedCommit { ops })
 }
 
 async fn plan_operation<S: ObjectStore + ?Sized>(
     operation: &FilesystemOperation,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    allocation: &mut CandidateAllocation,
 ) -> Result<PlannedOperation> {
     match operation {
         FilesystemOperation::CreateDirectory { path, parents } => {
-            plan_publish_create_directory(path, *parents, view).await
+            plan_publish_create_directory(path, *parents, view, allocation).await
         }
         FilesystemOperation::PutFile {
             path,
@@ -137,6 +127,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *behavior,
                 *expected_revision_no,
                 view,
+                allocation,
             )
             .await
         }
@@ -154,7 +145,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             from_path,
             to_path,
             behavior,
-        } => plan_publish_copy_file_path(from_path, to_path, *behavior, view).await,
+        } => plan_publish_copy_file_path(from_path, to_path, *behavior, view, allocation).await,
         FilesystemOperation::RestoreRevision {
             path,
             source_revision_no,
@@ -195,63 +186,12 @@ fn attribute(error: CoreError, index: usize, operation_count: usize) -> CoreErro
     error.at_operation(index)
 }
 
-/// Allocates inode IDs for `ops` in operation order and advances the shared
-/// counter.
-///
-/// The planner and final commit plan use the same ordering so they assign
-/// identical IDs to every created inode.
-fn allocate_inode_ids(ops: &[PlannedOp], next_inode_id: &mut InodeId) -> Result<Vec<InodeId>> {
-    let mut allocated = Vec::new();
-    for planned in ops {
-        if !allocates_inode(&planned.op) {
-            continue;
-        }
-        allocated.push(*next_inode_id);
-        *next_inode_id = next_inode_id
-            .0
-            .checked_add(1)
-            .map(InodeId)
-            .ok_or_else(|| CoreError::Internal("next inode id counter overflow".to_owned()))?;
-    }
-    Ok(allocated)
-}
-
-/// Verifies that every planned parent inode already exists or was allocated
-/// earlier in this request.
-///
-/// A parent ID at or after `next_inode_id` means the planner referenced an
-/// inode that the commit plan will not create.
-fn debug_assert_parents_are_allocated(ops: &[PlannedOp], next_inode_id: InodeId) {
-    debug_assert!(
-        ops.iter().all(|planned| {
-            let parent = match &planned.op {
-                CommitOp::CreateDirectory {
-                    parent_inode_id, ..
-                }
-                | CommitOp::CreateFile {
-                    parent_inode_id, ..
-                }
-                | CommitOp::Undelete {
-                    parent_inode_id, ..
-                } => *parent_inode_id,
-                CommitOp::Rename {
-                    new_parent_inode_id,
-                    ..
-                } => *new_parent_inode_id,
-                _ => return true,
-            };
-            parent < next_inode_id
-        }),
-        "planner predicted an inode id the commit plan has not allocated"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commit::{
-        build_commit_plan_for_publish, CommitIr, CommitPlan, CommitValidationError,
-        PublishCommitValidationContext,
+        build_commit_plan_for_publish, CandidateAllocation, CommitIr, CommitOp, CommitPlan,
+        CommitValidationError, InodeAllocator, PublishCommitValidationContext,
     };
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
@@ -259,9 +199,26 @@ mod tests {
     use crate::path::write::ops::{delete_path, put_file_bytes};
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
-    use loonfs_api::{AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior};
+    use loonfs_api::{
+        AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    };
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use std::ops::Deref;
     use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct TestPlannedCommit {
+        commit: PlannedCommit,
+        allocation: CandidateAllocation,
+    }
+
+    impl Deref for TestPlannedCommit {
+        type Target = PlannedCommit;
+
+        fn deref(&self) -> &Self::Target {
+            &self.commit
+        }
+    }
 
     fn test_context() -> MutationContext {
         MutationContext {
@@ -352,7 +309,7 @@ mod tests {
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         request: &CommitRequest,
-    ) -> Result<PlannedCommit> {
+    ) -> Result<TestPlannedCommit> {
         let (view, _projection) = load_publish_metadata_view(
             store,
             None,
@@ -364,21 +321,25 @@ mod tests {
         .await
         .expect("publish view");
         let empty_overlay = MetadataState::default();
-        plan_commit_against_publish_view(
+        let allocator = InodeAllocator::new(view.head().next_inode_id);
+        let mut allocation = allocator.begin_candidate();
+        let commit = plan_commit_against_publish_view(
             request,
             view.head(),
             view.metadata_view(),
             &empty_overlay,
             1,
+            &mut allocation,
         )
-        .await
+        .await?;
+        Ok(TestPlannedCommit { commit, allocation })
     }
 
     async fn plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         request: &CommitRequest,
-    ) -> PlannedCommit {
+    ) -> TestPlannedCommit {
         try_plan_against_current_state(store, namespace_id, request)
             .await
             .expect("plan")
@@ -388,7 +349,7 @@ mod tests {
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         commit_id: &str,
-        planned: PlannedCommit,
+        planned: TestPlannedCommit,
     ) -> Result<CommitPlan> {
         let (view, _projection) = load_publish_metadata_view(
             store,
@@ -405,10 +366,11 @@ mod tests {
                 namespace_id: namespace_id.clone(),
                 commit_id: CommitId::parse(commit_id).expect("valid commit id"),
                 writer_epoch: view.head().writer_epoch,
-                ops: planned.ops,
+                ops: planned.commit.ops,
                 message: None,
             },
             1,
+            &planned.allocation,
             &PublishCommitValidationContext {
                 head: view.head(),
                 metadata_view: view.metadata_view(),
@@ -773,17 +735,27 @@ mod tests {
         .await;
 
         assert_eq!(planned.ops.len(), 2);
+        assert!(matches!(
+            &planned.ops[0].op,
+            CommitOp::CreateDirectory {
+                child_inode_id: InodeId(2),
+                parent_inode_id: InodeId(1),
+                ..
+            }
+        ));
         // The put binds under the directory the create allocated rather than
-        // re-creating it.
+        // re-creating it, and validation receives the exact ID planning
+        // assigned to the file.
         assert!(matches!(
             &planned.ops[1].op,
             CommitOp::CreateFile {
+                child_inode_id: InodeId(3),
                 parent_inode_id,
                 display_name,
                 ..
             } if *parent_inode_id == InodeId(2) && display_name.as_str() == "a.txt"
         ));
-        assert_eq!(planned.resulting_next_inode_id, InodeId(4));
+        assert_eq!(planned.allocation.resulting_next_inode_id(), InodeId(4));
     }
 
     /// A batch that deletes a path and recreates it resolves the create
