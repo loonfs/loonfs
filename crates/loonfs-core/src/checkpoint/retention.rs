@@ -115,6 +115,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
                     .compare_and_swap(&object_key, expected_etag, Bytes::from(encoded))
                     .await
             }
+            // The retention floor is mutable control state, so its first publication is a conditional create.
             None => store.put_if_absent(&object_key, Bytes::from(encoded)).await,
         };
         match published {

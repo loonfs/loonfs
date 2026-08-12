@@ -2,7 +2,6 @@
 //! advance `metadata/root.json` by monotonic compare-and-swap.
 
 use super::error::ManifestLoadError;
-use super::load::load_namespace_manifest_envelope_if_present;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
@@ -14,7 +13,7 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
@@ -40,46 +39,31 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
         manifest.payload.namespace_id.as_str(),
         &manifest.payload.manifest_object_id,
     );
-    let manifest_bytes = encode_namespace_manifest_json(manifest).map_err(|err| {
+    let manifest_bytes = Bytes::from(encode_namespace_manifest_json(manifest).map_err(|err| {
         MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
             object_key: manifest_key.clone(),
             message: err.to_string(),
         })
-    })?;
+    })?);
+    // Immutable format objects use verified writes so identical bytes are an idempotent success
+    // and different bytes are corruption.
     match store
-        .put_if_absent(&manifest_key, Bytes::from(manifest_bytes))
+        .put_immutable_verified(&manifest_key, manifest_bytes)
         .await
     {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            let Some(existing) = load_namespace_manifest_envelope_if_present(
-                store,
-                &manifest.payload.namespace_id,
-                &manifest.payload.manifest_object_id,
-                &manifest_key,
-            )
-            .await
-            .map_err(MetadataProjectionLoadError::ManifestLoad)?
-            else {
-                return Err(MetadataProjectionLoadError::ManifestLoad(
-                    ManifestLoadError::MissingManifest {
-                        object_key: manifest_key,
-                    },
-                ));
-            };
-            if existing.payload_checksum == manifest.payload_checksum {
-                Ok(())
-            } else {
-                Err(MetadataProjectionLoadError::ManifestLoad(
-                    ManifestLoadError::ManifestConflict {
-                        object_key: manifest_key,
-                        manifest_id: manifest.payload.manifest_id,
-                        expected_payload_checksum: manifest.payload_checksum.clone(),
-                        actual_payload_checksum: existing.payload_checksum,
-                    },
-                ))
-            }
-        }
+        Ok(()) => Ok(()),
+        Err(ImmutableWriteError::DifferentObject { .. }) => Err(
+            MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
+                object_key: manifest_key,
+                manifest_id: manifest.payload.manifest_id,
+            }),
+        ),
+        Err(ImmutableWriteError::Transport { source, .. }) => Err(
+            MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ReadManifest {
+                object_key: manifest_key,
+                message: source.to_string(),
+            }),
+        ),
         Err(error) => Err(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ReadManifest {
                 object_key: manifest_key,
@@ -99,10 +83,10 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
 /// contention, and it is reported as such.
 pub(super) fn manifest_write_failure(error: MetadataProjectionLoadError) -> CoreError {
     match error {
-        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
-            object_key,
-            ..
-        }) => CoreError::NamespaceCorrupt(format!(
+        MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::ManifestObjectConflict { object_key, .. }
+            | ManifestLoadError::ManifestConflict { object_key, .. },
+        ) => CoreError::NamespaceCorrupt(format!(
             "namespace manifest `{object_key}` already exists with a different payload"
         )),
         error => CoreError::MetadataProjection(error),
@@ -247,6 +231,7 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
     let encoded = encode_control_object(&envelope).map_err(|err| {
         CoreError::Internal(format!("failed to encode metadata root object: {err}"))
     })?;
+    // The metadata root is mutable control state, so its first publication is a conditional create.
     match store.put_if_absent(&object_key, Bytes::from(encoded)).await {
         Ok(_) => Ok(Some(next)),
         Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(None),

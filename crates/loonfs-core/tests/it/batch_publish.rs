@@ -686,8 +686,9 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyMatcher::Prefix("namespaces/demo/wal/segments/".to_owned()),
-        InjectedCreateFailure::Transport {
-            message: "injected wal write failure",
+        InjectedCreateFailure::PreconditionFailed {
+            write_attempted_object: false,
+            additional_writes: Vec::new(),
         },
     );
     bootstrap_namespace(&store, &namespace_id, &context, false)

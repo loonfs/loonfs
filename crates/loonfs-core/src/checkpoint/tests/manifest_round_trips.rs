@@ -209,10 +209,9 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     .expect("write hello");
 
     match create_checkpoint(&store, &namespace_id, &context).await {
-        Err(CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-            ManifestLoadError::ManifestCodec { .. },
-        ))) => {}
-        other => panic!("expected manifest codec manifest load error, got {other:?}"),
+        Err(CoreError::NamespaceCorrupt(message))
+            if message.contains("already exists with a different payload") => {}
+        other => panic!("expected conflicting manifest corruption error, got {other:?}"),
     }
 
     let materialization = load_current_projection(&store, &namespace_id)
@@ -933,19 +932,16 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         .await
         .expect_err("different same-id manifest must conflict");
 
+    assert_eq!(
+        CoreError::MetadataProjection(error.clone()).code(),
+        ErrorCode::NamespaceCorrupt
+    );
     match error {
-        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
+        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
             manifest_id,
-            expected_payload_checksum,
-            actual_payload_checksum,
             ..
         }) => {
             assert_eq!(manifest_id, ManifestId(1));
-            assert_eq!(
-                expected_payload_checksum,
-                conflicting_manifest.payload_checksum
-            );
-            assert_eq!(actual_payload_checksum, manifest.payload_checksum);
         }
         other => panic!("unexpected error: {other:?}"),
     }

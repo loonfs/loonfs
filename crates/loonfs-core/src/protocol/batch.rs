@@ -23,7 +23,7 @@ use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::{ObjectMetadata, ObjectStore};
+use loonfs_objectstore::{ImmutableWriteError, ObjectMetadata, ObjectStore};
 use tracing::Instrument;
 
 #[derive(Debug, Clone)]
@@ -339,19 +339,38 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
         )
         .map_err(|error| CoreError::Internal(format!("wal build failed: {error}")))?;
         store
-            .put_if_absent(&wal.object_key, Bytes::copy_from_slice(&wal.encoded_bytes))
+            .put_immutable_verified(&wal.object_key, Bytes::copy_from_slice(&wal.encoded_bytes))
             .await
-            .map_err(|error| CoreError::WalWrite {
-                object_key: wal.object_key.clone(),
-                message: error.message(),
-                class: StoreFailureClass::of(&error),
-            })?;
+            .map_err(wal_immutable_write_error)?;
         Ok(wal)
     }
     .instrument(span.clone())
     .await;
     span.record("result", if result.is_ok() { "ok" } else { "error" });
     result
+}
+
+fn wal_immutable_write_error(error: ImmutableWriteError) -> CoreError {
+    let fallback_object_key = error.object_key().to_owned();
+    match error {
+        ImmutableWriteError::DifferentObject { object_key } => CoreError::NamespaceCorrupt(
+            format!("immutable WAL segment `{object_key}` already exists with different bytes"),
+        ),
+        ImmutableWriteError::Transport { object_key, source } => {
+            let message = source.message();
+            let class = StoreFailureClass::of(&source);
+            CoreError::WalWrite {
+                object_key,
+                message,
+                class,
+            }
+        }
+        error => CoreError::WalWrite {
+            object_key: fallback_object_key,
+            message: error.to_string(),
+            class: StoreFailureClass::Other,
+        },
+    }
 }
 
 /// Advances the namespace head past the new WAL segment by compare-and-swap.

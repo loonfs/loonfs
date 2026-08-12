@@ -53,6 +53,7 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     let encoded = encode_checkpoint_record(record)?;
     let object_key = checkpoint_record(record.namespace_id.as_str(), record.checkpoint_id.as_str());
+    // A checkpoint record is mutable control state, so its first lifecycle state is a conditional create.
     match store.put_if_absent(&object_key, encoded).await {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed { .. }) => Err(CoreError::Internal(format!(

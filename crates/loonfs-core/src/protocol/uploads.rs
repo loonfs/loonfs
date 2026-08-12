@@ -423,6 +423,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
     })?;
     let object_key = upload_session(namespace_id.as_str(), upload_id.as_str());
+    // An upload session is mutable control state, so its first lifecycle state is a conditional create.
     store
         .put_if_absent(&object_key, Bytes::from(encoded))
         .await

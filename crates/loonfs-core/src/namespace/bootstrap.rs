@@ -146,6 +146,7 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
         .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
     let bytes = encode_control_object(&envelope)
         .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
+    // The namespace head is mutable control state, so installation must be a conditional create.
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
         Ok(_) => Ok(NamespaceHeadInstall::Landed),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {

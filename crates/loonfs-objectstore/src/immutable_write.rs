@@ -15,6 +15,9 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum ImmutableWriteError {
     /// The key names bytes other than the immutable payload supplied here.
+    ///
+    /// This is a corruption tripwire, not a provider failure: callers must
+    /// preserve that classification at their public error boundary.
     #[error("immutable object `{object_key}` already exists with different bytes")]
     DifferentObject {
         /// Durable key whose existing bytes violated immutability.
