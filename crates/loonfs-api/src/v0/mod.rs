@@ -37,8 +37,8 @@ pub use operations::{
     WalFlushStepOutcome,
 };
 pub use reads::{
-    AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse, ListTrashResponse,
-    TrashEntry,
+    AuthoritativeAttributes, AuthoritativeFileBytes, AuthoritativePathEntry,
+    AuthoritativePathEntryKind, ListPathEntriesResponse, ListTrashResponse, TrashEntry,
 };
 pub use search::{
     DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse,

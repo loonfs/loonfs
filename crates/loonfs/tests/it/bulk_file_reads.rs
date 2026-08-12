@@ -9,9 +9,8 @@ use crate::common::*;
 use loonfs::{
     CheckpointFile, CheckpointFilesPageCursor, ContentRef, CreateCheckpointOptions,
     CreateNamespaceOptions, CurrentFileState, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, ErrorCode, FsReader, InodeId, InodeKind, MoveOptions, NamespaceId,
-    PageRequest, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore, StoreConfig,
-    UndeleteOptions,
+    DestinationBehavior, ErrorCode, FsReader, InodeId, MoveOptions, NamespaceId, PageRequest,
+    PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore, StoreConfig, UndeleteOptions,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
@@ -52,16 +51,23 @@ async fn listed_files(
             .expect("list directory")
             .entries;
         for entry in entries {
-            match entry.inode_kind {
-                InodeKind::Directory => directories.push(entry.absolute_path.as_str().to_owned()),
-                InodeKind::File => {
+            match entry.kind {
+                loonfs::AuthoritativePathEntryKind::Directory {} => {
+                    directories.push(entry.absolute_path.as_str().to_owned());
+                }
+                loonfs::AuthoritativePathEntryKind::File {
+                    revision_no,
+                    size_bytes,
+                    content_ref,
+                    ..
+                } => {
                     found.insert(
                         entry.inode_id,
                         ListedFile {
                             absolute_path: entry.absolute_path.as_str().to_owned(),
-                            revision_no: entry.revision_no.expect("a file carries a revision"),
-                            size_bytes: entry.size_bytes.expect("a file carries a size"),
-                            content_ref: entry.content_ref.expect("a file carries a content ref"),
+                            revision_no,
+                            size_bytes,
+                            content_ref,
                         },
                     );
                 }
@@ -800,7 +806,8 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
         .stat_path(&namespace_id, "/docs/alpha.txt")
         .await
         .expect("stat file")
-        .content_ref
+        .content_ref()
+        .cloned()
         .expect("a file carries a content ref");
 
     counting.reset();
@@ -851,7 +858,8 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
         .stat_path(&namespace_id, "/docs/alpha.txt")
         .await
         .expect("stat file")
-        .content_ref
+        .content_ref()
+        .cloned()
         .expect("a file carries a content ref");
 
     // Same length, different bytes: the size check passes and the digest

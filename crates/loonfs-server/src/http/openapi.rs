@@ -127,6 +127,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::AttributeRevisionNo,
         loonfs_api::InodeKind,
         loonfs_api::AuthoritativePathEntry,
+        loonfs_api::AuthoritativePathEntryKind,
+        loonfs_api::AuthoritativeAttributes,
         loonfs_api::ListPathEntriesResponse,
         BeginUploadRequest,
         BeginUploadResponse,

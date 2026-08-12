@@ -123,7 +123,7 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
     let root_entry = resolve_path(&store, &namespace_id, "/")
         .await
         .expect("a fresh namespace serves reads");
-    assert_eq!(root_entry.inode_kind, loonfs_api::InodeKind::Directory);
+    assert_eq!(root_entry.inode_kind(), loonfs_api::InodeKind::Directory);
     let status = loonfs_core::cache::load_namespace_head_summary(&store, &namespace_id)
         .await
         .expect("status");
@@ -411,7 +411,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let clone_entry = resolve_path(&store, &clone_namespace_id, "/docs/shared.txt")
         .await
         .expect("clone stat");
-    assert_eq!(source_entry.content_ref, clone_entry.content_ref);
+    assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
             .await

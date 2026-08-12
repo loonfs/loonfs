@@ -200,8 +200,11 @@ fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
         FilesystemChange::Moved {
             from_name, to_name, ..
         } => format!("move '{from_name}' -> '{to_name}'"),
-        FilesystemChange::Deleted { inode_id, name, .. } => match name {
-            Some(name) => format!("delete '{name}'"),
+        FilesystemChange::Deleted {
+            inode_id,
+            deleted_direntry,
+        } => match deleted_direntry {
+            Some(direntry) => format!("delete '{}'", direntry.display_name),
             None => format!("delete inode {inode_id}"),
         },
         FilesystemChange::Undeleted { name, .. } => format!("undelete '{name}'"),
@@ -742,19 +745,19 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             lines.extend([
                 format!("inode: {}", entry.inode_id),
-                format!("kind: {}", entry.inode_kind),
+                format!("kind: {}", entry.inode_kind()),
                 format!("seq: {}", entry.head_seq.0),
             ]);
-            if let Some(size) = entry.size_bytes {
-                lines.push(format!("size: {size}"));
-            }
-            if let Some(revision) = entry.revision_no {
-                lines.push(format!("revision: {}", revision.0));
-            }
-            if let Some(committed_at_ms) = entry.committed_at_ms {
-                lines.push(format!("modified: {}", format_utc_ms(committed_at_ms)));
-            }
-            if let Some(content_ref) = &entry.content_ref {
+            if let loonfs_api::AuthoritativePathEntryKind::File {
+                revision_no,
+                size_bytes,
+                content_ref,
+                committed_at_ms,
+            } = &entry.kind
+            {
+                lines.push(format!("size: {size_bytes}"));
+                lines.push(format!("revision: {}", revision_no.0));
+                lines.push(format!("modified: {}", format_utc_ms(*committed_at_ms)));
                 lines.push(format!("content_id: {}", content_ref.content_id));
                 lines.push(format!("content_kind: {}", content_ref.kind));
             }
@@ -762,7 +765,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             // is. An inode holding no attributes prints nothing extra: the
             // header already answered the question that was asked.
             if let Some(attributes) = &entry.attributes {
-                for (key, value) in attributes.iter() {
+                for (key, value) in attributes.attributes.iter() {
                     lines.push(format!("attr.{key}: {}", render_attribute_value(value)));
                 }
             }
@@ -900,10 +903,10 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
 
 pub(crate) fn human_path_entry(entry: &loonfs_api::AuthoritativePathEntry) -> String {
     let size = entry
-        .size_bytes
+        .size_bytes()
         .map(|value: u64| value.to_string())
         .unwrap_or_else(|| "-".to_owned());
-    format!("{}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
+    format!("{}\t{}\t{}", entry.inode_kind(), size, entry.absolute_path)
 }
 
 /// One attribute value on one line. A list joins on `, `, which is a display
@@ -952,8 +955,8 @@ mod tests {
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
     use loonfs_api::{
-        AbsolutePath, AuthoritativePathEntry, ChangeSeq, DisplayName, InodeId, InodeKind,
-        NamespaceId,
+        AbsolutePath, AuthoritativeAttributes, AuthoritativePathEntry, AuthoritativePathEntryKind,
+        ChangeSeq, DisplayName, InodeId, NamespaceId,
     };
 
     fn path_entry(path: &str, display_name: Option<&str>) -> AuthoritativePathEntry {
@@ -961,16 +964,11 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             absolute_path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if display_name.is_some() { 2 } else { 1 }),
-            inode_kind: InodeKind::Directory,
+            kind: AuthoritativePathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
             parent_inode_id: display_name.map(|_| InodeId(1)),
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
-            revision_no: None,
-            size_bytes: None,
-            content_ref: None,
-            committed_at_ms: None,
             attributes: None,
-            attributes_revision_no: None,
         }
     }
 
@@ -999,14 +997,14 @@ mod tests {
     /// can be read off the last line.
     fn stat_with_attribute(value: AttributeValue) -> CommandOutput {
         let mut entry = path_entry("/docs", Some("docs"));
-        entry.attributes = Some(
-            loonfs_api::Attributes::new(std::collections::BTreeMap::from([(
+        entry.attributes = Some(AuthoritativeAttributes {
+            revision_no: loonfs_api::AttributeRevisionNo(1),
+            attributes: loonfs_api::Attributes::new(std::collections::BTreeMap::from([(
                 loonfs_api::AttributeKey::parse("note").expect("attribute key"),
                 value,
             )]))
             .expect("attribute map"),
-        );
-        entry.attributes_revision_no = Some(loonfs_api::AttributeRevisionNo(1));
+        });
         stat_output(entry)
     }
 
@@ -1078,7 +1076,10 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&json_success(&newline).expect("JSON stat should render"))
                 .expect("rendered stat is JSON");
-        assert_eq!(json["data"]["attributes"]["note"]["value"], "first\nsecond");
+        assert_eq!(
+            json["data"]["attributes"]["attributes"]["note"]["value"],
+            "first\nsecond"
+        );
     }
 
     #[test]

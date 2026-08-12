@@ -87,7 +87,7 @@ fn filesystem_operations_match_core_semantics() {
         .stat_path_blocking(&namespace_id, "/docs/hello.txt")
         .expect("stat file");
     assert_eq!(stat.absolute_path, "/docs/hello.txt");
-    assert_eq!(stat.size_bytes, Some(5));
+    assert_eq!(stat.size_bytes(), Some(5));
 
     let entries = fs
         .list_path_blocking(&namespace_id, "/docs")
@@ -163,7 +163,7 @@ async fn async_runtime_methods_are_the_engine_boundary() {
         .expect("async stat");
 
     assert_eq!(async_stat.absolute_path, "/docs/hello.txt");
-    assert_eq!(async_stat.size_bytes, Some(5));
+    assert_eq!(async_stat.size_bytes(), Some(5));
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn forked_namespace_shares_content_then_diverges() {
     let clone_entry = fs
         .stat_path_blocking(&clone, "/docs/shared.txt")
         .expect("stat clone");
-    assert_eq!(source_entry.content_ref, clone_entry.content_ref);
+    assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
 
     fs.put_file_bytes_blocking(
         &clone,

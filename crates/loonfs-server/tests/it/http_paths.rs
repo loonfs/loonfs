@@ -115,7 +115,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         .await
         .expect("dest stat");
     assert_ne!(source_entry.inode_id, dest_entry.inode_id);
-    assert_eq!(source_entry.content_ref, dest_entry.content_ref);
+    assert_eq!(source_entry.content_ref(), dest_entry.content_ref());
     let dest_bytes = harness
         .client
         .get_file_bytes(&destination)

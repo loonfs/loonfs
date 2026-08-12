@@ -397,7 +397,7 @@ pub(crate) async fn run_filesystem_get(
         .await
         .map_err(|error| context.fail(kind, error))?;
     if args.recursive {
-        if entry.inode_kind != InodeKind::Directory {
+        if entry.inode_kind() != InodeKind::Directory {
             return Err(context.fail(
                 kind,
                 CliError::invalid_input(format!(
@@ -433,7 +433,7 @@ pub(crate) async fn run_filesystem_get(
         )
         .await;
     }
-    if entry.inode_kind == InodeKind::Directory {
+    if entry.inode_kind() == InodeKind::Directory {
         return Err(context.fail(
             kind,
             CliError::invalid_input(format!(
@@ -449,7 +449,7 @@ pub(crate) async fn run_filesystem_get(
         // and bytes already piped onward are somewhere this CLI cannot see.
         let mut download = context
             .target
-            .open_file_download(&spec, revision_no, entry.size_bytes, 0)
+            .open_file_download(&spec, revision_no, entry.size_bytes(), 0)
             .await
             .map_err(|error| context.fail(kind, error))?;
         stream_download_to_stdout(&mut download)
@@ -475,15 +475,14 @@ pub(crate) async fn run_filesystem_get(
     // one begins. A file with no content reference to compare against — one
     // this build cannot identify — starts over.
     let meta = entry
-        .content_ref
-        .as_ref()
+        .content_ref()
         .map(|content_ref| PartialMeta::describe(content_ref, revision_no));
     let start_offset = meta
         .as_ref()
         .map_or(0, |meta| partial::resumable_bytes(&destination, meta));
     let mut download = context
         .target
-        .open_file_download(&spec, revision_no, entry.size_bytes, start_offset)
+        .open_file_download(&spec, revision_no, entry.size_bytes(), start_offset)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -492,8 +491,8 @@ pub(crate) async fn run_filesystem_get(
         ProgressOp::Get,
         spec.absolute_path().as_str(),
     ));
-    progress.expect(entry.size_bytes, Some(1));
-    progress.file_started(spec.absolute_path().as_str(), entry.size_bytes);
+    progress.expect(entry.size_bytes(), Some(1));
+    progress.file_started(spec.absolute_path().as_str(), entry.size_bytes());
     // The local working copy is the one thing this CLI touches that has no
     // revision history behind it, so clobbering it is opt-in.
     // `persist_noclobber` closes the race between checking and installing
@@ -1218,7 +1217,7 @@ pub(crate) async fn run_filesystem_mkdir(
                 .stat_path_without_attributes(&spec)
                 .await
                 .map_err(|_| context.fail(kind, error.clone()))?;
-            if existing.inode_kind != InodeKind::Directory {
+            if existing.inode_kind() != InodeKind::Directory {
                 return Err(context.fail(kind, error));
             }
             return Ok(CommandOutput {
@@ -1296,7 +1295,7 @@ async fn resolve_transfer_destination(
         // report: either way this is not a directory to land inside.
         return Ok(named);
     };
-    if existing.inode_kind != InodeKind::Directory {
+    if existing.inode_kind() != InodeKind::Directory {
         return Ok(named);
     }
     let leaf = loonfs_api::DisplayName::parse(source_leaf)
@@ -1357,7 +1356,7 @@ async fn run_filesystem_transfer(
             .await
             .map_err(|error| context.fail(kind, error))?;
         if args.recursive {
-            if entry.inode_kind != InodeKind::Directory {
+            if entry.inode_kind() != InodeKind::Directory {
                 return Err(context.fail(
                     kind,
                     CliError::invalid_input(format!(
@@ -1385,7 +1384,7 @@ async fn run_filesystem_transfer(
             )
             .await;
         }
-        if entry.inode_kind == InodeKind::Directory {
+        if entry.inode_kind() == InodeKind::Directory {
             return Err(context.fail(
                 kind,
                 CliError::invalid_input(format!(

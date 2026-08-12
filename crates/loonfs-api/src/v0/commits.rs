@@ -4,8 +4,8 @@
 //! [`super::operations`].
 
 use crate::{
-    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    InodeKind, NamespaceId, RevisionNo,
+    manifest::DeletedDirentry, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef,
+    DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -91,13 +91,10 @@ pub enum FilesystemChange {
     Deleted {
         /// Inode at the root of the deleted subtree.
         inode_id: InodeId,
-        /// Directory that held the deleted binding, when the delete
+        /// Directory binding removed by the deletion, when the delete
         /// recorded one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_inode_id: Option<InodeId>,
-        /// Spelling of the deleted binding, when the delete recorded one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<DisplayName>,
+        deleted_direntry: Option<DeletedDirentry>,
     },
     /// A deleted inode was recovered and re-bound.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeUndeleted"))]
@@ -231,12 +228,15 @@ mod tests {
 
         let deleted = FilesystemChange::Deleted {
             inode_id: InodeId(2),
-            parent_inode_id: Some(InodeId(1)),
-            name: Some(crate::DisplayName::parse("a.txt").expect("valid display name")),
+            deleted_direntry: Some(crate::manifest::DeletedDirentry {
+                parent_inode_id: InodeId(1),
+                name_key: crate::NameKey::parse("a.txt").expect("valid name key"),
+                display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            }),
         };
         assert_eq!(
             serde_json::to_string(&deleted).expect("serialize deleted event"),
-            r#"{"kind":"deleted","inode_id":2,"parent_inode_id":1,"name":"a.txt"}"#
+            r#"{"kind":"deleted","inode_id":2,"deleted_direntry":{"parent_inode_id":1,"name_key":"a.txt","display_name":"a.txt"}}"#
         );
 
         let undeleted = FilesystemChange::Undeleted {

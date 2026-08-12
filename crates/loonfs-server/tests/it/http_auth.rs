@@ -381,7 +381,8 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
             .stat_path(&NamespacePath::parse("demo", "/first-copy.txt").expect("path"))
             .await
             .expect("repeated ref file")
-            .content_ref,
+            .content_ref()
+            .cloned(),
         Some(first.content_ref)
     );
 

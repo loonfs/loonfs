@@ -177,7 +177,8 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
         .stat_path(&namespace_id, "/docs/kept.txt")
         .await
         .expect("stat file")
-        .content_ref
+        .content_ref()
+        .cloned()
         .expect("a file carries a content ref");
     let published_key = content_key(&store, &namespace_id, &content_ref).await;
 
@@ -225,18 +226,15 @@ async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survi
         .put_file_bytes(&namespace_id, "/docs/retry.txt", b"same bytes", options())
         .await
         .expect("first put");
-    let committed_key = content_key(
-        &store,
-        &namespace_id,
-        &runtime
-            .reader
-            .stat_path(&namespace_id, "/docs/retry.txt")
-            .await
-            .expect("stat file")
-            .content_ref
-            .expect("a file carries a content ref"),
-    )
-    .await;
+    let committed_content_ref = runtime
+        .reader
+        .stat_path(&namespace_id, "/docs/retry.txt")
+        .await
+        .expect("stat file")
+        .content_ref()
+        .cloned()
+        .expect("a file carries a content ref");
+    let committed_key = content_key(&store, &namespace_id, &committed_content_ref).await;
 
     let retry = runtime
         .writer

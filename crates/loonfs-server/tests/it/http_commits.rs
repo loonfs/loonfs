@@ -801,8 +801,8 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
         .stat_path(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
         .await
         .expect("the file is still there");
-    assert_eq!(unchanged.revision_no, Some(RevisionNo(1)));
-    assert_eq!(unchanged.content_ref.as_ref(), Some(&first.content_ref));
+    assert_eq!(unchanged.revision_no(), Some(RevisionNo(1)));
+    assert_eq!(unchanged.content_ref(), Some(&first.content_ref));
 
     // Spelled correctly the same body commits, which is what says the typo
     // was the only thing wrong with it.
@@ -817,8 +817,8 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
         .stat_path(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
         .await
         .expect("the replace landed");
-    assert_eq!(replaced.revision_no, Some(RevisionNo(2)));
-    assert_eq!(replaced.content_ref.as_ref(), Some(&second.content_ref));
+    assert_eq!(replaced.revision_no(), Some(RevisionNo(2)));
+    assert_eq!(replaced.content_ref(), Some(&second.content_ref));
 
     harness.server.abort();
 }

@@ -68,25 +68,19 @@ fn get_status(harness: &crate::common::TestServer, query: &str) -> u16 {
     }
 }
 
-/// Both attribute fields must follow `projected` together; one without the
-/// other fails whichever way it leans.
+/// The grouped attribute projection is either present in full or absent.
 fn assert_projection(entry: &serde_json::Value, projected: bool) {
     assert_eq!(
         entry.get("attributes").is_some(),
         projected,
         "wrong `attributes` projection: {entry}"
     );
-    assert_eq!(
-        entry.get("attributes_revision_no").is_some(),
-        projected,
-        "wrong `attributes_revision_no` projection: {entry}"
-    );
 }
 
-/// Stat projects attributes by default and drops both fields on request;
-/// listing does the opposite. Neither ever answers with one field alone.
+/// Stat projects attributes by default and drops the group on request;
+/// listing does the opposite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_reads_project_both_attribute_fields_or_neither() {
+async fn http_reads_project_the_grouped_attributes_value() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -100,13 +94,16 @@ async fn http_reads_project_both_attribute_fields_or_neither() {
     // bare one carries the cleared state at revision 0 rather than nothing.
     let annotated = get_json(&harness, "/filesystem/stat?path=%2Fdocs%2Freport.txt");
     assert_projection(&annotated, true);
-    assert_eq!(annotated["attributes"]["owner"]["value"], "platform");
-    assert_eq!(annotated["attributes_revision_no"], 1);
+    assert_eq!(
+        annotated["attributes"]["attributes"]["owner"]["value"],
+        "platform"
+    );
+    assert_eq!(annotated["attributes"]["revision_no"], 1);
 
     let bare = get_json(&harness, "/filesystem/stat?path=%2Fdocs%2Fnotes.txt");
     assert_projection(&bare, true);
-    assert_eq!(bare["attributes"], serde_json::json!({}));
-    assert_eq!(bare["attributes_revision_no"], 0);
+    assert_eq!(bare["attributes"]["attributes"], serde_json::json!({}));
+    assert_eq!(bare["attributes"]["revision_no"], 0);
 
     let opted_out = get_json(
         &harness,
@@ -132,12 +129,15 @@ async fn http_reads_project_both_attribute_fields_or_neither() {
         assert_projection(entry, true);
         match entry["absolute_path"].as_str().expect("path") {
             "/docs/report.txt" => {
-                assert_eq!(entry["attributes"]["owner"]["value"], "platform");
-                assert_eq!(entry["attributes_revision_no"], 1);
+                assert_eq!(
+                    entry["attributes"]["attributes"]["owner"]["value"],
+                    "platform"
+                );
+                assert_eq!(entry["attributes"]["revision_no"], 1);
             }
             _ => {
-                assert_eq!(entry["attributes"], serde_json::json!({}));
-                assert_eq!(entry["attributes_revision_no"], 0);
+                assert_eq!(entry["attributes"]["attributes"], serde_json::json!({}));
+                assert_eq!(entry["attributes"]["revision_no"], 0);
             }
         }
     }
@@ -224,11 +224,16 @@ async fn the_client_round_trips_the_read_options() {
     assert_eq!(
         stat.attributes
             .as_ref()
-            .and_then(|attributes| attributes.get(&attribute_key("owner")))
+            .and_then(|projection| projection.attributes.get(&attribute_key("owner")))
             .cloned(),
         Some(attribute_text("platform"))
     );
-    assert_eq!(stat.attributes_revision_no, Some(AttributeRevisionNo(1)));
+    assert_eq!(
+        stat.attributes
+            .as_ref()
+            .map(|projection| projection.revision_no),
+        Some(AttributeRevisionNo(1))
+    );
 
     let without = harness
         .client
@@ -241,7 +246,6 @@ async fn the_client_round_trips_the_read_options() {
         .await
         .expect("stat without attributes");
     assert!(without.attributes.is_none());
-    assert!(without.attributes_revision_no.is_none());
 
     let listing = harness
         .client

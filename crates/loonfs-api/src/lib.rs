@@ -145,14 +145,15 @@ pub use secret::SecretString;
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
-    AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry,
-    CheckpointOwnerSummary, CheckpointSummary, CommitRequest, CommitResponse,
-    CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, ErrorDetails,
-    FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
-    GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome,
-    RetainedCandidates, RetainedReason, TrashEntry, WalFlushStepOutcome,
+    AdvanceRetentionResponse, ApiError, AuthoritativeAttributes, AuthoritativeFileBytes,
+    AuthoritativePathEntry, AuthoritativePathEntryKind, CheckpointOwnerSummary, CheckpointSummary,
+    CommitRequest, CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
+    ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,
+    ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    TrashEntry, WalFlushStepOutcome,
 };

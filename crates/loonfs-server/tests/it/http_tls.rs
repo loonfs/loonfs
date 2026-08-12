@@ -38,7 +38,10 @@ async fn a_client_trusting_the_server_certificate_round_trips_over_tls() {
         .expect("write file");
 
     let stat = harness.client.stat_path(&target).await.expect("stat file");
-    assert_eq!(stat.size_bytes, Some(b"ciphertext in flight".len() as u64));
+    assert_eq!(
+        stat.size_bytes(),
+        Some(b"ciphertext in flight".len() as u64)
+    );
 
     let bytes = harness
         .client

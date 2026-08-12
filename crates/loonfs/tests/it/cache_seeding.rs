@@ -454,7 +454,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     let list = list.expect("list docs");
 
     assert_eq!(stat.absolute_path, "/docs/file.txt");
-    assert_eq!(stat.size_bytes, Some(4));
+    assert_eq!(stat.size_bytes(), Some(4));
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].absolute_path, "/docs/file.txt");
 
@@ -628,7 +628,7 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
         .expect("stat root after create");
     assert_eq!(root.absolute_path, "/");
     assert_eq!(root.inode_id, InodeId(1));
-    assert_eq!(root.inode_kind, InodeKind::Directory);
+    assert_eq!(root.inode_kind(), InodeKind::Directory);
     assert_eq!(root.head_seq, ChangeSeq(0));
 
     let entries = fs

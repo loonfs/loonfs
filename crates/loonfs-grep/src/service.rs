@@ -624,10 +624,10 @@ async fn candidate_content(
         }
         Err(error) => return CandidateContent::Fetched(Err(error)),
     };
-    if entry.inode_id != candidate.inode_id || entry.revision_no != Some(candidate.revision_no) {
+    if entry.inode_id != candidate.inode_id || entry.revision_no() != Some(candidate.revision_no) {
         return CandidateContent::Superseded;
     }
-    let Some(content_ref) = entry.content_ref else {
+    let Some(content_ref) = entry.content_ref() else {
         return CandidateContent::Superseded;
     };
     if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
@@ -635,7 +635,7 @@ async fn candidate_content(
     }
     CandidateContent::Fetched(
         reads
-            .read_content_ref(&content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
+            .read_content_ref(content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
             .await,
     )
 }
@@ -1013,7 +1013,7 @@ async fn scan_candidate_inodes(
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();
     let root = match scope {
-        Some(entry) if entry.inode_kind == InodeKind::File => {
+        Some(entry) if entry.inode_kind() == InodeKind::File => {
             // A file-shaped scope names exactly one candidate.
             inodes.insert(entry.inode_id);
             return Ok(inodes);
@@ -1031,7 +1031,7 @@ async fn scan_candidate_inodes(
                 .list_path_page(&directory, cursor, SCAN_DIRECTORY_PAGE_ENTRIES)
                 .await?;
             for entry in page.items {
-                match entry.inode_kind {
+                match entry.inode_kind() {
                     InodeKind::Directory => directories.push(entry.absolute_path),
                     InodeKind::File => {
                         inodes.insert(entry.inode_id);

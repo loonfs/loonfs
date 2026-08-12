@@ -66,7 +66,8 @@ pub use loonfs_api::v0::{
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
-    AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
+    AuthoritativeAttributes, AuthoritativeFileBytes, AuthoritativePathEntry,
+    AuthoritativePathEntryKind, CapabilityDocument, ChangeSeq, CheckpointId,
     CheckpointOwnerSummary, CheckpointSummary, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
     ContentRefKind, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
     DeleteNamespaceResponse, DestinationBehavior, DirectoryPageCursor, EffectiveLimit,
