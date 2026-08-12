@@ -1,6 +1,6 @@
 //! Azure Blob Storage provider.
 
-use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use super::{ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::object_store::Result;
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
@@ -127,6 +127,10 @@ impl ObjectStore for AzureAbsStore {
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.inner.put(key, bytes, mode).await
+    }
+
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        self.inner.put_streamed(key, body, mode).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {

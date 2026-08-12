@@ -54,10 +54,19 @@ async fn a_file_past_the_default_proxy_cap_takes_the_grant() {
     let client = client();
     let _guard = test_transport::script([capabilities(true, Some(DEFAULT_PROXY_CAP_BYTES))]);
 
-    assert!(client.offers_direct_download(AUDIT_FILE_BYTES).await);
+    assert!(client
+        .offers_direct_download(AUDIT_FILE_BYTES)
+        .await
+        .expect("capabilities"));
     // Cached document, so no second scripted response is needed.
-    assert!(!client.offers_direct_download(DEFAULT_PROXY_CAP_BYTES).await);
-    assert!(!client.offers_direct_download(1).await);
+    assert!(!client
+        .offers_direct_download(DEFAULT_PROXY_CAP_BYTES)
+        .await
+        .expect("cached capabilities"));
+    assert!(!client
+        .offers_direct_download(1)
+        .await
+        .expect("cached capabilities"));
 }
 
 /// A deployment that cannot presign reads proxies everything, whatever the
@@ -69,7 +78,10 @@ async fn a_deployment_without_the_capability_never_takes_the_grant() {
     let client = client();
     let _guard = test_transport::script([capabilities(false, Some(DEFAULT_PROXY_CAP_BYTES))]);
 
-    assert!(!client.offers_direct_download(AUDIT_FILE_BYTES).await);
+    assert!(!client
+        .offers_direct_download(AUDIT_FILE_BYTES)
+        .await
+        .expect("capabilities"));
 }
 
 /// A deployment that states no cap is left on the proxied path: nothing
@@ -80,7 +92,21 @@ async fn a_deployment_that_advertises_no_cap_stays_proxied() {
     let client = client();
     let _guard = test_transport::script([capabilities(true, None)]);
 
-    assert!(!client.offers_direct_download(AUDIT_FILE_BYTES).await);
+    assert!(!client
+        .offers_direct_download(AUDIT_FILE_BYTES)
+        .await
+        .expect("capabilities"));
+}
+
+#[tokio::test]
+async fn a_capability_failure_is_not_reported_as_no_direct_download() {
+    let client = client();
+    let transport = test_transport::script([Outcome::Success(b"not json".to_vec())]);
+
+    let result = client.offers_direct_download(AUDIT_FILE_BYTES).await;
+
+    assert!(matches!(result, Err(ClientError::Json(_))), "{result:?}");
+    assert_eq!(transport.attempts(), 1);
 }
 
 fn grant(content_ref: ContentRef, url: &str) -> BeginDownloadResponse {

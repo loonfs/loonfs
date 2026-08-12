@@ -1,7 +1,7 @@
 //! Verified writes for objects whose keys name immutable bytes.
 
 use crate::retry::{
-    transport_retry_backoff, transport_retry_pause, OperationDeadline, TransportRetryPolicy,
+    next_retry_backoff, transport_retry_pause, OperationDeadline, TransportRetryPolicy,
 };
 use crate::timing::StdMonotonicTimer;
 use crate::{
@@ -67,23 +67,17 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
                     .await;
             }
             Err(error @ ObjectStoreError::Transport { .. }) => {
-                let Some(remaining) = deadline.remaining() else {
+                let Some(backoff) = next_retry_backoff(
+                    &retry_policy,
+                    key,
+                    "put_immutable_verified",
+                    bytes.len() as u64,
+                    &mut retries,
+                    Some(&deadline),
+                    &error,
+                ) else {
                     return resolve_readback(store, key, &bytes, error).await;
                 };
-                if retries >= retry_policy.max_retries {
-                    return resolve_readback(store, key, &bytes, error).await;
-                }
-                retries += 1;
-                let backoff = transport_retry_backoff(&retry_policy, retries).min(remaining);
-                tracing::info!(
-                    object_key = key,
-                    operation = "put_immutable_verified",
-                    retry = retries,
-                    max_retries = retry_policy.max_retries,
-                    backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-                    error = %error,
-                    "transient immutable write failure, backing off before retry",
-                );
                 ambiguous_transport = Some(error);
                 transport_retry_pause(backoff).await;
             }

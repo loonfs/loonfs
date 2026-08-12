@@ -732,14 +732,8 @@ async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> Ch
         Ok(stored) => present("a present object's checksum", stored)?,
         // A provider that stores no checksum for this object must say so
         // rather than invent an answer.
-        Err(error) => {
-            let message = error.message();
-            return if message.contains("no full-object checksum") {
-                Ok(())
-            } else {
-                Err(failed("stored-checksum read", &error))
-            };
-        }
+        Err(ObjectStoreError::StoredChecksumMissing { .. }) => return Ok(()),
+        Err(error) => return Err(failed("stored-checksum read", &error)),
     };
 
     if stored.size_bytes != payload.len() as u64 {
@@ -1007,6 +1001,53 @@ mod tests {
         }
     }
 
+    /// A checksum-capable provider may encounter an object written without
+    /// a stored checksum. That per-object answer is distinct from the store
+    /// lacking the readback capability altogether.
+    #[derive(Debug)]
+    struct MissingStoredChecksumStore {
+        inner: LocalFsStore,
+    }
+
+    #[async_trait]
+    impl ObjectStore for MissingStoredChecksumStore {
+        async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
+            self.inner.head(key).await
+        }
+
+        async fn head_stored_checksum(
+            &self,
+            key: &str,
+        ) -> StoreResult<Option<crate::StoredObjectChecksum>> {
+            match self.inner.head(key).await? {
+                Some(_) => Err(ObjectStoreError::StoredChecksumMissing {
+                    object_key: key.to_owned(),
+                }),
+                None => Ok(None),
+            }
+        }
+
+        async fn get_with_metadata(&self, key: &str) -> StoreResult<Option<ObjectBody>> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn get(&self, key: &str, range: Option<ByteRange>) -> StoreResult<Option<Bytes>> {
+            self.inner.get(key, range).await
+        }
+
+        async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> StoreResult<ObjectMetadata> {
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> StoreResult<()> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, StoreResult<String>> {
+            self.inner.list_prefix_stream(prefix)
+        }
+    }
+
     /// A store that stamps every object at the unix epoch — what an
     /// S3-compatible endpoint that omits `Last-Modified` becomes once the
     /// AWS client path synthesizes a time for it.
@@ -1073,6 +1114,22 @@ mod tests {
         assert_eq!(
             outcome(&report, "stored_checksum_readback"),
             &StoreProbeOutcome::Unsupported
+        );
+        assert!(report.all_passed());
+    }
+
+    #[tokio::test]
+    async fn a_present_object_without_a_stored_checksum_is_matched_structurally() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let store = MissingStoredChecksumStore {
+            inner: LocalFsStore::new(temp_dir.path()).expect("create local object store"),
+        };
+
+        let report = run_store_contract_probe(&store, "probe_test_missing_checksum").await;
+
+        assert_eq!(
+            outcome(&report, "stored_checksum_readback"),
+            &StoreProbeOutcome::Passed
         );
         assert!(report.all_passed());
     }

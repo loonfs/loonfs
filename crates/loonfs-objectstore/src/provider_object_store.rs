@@ -2,14 +2,13 @@
 //! delete and multipart stages, and multipart upload for large immutable
 //! payloads.
 
-use crate::attempts::count_retry_attempt;
 use crate::immutable_write::{readback, ImmutableReadback};
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
 use crate::object_store::Result;
 use crate::retry::{
-    transport_retry_backoff, transport_retry_pause, OperationDeadline, TransportRetryPolicy,
+    next_retry_backoff, transport_retry_pause, OperationDeadline, TransportRetryPolicy,
 };
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{
@@ -279,7 +278,7 @@ impl ProviderObjectStore {
     /// Conditional write modes do not use this path.
     async fn put_large_multipart(
         &self,
-        multipart: &dyn MultipartStore,
+        multipart: Arc<dyn MultipartStore>,
         key: &str,
         path: &Path,
         bytes: Bytes,
@@ -292,76 +291,24 @@ impl ProviderObjectStore {
             path,
         };
 
-        let upload_id = upload.create(size_bytes).await?;
-        let result = upload.upload_parts_and_complete(&upload_id, &bytes).await;
+        let mut abort_on_drop = upload.create(size_bytes).await?;
+        let result = upload
+            .upload_parts_and_complete(abort_on_drop.upload_id(), &bytes)
+            .await;
         match result {
-            Ok(metadata) => Ok(metadata),
+            Ok(metadata) => {
+                abort_on_drop.disarm();
+                Ok(metadata)
+            }
             Err(err) => {
                 // Best effort, and harmless when the failure raced a landed
                 // completion: the upload id no longer exists then, and the
                 // abort cannot touch the completed object.
-                upload.abort(&upload_id).await;
+                upload.abort(abort_on_drop.upload_id()).await;
+                abort_on_drop.disarm();
                 Err(err)
             }
         }
-    }
-
-    /// Returns the delay before the next write attempt, or `None` when the
-    /// retry count or operation deadline is exhausted.
-    ///
-    /// Multipart transfers use only the retry count. Exhaustion logs include the
-    /// payload size to help distinguish slow transfers from other failures.
-    fn next_write_backoff(
-        &self,
-        key: &str,
-        operation: &'static str,
-        payload_bytes: u64,
-        retries: &mut u32,
-        deadline: Option<&OperationDeadline<'_>>,
-        err: &provider_store::Error,
-    ) -> Option<Duration> {
-        if *retries >= self.transport_retry.max_retries {
-            tracing::warn!(
-                object_key = key,
-                operation,
-                retry = *retries,
-                payload_bytes,
-                error = %err,
-                "object store write retry budget exhausted; not retrying",
-            );
-            return None;
-        }
-        let mut remaining = Duration::MAX;
-        if let Some(deadline) = deadline {
-            let Some(deadline_remaining) = deadline.remaining() else {
-                tracing::warn!(
-                    object_key = key,
-                    operation,
-                    retry = *retries,
-                    payload_bytes,
-                    error = %err,
-                    "object store operation deadline exhausted; not retrying",
-                );
-                return None;
-            };
-            remaining = deadline_remaining;
-        }
-        *retries += 1;
-        // Every write retry this store grants passes through here, so this
-        // is the one place a measuring wrapper above needs counted for its
-        // sample's attempt count.
-        count_retry_attempt();
-        let backoff = transport_retry_backoff(&self.transport_retry, *retries).min(remaining);
-        tracing::info!(
-            object_key = key,
-            operation,
-            retry = *retries,
-            max_retries = self.transport_retry.max_retries,
-            backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-            error = %err,
-            "transient object store write failure, backing off before retry",
-        );
-        Some(backoff)
     }
 }
 
@@ -423,7 +370,7 @@ impl PartReader {
     }
 }
 
-/// Aborts a provider multipart upload when its streamed write is cancelled.
+/// Aborts a provider multipart upload when its write is cancelled.
 ///
 /// Normal return paths abort explicitly and disable this guard. Cancellation
 /// has no cleanup `await` point, so `Drop` starts the abort on the current
@@ -436,6 +383,22 @@ struct AbortUploadOnDrop {
 }
 
 impl AbortUploadOnDrop {
+    fn new(
+        multipart: Arc<dyn MultipartStore>,
+        path: Path,
+        upload_id: provider_store::MultipartId,
+    ) -> Self {
+        Self {
+            multipart: Some(multipart),
+            path,
+            upload_id,
+        }
+    }
+
+    fn upload_id(&self) -> &provider_store::MultipartId {
+        &self.upload_id
+    }
+
     fn disarm(&mut self) {
         self.multipart = None;
     }
@@ -450,7 +413,7 @@ impl Drop for AbortUploadOnDrop {
             tracing::warn!(
                 object_key = %self.path,
                 operation = "abort_multipart",
-                "abandoned streamed write has no runtime to abort its multipart upload on; \
+                "abandoned write has no runtime to abort its multipart upload on; \
                  parts remain until the bucket lifecycle rule collects them",
             );
             return;
@@ -463,7 +426,7 @@ impl Drop for AbortUploadOnDrop {
                     object_key = %path,
                     operation = "abort_multipart",
                     error = %err,
-                    "failed to abort the multipart upload of an abandoned streamed write",
+                    "failed to abort the multipart upload of an abandoned write",
                 );
             }
         });
@@ -474,23 +437,30 @@ impl Drop for AbortUploadOnDrop {
 /// surface, and the object being written.
 struct MultipartWrite<'op> {
     store: &'op ProviderObjectStore,
-    multipart: &'op dyn MultipartStore,
+    multipart: Arc<dyn MultipartStore>,
     key: &'op str,
     path: &'op Path,
 }
 
 impl MultipartWrite<'_> {
-    async fn create(&self, payload_bytes: u64) -> Result<provider_store::MultipartId> {
+    async fn create(&self, payload_bytes: u64) -> Result<AbortUploadOnDrop> {
         let mut retries: u32 = 0;
         loop {
             let err = match self.multipart.create_multipart(self.path).await {
-                Ok(upload_id) => return Ok(upload_id),
+                Ok(upload_id) => {
+                    return Ok(AbortUploadOnDrop::new(
+                        Arc::clone(&self.multipart),
+                        self.path.clone(),
+                        upload_id,
+                    ));
+                }
                 Err(err) => err,
             };
             if !provider_transport_retryable(&err) {
                 return Err(map_provider_error(self.key, err));
             }
-            let Some(backoff) = self.store.next_write_backoff(
+            let Some(backoff) = next_retry_backoff(
+                &self.store.transport_retry,
                 self.key,
                 "create_multipart",
                 payload_bytes,
@@ -640,7 +610,8 @@ impl MultipartWrite<'_> {
             if !provider_transport_retryable(&err) {
                 return Err(map_provider_error(self.key, err));
             }
-            let Some(backoff) = self.store.next_write_backoff(
+            let Some(backoff) = next_retry_backoff(
+                &self.store.transport_retry,
                 self.key,
                 "put_part",
                 payload_bytes,
@@ -859,9 +830,7 @@ impl ObjectStore for ProviderObjectStore {
             && size_bytes >= self.multipart_geometry.threshold_bytes
         {
             if let Some(multipart) = self.multipart.clone() {
-                return self
-                    .put_large_multipart(multipart.as_ref(), key, &path, bytes)
-                    .await;
+                return self.put_large_multipart(multipart, key, &path, bytes).await;
             }
         }
         // Raw flat writes are deliberately one attempt. In particular, a
@@ -924,26 +893,24 @@ impl ObjectStore for ProviderObjectStore {
 
         let upload = MultipartWrite {
             store: self,
-            multipart: multipart.as_ref(),
+            multipart,
             key,
             path: &path,
         };
-        let upload_id = upload.create(0).await?;
-        let mut abort_on_drop = AbortUploadOnDrop {
-            multipart: Some(Arc::clone(&multipart)),
-            path: path.clone(),
-            upload_id: upload_id.clone(),
-        };
+        let mut abort_on_drop = upload.create(0).await?;
         let result = upload
-            .upload_stream_and_complete(&upload_id, head, reader, &mode)
+            .upload_stream_and_complete(abort_on_drop.upload_id(), head, reader, &mode)
             .await;
-        abort_on_drop.disarm();
         match result {
-            Ok(size_bytes) => Ok(size_bytes),
+            Ok(size_bytes) => {
+                abort_on_drop.disarm();
+                Ok(size_bytes)
+            }
             Err(err) => {
                 // Best effort, and harmless when the failure raced a landed
                 // completion: the upload id no longer exists then.
-                upload.abort(&upload_id).await;
+                upload.abort(abort_on_drop.upload_id()).await;
+                abort_on_drop.disarm();
                 Err(err)
             }
         }
@@ -966,9 +933,15 @@ impl ObjectStore for ProviderObjectStore {
             if !provider_transport_retryable(&err) {
                 return Err(map_provider_error(key, err));
             }
-            let Some(backoff) =
-                self.next_write_backoff(key, "delete", 0, &mut retries, Some(&deadline), &err)
-            else {
+            let Some(backoff) = next_retry_backoff(
+                &self.transport_retry,
+                key,
+                "delete",
+                0,
+                &mut retries,
+                Some(&deadline),
+                &err,
+            ) else {
                 return Err(map_provider_error(key, err));
             };
             transport_retry_pause(backoff).await;
@@ -1188,6 +1161,7 @@ mod tests {
     use crate::metrics::{
         InstrumentedObjectStore, ObjectStoreOperation, VecObjectStoreMetricsRecorder,
     };
+    use crate::retry::transport_retry_backoff;
     use crate::test_support::SteppingTimer;
     use futures::StreamExt;
     use object_store::memory::InMemory;
@@ -1462,8 +1436,9 @@ mod tests {
 
     use provider_store::{GetResult, ListResult, MultipartUpload, PutMultipartOptions};
     use std::collections::{BTreeMap, HashMap, VecDeque};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use tokio::sync::Notify;
 
     #[derive(Debug)]
     enum WriteScript {
@@ -1503,6 +1478,9 @@ mod tests {
         part_attempts: Mutex<HashMap<usize, usize>>,
         multipart_completes: AtomicUsize,
         multipart_aborts: AtomicUsize,
+        block_part_uploads: AtomicBool,
+        part_started: Notify,
+        multipart_aborted: Notify,
         next_upload_id: AtomicUsize,
         multipart_uploads: Mutex<HashMap<String, BTreeMap<usize, Bytes>>>,
     }
@@ -1700,6 +1678,10 @@ mod tests {
             part_idx: usize,
             data: PutPayload,
         ) -> provider_store::Result<PartId> {
+            if self.block_part_uploads.load(Ordering::SeqCst) {
+                self.part_started.notify_one();
+                return std::future::pending().await;
+            }
             *self
                 .part_attempts
                 .lock()
@@ -1771,6 +1753,7 @@ mod tests {
                 .lock()
                 .expect("uploads")
                 .remove(id.as_str());
+            self.multipart_aborted.notify_one();
             Ok(())
         }
     }
@@ -2273,6 +2256,39 @@ mod tests {
         assert_eq!(
             store.get(MULTIPART_KEY, None).await.expect("get"),
             Some(Bytes::from(payload))
+        );
+    }
+
+    /// Cancellation has no error arm to run. The upload id must therefore
+    /// be guarded from the instant creation returns, including for the
+    /// buffered multipart path.
+    #[tokio::test]
+    async fn dropping_a_buffered_multipart_write_aborts_its_provider_upload() {
+        let flaky = Arc::new(FlakyStore::default());
+        flaky.block_part_uploads.store(true, Ordering::SeqCst);
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let part_started = flaky.part_started.notified();
+        let multipart_aborted = flaky.multipart_aborted.notified();
+
+        {
+            let write = store.put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)));
+            tokio::pin!(write);
+            let completed = tokio::select! {
+                () = part_started => None,
+                result = &mut write => Some(result),
+            };
+            assert!(
+                completed.is_none(),
+                "blocked multipart write completed unexpectedly: {completed:?}"
+            );
+        }
+
+        multipart_aborted.await;
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
+        assert!(
+            flaky.multipart_uploads.lock().expect("uploads").is_empty(),
+            "cancelling the write must leave no provider upload behind"
         );
     }
 

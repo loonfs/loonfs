@@ -163,6 +163,16 @@ pub enum ObjectStoreError {
         /// Sanitized provider explanation with credential material removed.
         message: String,
     },
+    /// Reports an object that exists but has no stored full-object checksum.
+    ///
+    /// This is distinct from [`Self::Unsupported`]: the store can perform
+    /// checksum readback, but this particular object carries no checksum it
+    /// can honestly return.
+    #[error("stored full-object checksum missing for `{object_key}`")]
+    StoredChecksumMissing {
+        /// Object whose provider metadata carried no stored checksum.
+        object_key: String,
+    },
     /// Not object-scoped: the store lacks a required capability.
     #[error("unsupported capability: {0}")]
     Unsupported(&'static str),
@@ -198,6 +208,7 @@ impl ObjectStoreError {
             | Self::InvalidRange { object_key }
             | Self::PreconditionFailed { object_key }
             | Self::PermissionDenied { object_key, .. }
+            | Self::StoredChecksumMissing { object_key }
             | Self::Transport { object_key, .. } => Some(object_key),
             Self::InvalidContentRef(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
         }
@@ -215,6 +226,7 @@ impl ObjectStoreError {
             Self::PermissionDenied { message, .. } => {
                 format!("permission denied: {message}")
             }
+            Self::StoredChecksumMissing { .. } => "stored full-object checksum missing".to_owned(),
             Self::Unsupported(capability) => format!("unsupported capability: {capability}"),
             Self::Configuration(message) => {
                 format!("invalid object store configuration: {message}")
@@ -260,11 +272,13 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// code that reaches for it passes its tests against S3 and fails in
     /// production.
     ///
-    /// Stores that cannot report a stored checksum return
-    /// [`ObjectStoreError::Unsupported`]. That is the same capability line
-    /// as presigned direct uploads: a deployment whose provider cannot show
-    /// the checksum back also cannot offer `direct_put`, because completion
-    /// would have nothing to verify against.
+    /// Stores that cannot perform checksum readback return
+    /// [`ObjectStoreError::Unsupported`]. A store that can ask but finds an
+    /// existing object with no stored checksum returns
+    /// [`ObjectStoreError::StoredChecksumMissing`]. That is the same
+    /// capability line as presigned direct uploads: a deployment whose
+    /// provider cannot show the checksum back also cannot offer `direct_put`,
+    /// because completion would have nothing to verify against.
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let _ = key;
         Err(ObjectStoreError::Unsupported(

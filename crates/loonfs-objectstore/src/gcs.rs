@@ -1,6 +1,6 @@
 //! Google Cloud Storage provider.
 
-use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use super::{ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::object_store::Result;
 use crate::presign::{stored_crc32c, GcsPresignerConfig, GcsV4Presigner, PresignedUrl};
 use crate::store_io_runtime::StoreIoRuntime;
@@ -212,10 +212,9 @@ impl ObjectStore for GcpGcsStore {
 
         let headers = response.headers();
         let storage_checksum = stored_crc32c_from_headers(headers).ok_or_else(|| {
-            ObjectStoreError::transport(
-                key,
-                "provider reported no crc32c for this object".to_owned(),
-            )
+            ObjectStoreError::StoredChecksumMissing {
+                object_key: key.to_owned(),
+            }
         })?;
         let size_bytes = headers
             .get(http::header::CONTENT_LENGTH)
@@ -256,6 +255,21 @@ impl ObjectStore for GcpGcsStore {
         ))
     }
 
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        self.inner.validate_key(key)?;
+        if matches!(mode, PutMode::CompareAndSwap { .. }) {
+            // The public GCS compare token is an object generation, while
+            // `ProviderObjectStore` can only compare the raw e-tag returned
+            // by its provider HEAD before multipart completion. Forwarding
+            // streamed CAS would therefore enforce a different condition
+            // from `head`; reject it instead of claiming false CAS safety.
+            return Err(ObjectStoreError::Unsupported(
+                "streamed compare-and-swap with GCS generation tokens",
+            ));
+        }
+        self.inner.put_streamed(key, body, mode).await
+    }
+
     async fn delete(&self, key: &str) -> Result<()> {
         self.inner.delete(key).await
     }
@@ -284,8 +298,9 @@ fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<StorageChecks
 mod tests {
     use super::{stored_crc32c_from_headers, GcpGcsStore, GcpGcsStoreConfig};
     use crate::test_support::gcs_fixture_service_account_key_file;
-    use crate::{ObjectStore, ObjectStoreError};
+    use crate::{ObjectStore, ObjectStoreError, PutMode};
     use bytes::Bytes;
+    use futures::StreamExt;
 
     #[tokio::test]
     async fn invalid_keys_are_rejected_before_generation_tokens() {
@@ -303,6 +318,31 @@ mod tests {
                 .await,
             Err(ObjectStoreError::InvalidKey { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn streamed_compare_and_swap_rejects_the_mismatched_token_semantics() {
+        let service_account_key_path = gcs_fixture_service_account_key_file("gcs-streamed-cas");
+        let store = GcpGcsStore::new(GcpGcsStoreConfig {
+            bucket: "bucket".to_owned(),
+            service_account_key_path: service_account_key_path.display().to_string(),
+            key_prefix: None,
+        })
+        .expect("construct gcs store");
+        let body = futures::stream::iter([Ok(Bytes::from_static(b"payload"))]).boxed();
+
+        let error = store
+            .put_streamed(
+                "namespaces/demo/wal/head.json",
+                body,
+                PutMode::CompareAndSwap {
+                    expected_etag: "123".to_owned(),
+                },
+            )
+            .await
+            .expect_err("streamed GCS CAS must not compare an e-tag to a generation");
+
+        assert!(matches!(error, ObjectStoreError::Unsupported(_)));
     }
 
     #[test]
