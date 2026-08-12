@@ -11,11 +11,12 @@
 //! manifests.
 
 use super::load::load_namespace_manifest_envelope;
+use super::ManifestLoadError;
 use crate::control_object::{
     core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
     ControlObjectLoadError, LoadedControl,
 };
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::read_head_object;
 use bytes::Bytes;
@@ -202,6 +203,12 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     )))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckpointBasisVerification {
+    Verified,
+    Invalid,
+}
+
 /// Checks that a record's basis is still intact: the retention floor has
 /// not passed it, and the basis manifest still loads with the expected
 /// checksum.
@@ -212,7 +219,7 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
 pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
-) -> Result<bool> {
+) -> Result<CheckpointBasisVerification> {
     let head = read_head_object(store, &record.namespace_id)
         .await
         .map_err(CoreError::load_head)?
@@ -221,8 +228,9 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::load_head)?;
     if floor_seq > record.manifest_head_seq {
-        return Ok(false);
+        return Ok(CheckpointBasisVerification::Invalid);
     }
+    // House rule: Err is not converted into absence or false unless the name says so.
     let manifest = match load_namespace_manifest_envelope(
         store,
         &record.namespace_id,
@@ -231,9 +239,28 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     .await
     {
         Ok(manifest) => manifest,
-        Err(_) => return Ok(false),
+        Err(ManifestLoadError::MissingManifest { .. }) => {
+            return Ok(CheckpointBasisVerification::Invalid)
+        }
+        Err(error) => {
+            return Err(CoreError::MetadataProjection(
+                MetadataProjectionLoadError::ManifestLoad(error),
+            ))
+        }
     };
-    Ok(manifest.payload_checksum == record.manifest_payload_checksum)
+    if manifest.payload_checksum != record.manifest_payload_checksum {
+        // Both durable objects loaded successfully, so their disagreement is
+        // corruption rather than a retention race that a new checkpoint can fix.
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "checkpoint `{}` for namespace `{}` records manifest `{}` payload checksum `{}`, but the manifest carries `{}`",
+            record.checkpoint_id,
+            record.namespace_id,
+            record.manifest_object_id,
+            record.manifest_payload_checksum,
+            manifest.payload_checksum,
+        )));
+    }
+    Ok(CheckpointBasisVerification::Verified)
 }
 
 #[cfg(test)]

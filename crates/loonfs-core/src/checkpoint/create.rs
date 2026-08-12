@@ -2,7 +2,10 @@
 //! then pin the resulting manifest under one durable checkpoint record.
 
 use super::flush::{try_flush_wal, TryFlushWal};
-use super::record::{release_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record};
+use super::record::{
+    release_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record,
+    CheckpointBasisVerification,
+};
 #[cfg(test)]
 use super::row::manifest_rows_for_family;
 #[cfg(test)]
@@ -81,10 +84,29 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         let verify_started_ms = timer.monotonic_now_ms();
         write_checkpoint_record(store, &record).await?;
 
-        let verified = verify_checkpoint_basis(store, &record).await?;
+        let verification = match verify_checkpoint_basis(store, &record).await {
+            Ok(verification) => verification,
+            Err(error) => {
+                // Cleanup is best effort on an error and must not replace its
+                // original classification.
+                if let Err(cleanup_error) =
+                    release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms)
+                        .await
+                {
+                    tracing::warn!(
+                        namespace_id = %namespace_id,
+                        checkpoint_id = %checkpoint_id,
+                        original_error = %error,
+                        cleanup_error = %cleanup_error,
+                        "failed to release a checkpoint record after basis verification failed"
+                    );
+                }
+                return Err(error);
+            }
+        };
         let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
             <= CHECKPOINT_VERIFY_BUDGET_MS;
-        if verified && within_budget {
+        if verification == CheckpointBasisVerification::Verified && within_budget {
             return Ok(CreateCheckpointResponse {
                 namespace_id: namespace_id.clone(),
                 checkpoint_id,
