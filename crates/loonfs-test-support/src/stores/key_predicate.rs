@@ -54,12 +54,12 @@ impl KeyPredicate {
         Self::family(DurableObjectFamily::MetadataTable)
     }
 
-    /// Selects the WAL head for `namespace_id`.
+    /// Selects the WAL head key for the given namespace.
     pub fn wal_head(namespace_id: &NamespaceId) -> Self {
         Self::exact(wal_head(namespace_id))
     }
 
-    /// Selects the metadata root for `namespace_id`.
+    /// Selects the metadata root key for the given namespace.
     pub fn metadata_root(namespace_id: &NamespaceId) -> Self {
         Self::exact(metadata_root(namespace_id))
     }

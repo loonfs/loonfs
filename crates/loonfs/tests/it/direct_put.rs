@@ -582,10 +582,10 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         puts.2.expect("put c");
         puts.3.expect("put d");
 
-        // The already-proven candidates reach publisher admission together
-        // and publish as one batch: one WAL segment, one head CAS. The slow
-        // content-ref helper validates before admission and is intentionally
-        // outside this batching seam.
+        // The four prepared candidates are admitted together and published
+        // in one batch, producing one WAL segment and one head CAS. The slower
+        // content-reference helper validates before admission, so it is not
+        // part of this batching test.
         let segments_after = wal_segment_count(&object_store, &namespace_id).await;
         assert_eq!(segments_after - segments_before, 1);
 

@@ -248,10 +248,8 @@ async fn put_file_content_ref_validates_content_before_publication() {
     let content_ref = harness.stage_content(bytes).await;
     harness.recording.reset();
 
-    // These global counts show the explicitly slow helper still validates
-    // exactly once, but not where. The plain-candidate seam below proves the
-    // publisher itself performs no content-key I/O, locating this read before
-    // publication.
+    // The convenience method should validate the referenced content exactly
+    // once before publishing it.
     harness
         .writer
         .put_file_content_ref(

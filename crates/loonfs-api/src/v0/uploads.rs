@@ -89,7 +89,7 @@ pub enum UploadMode {
 /// combinations are rejected during decoding. The `mode` field is required.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// The wire discriminator is frozen as `mode` for this deliberate exception.
+// Keep `mode` as the discriminator for wire-format compatibility.
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BeginUploadRequest {
     // Empty braces make serde reject fields from another transport. A unit
@@ -257,7 +257,7 @@ pub struct ValidatedContentToken {
 /// response fields are accepted for forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// The wire discriminator is frozen as `mode` for this deliberate exception.
+// Keep `mode` as the discriminator for wire-format compatibility.
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum BeginUploadResponse {
     /// The service will receive the bytes and write the content object.
@@ -339,23 +339,19 @@ pub struct UploadContentResponse {
     pub content_ref: ContentRef,
 }
 
-/// Request to complete an upload, tagged by which of its two shapes it is.
+/// Request to complete an upload.
 ///
-/// The shapes correspond to who knew the content identity first. A
-/// service-proxied or `direct_put` session was handed its reference before
-/// any byte moved, so its completion names that reference back. A
-/// `direct_multipart` session was never told one — there was nothing to
-/// tell — so its completion carries the claim and its parts instead, and
-/// the server builds the reference from the identity it has held all along.
+/// A service-proxied or `direct_put` session receives its content reference
+/// before the upload and returns that reference at completion. A
+/// `direct_multipart` session instead provides the completed parts and a
+/// claim describing the assembled object.
 ///
-/// The two share no fields, so a completion carrying one shape's fields
-/// under the other's tag does not decode. What decoding cannot settle is
-/// whether the shape matches the *session*, because only the server knows
-/// which transport the session was opened with; that one check is made
-/// against the durable record.
+/// The variants share no fields, so fields from one completion type are
+/// rejected when used with the other type. The server also checks that the
+/// completion type matches the transport stored in the upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// The wire discriminator is frozen as `completion` for this deliberate exception.
+// Keep `completion` as the discriminator for wire-format compatibility.
 #[serde(tag = "completion", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompleteUploadRequest {
     /// Completes a session the server named a content object for: the
@@ -414,13 +410,13 @@ pub struct CompleteUploadResponse {
 
 /// Observed state of an upload session.
 ///
-/// A session is `open`, then `completed` or `aborted`, and both of those are
-/// final. Reading a completed session mints a fresh receipt for content that
-/// is already durable, which is why losing a commit response never costs a
-/// retransfer.
+/// A session starts as `Open` and ends as either `Completed` or `Aborted`.
+/// Both final states are permanent. Reading a completed session issues a new
+/// receipt for the durable content, so a lost commit response does not require
+/// the content to be uploaded again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// The wire discriminator is frozen as `state` for this deliberate exception.
+// Keep `state` as the discriminator for wire-format compatibility.
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum UploadSessionStatus {
     /// Accepting content until its lease passes.

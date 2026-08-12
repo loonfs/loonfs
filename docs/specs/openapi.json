@@ -3572,7 +3572,7 @@
             }
           }
         ],
-        "description": "Request to complete an upload, tagged by which of its two shapes it is.\n\nThe shapes correspond to who knew the content identity first. A\nservice-proxied or `direct_put` session was handed its reference before\nany byte moved, so its completion names that reference back. A\n`direct_multipart` session was never told one — there was nothing to\ntell — so its completion carries the claim and its parts instead, and\nthe server builds the reference from the identity it has held all along.\n\nThe two share no fields, so a completion carrying one shape's fields\nunder the other's tag does not decode. What decoding cannot settle is\nwhether the shape matches the *session*, because only the server knows\nwhich transport the session was opened with; that one check is made\nagainst the durable record."
+        "description": "Request to complete an upload.\n\nA service-proxied or `direct_put` session receives its content reference\nbefore the upload and returns that reference at completion. A\n`direct_multipart` session instead provides the completed parts and a\nclaim describing the assembled object.\n\nThe variants share no fields, so fields from one completion type are\nrejected when used with the other type. The server also checks that the\ncompletion type matches the transport stored in the upload session."
       },
       "CompleteUploadResponse": {
         "type": "object",
@@ -5025,7 +5025,7 @@
             }
           }
         ],
-        "description": "Where a namespace's grep index is in its lifecycle.\n\nThe phases carry different facts and never share a field: a backfill\nreports the sequence it is walking toward and how far the walk got, and\nonly a steady index reports a watermark it has actually built through.\nA reader that wants \"is this searchable, and through what?\" asks the\n`steady` phase and nothing else."
+        "description": "Where a namespace's grep index is in its lifecycle.\n\nEach phase contains only the fields valid for that phase. `Backfilling`\nreports its target and current position. `Steady` reports how far the\nindex has been built. Clients should treat a namespace as searchable only\nwhen the index is in the `Steady` phase."
       },
       "GrepIndexStatusResponse": {
         "type": "object",
@@ -6119,7 +6119,7 @@
             }
           }
         ],
-        "description": "Observed state of an upload session.\n\nA session is `open`, then `completed` or `aborted`, and both of those are\nfinal. Reading a completed session mints a fresh receipt for content that\nis already durable, which is why losing a commit response never costs a\nretransfer."
+        "description": "Observed state of an upload session.\n\nA session starts as `Open` and ends as either `Completed` or `Aborted`.\nBoth final states are permanent. Reading a completed session issues a new\nreceipt for the durable content, so a lost commit response does not require\nthe content to be uploaded again."
       },
       "UploadStatusResponse": {
         "type": "object",

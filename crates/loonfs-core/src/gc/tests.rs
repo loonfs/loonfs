@@ -2100,8 +2100,8 @@ fn reason_total(report: &GcResponse) -> u64 {
         .sum()
 }
 
-/// A namespace with one staged segment under `metadata_compaction_id`, aged
-/// so the pass has a reference anchor, and the lease key that job would hold.
+/// Creates a namespace with one aged staged segment and returns the keys for
+/// the segment and its compaction lease.
 async fn namespace_with_staged_output(
     temp_dir: &tempfile::TempDir,
     namespace_id: &NamespaceId,
@@ -2135,8 +2135,7 @@ async fn namespace_with_staged_output(
     (store, staged_key, lease_key)
 }
 
-/// Writes the lease a job holding `metadata_compaction_id` would have written at
-/// `heartbeat_at_ms`, in the state a running job leaves it in.
+/// Writes an active compaction lease with the given heartbeat time.
 async fn write_compaction_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -2153,7 +2152,7 @@ async fn write_compaction_lease<S: ObjectStore + ?Sized>(
     .await;
 }
 
-/// The same, in whichever lifecycle state the test needs.
+/// Writes a compaction lease in the lifecycle state required by the test.
 async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
