@@ -197,7 +197,7 @@ fn read_options_project_grouped_attributes_or_none() {
         .expect("stat");
     assert!(default_stat.attributes.is_some());
 
-    let opted_out = block_on(fs.reader.stat_path_with_options(
+    let opted_out = block_on(fs.reader.stat_path(
         &namespace_id,
         "/docs/report.txt",
         StatPathOptions {
@@ -214,7 +214,7 @@ fn read_options_project_grouped_attributes_or_none() {
         assert!(entry.attributes.is_none());
     }
 
-    let projected = block_on(fs.reader.list_path_entries_page_with_options(
+    let projected = block_on(fs.reader.list_path_entries_page(
         &namespace_id,
         "/docs",
         PageRequest {

@@ -138,7 +138,7 @@ pub(super) async fn list_path_entries(
     }
     let listing = state
         .reader
-        .list_path_entries_page_with_options(
+        .list_path_entries_page(
             &namespace_id,
             &path,
             PageRequest {
@@ -190,7 +190,7 @@ pub(super) async fn stat_path(
     }
     let entry = state
         .reader
-        .stat_path_with_options(&namespace_id, &path, options)
+        .stat_path(&namespace_id, &path, options)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entry))

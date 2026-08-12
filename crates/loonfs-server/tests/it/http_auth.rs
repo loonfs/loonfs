@@ -378,7 +378,10 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     assert_eq!(
         harness
             .client
-            .stat_path(&NamespacePath::parse("demo", "/first-copy.txt").expect("path"))
+            .stat_path(
+                &NamespacePath::parse("demo", "/first-copy.txt").expect("path"),
+                &Default::default(),
+            )
             .await
             .expect("repeated ref file")
             .content_ref()
@@ -421,7 +424,10 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
     assert_eq!(response.committed_seq, ChangeSeq(1));
     harness
         .client
-        .stat_path(&NamespacePath::parse("demo", "/docs").expect("path"))
+        .stat_path(
+            &NamespacePath::parse("demo", "/docs").expect("path"),
+            &Default::default(),
+        )
         .await
         .expect("mkdir committed");
 

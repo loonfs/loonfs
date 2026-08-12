@@ -98,7 +98,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
     let first_page = harness
         .client
-        .list_path_entries_page(&docs, Some(2), None)
+        .list_path_entries_page(&docs, Some(2), None, &Default::default())
         .await
         .expect("first directory page");
     assert_eq!(entry_names(&first_page), vec!["a.txt", "b.txt"]);
@@ -106,7 +106,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
     let second_page = harness
         .client
-        .list_path_entries_page(&docs, Some(2), Some(&cursor))
+        .list_path_entries_page(&docs, Some(2), Some(&cursor), &Default::default())
         .await
         .expect("second directory page");
     assert_eq!(entry_names(&second_page), vec!["c.txt"]);
@@ -114,7 +114,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
     let full_listing = harness
         .client
-        .list_path_entries_all(&docs)
+        .list_path_entries_all(&docs, &Default::default())
         .await
         .expect("full directory list");
     assert_eq!(entry_names(&full_listing), vec!["a.txt", "b.txt", "c.txt"]);
@@ -122,7 +122,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
     let mismatch = harness
         .client
-        .list_path_entries_page(&other, Some(2), Some(&cursor))
+        .list_path_entries_page(&other, Some(2), Some(&cursor), &Default::default())
         .await
         .expect_err("directory cursor must match listed path");
     match mismatch {
@@ -193,7 +193,7 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
 
     let listing = harness
         .client
-        .list_path_entries_all(&docs)
+        .list_path_entries_all(&docs, &Default::default())
         .await
         .expect("directory list");
     assert_eq!(entry_names(&listing), vec!["a.txt", "B.txt", "c.txt"]);
@@ -233,7 +233,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .expect("create file");
     let created = harness
         .client
-        .stat_path(&target)
+        .stat_path(&target, &Default::default())
         .await
         .expect("stat created file");
     let inode_id = created.inode_id;
@@ -273,7 +273,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let entry = harness
         .client
-        .stat_path(&target)
+        .stat_path(&target, &Default::default())
         .await
         .expect("stat restored file");
     assert_eq!(entry.inode_id, inode_id);
@@ -371,7 +371,11 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         .await
         .expect("replace file");
 
-    let entry = harness.client.stat_path(&target).await.expect("stat file");
+    let entry = harness
+        .client
+        .stat_path(&target, &Default::default())
+        .await
+        .expect("stat file");
     let revisions = harness
         .client
         .list_file_revisions_page(&target, None, None)

@@ -28,9 +28,9 @@ use loonfs_api::{
     UploadId,
 };
 use loonfs_client::{
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, DirectDownloadStream, MoveOptions,
-    NamespacePath, PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, DirectDownloadStream,
+    ListPathEntriesOptions, MoveOptions, NamespacePath, PutFileOptions, RestoreRevisionOptions,
+    StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
@@ -316,7 +316,11 @@ impl ResolvedTarget {
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.list_path_entries_all(spec).await,
-            Self::Remote(target) => Ok(target.client.list_path_entries_all(spec).await?.entries),
+            Self::Remote(target) => Ok(target
+                .client
+                .list_path_entries_all(spec, &ListPathEntriesOptions::default())
+                .await?
+                .entries),
         }
     }
 
@@ -336,7 +340,7 @@ impl ResolvedTarget {
             }
             Self::Remote(target) => Ok(target
                 .client
-                .list_path_entries_page(spec, limit, cursor)
+                .list_path_entries_page(spec, limit, cursor, &ListPathEntriesOptions::default())
                 .await?),
         }
     }
@@ -346,7 +350,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
     ) -> Result<AuthoritativePathEntry, BackendError> {
-        self.stat_path_with_options(spec, &StatPathOptions::default())
+        self.stat_path_projected(spec, &StatPathOptions::default())
             .await
     }
 
@@ -357,7 +361,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
     ) -> Result<AuthoritativePathEntry, BackendError> {
-        self.stat_path_with_options(
+        self.stat_path_projected(
             spec,
             &StatPathOptions {
                 include_attributes: false,
@@ -366,14 +370,14 @@ impl ResolvedTarget {
         .await
     }
 
-    async fn stat_path_with_options(
+    async fn stat_path_projected(
         &self,
         spec: &NamespacePath,
         options: &StatPathOptions,
     ) -> Result<AuthoritativePathEntry, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.stat_path(spec, options).await,
-            Self::Remote(target) => Ok(target.client.stat_path_with_options(spec, options).await?),
+            Self::Remote(target) => Ok(target.client.stat_path(spec, options).await?),
         }
     }
 

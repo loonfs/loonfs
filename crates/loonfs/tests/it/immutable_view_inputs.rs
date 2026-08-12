@@ -75,7 +75,7 @@ async fn warm_reader_stops_fetching_immutable_view_inputs() {
         .await
         .expect("build reader");
     reader
-        .stat_path(&namespace_id, "/docs/file-0.txt")
+        .stat_path(&namespace_id, "/docs/file-0.txt", Default::default())
         .await
         .expect("first stat");
     let warmup = immutable_input_gets(&recording.take_get_keys());
@@ -85,7 +85,7 @@ async fn warm_reader_stops_fetching_immutable_view_inputs() {
     );
 
     reader
-        .stat_path(&namespace_id, "/docs/file-1.txt")
+        .stat_path(&namespace_id, "/docs/file-1.txt", Default::default())
         .await
         .expect("second stat");
     let repeats = immutable_input_gets(&recording.take_get_keys());

@@ -394,7 +394,8 @@ async fn run_admin_run(
     let jobs = selected_jobs(&args.jobs);
     let fail_here = |error| fail_for(kind, &resolved.profile_name, &mode, error);
 
-    let (keys, steps, budget_exhausted) = if args.drain {
+    let job_names: Vec<String> = jobs.iter().map(|job| job.as_str().to_owned()).collect();
+    let data = if args.drain {
         let budget = StepBudget {
             max_steps: args.max_steps,
             deadline_ms: args.deadline_ms,
@@ -404,35 +405,30 @@ async fn run_admin_run(
             .drain_maintenance(&namespaces, &jobs, budget)
             .await
             .map_err(fail_here)?;
-        (
-            progress.keys.iter().map(key_report).collect(),
-            progress.steps,
-            progress.budget_exhausted(),
-        )
+        CommandData::MaintenanceDrained {
+            namespaces,
+            jobs: job_names,
+            keys: progress.keys.iter().map(key_report).collect(),
+            steps: progress.steps,
+            budget_exhausted: progress.budget_exhausted(),
+        }
     } else {
         resolved
             .target
             .host_maintenance(&namespaces, &jobs, args.poll_interval_ms, shutdown_signal())
             .await
             .map_err(fail_here)?;
-        // A hosted run reports no per-key outcome: the runner ran the steps,
-        // and where each namespace got to is durable state to read, not a
-        // tally this process kept.
-        (Vec::new(), 0, false)
+        CommandData::MaintenanceHosted {
+            namespaces,
+            jobs: job_names,
+        }
     };
 
     Ok(CommandOutput {
         kind,
         profile: Some(resolved.profile_name),
         mode: Some(mode),
-        data: CommandData::MaintenanceHosted {
-            namespaces,
-            jobs: jobs.iter().map(|job| job.as_str().to_owned()).collect(),
-            drained: args.drain,
-            keys,
-            steps,
-            budget_exhausted,
-        },
+        data,
     })
 }
 

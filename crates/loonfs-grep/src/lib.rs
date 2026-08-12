@@ -82,10 +82,7 @@ pub use error::GrepError as Error;
 pub use error::{GrepError, Result};
 pub use maintenance::{GrepGcJob, GrepMaintenanceJob, GREP_GC_JOB, GREP_INDEX_JOB};
 pub use reads::NamespaceReads;
-pub use service::{
-    GrepService, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES,
-    MAX_GREP_TAIL_FILES,
-};
+pub use service::{GrepService, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES};
 pub use worker::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepBuildReport, GrepDisableOutcome, GrepEnableOutcome,
     GrepGcReport, GrepGcRequest, GrepReorganizeOutcome, GrepReorganizeReport, GrepWorker,

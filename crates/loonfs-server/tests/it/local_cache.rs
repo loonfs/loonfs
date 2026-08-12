@@ -100,7 +100,7 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
 
     let warmed = first
         .client
-        .list_path_entries_all(&listing)
+        .list_path_entries_all(&listing, &Default::default())
         .await
         .expect("warm the cache");
     assert_eq!(warmed.entries.len(), 5);
@@ -125,7 +125,7 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     .await;
     let served = second
         .client
-        .list_path_entries_all(&listing)
+        .list_path_entries_all(&listing, &Default::default())
         .await
         .expect("list from the restarted server");
     assert_eq!(served.entries, warmed.entries);

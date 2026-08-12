@@ -10,10 +10,11 @@ use crate::render::write_stderr_warning;
 use loonfs::{
     ByteStream, ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    FileContentStream, FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceHandle,
-    MaintenanceJob, MaintenanceJobId, MaintenancePlan, MaintenanceStepConclusion, MoveOptions,
-    PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore,
-    StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
+    FileContentStream, FsAdmin, FsReader, FsWriter, ListChangesOptions, ListPathEntriesOptions,
+    MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenancePlan,
+    MaintenanceStepConclusion, MoveOptions, PutFileOptions, ReadFileStreamOptions,
+    RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions, UndeleteOptions,
+    UpdateAttributesOptions,
 };
 use loonfs_api::{
     v0::{
@@ -216,7 +217,12 @@ impl EmbeddedBackend {
                 })?,
         };
         self.reader
-            .list_path_entries_page(spec.namespace(), spec.absolute_path().as_str(), request)
+            .list_path_entries_page(
+                spec.namespace(),
+                spec.absolute_path().as_str(),
+                request,
+                ListPathEntriesOptions::default(),
+            )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
@@ -227,7 +233,7 @@ impl EmbeddedBackend {
         options: &StatPathOptions,
     ) -> Result<AuthoritativePathEntry, BackendError> {
         self.reader
-            .stat_path_with_options(
+            .stat_path(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 options.clone(),

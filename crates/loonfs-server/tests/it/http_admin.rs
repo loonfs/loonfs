@@ -481,14 +481,14 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .await
         .expect("corrupt manifest");
 
-    match cold_client.stat_path(&target).await {
+    match cold_client.stat_path(&target, &Default::default()).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
         other => unreachable!("expected namespace_corrupt, got {other:?}"),
     }
     // The warm server keeps serving its pinned pair; the corruption is
     // surfaced by whoever actually consumes the manifest.
     client
-        .stat_path(&target)
+        .stat_path(&target, &Default::default())
         .await
         .expect("warm server reads from its pinned head-plus-manifest pair");
 

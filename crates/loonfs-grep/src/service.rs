@@ -24,16 +24,12 @@ use loonfs_api::wire::sst_blocks::{
 use loonfs_api::{
     decode_cursor, encode_cursor, AbsolutePath, AuthoritativePathEntry, ChangeSeq, ErrorCode,
     GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId,
-    RevisionNo,
+    PaginationPolicy, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-/// Matches returned per page when the request names no limit.
-pub const DEFAULT_GREP_PAGE_LIMIT: usize = 100;
-/// Largest per-page match limit a request may name.
-pub const MAX_GREP_PAGE_LIMIT: usize = 1000;
 /// Unindexed-tail revisions one query will scan exhaustively before
 /// failing with `index_lagging` (or skipping the tail under `allow_stale`).
 /// Advertised as the `query.grep.tail_budget_files` capability limit.
@@ -664,21 +660,10 @@ impl GrepService {
         store: &S,
     ) -> Result<GrepResponse> {
         let head_seq = reads.head_seq().await?;
-        let limit = match request.limit {
-            None => DEFAULT_GREP_PAGE_LIMIT,
-            Some(0) => {
-                return Err(
-                    CoreError::InvalidQuery("limit must be greater than zero".to_owned()).into(),
-                );
-            }
-            Some(limit) if limit as usize > MAX_GREP_PAGE_LIMIT => {
-                return Err(CoreError::InvalidQuery(format!(
-                    "limit {limit} exceeds the maximum of {MAX_GREP_PAGE_LIMIT}"
-                ))
-                .into());
-            }
-            Some(limit) => limit as usize,
-        };
+        let limit = PaginationPolicy::default()
+            .resolve_limit(request.limit)
+            .map_err(|error| CoreError::InvalidQuery(error.to_string()))?
+            .as_usize();
         let fingerprint = request.fingerprint();
         let resume = match &request.cursor {
             Some(cursor) => {
@@ -720,23 +705,10 @@ impl GrepService {
         // The scope filter resolves the requested prefix once, to the path
         // the namespace spells it as; every candidate is then tested against
         // that spelling, so name-policy folding and path normalization apply
-        // exactly as they do to every other read. A prefix that resolves to
-        // nothing has no matches.
+        // exactly as they do to every other read. A missing prefix is the
+        // same `path_not_found` failure as every other scoped read.
         let scope = match &request.path_prefix {
-            Some(prefix) => match reads.resolve_path(prefix).await {
-                Ok(entry) => Some(entry),
-                Err(error) if error.code() == ErrorCode::PathNotFound => {
-                    return Ok(GrepResponse {
-                        namespace_id: reads.namespace_id().clone(),
-                        head_seq,
-                        built_through_seq: snapshot.built_through_seq,
-                        tail_scanned: true,
-                        matches: Vec::new(),
-                        next_cursor: None,
-                    });
-                }
-                Err(error) => return Err(error),
-            },
+            Some(prefix) => Some(reads.resolve_path(prefix).await?),
             None => None,
         };
 

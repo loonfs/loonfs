@@ -20,17 +20,6 @@ use loonfs_api::{
 
 impl FsReader {
     /// Resolves an absolute path to its authoritative entry at the current
-    /// head, projecting the inode's attributes.
-    pub async fn stat_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<AuthoritativePathEntry> {
-        self.stat_path_with_options(namespace_id, absolute_path, StatPathOptions::default())
-            .await
-    }
-
-    /// Resolves an absolute path to its authoritative entry at the current
     /// head, projecting what `options` asks for.
     #[tracing::instrument(
         level = "debug",
@@ -44,7 +33,7 @@ impl FsReader {
             cache_path = tracing::field::Empty,
         )
     )]
-    pub async fn stat_path_with_options(
+    pub async fn stat_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -109,29 +98,12 @@ impl FsReader {
         Ok(envelope)
     }
 
-    /// Lists one page of a directory together with the head the page was read
-    /// from. Entries carry no attributes.
-    pub async fn list_path_entries_page(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        request: PageRequest<DirectoryPageCursor>,
-    ) -> Result<ListPathEntriesResponse> {
-        self.list_path_entries_page_with_options(
-            namespace_id,
-            absolute_path,
-            request,
-            ListPathEntriesOptions::default(),
-        )
-        .await
-    }
-
     /// Lists one page of a directory, projecting what `options` asks for.
     ///
     /// Asking for attributes costs one lookup per entry and adds an unbounded
     /// number of bytes to the page, so a caller that turns the projection on
     /// should also size its page for the maps it expects back.
-    pub async fn list_path_entries_page_with_options(
+    pub async fn list_path_entries_page(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,

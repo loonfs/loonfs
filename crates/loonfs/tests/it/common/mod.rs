@@ -138,7 +138,9 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativePathEntry> {
-        self.reader.stat_path(namespace_id, absolute_path).await
+        self.reader
+            .stat_path(namespace_id, absolute_path, Default::default())
+            .await
     }
 
     pub(crate) async fn list_path(
@@ -170,7 +172,7 @@ impl TestRuntime {
         request: PageRequest<DirectoryPageCursor>,
     ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
         self.reader
-            .list_path_entries_page(namespace_id, absolute_path, request)
+            .list_path_entries_page(namespace_id, absolute_path, request, Default::default())
             .await
     }
 
@@ -380,7 +382,10 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativePathEntry> {
-        block_on(self.reader.stat_path(namespace_id, absolute_path))
+        block_on(
+            self.reader
+                .stat_path(namespace_id, absolute_path, Default::default()),
+        )
     }
 
     fn list_path_blocking(

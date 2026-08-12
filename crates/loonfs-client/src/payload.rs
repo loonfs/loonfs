@@ -58,19 +58,6 @@ impl PayloadSource {
         }
     }
 
-    /// A source whose complete length the caller already knows.
-    ///
-    /// The length is used to choose a transport and to frame the request; a
-    /// source that delivers a different number of bytes is still uploaded
-    /// faithfully, and it is the bytes that decide what is stored.
-    pub fn sized_stream(stream: PayloadStream, size_bytes: u64) -> Self {
-        Self {
-            stream,
-            size_bytes: Some(size_bytes),
-            rewind: None,
-        }
-    }
-
     /// A source of unknown length reading from anything asynchronous —
     /// standard input, a socket, a decompressor.
     pub fn reader<R>(reader: R) -> Self

@@ -13,7 +13,7 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     CapabilityDocument, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, ErrorCode, ForkNamespaceRequest, ListCheckpointsResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, ReleaseCheckpointResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, PaginationPolicy, ReleaseCheckpointResponse,
     FEATURE_ADMIN_GREP_INDEX, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
@@ -135,17 +135,18 @@ pub(super) async fn capabilities(
         state.config.grep.mode.maintains_index(),
     );
     if state.config.grep.mode.serves_grep() {
+        let pagination = PaginationPolicy::default();
         capabilities.profiles.push(PROFILE_QUERY_V0.to_owned());
         capabilities
             .features
             .insert(FEATURE_QUERY_GREP.to_owned(), true);
         capabilities.limits.insert(
             LIMIT_QUERY_GREP_DEFAULT.to_owned(),
-            loonfs_grep::DEFAULT_GREP_PAGE_LIMIT as u64,
+            u64::from(pagination.default_limit().get()),
         );
         capabilities.limits.insert(
             LIMIT_QUERY_GREP_MAX.to_owned(),
-            loonfs_grep::MAX_GREP_PAGE_LIMIT as u64,
+            u64::from(pagination.max_limit().get()),
         );
         capabilities.limits.insert(
             LIMIT_QUERY_GREP_SCAN_BUDGET_FILES.to_owned(),

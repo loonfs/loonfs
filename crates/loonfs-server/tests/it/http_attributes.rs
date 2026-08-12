@@ -218,7 +218,7 @@ async fn the_client_round_trips_the_read_options() {
     // this checks: each surface, once, against its own default.
     let stat = harness
         .client
-        .stat_path(&path("/docs/report.txt"))
+        .stat_path(&path("/docs/report.txt"), &Default::default())
         .await
         .expect("stat");
     assert_eq!(
@@ -237,7 +237,7 @@ async fn the_client_round_trips_the_read_options() {
 
     let without = harness
         .client
-        .stat_path_with_options(
+        .stat_path(
             &path("/docs/report.txt"),
             &StatPathOptions {
                 include_attributes: false,
@@ -249,7 +249,7 @@ async fn the_client_round_trips_the_read_options() {
 
     let listing = harness
         .client
-        .list_path_entries_all(&path("/docs"))
+        .list_path_entries_all(&path("/docs"), &Default::default())
         .await
         .expect("list");
     assert!(listing
@@ -259,7 +259,7 @@ async fn the_client_round_trips_the_read_options() {
 
     let projected = harness
         .client
-        .list_path_entries_all_with_options(
+        .list_path_entries_all(
             &path("/docs"),
             &ListPathEntriesOptions {
                 include_attributes: true,

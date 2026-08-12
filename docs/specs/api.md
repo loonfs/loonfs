@@ -95,7 +95,7 @@ either way.
     "maintenance.gc.min_grace_window_ms": 1230000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
-    "query.grep.default_limit": 100,
+    "query.grep.default_limit": 1000,
     "query.grep.max_limit": 1000,
     "query.grep.scan_budget_files": 4096,
     "query.grep.tail_budget_files": 512
@@ -139,7 +139,7 @@ Registered limit keys:
 | `commit.max_message_bytes` | Largest accepted commit `message`, in bytes; a longer one answers `invalid_request` before planning. |
 | `maintenance.gc.min_grace_window_ms` | Smallest accepted `grace_window_ms` on a `gc` request; smaller values answer `invalid_request`. Derived from the publication budgets, not tuned. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
-| `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. Distinct from the pagination keys because a grep item costs a verified file read, not a row. |
+| `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. The query keys identify the operation's contract even though grep now shares the standard pagination values. |
 | `query.grep.scan_budget_files` | Files a plan-less `allow_scan` grep will scan before refusing with `query_unindexable`. |
 | `query.grep.tail_budget_files` | Unindexed-tail revisions one grep scans exhaustively before failing with `index_lagging`. |
 
@@ -280,6 +280,14 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it; core filesystem state remains available. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
+
+Automated retry is deliberately narrower than the shared HTTP status. Raw
+transport failures may be retried, and among registered error codes only
+`commit_queue_full`, `server_busy`, and `shutting_down` can clear without
+caller or operator action. `checkpoint_unavailable`, `maintenance_required`,
+and `index_lagging` remain 503 status groupings but require maintenance before
+an unchanged request can succeed; `commit_outcome_unknown` and
+`deadline_exceeded` require reconciliation before retrying a mutation.
 
 Precondition failures surface as `409` resource-state conflicts
 (`stale_revision`, `stale_head`, `commit_id_reuse_conflict`) rather than
@@ -2185,7 +2193,8 @@ postdates it are omitted entirely rather than mixed in. The `path_prefix`
 value is a complete absolute path, not a partial textual segment prefix. Its
 scope resolves to an inode under the namespace's name policy and filters by
 ancestry, so it requires the same canonical spelling and validation as every
-other path read. A missing data half answers `not_supported` with the
+other path read. A scope that does not exist answers `path_not_found`; an
+empty existing scope answers successfully with no matches. A missing data half answers `not_supported` with the
 `feature` field naming `query.grep`, the same key capability discovery
 advertises the serving half under.
 
