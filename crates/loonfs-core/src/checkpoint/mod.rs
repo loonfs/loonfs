@@ -50,8 +50,9 @@ pub(crate) mod tests;
 mod validate;
 
 pub use self::cache::{
-    MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
-    WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+    MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheObserver,
+    MetadataTableCacheStats, WalTailProjectionCache, WalTailProjectionCacheConfig,
+    WalTailProjectionCacheKey, WalTailProjectionCacheObserver, WalTailProjectionCacheStats,
     DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};

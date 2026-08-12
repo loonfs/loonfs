@@ -42,7 +42,7 @@ async fn scraping_metrics_without_a_token_is_unauthorized() {
 /// served, the object-store calls they made, and the runtime caches those
 /// reads warmed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_scrape_reports_requests_object_store_calls_and_cache_levels() {
+async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -96,7 +96,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_levels() {
         ) >= 1.0
     );
 
-    // The object-store bridge and the scrape-time cache gauges.
+    // The recorder includes both object-store and cache activity.
     assert!(
         series(
             &first,
@@ -109,8 +109,10 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_levels() {
             "loonfs_object_store_bytes_in_total{operation=\"put\"}"
         ) > 0.0
     );
-    assert!(first.contains_key("loonfs_cache_metadata_table_cache_hits"));
-    assert!(first.contains_key("loonfs_cache_latest_metadata_view_reads"));
+    assert!(first.contains_key("loonfs_metadata_table_cache_gets_total{result=\"hit\"}"));
+    assert!(first.contains_key("loonfs_runtime_cache_latest_metadata_view_reads_total"));
+    assert!(first.contains_key("loonfs_grep_block_cache_gets_total{result=\"hit\"}"));
+    assert!(first.contains_key("loonfs_wal_tail_projection_cache_retained_rows"));
     assert_eq!(
         series(&first, "loonfs_server_upload_permits_available"),
         8.0,

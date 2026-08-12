@@ -435,10 +435,9 @@ async fn serve_metrics(
     headers: HeaderMap,
 ) -> Result<Response, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    // Read at scrape time rather than accumulated: these are levels, and a
-    // level is only true when it is asked for.
+    // Sample server state here because these values can change between
+    // scrapes. Cache activity is already included in the recorder snapshot.
     let rendered = state.metrics.render(
-        &state.writer.runtime_cache_stats(),
         state
             .local_cache
             .as_ref()

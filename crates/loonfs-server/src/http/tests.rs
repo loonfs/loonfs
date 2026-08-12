@@ -551,10 +551,55 @@ async fn a_server_without_the_table_builds_no_local_cache() {
         .await
         .expect("build app");
     assert!(state.local_cache.is_none());
-    let rendered = state
-        .metrics
-        .render(&state.writer.runtime_cache_stats(), None, 0, 0);
+    let rendered = state.metrics.render(None, 0, 0);
     assert!(!rendered.contains("loonfs_local_cache_"));
+}
+
+#[tokio::test]
+async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let config = test_config(temp_dir.path(), "cache-metrics-writer");
+
+    let (_router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    let rendered = state.metrics.render(None, 0, 0);
+
+    for name in [
+        "loonfs_runtime_cache_latest_metadata_view_reads_total",
+        "loonfs_metadata_table_cache_gets_total",
+        "loonfs_metadata_table_cache_inserts_total",
+        "loonfs_metadata_table_cache_evictions_total",
+        "loonfs_metadata_table_cache_filter_skips_total",
+        "loonfs_metadata_table_cache_filter_false_positives_total",
+        "loonfs_wal_tail_projection_cache_gets_total",
+        "loonfs_wal_tail_projection_cache_inserts_total",
+        "loonfs_wal_tail_projection_cache_evictions_total",
+        "loonfs_wal_tail_projection_cache_evicted_rows_total",
+        "loonfs_wal_tail_projection_cache_evicted_decoded_bytes_total",
+        "loonfs_wal_tail_projection_cache_rejections_total",
+        "loonfs_wal_tail_projection_cache_rejected_rows_total",
+        "loonfs_wal_tail_projection_cache_rejected_decoded_bytes_total",
+        "loonfs_grep_block_cache_gets_total",
+        "loonfs_grep_block_cache_inserts_total",
+        "loonfs_grep_block_cache_evictions_total",
+    ] {
+        assert!(
+            rendered.contains(&format!("# TYPE {name} counter\n")),
+            "missing counter `{name}`"
+        );
+    }
+    for name in [
+        "loonfs_wal_tail_projection_cache_retained_rows",
+        "loonfs_wal_tail_projection_cache_retained_decoded_bytes",
+    ] {
+        assert!(
+            rendered.contains(&format!("# TYPE {name} gauge\n")),
+            "missing gauge `{name}`"
+        );
+    }
+    assert!(!rendered.contains("loonfs_cache_metadata_table_cache_hits"));
 }
 
 /// A configured cache is built at startup and reports itself on every
@@ -571,12 +616,7 @@ async fn a_configured_local_cache_is_built_and_scraped() {
         .await
         .expect("build app");
     let local_cache = state.local_cache.clone().expect("a local cache");
-    let rendered = state.metrics.render(
-        &state.writer.runtime_cache_stats(),
-        Some(local_cache.foyer_stats()),
-        0,
-        0,
-    );
+    let rendered = state.metrics.render(Some(local_cache.foyer_stats()), 0, 0);
     assert!(rendered.contains("loonfs_local_cache_memory_capacity_bytes 4194304\n"));
     assert!(rendered.contains("loonfs_local_cache_disk_capacity_bytes 134217728\n"));
     assert!(rendered.contains("loonfs_local_cache_queue_buffer_overflows 0\n"));
@@ -2174,7 +2214,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     // needs to know it is happening, not only that some clients saw 503.
     assert!(state
         .metrics
-        .render(&state.writer.runtime_cache_stats(), None, 0, 0)
+        .render(None, 0, 0)
         .contains("loonfs_server_busy_rejections_total{kind=\"upload\"} 1\n"));
 
     drop(held);
@@ -2289,7 +2329,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     );
     assert!(state
         .metrics
-        .render(&state.writer.runtime_cache_stats(), None, 0, 0)
+        .render(None, 0, 0)
         .contains("loonfs_server_busy_rejections_total{kind=\"download\"} 1\n"));
 
     drop(held);

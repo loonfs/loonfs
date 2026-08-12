@@ -134,15 +134,10 @@ fn rendering_the_same_readings_twice_produces_the_same_bytes() {
 }
 
 #[test]
-fn scrape_time_gauges_carry_every_runtime_cache_counter() {
+fn scrape_time_gauges_carry_permit_levels() {
     let mut rendered = String::new();
-    let cache = RuntimeCacheStats {
-        metadata_table_cache_hits: 12,
-        ..RuntimeCacheStats::default()
-    };
-    render_scrape_gauges(&mut rendered, &cache, None, 4, 2);
+    render_scrape_gauges(&mut rendered, None, 4, 2);
 
-    assert!(rendered.contains("loonfs_cache_metadata_table_cache_hits 12\n"));
     assert!(rendered.contains("loonfs_server_upload_permits_available 4\n"));
     assert!(rendered.contains("loonfs_server_download_permits_available 2\n"));
     assert_eq!(
@@ -150,8 +145,8 @@ fn scrape_time_gauges_carry_every_runtime_cache_counter() {
             .lines()
             .filter(|line| line.starts_with("# TYPE"))
             .count(),
-        if cfg!(target_os = "linux") { 21 } else { 20 },
-        "eighteen cache counters, the two permit pools, and Linux RSS where available"
+        if cfg!(target_os = "linux") { 3 } else { 2 },
+        "the two permit pools and Linux RSS where available"
     );
 }
 
@@ -159,7 +154,7 @@ fn scrape_time_gauges_carry_every_runtime_cache_counter() {
 #[test]
 fn a_scrape_reports_positive_process_resident_bytes() {
     let mut rendered = String::new();
-    render_scrape_gauges(&mut rendered, &RuntimeCacheStats::default(), None, 0, 0);
+    render_scrape_gauges(&mut rendered, None, 0, 0);
 
     let resident_bytes = rendered
         .lines()
