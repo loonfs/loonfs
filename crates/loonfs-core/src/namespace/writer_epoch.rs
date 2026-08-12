@@ -218,14 +218,14 @@ mod tests {
             HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");
         store
-            .put_if_absent(&wal_head(namespace_id.as_str()), Bytes::from(bytes))
+            .put_if_absent(&wal_head(namespace_id), Bytes::from(bytes))
             .await
             .expect("write head");
     }
 
     async fn head_etag(store: &LocalFsStore, namespace_id: &NamespaceId) -> String {
         store
-            .head(&wal_head(namespace_id.as_str()))
+            .head(&wal_head(namespace_id))
             .await
             .expect("head metadata")
             .expect("head exists")
@@ -280,7 +280,7 @@ mod tests {
         .await;
         let store = FailStore::new(
             inner,
-            KeyPredicate::exact(wal_head(namespace_id.as_str())),
+            KeyPredicate::exact(wal_head(&namespace_id)),
             OperationClass::CompareAndSwap,
             InjectedError::PermissionDenied("head write forbidden".to_owned()),
         );
@@ -480,7 +480,7 @@ mod tests {
         // its epoch (head read #1) — the stalled-deleter interleaving.
         let store = TakeoverBetweenHeadReadsStore {
             inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-            head_key: wal_head(namespace_id.as_str()),
+            head_key: wal_head(&namespace_id),
             head_reads: AtomicUsize::new(0),
         };
 
@@ -640,7 +640,7 @@ mod tests {
             let bytes = encode_control_object(&envelope).expect("head bytes");
             self.inner
                 .put(
-                    &wal_head(self.namespace_id.as_str()),
+                    &wal_head(&self.namespace_id),
                     Bytes::from(bytes),
                     PutMode::Overwrite,
                 )

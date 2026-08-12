@@ -81,7 +81,7 @@ async fn content_key(
             .expect("load namespace catalog")
             .content_store_id()
             .clone();
-    loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id)
+    loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id)
 }
 
 async fn exists(store: &SharedObjectStore, key: &str) -> bool {
@@ -92,7 +92,7 @@ async fn exists(store: &SharedObjectStore, key: &str) -> bool {
 async fn session_keys(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Vec<String> {
     store
         .list_prefix(&loonfs_objectstore::keys::upload_session_prefix(
-            namespace_id.as_str(),
+            namespace_id,
         ))
         .await
         .expect("list upload sessions")

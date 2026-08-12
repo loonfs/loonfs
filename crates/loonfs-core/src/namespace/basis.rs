@@ -139,7 +139,7 @@ pub(crate) fn metadata_basis_without_root(
     };
     let manifest_id = manifest_object_id_manifest_id(fork_basis.source_manifest_object_id.as_str())
         .ok_or_else(|| ControlObjectLoadError::Codec {
-            object_key: loonfs_objectstore::keys::wal_head(head.namespace_id.as_str()),
+            object_key: loonfs_objectstore::keys::wal_head(&head.namespace_id),
             message: format!(
                 "fork basis manifest object id `{}` does not encode a manifest id",
                 fork_basis.source_manifest_object_id

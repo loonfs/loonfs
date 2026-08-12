@@ -345,7 +345,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
     .expect("session envelope");
     let bytes =
         loonfs_api::wire::control::encode_control_object(&envelope).expect("encode session");
-    let key = loonfs_objectstore::keys::upload_session(namespace_id.as_str(), upload_id.as_str());
+    let key = loonfs_objectstore::keys::upload_session(namespace_id, &upload_id);
     store
         .put_if_absent(&key, bytes::Bytes::from(bytes))
         .await
@@ -391,7 +391,7 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
 ) -> Option<UploadSessionState> {
-    let key = loonfs_objectstore::keys::upload_session(namespace_id.as_str(), upload_id.as_str());
+    let key = loonfs_objectstore::keys::upload_session(namespace_id, upload_id);
     let body = store.get(&key, None).await.expect("read upload session")?;
     Some(
         decode_control_object::<UploadSessionState>(&body, ControlObjectKind::UploadSession)
@@ -446,7 +446,7 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
     .expect("read record")
     .expect("record exists")
     .state;
-    let basis_key = metadata_manifest_object(namespace_id.as_str(), &record.manifest_object_id);
+    let basis_key = metadata_manifest_object(&namespace_id, &record.manifest_object_id);
     store.delete(&basis_key).await.expect("drop basis manifest");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -531,10 +531,10 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     assert!(!report.degraded_retention);
 
     for prefix in [
-        wal_segment_prefix(namespace_id.as_str()),
-        metadata_table_prefix(namespace_id.as_str()),
-        metadata_manifest_prefix(namespace_id.as_str()),
-        checkpoint_prefix(namespace_id.as_str()),
+        wal_segment_prefix(&namespace_id),
+        metadata_table_prefix(&namespace_id),
+        metadata_manifest_prefix(&namespace_id),
+        checkpoint_prefix(&namespace_id),
     ] {
         assert!(
             store.list_prefix(&prefix).await.expect("list").is_empty(),
@@ -545,8 +545,8 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     // wherever the namespace published them, because neither is ever a
     // collection candidate.
     for key in [
-        loonfs_objectstore::keys::wal_head(namespace_id.as_str()),
-        loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
+        loonfs_objectstore::keys::wal_head(&namespace_id),
+        loonfs_objectstore::keys::metadata_root(&namespace_id),
     ] {
         assert!(
             store.head(&key).await.expect("head").is_some(),
@@ -584,7 +584,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
 
     // The deleted source keeps exactly what the living clone needs.
     let fork_record = read_fork_record(&store, &source).await;
-    let basis_key = metadata_manifest_object(source.as_str(), &fork_record.manifest_object_id);
+    let basis_key = metadata_manifest_object(&source, &fork_record.manifest_object_id);
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
@@ -647,10 +647,9 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
-    let session_key =
-        loonfs_objectstore::keys::upload_session(namespace_id.as_str(), upload_id.as_str());
+    let session_key = loonfs_objectstore::keys::upload_session(&namespace_id, &upload_id);
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
 
     // Inside the lease nothing happens, however old the object looks: the
     // session carries its own expiry, so no provider timestamp decides this.
@@ -759,8 +758,7 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
         .await
         .expect("bootstrap");
     let (upload_id, ..) = stage_upload(&store, &namespace_id, &setup).await;
-    let session_key =
-        loonfs_objectstore::keys::upload_session(namespace_id.as_str(), upload_id.as_str());
+    let session_key = loonfs_objectstore::keys::upload_session(&namespace_id, &upload_id);
 
     // The pass that aborts the session is the only thing that knows the
     // record now ages out a grace window from this instant.
@@ -860,7 +858,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         stage_upload(&store, &namespace_id, &setup).await;
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadAborted);
     let gc_config = config();
     let gc = gc_namespace(&store, &namespace_id, &gc_config, &aged);
@@ -908,7 +906,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         stage_upload(&store, &namespace_id, &setup).await;
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCompleted);
     let request = loonfs_api::v0::CompleteUploadRequest::for_content_ref(content_ref.clone());
     let completion = crate::protocol::complete_upload(
@@ -1039,7 +1037,7 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
 
     let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS - 1);
     let report = gc_namespace(&store, &namespace_id, &config(), &inside)
@@ -1070,7 +1068,7 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
 
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let report = gc_namespace(&store, &namespace_id, &config(), &past)
@@ -1123,10 +1121,8 @@ async fn content_gc_never_reclaims_published_content() {
                 .await
                 .expect("advance floor");
         }
-        let content_key = loonfs_objectstore::keys::content_blob(
-            content_store_id.as_str(),
-            &content_ref.content_id,
-        );
+        let content_key =
+            loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
 
         let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
         let report = gc_namespace(&store, &namespace_id, &config(), &past)
@@ -1197,7 +1193,7 @@ async fn content_reference_scan_surfaces_a_manifest_corrupted_after_marking() {
     namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
     let live = live_set(&store, &namespace_id, &setup).await;
     let manifest_object_id = live.manifests.iter().next().expect("live manifest").clone();
-    let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
+    let manifest_key = metadata_manifest_object(&namespace_id, &manifest_object_id);
     store
         .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
         .await
@@ -1221,7 +1217,7 @@ async fn content_reference_scan_is_unavailable_when_a_marked_manifest_does_not_r
     let live = live_set(&inner, &namespace_id, &setup).await;
     let store = FailStore::new(
         inner,
-        KeyPredicate::prefix(metadata_manifest_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
         OperationClass::Read,
         InjectedError::Transport("marked manifest timed out".to_owned()),
     );
@@ -1244,7 +1240,7 @@ async fn content_reference_scan_surfaces_corrupt_metadata_rows() {
     let (upload_id, content_ref, content_store_id, _) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
     let table_keys = store
-        .list_prefix(&metadata_table_prefix(namespace_id.as_str()))
+        .list_prefix(&metadata_table_prefix(&namespace_id))
         .await
         .expect("list metadata tables");
     assert!(
@@ -1265,7 +1261,7 @@ async fn content_reference_scan_surfaces_corrupt_metadata_rows() {
             .expect("corrupt metadata table");
     }
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
 
     let error = gc_namespace(&store, &namespace_id, &config(), &past)
@@ -1293,10 +1289,10 @@ async fn content_reference_scan_retains_content_when_metadata_rows_do_not_read()
     let (upload_id, content_ref, content_store_id, _) =
         complete_upload_for_gc(&inner, &namespace_id, b"unpublished\n", &setup).await;
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let store = FailStore::new(
         inner,
-        KeyPredicate::prefix(metadata_table_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(metadata_table_prefix(&namespace_id)),
         OperationClass::Read,
         InjectedError::Transport("metadata rows timed out".to_owned()),
     );
@@ -1336,7 +1332,7 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let live = live_set(&store, &namespace_id, &setup).await;
     assert!(
         !live.manifests.is_empty() && !live.wal_segments.is_empty(),
@@ -1449,10 +1445,7 @@ async fn a_budget_below_the_roots_reads_no_chain_and_says_it_ran_out() {
     read.sort();
     assert_eq!(
         read,
-        vec![
-            metadata_root(namespace_id.as_str()),
-            wal_head(namespace_id.as_str())
-        ],
+        vec![metadata_root(&namespace_id), wal_head(&namespace_id)],
         "the pair the pass charged itself for is all it read"
     );
 }
@@ -1475,7 +1468,7 @@ async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
     let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
     assert!(chain_units > 0, "the fixture must retain a chain");
 
-    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str()));
+    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
     let store = CountingStore::new(inner, segment_reads);
     let mut at_the_gate = config();
     at_the_gate.max_objects = Some(marking - chain_units);
@@ -1528,7 +1521,7 @@ async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
     // wants more than two.
     let at_the_gate = 2;
 
-    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str()));
+    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
     let store = RecordingStore::new(inner, segment_reads);
     let mut bounded = config();
     bounded.max_objects = Some(marking - chain_units + at_the_gate);
@@ -1634,7 +1627,7 @@ async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
     let retained = live.wal_segments;
     assert!(!retained.is_empty(), "the fixture must retain a chain");
 
-    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str()));
+    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
     let store = RecordingStore::new(inner, segment_reads);
     let mut exact = config();
     exact.max_objects = Some(marking);
@@ -1742,12 +1735,12 @@ async fn a_complete_pass_fetches_each_retained_segment_once() {
     )
     .await;
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let retained = live_set(&inner, &namespace_id, &past).await.wal_segments;
     assert!(!retained.is_empty(), "the fixture must retain a chain");
 
-    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str()));
+    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
     let store = RecordingStore::new(inner, segment_reads);
     let report = gc_namespace(&store, &namespace_id, &config(), &past)
         .await
@@ -1799,7 +1792,7 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
         .await,
     );
 
-    let record_reads = KeyPredicate::prefix(checkpoint_prefix(namespace_id.as_str()));
+    let record_reads = KeyPredicate::prefix(checkpoint_prefix(&namespace_id));
     let store = CountingStore::new(inner, record_reads);
     let mut bounded = config();
     bounded.max_objects = Some(3);
@@ -1859,7 +1852,7 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
     )
     .await;
     let content_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let marking = marking_units(&seed, &namespace_id, &past).await;
     let mut some_budget_reached_the_verdict = false;
@@ -2107,12 +2100,12 @@ fn reason_total(report: &GcResponse) -> u64 {
         .sum()
 }
 
-/// A namespace with one staged segment under `job_id`, aged so the pass has a
-/// reference anchor, and the lease key that job would hold.
+/// A namespace with one staged segment under `metadata_compaction_id`, aged
+/// so the pass has a reference anchor, and the lease key that job would hold.
 async fn namespace_with_staged_output(
     temp_dir: &tempfile::TempDir,
     namespace_id: &NamespaceId,
-    job_id: &str,
+    metadata_compaction_id: &loonfs_api::MetadataCompactionId,
 ) -> (MetadataMapStore<LocalFsStore>, String, String) {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let setup = context(1_000);
@@ -2129,30 +2122,31 @@ async fn namespace_with_staged_output(
     let published = namespace_key_set(&inner, namespace_id).await;
     let store = aged_before_now(inner, published);
     let staged_key = metadata_compaction_table(
-        namespace_id.as_str(),
-        job_id,
-        "tbl_0123456789abcdef0123456789abcdef",
+        namespace_id,
+        metadata_compaction_id,
+        &loonfs_api::MetadataTableId::parse("tbl_0123456789abcdef0123456789abcdef")
+            .expect("valid metadata table id"),
     );
     store
         .put_if_absent(&staged_key, Bytes::from_static(b"staged segment"))
         .await
         .expect("write a staged segment");
-    let lease_key = metadata_compaction_lease(namespace_id.as_str(), job_id);
+    let lease_key = metadata_compaction_lease(namespace_id, metadata_compaction_id);
     (store, staged_key, lease_key)
 }
 
-/// Writes the lease a job holding `job_id` would have written at
+/// Writes the lease a job holding `metadata_compaction_id` would have written at
 /// `heartbeat_at_ms`, in the state a running job leaves it in.
 async fn write_compaction_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    job_id: &str,
+    metadata_compaction_id: &loonfs_api::MetadataCompactionId,
     heartbeat_at_ms: u64,
 ) {
     write_compaction_lease_in_state(
         store,
         namespace_id,
-        job_id,
+        metadata_compaction_id,
         heartbeat_at_ms,
         loonfs_api::wire::control::MetadataCompactionLeaseStatus::Active,
     )
@@ -2163,14 +2157,14 @@ async fn write_compaction_lease<S: ObjectStore + ?Sized>(
 async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    job_id: &str,
+    metadata_compaction_id: &loonfs_api::MetadataCompactionId,
     heartbeat_at_ms: u64,
     status: loonfs_api::wire::control::MetadataCompactionLeaseStatus,
 ) {
     let envelope = loonfs_api::wire::control::MetadataCompactionLeaseEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::CompactionLease,
         loonfs_api::wire::control::MetadataCompactionLeaseState {
-            job_id: loonfs_api::MetadataCompactionId::parse(job_id).expect("job id"),
+            job_id: metadata_compaction_id.clone(),
             namespace_id: namespace_id.clone(),
             owner_id: "writer".to_owned(),
             status,
@@ -2183,7 +2177,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
         loonfs_api::wire::control::encode_control_object(&envelope).expect("encode a lease");
     store
         .put(
-            &metadata_compaction_lease(namespace_id.as_str(), job_id),
+            &metadata_compaction_lease(namespace_id, metadata_compaction_id),
             Bytes::from(bytes),
             PutMode::Overwrite,
         )
@@ -2191,7 +2185,10 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
         .expect("write a lease");
 }
 
-const TEST_JOB_ID: &str = "cmp_0123456789abcdef0123456789abcdef";
+fn test_metadata_compaction_id() -> loonfs_api::MetadataCompactionId {
+    loonfs_api::MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
+        .expect("valid metadata compaction id")
+}
 
 /// A running job's output survives however old it is, because its lease says
 /// the job that wrote it is still running.
@@ -2204,12 +2201,19 @@ async fn a_live_jobs_staged_output_survives_however_old_it_is() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let (store, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
+            .await;
 
     // A day past the window the design used to apply here, with the job's
     // lease refreshed a moment ago.
     let now_ms = now_after_newest_object(store.inner(), &namespace_id, 24 * 60 * 60 * 1000).await;
-    write_compaction_lease(&store, &namespace_id, TEST_JOB_ID, now_ms).await;
+    write_compaction_lease(
+        &store,
+        &namespace_id,
+        &test_metadata_compaction_id(),
+        now_ms,
+    )
+    .await;
 
     let report = gc_namespace(&store, &namespace_id, &config(), &context(now_ms))
         .await
@@ -2238,12 +2242,19 @@ async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let (store, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
+            .await;
 
     // The job's last heartbeat, and then a pass one lease expiry later. The
     // lease is stale, but the objects are still inside the staging window.
     let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
-    write_compaction_lease(&store, &namespace_id, TEST_JOB_ID, died_at_ms).await;
+    write_compaction_lease(
+        &store,
+        &namespace_id,
+        &test_metadata_compaction_id(),
+        died_at_ms,
+    )
+    .await;
     let expired_ms = died_at_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS + 1;
     let report = gc_namespace(&store, &namespace_id, &config(), &context(expired_ms))
         .await
@@ -2290,7 +2301,8 @@ async fn staged_output_with_no_lease_at_all_is_reclaimed() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let (store, staged_key, _) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
+            .await;
 
     let reclaimable_ms = now_after_newest_object(
         store.inner(),
@@ -2316,7 +2328,8 @@ async fn a_lease_that_does_not_decode_fails_the_pass() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let (store, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
+            .await;
     store
         .put(
             &lease_key,
@@ -2353,10 +2366,17 @@ async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let (inner, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
+            .await;
 
     let died_at_ms = now_after_newest_object(inner.inner(), &namespace_id, 0).await;
-    write_compaction_lease(&inner, &namespace_id, TEST_JOB_ID, died_at_ms).await;
+    write_compaction_lease(
+        &inner,
+        &namespace_id,
+        &test_metadata_compaction_id(),
+        died_at_ms,
+    )
+    .await;
     let reclaimable_ms = now_after_newest_object(
         inner.inner(),
         &namespace_id,
@@ -2406,10 +2426,17 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let (store, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
+            .await;
 
     let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
-    write_compaction_lease(&store, &namespace_id, TEST_JOB_ID, died_at_ms).await;
+    write_compaction_lease(
+        &store,
+        &namespace_id,
+        &test_metadata_compaction_id(),
+        died_at_ms,
+    )
+    .await;
     let reclaimable = context(
         now_after_newest_object(
             store.inner(),
@@ -2428,7 +2455,7 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
         GcCursor::after(
             &namespace_id,
             CandidateFamily::MetadataTables,
-            format!("{}~", metadata_table_prefix(namespace_id.as_str())),
+            format!("{}~", metadata_table_prefix(&namespace_id)),
         )
         .encode()
         .expect("encode cursor"),
@@ -2561,7 +2588,7 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
     // job does happens in that gap, on a store the gate does not hold.
     let gated = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
         OperationClass::List,
     );
     gated.block_next();
@@ -2640,7 +2667,7 @@ async fn a_published_jobs_lease_expires_and_the_pass_removes_only_the_lease() {
     .await;
     let staged =
         crate::checkpoint::tests::staged_keys_of_the_current_manifest(&store, &namespace_id).await;
-    let lease_key = metadata_compaction_lease(namespace_id.as_str(), spec.job_id().as_str());
+    let lease_key = metadata_compaction_lease(&namespace_id, spec.job_id());
     assert!(
         store
             .head(&lease_key)
@@ -2707,8 +2734,9 @@ async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
     let published = namespace_key_set(&inner, &namespace_id).await;
     let store = aged_before_now(inner, published);
     let orphan_key = metadata_table(
-        namespace_id.as_str(),
-        "tbl_0123456789abcdef0123456789abcdef",
+        &namespace_id,
+        &loonfs_api::MetadataTableId::parse("tbl_0123456789abcdef0123456789abcdef")
+            .expect("valid metadata table id"),
     );
     store
         .put_if_absent(&orphan_key, Bytes::from_static(b"orphan table"))
@@ -2756,8 +2784,9 @@ async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
         .await
         .expect("flush wal");
     let orphan_key = metadata_table(
-        namespace_id.as_str(),
-        "tbl_0123456789abcdef0123456789abcdef",
+        &namespace_id,
+        &loonfs_api::MetadataTableId::parse("tbl_0123456789abcdef0123456789abcdef")
+            .expect("valid metadata table id"),
     );
     inner
         .put_if_absent(&orphan_key, Bytes::from_static(b"orphan table"))
@@ -2806,8 +2835,9 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     let setup = context(1_000);
     namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
     let orphan_key = wal_segment(
-        namespace_id.as_str(),
-        "00000000000000000000-0123456789abcdef",
+        &namespace_id,
+        &loonfs_api::WalSegmentId::parse("00000000000000000000-0123456789abcdef")
+            .expect("valid WAL segment id"),
     );
     inner
         .put_if_absent(&orphan_key, Bytes::from_static(b"orphan"))
@@ -3010,7 +3040,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
         .await
         .expect("bootstrap");
 
-    let manifest_prefix = metadata_manifest_prefix(namespace_id.as_str());
+    let manifest_prefix = metadata_manifest_prefix(&namespace_id);
     let foreign_objects = [
         (
             format!("{manifest_prefix}notes.txt"),
@@ -3073,7 +3103,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     // Record-less maintenance: nothing accumulates under `checkpoints/`.
     assert!(
         store
-            .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+            .list_prefix(&checkpoint_prefix(&namespace_id))
             .await
             .expect("list checkpoint records")
             .is_empty(),
@@ -3091,7 +3121,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     assert_eq!(report.deleted_manifests, 2);
     assert!(!report.degraded_retention);
     let manifests_left = store
-        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
+        .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
         .expect("list manifests");
     assert_eq!(manifests_left.len(), 1, "only the live root manifest stays");
@@ -3642,7 +3672,7 @@ async fn gc_retains_active_checkpoint_bases() {
 /// Reads the single fork-owned record a fork left under the source.
 async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> CheckpointRecordState {
     for key in store
-        .list_prefix(&checkpoint_prefix(source.as_str()))
+        .list_prefix(&checkpoint_prefix(source))
         .await
         .expect("list checkpoints")
     {
@@ -3761,7 +3791,7 @@ async fn gc_surfaces_a_corrupt_fork_target_head() {
         .await
         .expect("fork");
     store
-        .put_overwrite(&wal_head(clone.as_str()), Bytes::from_static(b"not json"))
+        .put_overwrite(&wal_head(&clone), Bytes::from_static(b"not json"))
         .await
         .expect("corrupt target head");
     let before = namespace_keys(&store, &source).await;
@@ -3770,7 +3800,7 @@ async fn gc_surfaces_a_corrupt_fork_target_head() {
         .await
         .expect_err("a corrupt target head must fail the source pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(&wal_head(clone.as_str())));
+    assert!(error.message().contains(&wal_head(&clone)));
     assert_eq!(namespace_keys(&store, &source).await, before);
 }
 
@@ -3791,7 +3821,7 @@ async fn gc_retains_a_fork_checkpoint_when_the_target_head_does_not_read() {
     let fork_record = read_fork_record(&inner, &source).await;
     let store = FailStore::new(
         inner,
-        KeyPredicate::exact(wal_head(clone.as_str())),
+        KeyPredicate::exact(wal_head(&clone)),
         OperationClass::Read,
         InjectedError::Transport("target head timed out".to_owned()),
     );
@@ -3991,7 +4021,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         .await
         .expect("fork retry after abandonment");
     let retry = store
-        .list_prefix(&checkpoint_prefix(source.as_str()))
+        .list_prefix(&checkpoint_prefix(&source))
         .await
         .expect("list checkpoints")
         .len();
@@ -4028,7 +4058,7 @@ async fn gc_fails_the_pass_on_a_corrupt_checkpoint_record() {
         .expect("checkpoint");
 
     let record_keys = store
-        .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+        .list_prefix(&checkpoint_prefix(&namespace_id))
         .await
         .expect("list checkpoints");
     let corrupt_key = record_keys
@@ -4068,7 +4098,7 @@ async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(checkpoint_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
         OperationClass::Read,
         InjectedError::Transport("checkpoint record read timed out".to_owned()),
     );
@@ -4083,7 +4113,7 @@ async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
 
     let record_keys = store
         .inner()
-        .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+        .list_prefix(&checkpoint_prefix(&namespace_id))
         .await
         .expect("list checkpoints");
     let record_key = record_keys
@@ -4123,7 +4153,7 @@ async fn corrupt_reference_anchor_manifest_fails_instead_of_becoming_missing() {
         .await
         .expect("checkpoint");
     let manifest_key = store
-        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
+        .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
         .expect("list manifests")
         .into_iter()
@@ -4159,7 +4189,7 @@ async fn unreadable_reference_anchor_manifest_remains_conservative() {
     let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
     let store = FailStore::new(
         inner,
-        KeyPredicate::prefix(metadata_manifest_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
         OperationClass::Read,
         InjectedError::Transport("reference manifest timed out".to_owned()),
     );
@@ -4189,7 +4219,7 @@ async fn gc_fails_the_pass_on_a_corrupt_root_manifest() {
         .expect("checkpoint");
 
     let manifest_keys = store
-        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
+        .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
         .expect("list manifests");
     assert!(
@@ -4232,7 +4262,7 @@ async fn gc_degrades_when_a_root_manifest_does_not_read() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_manifest_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
         OperationClass::Read,
         InjectedError::Transport("manifest read timed out".to_owned()),
     );
@@ -4384,7 +4414,7 @@ async fn gc_fails_the_pass_when_a_fork_pin_record_is_corrupt() {
         .expect("fork");
 
     let record_keys = store
-        .list_prefix(&checkpoint_prefix(source.as_str()))
+        .list_prefix(&checkpoint_prefix(&source))
         .await
         .expect("list checkpoints");
     let corrupt_key = record_keys.first().expect("the fork pinned").clone();
@@ -4446,13 +4476,18 @@ async fn add_bounded_gc_fixture(
     for index in 0..6 {
         for key in [
             wal_segment(
-                namespace_id.as_str(),
-                &format!("00000000000000000000-orphan-{index:02}"),
+                namespace_id,
+                &loonfs_api::WalSegmentId::parse(format!("{index:020}-0000000000000000"))
+                    .expect("valid WAL segment id"),
             ),
-            metadata_table(namespace_id.as_str(), &format!("000-orphan-{index:02}")),
+            metadata_table(
+                namespace_id,
+                &loonfs_api::MetadataTableId::parse(format!("tbl_{index:032x}"))
+                    .expect("valid metadata table id"),
+            ),
             format!(
                 "{}000-orphan-{index:02}.manifest.json",
-                metadata_manifest_prefix(namespace_id.as_str())
+                metadata_manifest_prefix(namespace_id)
             ),
         ] {
             store
@@ -4602,8 +4637,9 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     let orphan_keys: Vec<String> = (0..5)
         .map(|index| {
             wal_segment(
-                namespace_id.as_str(),
-                &format!("00000000000000000000-orphan-{index:02}"),
+                &namespace_id,
+                &loonfs_api::WalSegmentId::parse(format!("{index:020}-0000000000000000"))
+                    .expect("valid WAL segment id"),
             )
         })
         .collect();
@@ -4614,7 +4650,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
             .expect("write orphan");
     }
     let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
-    let wal_prefix = wal_segment_prefix(namespace_id.as_str());
+    let wal_prefix = wal_segment_prefix(&namespace_id);
     let store = CountingStore::new(inner, KeyPredicate::prefix(wal_prefix));
     let mut bounded = config();
     // Two candidates a pass, plus the roots the pass marks before it walks.
@@ -4679,8 +4715,9 @@ async fn stale_cursor_rebuilds_roots_before_resuming() {
         .expect("bootstrap");
     for index in 0..2 {
         let key = wal_segment(
-            namespace_id.as_str(),
-            &format!("00000000000000000000-orphan-{index:02}"),
+            &namespace_id,
+            &loonfs_api::WalSegmentId::parse(format!("{index:020}-0000000000000000"))
+                .expect("valid WAL segment id"),
         );
         store
             .put_if_absent(&key, Bytes::from_static(b"orphan"))
@@ -4729,7 +4766,7 @@ async fn stale_cursor_rebuilds_roots_before_resuming() {
         );
     }
     for manifest_object_id in live.manifests {
-        let key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
+        let key = metadata_manifest_object(&namespace_id, &manifest_object_id);
         assert!(
             store
                 .head(&key)

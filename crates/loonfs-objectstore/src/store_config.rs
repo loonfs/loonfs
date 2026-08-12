@@ -142,6 +142,7 @@ pub enum StoreConfig {
 /// Field paths are rooted at the store table (`store.bucket`, ...) so callers
 /// can report them directly or prefix them with their own config path.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum StoreConfigError {
     /// Reports a required field whose value is absent or blank.
     #[error("missing `{field}`")]

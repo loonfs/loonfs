@@ -25,7 +25,7 @@
 
 use crate::checkpoint::{claim_compaction_prefix, CompactionPrefixOwner};
 use crate::error::{CoreError, Result};
-use loonfs_api::NamespaceId;
+use loonfs_api::{MetadataCompactionId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_compaction_job_id_from_key, metadata_compaction_lease};
 use loonfs_objectstore::ObjectStore;
 
@@ -67,20 +67,26 @@ impl CompactionLeases {
         key: &str,
         now_ms: u64,
     ) -> Result<StagedObject> {
-        let Some(job_id) = metadata_compaction_job_id_from_key(key) else {
+        let Some(metadata_compaction_id) = metadata_compaction_job_id_from_key(key)
+            .and_then(|job_id| MetadataCompactionId::parse(job_id).ok())
+        else {
             return Ok(StagedObject::UnrecognizedKey);
         };
         let owner = match &self.last_read {
-            Some((read_job_id, owner)) if read_job_id == job_id => *owner,
+            Some((read_job_id, owner)) if read_job_id == metadata_compaction_id.as_str() => *owner,
             _ => {
                 // The walk has left whatever job it was on, so the lease that
                 // job's reap was holding may go now.
                 self.delete_claimed_lease(store).await?;
-                let owner = claim_compaction_prefix(store, namespace_id, job_id, now_ms).await?;
-                self.last_read = Some((job_id.to_owned(), owner));
+                let owner =
+                    claim_compaction_prefix(store, namespace_id, &metadata_compaction_id, now_ms)
+                        .await?;
+                self.last_read = Some((metadata_compaction_id.to_string(), owner));
                 if owner == CompactionPrefixOwner::ThisCollector {
-                    self.claimed_lease =
-                        Some(metadata_compaction_lease(namespace_id.as_str(), job_id));
+                    self.claimed_lease = Some(metadata_compaction_lease(
+                        namespace_id,
+                        &metadata_compaction_id,
+                    ));
                 }
                 owner
             }

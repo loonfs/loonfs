@@ -793,7 +793,7 @@ async fn staged_object_keys<S: ObjectStore + ?Sized>(
 ) -> BTreeSet<String> {
     use futures::StreamExt;
     store
-        .list_prefix_stream(&metadata_compaction_prefix(namespace_id.as_str()))
+        .list_prefix_stream(&metadata_compaction_prefix(namespace_id))
         .map(|key| key.expect("list staged objects"))
         .collect()
         .await
@@ -1233,7 +1233,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
     assert!(
         result.output_segments.iter().all(|descriptor| descriptor
             .object_key
-            .starts_with(&metadata_compaction_prefix(namespace_id.as_str()))),
+            .starts_with(&metadata_compaction_prefix(&namespace_id))),
         "every output segment is written to the staging directory"
     );
     // Every reverse row the floor covers costs one point read, and no other
@@ -2262,7 +2262,7 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
     let group = MetadataFamilyGroup::Bindings;
     let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
     let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
-    let lease_key = metadata_compaction_lease(namespace_id.as_str(), spec.job_id().as_str());
+    let lease_key = metadata_compaction_lease(&namespace_id, spec.job_id());
 
     let outcome = run_metadata_compaction_job(
         &store,
@@ -2285,7 +2285,7 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
     let referenced = referenced_segment_keys(&store, &namespace_id).await;
     let job_prefix = format!(
         "{}{}/",
-        metadata_compaction_prefix(namespace_id.as_str()),
+        metadata_compaction_prefix(&namespace_id),
         spec.job_id().as_str()
     );
     assert!(
@@ -2322,7 +2322,7 @@ async fn a_cancelled_job_leaves_its_claim_standing() {
     let group = MetadataFamilyGroup::Bindings;
     let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
     let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
-    let lease_key = metadata_compaction_lease(namespace_id.as_str(), spec.job_id().as_str());
+    let lease_key = metadata_compaction_lease(&namespace_id, spec.job_id());
 
     let cancellation = MetadataCompactionCancellation::default();
     let dying_store = CancelAfterReadsStore {
@@ -2393,7 +2393,7 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
     // stamped its lease off a real clock, so the pass's clock has to clear
     // whatever it spent running.
     let expired_ms = test_context().now_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS * 2;
-    let owner = claim_compaction_prefix(&store, &namespace_id, spec.job_id().as_str(), expired_ms)
+    let owner = claim_compaction_prefix(&store, &namespace_id, spec.job_id(), expired_ms)
         .await
         .expect("claim the expired prefix");
     assert_eq!(
@@ -2457,7 +2457,7 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     seed_bindings_workload(&store, &namespace_id).await;
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let lease_key = metadata_compaction_lease(namespace_id.as_str(), spec.job_id().as_str());
+    let lease_key = metadata_compaction_lease(&namespace_id, spec.job_id());
     // The stepping clock below moves each heartbeat's stamp forward a few
     // seconds, so the pass's clock is set well past the expiry rather than one
     // millisecond past it.
@@ -2477,7 +2477,7 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     );
     gated.block_next();
     let (claimed, beat) = tokio::join!(
-        claim_compaction_prefix(&gated, &namespace_id, spec.job_id().as_str(), expired_ms),
+        claim_compaction_prefix(&gated, &namespace_id, spec.job_id(), expired_ms),
         async {
             gated.wait_until_blocked().await;
             let beat = lease.heartbeat(&store).await.expect("heartbeat the lease");
@@ -2499,7 +2499,7 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     // The other order, on the same lease: the claim lands, and the heartbeat
     // behind it finds an etag it does not hold.
     assert_eq!(
-        claim_compaction_prefix(&store, &namespace_id, spec.job_id().as_str(), expired_ms)
+        claim_compaction_prefix(&store, &namespace_id, spec.job_id(), expired_ms)
             .await
             .expect("claim the prefix"),
         CompactionPrefixOwner::ThisCollector

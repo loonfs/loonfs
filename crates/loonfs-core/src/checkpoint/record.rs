@@ -58,7 +58,7 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     record: &CheckpointRecordState,
 ) -> Result<()> {
     let encoded = encode_checkpoint_record(record)?;
-    let object_key = checkpoint_record(record.namespace_id.as_str(), record.checkpoint_id.as_str());
+    let object_key = checkpoint_record(&record.namespace_id, &record.checkpoint_id);
     // A checkpoint record is mutable control state, so its first lifecycle state is a conditional create.
     match store.put_if_absent(&object_key, encoded).await {
         Ok(_) => Ok(()),
@@ -150,7 +150,7 @@ pub(crate) async fn read_checkpoint_record<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
 ) -> Result<Option<LoadedCheckpointRecord>> {
-    let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
+    let object_key = checkpoint_record(namespace_id, checkpoint_id);
     let loaded = load_checkpoint_record_at_key(store, &object_key).await;
     match loaded {
         Ok(loaded) => Ok(Some(loaded)),
@@ -173,7 +173,7 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     released_at_ms: u64,
 ) -> Result<()> {
     const RELEASE_CAS_ATTEMPTS: usize = 4;
-    let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
+    let object_key = checkpoint_record(namespace_id, checkpoint_id);
     for _attempt in 0..RELEASE_CAS_ATTEMPTS {
         let Some(loaded) = read_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
             // Reaped underneath us: no active pin under this id is exactly
@@ -309,7 +309,8 @@ mod tests {
     #[tokio::test]
     async fn listed_loader_rejects_a_different_durable_family() {
         let (_directory, store) = local_store();
-        let object_key = wal_head("demo");
+        let object_key =
+            wal_head(&loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"));
 
         let error = load_checkpoint_record_at_key(&store, &object_key)
             .await
@@ -341,7 +342,7 @@ mod tests {
         let key_namespace_id = namespace("demo");
         let embedded_namespace_id = namespace("other");
         let checkpoint_id = checkpoint("chk_00000000000000000000000000000001");
-        let object_key = checkpoint_record(key_namespace_id.as_str(), checkpoint_id.as_str());
+        let object_key = checkpoint_record(&key_namespace_id, &checkpoint_id);
         let bytes = encode_checkpoint_record(&record(embedded_namespace_id, checkpoint_id))
             .expect("record bytes");
         store
@@ -365,7 +366,7 @@ mod tests {
         let namespace_id = namespace("demo");
         let key_checkpoint_id = checkpoint("chk_00000000000000000000000000000001");
         let embedded_checkpoint_id = checkpoint("chk_00000000000000000000000000000002");
-        let object_key = checkpoint_record(namespace_id.as_str(), key_checkpoint_id.as_str());
+        let object_key = checkpoint_record(&namespace_id, &key_checkpoint_id);
         let bytes = encode_checkpoint_record(&record(namespace_id, embedded_checkpoint_id))
             .expect("record bytes");
         store

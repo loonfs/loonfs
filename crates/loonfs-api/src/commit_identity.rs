@@ -151,6 +151,7 @@ enum OperationFingerprintInput<'a> {
 /// every already-published update. The kind is part of the value, so a text
 /// and a one-member list fingerprint differently.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// The fingerprint discriminator is frozen as `type` for this deliberate exception.
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AttributeValueFingerprintInput<'a> {
     Text { text: &'a str },

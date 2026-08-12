@@ -458,7 +458,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
 
     store
         .delete(&content_blob(
-            first.content_store_id.as_str(),
+            &first.content_store_id,
             &first.content_ref.content_id,
         ))
         .await

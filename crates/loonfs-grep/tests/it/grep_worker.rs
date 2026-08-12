@@ -650,7 +650,7 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
     let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
 
     // Age the pin out from under the backfill without releasing it.
-    let key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
+    let key = checkpoint_record(&namespace_id, &checkpoint_id);
     let mut record = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
         .await
         .expect("backfill checkpoint record");
@@ -1580,7 +1580,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .fork_basis
         .expect("a fork target has a basis manifest");
     let manifest_key = metadata_manifest_object(
-        target_basis.source_namespace_id.as_str(),
+        &target_basis.source_namespace_id,
         &target_basis.source_manifest_object_id,
     );
     let manifest_bytes = store
@@ -2092,14 +2092,14 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         vec![
             // Marking lists the records it roots from, then the manifests
             // it ages to find its reference manifest.
-            checkpoint_prefix(live_namespace.as_str()),
-            metadata_manifest_prefix(live_namespace.as_str()),
-            wal_segment_prefix(live_namespace.as_str()),
-            metadata_table_prefix(live_namespace.as_str()),
-            metadata_compaction_prefix(live_namespace.as_str()),
-            metadata_manifest_prefix(live_namespace.as_str()),
-            checkpoint_prefix(live_namespace.as_str()),
-            upload_session_prefix(live_namespace.as_str()),
+            checkpoint_prefix(&live_namespace),
+            metadata_manifest_prefix(&live_namespace),
+            wal_segment_prefix(&live_namespace),
+            metadata_table_prefix(&live_namespace),
+            metadata_compaction_prefix(&live_namespace),
+            metadata_manifest_prefix(&live_namespace),
+            checkpoint_prefix(&live_namespace),
+            upload_session_prefix(&live_namespace),
         ],
         "core GC must list only its own core prefixes"
     );

@@ -202,7 +202,7 @@ async fn begin_direct_put_rejects_a_malformed_claim_without_creating_a_session()
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
         store
-            .list_prefix(&upload_session_prefix(namespace_id.as_str()))
+            .list_prefix(&upload_session_prefix(&namespace_id))
             .await
             .expect("list upload sessions"),
         Vec::<String>::new()
@@ -350,7 +350,7 @@ async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
         store
-            .list_prefix(&upload_session_prefix(namespace_id.as_str()))
+            .list_prefix(&upload_session_prefix(&namespace_id))
             .await
             .expect("list upload sessions"),
         Vec::<String>::new()
@@ -477,10 +477,7 @@ mod streamed_content {
         let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
             .await
             .expect("catalog");
-        let object_key = content_blob(
-            catalog.content_store_id().as_str(),
-            &first.content_ref.content_id,
-        );
+        let object_key = content_blob(catalog.content_store_id(), &first.content_ref.content_id);
         assert_eq!(
             store
                 .get(&object_key, None)
@@ -587,10 +584,7 @@ mod streamed_content {
             loonfs_core::control::load_namespace_catalog_entry(blocking.as_ref(), &namespace_id)
                 .await
                 .expect("catalog");
-        let object_key = content_blob(
-            catalog.content_store_id().as_str(),
-            &staged.content_ref.content_id,
-        );
+        let object_key = content_blob(catalog.content_store_id(), &staged.content_ref.content_id);
         let stored = blocking
             .get(&object_key, None)
             .await
@@ -665,7 +659,7 @@ mod direct_multipart {
         let catalog = loonfs_core::control::load_namespace_catalog_entry(store, &namespace_id)
             .await
             .expect("catalog");
-        let object_key = content_blob(catalog.content_store_id().as_str(), &state.content_id);
+        let object_key = content_blob(catalog.content_store_id(), &state.content_id);
 
         Session {
             namespace_id,
@@ -685,7 +679,7 @@ mod direct_multipart {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> UploadSessionState {
-        let key = upload_session(namespace_id.as_str(), upload_id.as_str());
+        let key = upload_session(namespace_id, upload_id);
         let bytes = store
             .get(&key, None)
             .await

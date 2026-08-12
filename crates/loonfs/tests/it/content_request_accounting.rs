@@ -180,7 +180,7 @@ async fn bind_namespace_to_content_store(
         .expect("build namespace head");
     store
         .put_overwrite(
-            &wal_head(namespace_id.as_str()),
+            &wal_head(namespace_id),
             Bytes::from(encode_control_object(&envelope).expect("encode namespace head")),
         )
         .await
@@ -942,7 +942,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let recording = RequestLog::new(temp_dir.path());
     let blocking = Arc::new(BlockingStore::new(
         recording.store(),
-        KeyPredicate::wal_head(namespace_id.as_str()),
+        KeyPredicate::wal_head(&namespace_id),
         OperationClass::CompareAndSwap,
     ));
     let store: SharedObjectStore = blocking.clone();
@@ -1010,7 +1010,7 @@ async fn stale_head_retry_preserves_content_admission() {
     let recording = RequestLog::new(temp_dir.path());
     let conflicting = Arc::new(FailStore::new(
         recording.store(),
-        KeyPredicate::wal_head(namespace_id.as_str()),
+        KeyPredicate::wal_head(&namespace_id),
         OperationClass::CompareAndSwap,
         InjectedError::PreconditionFailed,
     ));
@@ -1047,7 +1047,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     let recording = RequestLog::new(temp_dir.path());
     let blocking = Arc::new(BlockingStore::new(
         recording.store(),
-        KeyPredicate::wal_head(namespace_id.as_str()),
+        KeyPredicate::wal_head(&namespace_id),
         OperationClass::CompareAndSwap,
     ));
     let store: SharedObjectStore = blocking.clone();

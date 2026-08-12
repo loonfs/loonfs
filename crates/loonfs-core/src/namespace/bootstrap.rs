@@ -146,7 +146,7 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     head: &HeadState,
 ) -> Result<NamespaceHeadInstall, CoreError> {
-    let object_key = wal_head(namespace_id.as_str());
+    let object_key = wal_head(namespace_id);
     let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head.clone())
         .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
     let bytes = encode_control_object(&envelope)

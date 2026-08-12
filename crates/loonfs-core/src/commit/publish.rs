@@ -86,7 +86,7 @@ pub(crate) fn prepare_commit_head_publish(
         });
     }
 
-    let object_key = wal_head(current_head.namespace_id.as_str());
+    let object_key = wal_head(&current_head.namespace_id);
     let new_tip = wal.envelope.pointer(wal.object_key.clone());
     let resulting_head = HeadState {
         namespace_id: current_head.namespace_id.clone(),
@@ -293,7 +293,7 @@ mod tests {
         };
         let envelope = WalSegmentEnvelope::from_payload(payload).expect("wal envelope");
         PreparedWalSegment {
-            object_key: wal_segment_key(namespace_id.as_str(), segment_id.as_str()),
+            object_key: wal_segment_key(&namespace_id, &segment_id),
             segment_id,
             envelope,
             encoded_bytes: Vec::new(),
@@ -317,7 +317,7 @@ mod tests {
         );
         assert_eq!(
             prepared.write.object_key,
-            wal_head(prepared.resulting_head.namespace_id.as_str()),
+            wal_head(&prepared.resulting_head.namespace_id),
         );
         let expected_envelope = HeadStateEnvelope::from_state(
             ControlObjectKind::WalHead,
@@ -511,7 +511,7 @@ mod tests {
                 let segment_id = WalSegmentId::parse(format!("{:020}-{offset:016x}", seq.0))
                     .expect("valid segment id");
                 WalSegmentPointer {
-                    object_key: wal_segment_key(namespace_id.as_str(), segment_id.as_str()),
+                    object_key: wal_segment_key(&namespace_id, &segment_id),
                     segment_id,
                     start_seq: seq,
                     end_seq: seq,

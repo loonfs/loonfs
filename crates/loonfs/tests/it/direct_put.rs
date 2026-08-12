@@ -688,10 +688,7 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
 fn begin_upload_validates_controls_without_replay_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "begin-upload-cache-test");
 
@@ -749,7 +746,7 @@ fn begin_upload_rejects_missing_and_unreadable_namespaces() {
     fs.begin_upload_blocking(&namespace_id)
         .expect("a live namespace admits uploads");
 
-    block_on(raw_store.delete(&wal_head(namespace_id.as_str()))).expect("delete head");
+    block_on(raw_store.delete(&wal_head(&namespace_id))).expect("delete head");
     assert_core_error_kind(
         fs.begin_upload_blocking(&namespace_id),
         ErrorCode::NamespaceNotFound,
@@ -771,7 +768,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     fs.create_namespace_blocking(&head_bad, CreateNamespaceOptions::default())
         .expect("create head-bad namespace");
     block_on(raw_store.put_overwrite(
-        &wal_head(head_bad.as_str()),
+        &wal_head(&head_bad),
         Bytes::from_static(br#"{"not":"a head"}"#),
     ))
     .expect("corrupt head");

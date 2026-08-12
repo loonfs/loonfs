@@ -22,10 +22,7 @@ use tempfile::tempdir;
 fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "tail-projection-cache-test");
 
@@ -78,10 +75,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
 fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let setup = open_runtime(object_store.clone(), "publish-tail");
     let measured = open_runtime(object_store, "publish-tail");
@@ -128,10 +122,7 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
 fn runtime_publish_allows_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let setup = open_runtime(object_store.clone(), "publish-tail");
     let measured = open_runtime(object_store, "publish-tail");
@@ -159,10 +150,7 @@ fn runtime_publish_allows_multi_segment_wal_tail() {
 fn runtime_cache_observes_head_advanced_by_another_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let reader = open_runtime(object_store.clone(), "tail-cache-reader");
     let writer = open_runtime(object_store, "tail-cache-writer");
@@ -199,10 +187,7 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
 fn runtime_cache_can_be_disabled() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "tail-cache-disabled-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig::disabled())
@@ -276,10 +261,7 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
 fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
@@ -332,10 +314,7 @@ fn runtime_read_allows_multi_segment_wal_tail() {
 fn stale_head_write_error_recovers_and_reseeds_caches() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "tail-cache-stale-test");
 
@@ -506,10 +485,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
 fn runtime_control_cache_reuses_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "control-cache-head-test");
 
@@ -535,10 +511,7 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let other_namespace = NamespaceId::parse("other").expect("valid namespace id");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "control-cache-eviction-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
@@ -574,10 +547,7 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
 fn runtime_control_cache_reloads_head_after_external_change() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let reader = open_runtime(object_store.clone(), "control-cache-reader");
     let writer = open_runtime(object_store, "control-cache-writer");

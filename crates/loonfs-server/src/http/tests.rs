@@ -254,10 +254,10 @@ struct StaleHeadOnceStore {
 }
 
 impl StaleHeadOnceStore {
-    fn new(root: impl AsRef<Path>, namespace: &str) -> Self {
+    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("construct local store"),
-            head_key: wal_head(namespace),
+            head_key: wal_head(namespace_id),
             armed: AtomicBool::new(true),
         }
     }
@@ -897,7 +897,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     let namespace_id = namespace_id("shutdown-order");
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
-        KeyPredicate::wal_head(namespace_id.as_str()),
+        KeyPredicate::wal_head(&namespace_id),
         OperationClass::CompareAndSwap,
     ));
     let config = test_config(temp_dir.path(), "shutdown-order-server");
@@ -1565,8 +1565,10 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_path_mutation_retries_transient_stale_head_cas() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(StaleHeadOnceStore::new(temp_dir.path(), "demo")) as SharedObjectStore;
-    bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
+    let namespace_id = namespace_id("demo");
+    let store =
+        Arc::new(StaleHeadOnceStore::new(temp_dir.path(), &namespace_id)) as SharedObjectStore;
+    bootstrap_namespace(&store, "server-writer", &namespace_id).await;
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
@@ -1916,7 +1918,8 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
 
     let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
     let key = loonfs_objectstore::keys::content_blob(
-        "cs_00000000000000000000000000000001",
+        &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
+            .expect("valid content store id"),
         &loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
     );
     // Chunks the size of an HTTP body's, not the store's: the boundaries a

@@ -475,7 +475,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .expect("metadata root");
     store
         .put_overwrite(
-            &metadata_manifest_object(namespace.as_str(), &root.state.manifest_object_id),
+            &metadata_manifest_object(&namespace, &root.state.manifest_object_id),
             Bytes::from_static(br#"{"bad":"json"}"#),
         )
         .await

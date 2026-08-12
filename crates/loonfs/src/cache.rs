@@ -240,10 +240,7 @@ impl ReadCore {
         let cached = self.inner.control_cache().wal_head(namespace_id);
         if let Some(head) = cached {
             match self
-                .cached_control_identity_matches(
-                    &wal_head(namespace_id.as_str()),
-                    &head.head.identity,
-                )
+                .cached_control_identity_matches(&wal_head(namespace_id), &head.head.identity)
                 .await
             {
                 Ok(true) => return Ok(head),

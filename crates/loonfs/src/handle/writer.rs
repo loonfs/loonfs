@@ -488,7 +488,7 @@ mod tests {
     ) -> (FsWriter, Arc<BlockingStore<LocalFsStore>>) {
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir).expect("create local-fs store"),
-            KeyPredicate::wal_head(namespace_id.as_str()),
+            KeyPredicate::wal_head(namespace_id),
             OperationClass::CompareAndSwap,
         ));
         let writer = FsWriter::builder_with_store(blocking.clone())

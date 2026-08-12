@@ -28,7 +28,11 @@ async fn records_put_success() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put(&wal_head("ns-1"), bytes(b"head"), PutMode::CreateIfAbsent)
+        .put(
+            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            bytes(b"head"),
+            PutMode::CreateIfAbsent,
+        )
         .await
         .expect("put object");
 
@@ -51,15 +55,25 @@ async fn convenience_writes_funnel_through_put_with_distinct_modes() {
     let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
 
     store
-        .put_overwrite(&wal_head("ns-1"), bytes(b"overwrite"))
+        .put_overwrite(
+            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            bytes(b"overwrite"),
+        )
         .await
         .expect("put overwrite");
     store
-        .put_if_absent(&wal_head("ns-1"), bytes(b"create"))
+        .put_if_absent(
+            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            bytes(b"create"),
+        )
         .await
         .expect("put if absent");
     store
-        .compare_and_swap(&wal_head("ns-1"), "etag-old", bytes(b"swap"))
+        .compare_and_swap(
+            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            "etag-old",
+            bytes(b"swap"),
+        )
         .await
         .expect("compare and swap");
 
@@ -163,7 +177,10 @@ async fn records_list_count() {
         .await
         .expect("put descriptor");
     store
-        .put_overwrite(&wal_head("ns-1"), bytes(b"head"))
+        .put_overwrite(
+            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            bytes(b"head"),
+        )
         .await
         .expect("put head");
     let keys = store
@@ -187,7 +204,11 @@ async fn classifies_wal_and_manifest_key_families() {
 
     store
         .put_overwrite(
-            &wal_segment("ns-1", "seg_00000000000000000000000000000001"),
+            &wal_segment(
+                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+                &loonfs_api::WalSegmentId::parse("00000000000000000001-644e4d336fd4ee33")
+                    .expect("valid WAL segment id"),
+            ),
             bytes(b"wal"),
         )
         .await
@@ -195,7 +216,7 @@ async fn classifies_wal_and_manifest_key_families() {
     store
         .put_overwrite(
             &metadata_manifest_object(
-                "ns-1",
+                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
                 &ManifestObjectId::parse("00000000000000000002-0123456789abcdef")
                     .expect("valid manifest object id"),
             ),
@@ -205,7 +226,11 @@ async fn classifies_wal_and_manifest_key_families() {
         .expect("put manifest");
     store
         .put_overwrite(
-            &metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
+            &metadata_table(
+                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+                &loonfs_api::MetadataTableId::parse("tbl_00000000000000000000000000000001")
+                    .expect("valid metadata table id"),
+            ),
             bytes(b"table"),
         )
         .await
@@ -226,7 +251,7 @@ async fn classifies_gc_namespace_layout_family() {
     store
         .put_overwrite(
             &metadata_manifest_object(
-                "ns-1",
+                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
                 &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
                     .expect("valid manifest object id"),
             ),
@@ -236,14 +261,22 @@ async fn classifies_gc_namespace_layout_family() {
         .expect("put namespace manifest");
     store
         .put_overwrite(
-            &metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
+            &metadata_table(
+                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+                &loonfs_api::MetadataTableId::parse("tbl_00000000000000000000000000000001")
+                    .expect("valid metadata table id"),
+            ),
             bytes(b"metadata"),
         )
         .await
         .expect("put metadata sst");
     store
         .put_overwrite(
-            &checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
+            &checkpoint_record(
+                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+                &loonfs_api::CheckpointId::parse("chk_00000000000000000000000000000001")
+                    .expect("valid checkpoint id"),
+            ),
             bytes(b"checkpoint"),
         )
         .await
@@ -265,7 +298,10 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
     let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
 
     store
-        .put_overwrite(&wal_head("ns-1"), bytes(b"head"))
+        .put_overwrite(
+            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            bytes(b"head"),
+        )
         .await
         .expect("put object");
     assert!(store

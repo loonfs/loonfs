@@ -24,7 +24,7 @@ impl ManifestChecksumMismatchOnceStore {
     ) -> Self {
         Self {
             inner,
-            checkpoint_prefix: checkpoint_prefix(namespace_id.as_str()),
+            checkpoint_prefix: checkpoint_prefix(namespace_id),
             manifest_key,
             mismatched_manifest,
             mismatch_armed: AtomicBool::new(false),
@@ -814,7 +814,7 @@ async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_recor
 
     let record_keys = store
         .inner()
-        .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+        .list_prefix(&checkpoint_prefix(&namespace_id))
         .await
         .expect("list checkpoint records");
     assert_eq!(record_keys.len(), 1, "the failed create wrote one record");
@@ -889,7 +889,7 @@ async fn checkpoint_checksum_disagreement_is_terminal_corruption_and_releases_re
 
     let record_keys = store
         .inner()
-        .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+        .list_prefix(&checkpoint_prefix(&namespace_id))
         .await
         .expect("list checkpoint records");
     assert_eq!(record_keys.len(), 1, "the failed create wrote one record");
@@ -914,7 +914,7 @@ async fn checkpoint_checksum_disagreement_is_terminal_corruption_and_releases_re
 
 async fn wal_segment_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
     store
-        .list_prefix(&wal_segment_prefix(namespace_id.as_str()))
+        .list_prefix(&wal_segment_prefix(namespace_id))
         .await
         .expect("list wal segments")
         .len()
@@ -1634,7 +1634,7 @@ async fn a_missing_floor_reads_as_retain_everything() {
         .expect("bootstrap");
     assert!(
         store
-            .head(&loonfs_objectstore::keys::wal_floor(namespace_id.as_str()))
+            .head(&loonfs_objectstore::keys::wal_floor(&namespace_id))
             .await
             .expect("probe floor")
             .is_none(),

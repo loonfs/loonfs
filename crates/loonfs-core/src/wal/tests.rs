@@ -349,17 +349,18 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
 #[tokio::test]
 async fn validated_wal_chain_rejects_corrupt_visible_segments() {
     assert_wal_chain_corruption_rejected(|object_key, _envelope, pointer| {
-        *object_key = wal_segment("other", "seg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        *object_key = wal_segment(
+            &loonfs_api::NamespaceId::parse("other").expect("valid namespace id"),
+            &loonfs_api::WalSegmentId::parse("00000000000000000001-5f33f9a12dd767df")
+                .expect("valid WAL segment id"),
+        );
         pointer.object_key = object_key.clone();
     })
     .await;
     assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
         envelope.payload.namespace_id = NamespaceId::parse("other").expect("valid namespace id");
         rewrap_envelope(envelope);
-        *object_key = wal_segment(
-            envelope.payload.namespace_id.as_str(),
-            envelope.payload.segment_id.as_str(),
-        );
+        *object_key = wal_segment(&envelope.payload.namespace_id, &envelope.payload.segment_id);
         *pointer = envelope.pointer(object_key.clone());
     })
     .await;
@@ -382,10 +383,7 @@ async fn validated_wal_chain_rejects_corrupt_visible_segments() {
     assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
         envelope.payload.end_seq = ChangeSeq(2);
         rewrap_envelope(envelope);
-        *object_key = wal_segment(
-            envelope.payload.namespace_id.as_str(),
-            envelope.payload.segment_id.as_str(),
-        );
+        *object_key = wal_segment(&envelope.payload.namespace_id, &envelope.payload.segment_id);
         *pointer = envelope.pointer(object_key.clone());
     })
     .await;
@@ -395,10 +393,7 @@ async fn validated_wal_chain_rejects_corrupt_visible_segments() {
         envelope.payload.records.push(skipped);
         envelope.payload.end_seq = ChangeSeq(3);
         rewrap_envelope(envelope);
-        *object_key = wal_segment(
-            envelope.payload.namespace_id.as_str(),
-            envelope.payload.segment_id.as_str(),
-        );
+        *object_key = wal_segment(&envelope.payload.namespace_id, &envelope.payload.segment_id);
         *pointer = envelope.pointer(object_key.clone());
     })
     .await;
@@ -408,10 +403,7 @@ async fn validated_wal_chain_rejects_corrupt_visible_segments() {
         envelope.payload.end_seq = ChangeSeq(2);
         envelope.payload.records[0].seq = ChangeSeq(2);
         rewrap_envelope(envelope);
-        *object_key = wal_segment(
-            envelope.payload.namespace_id.as_str(),
-            envelope.payload.segment_id.as_str(),
-        );
+        *object_key = wal_segment(&envelope.payload.namespace_id, &envelope.payload.segment_id);
         *pointer = envelope.pointer(object_key.clone());
     })
     .await;
@@ -560,7 +552,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
         WalSegmentId::parse("00000000000000000001-00000000deadbeef").expect("valid segment id");
     let garbage = [
         WalSegmentPointer {
-            object_key: wal_segment(namespace_id.as_str(), missing_segment_id.as_str()),
+            object_key: wal_segment(&namespace_id, &missing_segment_id),
             segment_id: missing_segment_id,
             start_seq: ChangeSeq(1),
             end_seq: ChangeSeq(1),
@@ -743,7 +735,7 @@ async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() 
     // walk's own fetches to succeed.
     let failing = FailStore::new(
         inner,
-        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
         OperationClass::Get,
         InjectedError::Transport("the store is flaky".to_owned()),
     );
@@ -802,7 +794,7 @@ async fn failed_prefetch_requests_count_against_the_limit() {
 
     let failing = FailStore::new(
         inner,
-        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
         OperationClass::Get,
         InjectedError::Transport("the store is flaky".to_owned()),
     );
@@ -1128,7 +1120,7 @@ async fn boundary_length_replay_fetches_every_segment_once_in_bounded_waves() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = ConcurrencyWatchStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
     );
     let segments =
         usize::try_from(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS).expect("a segment count");
@@ -1170,7 +1162,7 @@ async fn prefetch_fetches_only_the_segments_the_gap_intersects() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
     );
     let chain = prepared_unstored_chain(&namespace_id, 5);
     store_chain(&store, &chain).await;

@@ -1487,6 +1487,7 @@ impl GrepGcCursor {
             NamespaceCursorError::Malformed(_) | NamespaceCursorError::OutsideKeyspace => {
                 malformed_gc_cursor()
             }
+            _ => malformed_gc_cursor(),
         })
     }
 

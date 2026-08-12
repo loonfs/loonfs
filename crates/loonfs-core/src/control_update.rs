@@ -199,7 +199,7 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
 ) -> crate::error::Result<LoadedUploadSessionObject> {
-    let object_key = upload_session(namespace_id.as_str(), upload_id.as_str());
+    let object_key = upload_session(namespace_id, upload_id);
     let loaded = load_control_object(
         store,
         object_key,
@@ -240,7 +240,7 @@ mod tests {
         .expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");
         store
-            .put_if_absent(&wal_head(namespace_id.as_str()), Bytes::from(bytes))
+            .put_if_absent(&wal_head(namespace_id), Bytes::from(bytes))
             .await
             .expect("write head");
     }

@@ -329,7 +329,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     // first and records last, so a record still on the store never has its
     // basis pulled out from under it inside a pass. State, expiry, and owner
     // fate gate only whether the record itself is a candidate.
-    let checkpoints_prefix = checkpoint_prefix(namespace_id.as_str());
+    let checkpoints_prefix = checkpoint_prefix(namespace_id);
     let mut checkpoint_keys = store.list_prefix_stream(&checkpoints_prefix);
     while let Some(item) = checkpoint_keys.next().await {
         let key = item.map_err(|error| CoreError::store(&checkpoints_prefix, &error))?;
@@ -397,7 +397,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         if !budget.try_charge() {
             return Ok(LiveSetCollection::BudgetExhausted);
         }
-        let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
+        let manifest_key = metadata_manifest_object(namespace_id, &manifest_object_id);
         match load_namespace_manifest_envelope_if_present(
             store,
             namespace_id,
@@ -563,7 +563,7 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<Option<ReferenceAnchor>> {
-    let prefix = metadata_manifest_prefix(namespace_id.as_str());
+    let prefix = metadata_manifest_prefix(namespace_id);
     let mut keys = store.list_prefix_stream(&prefix);
     let mut published_any = false;
     let mut aged = None;

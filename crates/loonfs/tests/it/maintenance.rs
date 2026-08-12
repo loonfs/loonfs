@@ -74,7 +74,7 @@ fn namespace_status_counts_wal_tail_without_reading_segments() {
     // enough to size a hint-covered tail.
     let store = Arc::new(CountingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
     ));
     let fs = open_runtime(store.clone(), "status-count-test");
 
@@ -105,7 +105,7 @@ const LEGACY_RECENT_SEGMENTS: usize = 32;
 /// Rewrites a head's replay accelerator to its newest `keep` pointers,
 /// which is the shape a head published by an older build carries.
 fn truncate_recent_segments(store: &SharedObjectStore, namespace_id: &NamespaceId, keep: usize) {
-    let key = wal_head(namespace_id.as_str());
+    let key = wal_head(namespace_id);
     let bytes = block_on(store.get(&key, None))
         .expect("read head")
         .expect("head exists");
@@ -213,7 +213,7 @@ fn namespace_status_and_step_reject_a_namespace_whose_head_is_gone() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    block_on(raw_store.delete(&wal_head(namespace_id.as_str()))).expect("delete head");
+    block_on(raw_store.delete(&wal_head(&namespace_id))).expect("delete head");
 
     assert_core_error_kind(
         fs.namespace_status_blocking(&namespace_id),
@@ -286,9 +286,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     // under `checkpoints/`.
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
     let records = block_on(
-        raw_store.list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(
-            namespace_id.as_str(),
-        )),
+        raw_store.list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(&namespace_id)),
     )
     .expect("list checkpoint records");
     assert!(
@@ -541,8 +539,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         &namespace_id,
     ))
     .expect("metadata root");
-    let manifest_key =
-        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
+    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest_object_id);
     let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
@@ -676,10 +673,7 @@ fn maintenance_step_counts_segments_not_commits() {
 fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "step-race-test");
 

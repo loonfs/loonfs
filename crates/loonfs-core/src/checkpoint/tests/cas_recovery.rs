@@ -49,7 +49,7 @@ impl ManifestSwapOnCasConflictStore {
             loonfs_api::wire::control::encode_control_object(&envelope).expect("root bytes");
         self.inner
             .put(
-                &loonfs_objectstore::keys::metadata_root(self.namespace_id.as_str()),
+                &loonfs_objectstore::keys::metadata_root(&self.namespace_id),
                 Bytes::from(bytes),
                 PutMode::Overwrite,
             )
@@ -144,7 +144,7 @@ impl FloorRaiseOnCasConflictStore {
             loonfs_api::wire::control::encode_control_object(&envelope).expect("floor bytes");
         self.inner
             .put(
-                &loonfs_objectstore::keys::wal_floor(self.namespace_id.as_str()),
+                &loonfs_objectstore::keys::wal_floor(&self.namespace_id),
                 Bytes::from(bytes),
                 PutMode::Overwrite,
             )
@@ -181,7 +181,7 @@ impl ObjectStore for FloorRaiseOnCasConflictStore {
         // The first advance creates the floor object, so the competing
         // writer has to be able to win that race too.
         if mode == PutMode::CreateIfAbsent
-            && key == loonfs_objectstore::keys::wal_floor(self.namespace_id.as_str())
+            && key == loonfs_objectstore::keys::wal_floor(&self.namespace_id)
             && self.remaining_conflicts.load(Ordering::SeqCst) > 0
         {
             self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
@@ -200,7 +200,7 @@ impl ObjectStore for FloorRaiseOnCasConflictStore {
         bytes: Bytes,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         use std::sync::atomic::Ordering;
-        if key == loonfs_objectstore::keys::wal_floor(self.namespace_id.as_str())
+        if key == loonfs_objectstore::keys::wal_floor(&self.namespace_id)
             && self.remaining_conflicts.load(Ordering::SeqCst) > 0
         {
             self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
@@ -513,11 +513,7 @@ async fn create_checkpoint_fails_when_its_manifest_key_holds_a_different_payload
     // so rather than generate another id.
     let store = ConflictOnManifestCreateStore::mutate_next_inode(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        format!(
-            "{}{:020}-",
-            metadata_manifest_prefix(namespace_id.as_str()),
-            2
-        ),
+        format!("{}{:020}-", metadata_manifest_prefix(&namespace_id), 2),
     );
 
     let error = create_checkpoint(&store, &namespace_id, &context)
@@ -527,7 +523,7 @@ async fn create_checkpoint_fails_when_its_manifest_key_holds_a_different_payload
     match error {
         CoreError::NamespaceCorrupt(message) => {
             assert!(
-                message.contains(&metadata_manifest_prefix(namespace_id.as_str())),
+                message.contains(&metadata_manifest_prefix(&namespace_id)),
                 "the error must name the manifest key, got {message}"
             );
         }
@@ -624,7 +620,7 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
     }
 
     let manifest_objects = store
-        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
+        .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
         .expect("list manifest objects");
     assert_eq!(
@@ -724,7 +720,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
     let context = test_context();
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::metadata_root(namespace_id.as_str()),
+        KeyPredicate::metadata_root(&namespace_id),
         OperationClass::CompareAndSwap,
         InjectedError::PreconditionFailed,
     );
@@ -783,7 +779,7 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
     let context = test_context();
     let store = RootCasTransportAfterApplyStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
+        loonfs_objectstore::keys::metadata_root(&namespace_id),
     );
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
@@ -885,7 +881,7 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
     };
     let store = RootCasTransportAfterCompetingRootStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
+        loonfs_objectstore::keys::metadata_root(&namespace_id),
         competing_root,
     );
 
@@ -1046,7 +1042,7 @@ async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
         .await
         .expect("bootstrap");
     let stale_head = inner
-        .get_with_metadata(&wal_head(namespace_id.as_str()))
+        .get_with_metadata(&wal_head(&namespace_id))
         .await
         .expect("read bootstrap head")
         .expect("bootstrap head exists");
@@ -1067,7 +1063,7 @@ async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
 
     let store = StaleHeadOnceStore {
         inner,
-        head_key: wal_head(namespace_id.as_str()),
+        head_key: wal_head(&namespace_id),
         stale_head: std::sync::Mutex::new(Some(stale_head)),
     };
     let projection = load_current_projection(&store, &namespace_id)

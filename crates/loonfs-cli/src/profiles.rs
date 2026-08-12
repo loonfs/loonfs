@@ -2,13 +2,13 @@
 
 use crate::config::{validate_profile_name, CliConfig, ProfileConfig};
 use crate::error::CliError;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ProfileSummary {
     pub name: String,
     pub mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub store_kind: Option<String>,
 }
 

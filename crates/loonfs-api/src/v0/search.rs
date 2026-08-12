@@ -125,6 +125,7 @@ pub struct GrepResponse {
 /// `steady` phase and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+// The wire discriminator is frozen as `phase` for this deliberate exception.
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum GrepIndexLifecycle {
     /// No index is maintained for this namespace.

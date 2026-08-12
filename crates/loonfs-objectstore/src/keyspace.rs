@@ -144,7 +144,8 @@ mod tests {
 
     #[test]
     fn scoped_key_helpers_keep_prefix_isolation() {
-        let head_key = wal_head("ns-1");
+        let head_key =
+            wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
         assert!(matches!(
             scope_object_key(Some("tenant-a"), &head_key),
             Ok(scoped) if scoped == format!("tenant-a/{head_key}")

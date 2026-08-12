@@ -42,7 +42,7 @@ pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore 
     )
     .await?
     .ok_or_else(|| ManifestLoadError::MissingManifest {
-        object_key: metadata_manifest_object(namespace_id.as_str(), &manifest_object_id),
+        object_key: metadata_manifest_object(namespace_id, &manifest_object_id),
     })
 }
 
@@ -52,7 +52,7 @@ async fn manifest_object_id_for_manifest_id<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
 ) -> Result<ManifestObjectId, ManifestLoadError> {
-    let prefix = metadata_manifest_prefix(namespace_id.as_str());
+    let prefix = metadata_manifest_prefix(namespace_id);
     let keys =
         store
             .list_prefix(&prefix)
@@ -88,7 +88,7 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
     namespace_id: &NamespaceId,
     manifest_object_id: &ManifestObjectId,
 ) -> Result<Option<ManifestMaterializationForInspection>, ManifestLoadError> {
-    let manifest_key = metadata_manifest_object(namespace_id.as_str(), manifest_object_id);
+    let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
     let manifest = load_namespace_manifest_envelope_if_present(
         store,
         namespace_id,

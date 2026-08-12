@@ -99,7 +99,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let encoded = encode_control_object(&envelope).map_err(|err| {
             CoreError::Internal(format!("failed to encode wal floor object: {err}"))
         })?;
-        let object_key = loonfs_objectstore::keys::wal_floor(namespace_id.as_str());
+        let object_key = loonfs_objectstore::keys::wal_floor(namespace_id);
         let published = match &loaded {
             Some(loaded) => {
                 store

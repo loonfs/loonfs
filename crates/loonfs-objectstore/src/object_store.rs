@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
 use loonfs_api::StorageChecksum;
-use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
 use thiserror::Error;
@@ -21,7 +20,7 @@ pub type SharedObjectStore = Arc<dyn ObjectStore>;
 pub type ByteStream = BoxStream<'static, Result<Bytes>>;
 
 /// Metadata returned by a successful `head`, full-object `get`, or `put` call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectMetadata {
     /// Opaque compare token for one object version.
     ///
@@ -36,7 +35,6 @@ pub struct ObjectMetadata {
     ///
     /// Advisory: garbage collection uses it for grace/reap age checks and
     /// treats an absent value as "young" (retain). Never a validity input.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_modified_ms: Option<u64>,
 }
 
@@ -45,7 +43,7 @@ pub struct ObjectMetadata {
 ///
 /// This is the evidence a completion check needs to decide whether the
 /// object at a key is the object that was promised, without downloading it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredObjectChecksum {
     /// Complete object length the provider reports.
     pub size_bytes: u64,
@@ -59,7 +57,7 @@ pub struct StoredObjectChecksum {
 /// LoonFS keeps no durable record of any part. Parts are the uploader's
 /// bookkeeping, exactly as they are in the provider's own multipart API, and
 /// this is the shape they come back in at completion.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultipartPart {
     /// One-based part number.
     pub part_number: u32,
@@ -70,7 +68,7 @@ pub struct MultipartPart {
 }
 
 /// What a provider said about an attempt to assemble a multipart upload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MultipartCompletion {
     /// The provider accepted the assembly on this call.
     Assembled,
@@ -84,7 +82,7 @@ pub enum MultipartCompletion {
 }
 
 /// Full object bytes returned with metadata from the same read operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectBody {
     /// Identity, size, and modification metadata observed with these exact bytes.
     pub metadata: ObjectMetadata,
@@ -93,7 +91,7 @@ pub struct ObjectBody {
 }
 
 /// Controls the write semantics of a `put` call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PutMode {
     /// Unconditionally overwrite any existing object.
     Overwrite,
@@ -107,7 +105,7 @@ pub enum PutMode {
 }
 
 /// A byte range for partial object reads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ByteRange {
     /// First byte to read (inclusive, zero-based).
     pub start_inclusive: u64,

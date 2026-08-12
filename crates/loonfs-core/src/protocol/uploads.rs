@@ -150,7 +150,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
     let content_ref = direct_put_content_ref(content_id.clone(), &claim)?;
-    let object_key = content_blob(content_store_id.as_str(), &content_id);
+    let object_key = content_blob(&content_store_id, &content_id);
     let upload_id = create_upload_session(
         store,
         namespace_id,
@@ -184,7 +184,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
-    let object_key = content_blob(content_store_id.as_str(), &content_id);
+    let object_key = content_blob(&content_store_id, &content_id);
 
     let provider_upload_id = store
         .create_multipart_upload(&object_key)
@@ -280,7 +280,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     }
 
     Ok(MultipartPartTargets {
-        object_key: content_blob(content_store_id.as_str(), &session.content_id),
+        object_key: content_blob(&content_store_id, &session.content_id),
         provider_upload_id: provider_upload_id.to_owned(),
         parts,
     })
@@ -465,7 +465,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     let encoded = encode_control_object(&envelope).map_err(|err| {
         CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
     })?;
-    let object_key = upload_session(namespace_id.as_str(), upload_id.as_str());
+    let object_key = upload_session(namespace_id, &upload_id);
     // An upload session is mutable control state, so its first lifecycle state is a conditional create.
     store
         .put_if_absent(&object_key, Bytes::from(encoded))
@@ -1024,10 +1024,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         // replay, and it fails loudly.
         return Err(CoreError::Internal(format!(
             "content object `{}` already holds bytes under a freshly minted identity",
-            content_blob(
-                catalog.content_store_id().as_str(),
-                &staged.content_ref.content_id
-            )
+            content_blob(catalog.content_store_id(), &staged.content_ref.content_id)
         )));
     }
     complete_owned_staging(
@@ -1521,7 +1518,7 @@ async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     expected: &ContentRef,
 ) -> Result<CompletionOutcome> {
     let parts = multipart_parts(parts)?;
-    let object_key = content_blob(content_store_id.as_str(), &expected.content_id);
+    let object_key = content_blob(content_store_id, &expected.content_id);
 
     match store
         .complete_multipart_upload(
@@ -1607,7 +1604,7 @@ mod tests {
         let content_store_id = load_namespace_content_store_id(store, &namespace_id)
             .await
             .expect("content store id");
-        let content_key = content_blob(content_store_id.as_str(), &staged.content_ref.content_id);
+        let content_key = content_blob(&content_store_id, &staged.content_ref.content_id);
         (
             namespace_id,
             content_store_id,

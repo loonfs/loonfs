@@ -118,8 +118,7 @@ pub(super) async fn overwrite_manifest(
     namespace_id: &NamespaceId,
     manifest: NamespaceManifestEnvelope,
 ) {
-    let manifest_key =
-        metadata_manifest_object(namespace_id.as_str(), &manifest.payload.manifest_object_id);
+    let manifest_key = metadata_manifest_object(namespace_id, &manifest.payload.manifest_object_id);
     let manifest_id = manifest.payload.manifest_id;
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     let updated_manifest =
@@ -149,7 +148,7 @@ pub(super) async fn overwrite_manifest(
             loonfs_api::wire::control::encode_control_object(&envelope).expect("root bytes");
         store
             .put_overwrite(
-                &loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
+                &loonfs_objectstore::keys::metadata_root(namespace_id),
                 Bytes::from(bytes),
             )
             .await
@@ -190,7 +189,7 @@ fn segment_modelled_on(
 ) -> MetadataFileRef {
     let table_id = loonfs_api::MetadataTableId::generate();
     MetadataFileRef {
-        object_key: metadata_table(namespace_id.as_str(), table_id.as_str()),
+        object_key: metadata_table(namespace_id, &table_id),
         table_id,
         run_seq,
         level,
@@ -917,7 +916,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     descriptor.index_block.crc32c ^= 0xffff_ffff;
 
     let manifest_key =
-        metadata_manifest_object(namespace_id.as_str(), &manifest.payload.manifest_object_id);
+        metadata_manifest_object(&namespace_id, &manifest.payload.manifest_object_id);
     let manifest_id = manifest.payload.manifest_id;
     let updated_manifest =
         NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
@@ -1068,7 +1067,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     .await;
 
     let manifest_key =
-        metadata_manifest_object(namespace_id.as_str(), &manifest.payload.manifest_object_id);
+        metadata_manifest_object(&namespace_id, &manifest.payload.manifest_object_id);
     let manifest_id = manifest.payload.manifest_id;
     let updated_manifest =
         NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");

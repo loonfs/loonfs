@@ -38,6 +38,7 @@ pub struct EnvelopeProbe {
 /// envelope-generic; the wrapping error names the object (and its key) the
 /// bytes came from.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EnvelopeCodecError {
     /// Reports a payload that cannot be serialized into its family's durable encoding.
     #[error("failed to encode envelope payload: {0}")]

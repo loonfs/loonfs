@@ -43,7 +43,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let namespace_id = NamespaceId::parse("parked").expect("valid namespace id");
     let store_impl = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir).expect("create local-fs store"),
-        KeyPredicate::wal_head(namespace_id.as_str()),
+        KeyPredicate::wal_head(&namespace_id),
         OperationClass::CompareAndSwap,
     ));
     let store: SharedObjectStore = store_impl.clone();

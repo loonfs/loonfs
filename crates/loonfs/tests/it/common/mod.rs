@@ -581,24 +581,24 @@ pub(crate) struct RuntimeStoreProbe {
 }
 
 impl RuntimeStoreProbe {
-    pub(crate) fn new(root: &Path, namespace: &str) -> Self {
+    pub(crate) fn new(root: &Path, namespace_id: &NamespaceId) -> Self {
         let inner: SharedObjectStore =
             Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
         let wal_gets = Arc::new(CountingStore::new(
             inner,
-            KeyPredicate::prefix(format!("namespaces/{namespace}/wal/segments/")),
+            KeyPredicate::prefix(format!("namespaces/{namespace_id}/wal/segments/")),
         ));
         let manifest_gets = Arc::new(CountingStore::new(
             wal_gets.clone() as SharedObjectStore,
-            KeyPredicate::prefix(format!("namespaces/{namespace}/metadata/manifests/")),
+            KeyPredicate::prefix(format!("namespaces/{namespace_id}/metadata/manifests/")),
         ));
         let head_gets = Arc::new(CountingStore::new(
             manifest_gets.clone() as SharedObjectStore,
-            KeyPredicate::wal_head(namespace),
+            KeyPredicate::wal_head(namespace_id),
         ));
         let fail_head_cas = Arc::new(FailStore::new(
             head_gets.clone() as SharedObjectStore,
-            KeyPredicate::wal_head(namespace),
+            KeyPredicate::wal_head(namespace_id),
             OperationClass::CompareAndSwap,
             InjectedError::PreconditionFailed,
         ));
@@ -606,7 +606,7 @@ impl RuntimeStoreProbe {
         // namespace that has never flushed, compare-and-swap after that.
         let fail_root_cas = Arc::new(FailStore::new(
             fail_head_cas.clone() as SharedObjectStore,
-            KeyPredicate::metadata_root(namespace),
+            KeyPredicate::metadata_root(namespace_id),
             OperationClass::Put,
             InjectedError::PreconditionFailed,
         ));

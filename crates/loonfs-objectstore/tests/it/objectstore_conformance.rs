@@ -26,36 +26,55 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn key_builders_cover_locked_object_families() {
-    assert_eq!(wal_head("ns-1"), "namespaces/ns-1/wal/head.json");
+    assert_eq!(
+        wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+        "namespaces/ns-1/wal/head.json"
+    );
     assert_eq!(
         content_blob(
-            "cs_00000000000000000000000000000001",
+            &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001").expect("valid content store id"),
             &ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("valid content id"),
         ),
         "content-stores/cs_00000000000000000000000000000001/objects/ab/cd/con_abcdef0123456789abcdef0123456789"
     );
     assert_eq!(
-        wal_segment("ns-1", "seg_00000000000000000000000000000001"),
-        "namespaces/ns-1/wal/segments/seg_00000000000000000000000000000001.wal.zst"
+        wal_segment(
+            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+            &loonfs_api::WalSegmentId::parse("00000000000000000001-644e4d336fd4ee33")
+                .expect("valid WAL segment id")
+        ),
+        "namespaces/ns-1/wal/segments/00000000000000000001-644e4d336fd4ee33.wal.zst"
     );
     assert_eq!(
         metadata_manifest_object(
-            "ns-1",
+            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
             &ManifestObjectId::parse("00000000000000000420-0123456789abcdef")
                 .expect("valid manifest object id"),
         ),
         "namespaces/ns-1/metadata/manifests/00000000000000000420-0123456789abcdef.manifest.json"
     );
     assert_eq!(
-        metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
+        metadata_table(
+            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+            &loonfs_api::MetadataTableId::parse("tbl_00000000000000000000000000000001")
+                .expect("valid metadata table id")
+        ),
         "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
     );
     assert_eq!(
-        metadata_table("source-ns", "tbl_00000000000000000000000000000002"),
+        metadata_table(
+            &loonfs_api::NamespaceId::parse("source-ns").expect("valid namespace id"),
+            &loonfs_api::MetadataTableId::parse("tbl_00000000000000000000000000000002")
+                .expect("valid metadata table id")
+        ),
         "namespaces/source-ns/metadata/tables/tbl_00000000000000000000000000000002.sst.zst"
     );
     assert_eq!(
-        metadata_table("ns-1", "tbl_ffffffffffffffffffffffffffffffff"),
+        metadata_table(
+            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+            &loonfs_api::MetadataTableId::parse("tbl_ffffffffffffffffffffffffffffffff")
+                .expect("valid metadata table id")
+        ),
         "namespaces/ns-1/metadata/tables/tbl_ffffffffffffffffffffffffffffffff.sst.zst"
     );
 }
@@ -349,7 +368,8 @@ fn probe_report_lines(report: &StoreProbeReport) -> String {
 /// The content key a streamed-write exercise writes to and cleans up.
 fn streamed_write_key() -> String {
     content_blob(
-        "cs_00000000000000000000000000000001",
+        &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
+            .expect("valid content store id"),
         &ContentId::parse("con_5723ea9d1c4b48f0a1d2e3f4a5b6c7d8").expect("valid content id"),
     )
 }
