@@ -37,7 +37,7 @@ use loonfs_test_support::stores::{FailStore, InjectedError, OperationContext, Op
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use tokio::sync::Semaphore;
@@ -338,6 +338,62 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
 }
 
 #[tokio::test]
+async fn enable_releases_its_checkpoint_when_root_reload_fails_before_publication() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("enable-root-failure").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("enable-root-failure-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let host = GrepHost::new(&store, "enable-root-failure-admin").await;
+    let grep_root_key = root_key(&namespace_id);
+    let root_loads = Arc::new(AtomicUsize::new(0));
+    let observed_root_loads = Arc::clone(&root_loads);
+    let failing_store = Arc::new(FailStore::matching(
+        store.clone(),
+        move |context: &OperationContext<'_>| {
+            context.key() == grep_root_key
+                && matches!(context.kind(), OperationKind::GetWithMetadata)
+                && observed_root_loads.fetch_add(1, Ordering::SeqCst) == 1
+        },
+        InjectedError::Transport("injected grep-root reload failure".to_owned()),
+    ));
+    failing_store.fail_all();
+    let worker = GrepWorker::with_block_cache(
+        failing_store.clone(),
+        host.reader.clone(),
+        host.admin.clone(),
+        Arc::clone(&host.block_cache),
+    );
+
+    let error = worker
+        .enable(&namespace_id)
+        .await
+        .expect_err("the second root load fails after checkpoint creation");
+    assert!(matches!(error, GrepError::StoreUnavailable { .. }));
+    assert_eq!(failing_store.attempts(), 1);
+
+    let checkpoints = host
+        .admin
+        .list_checkpoints(&namespace_id)
+        .await
+        .expect("list checkpoints after failed enable");
+    assert!(
+        checkpoints.checkpoints.is_empty(),
+        "a failure before root publication must not leave an active checkpoint"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
@@ -387,20 +443,72 @@ async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous()
     assert!(matches!(error, GrepError::StoreUnavailable { .. }));
     assert_eq!(failing_store.attempts(), 1);
 
-    let root = load_grep_root(&*store, &namespace_id)
+    assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn restart_retains_its_checkpoint_when_the_root_write_result_is_ambiguous() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("ambiguous-restart").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("ambiguous-restart-writer")
+        .min_publish_interval_ms(0)
+        .build()
         .await
-        .expect("load published root")
-        .expect("the root write landed");
-    let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.manifest_state().lifecycle() else {
-        panic!("published root should be backfilling");
-    };
-    let checkpoint = control::checkpoint_record(&store, &namespace_id, checkpoint_id)
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
-        .expect("published checkpoint remains readable");
-    assert!(matches!(
-        checkpoint.state,
-        CheckpointRecordLifecycle::Active {}
-    ));
+        .expect("create namespace");
+    let host = GrepHost::new(&store, "ambiguous-restart-admin").await;
+    host.worker
+        .enable(&namespace_id)
+        .await
+        .expect("enable grep");
+    let previous_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    host.admin
+        .release_checkpoint(&namespace_id, &previous_checkpoint_id)
+        .await
+        .expect("make the current backfill restart");
+
+    let grep_root_key = root_key(&namespace_id);
+    let failing_store = Arc::new(
+        FailStore::matching(
+            store.clone(),
+            move |context: &OperationContext<'_>| {
+                context.key() == grep_root_key
+                    && matches!(
+                        context.kind(),
+                        OperationKind::Put {
+                            mode: PutMode::CompareAndSwap { .. },
+                            ..
+                        }
+                    )
+            },
+            InjectedError::Transport("injected failure after root publication".to_owned()),
+        )
+        .apply_then_fail(),
+    );
+    failing_store.fail_next(1);
+    let worker = GrepWorker::with_block_cache(
+        failing_store.clone(),
+        host.reader.clone(),
+        host.admin.clone(),
+        Arc::clone(&host.block_cache),
+    );
+
+    let error = worker
+        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .await
+        .expect_err("restart publication acknowledgement fails");
+    assert!(matches!(error, GrepError::StoreUnavailable { .. }));
+    assert_eq!(failing_store.attempts(), 1);
+
+    let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    assert_ne!(checkpoint_id, previous_checkpoint_id);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -603,7 +711,7 @@ async fn assert_fresh_backfill_attempt(
     };
     assert_eq!(
         *cursor, None,
-        "a rebootstrap restarts the walk from the beginning"
+        "a fresh backfill starts the walk from the beginning"
     );
     assert!(
         root.manifest_state().segments().is_empty(),

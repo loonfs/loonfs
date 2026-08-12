@@ -286,50 +286,60 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         }
 
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let outcome = async {
-            let current = load_grep_root(&self.store, namespace_id)
-                .await
-                .map_err(GrepError::from)?;
-            if let Some(current) = &current {
-                if !matches!(
-                    current.manifest_state().lifecycle(),
-                    GrepLifecycle::Disabled
-                ) {
-                    return Ok(GrepEnableOutcome::AlreadyEnabled {
-                        state: current.manifest_state().lifecycle().clone(),
-                    });
-                }
+        let current = match load_grep_root(&self.store, namespace_id).await {
+            Ok(current) => current,
+            Err(error) => {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
+                return Err(error.into());
             }
-            let next_run_ordinal = current
-                .as_ref()
-                .map_or(0, |root| root.manifest_state().index().next_run_ordinal);
-            let next = backfilling_root(
-                namespace_id,
-                checkpoint.checkpoint_seq,
-                checkpoint.checkpoint_id.clone(),
-                next_run_ordinal,
-            )?;
-            let published = match current {
-                Some(current) => self.advance_root(&current, &next).await,
-                None => self.seed_root(&next).await,
-            };
-            match published {
-                Ok(published) => Ok(GrepEnableOutcome::Enabled {
-                    state: published.manifest_state().lifecycle().clone(),
-                }),
-                Err(GrepRootError::Conflict { .. }) => Ok(GrepEnableOutcome::Superseded),
-                Err(error) => Err(error.into()),
+        };
+        if let Some(current) = &current {
+            if !matches!(
+                current.manifest_state().lifecycle(),
+                GrepLifecycle::Disabled
+            ) {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
+                return Ok(GrepEnableOutcome::AlreadyEnabled {
+                    state: current.manifest_state().lifecycle().clone(),
+                });
             }
         }
-        .await;
-        if matches!(
-            &outcome,
-            Ok(GrepEnableOutcome::AlreadyEnabled { .. } | GrepEnableOutcome::Superseded)
+        let next_run_ordinal = current
+            .as_ref()
+            .map_or(0, |root| root.manifest_state().index().next_run_ordinal);
+        let next = match backfilling_root(
+            namespace_id,
+            checkpoint.checkpoint_seq,
+            checkpoint.checkpoint_id.clone(),
+            next_run_ordinal,
         ) {
-            self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
-                .await?;
+            Ok(next) => next,
+            Err(error) => {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
+                return Err(error);
+            }
+        };
+        let published = match current {
+            Some(current) => self.advance_root(&current, &next).await,
+            None => self.seed_root(&next).await,
+        };
+        match published {
+            Ok(published) => Ok(GrepEnableOutcome::Enabled {
+                state: published.manifest_state().lifecycle().clone(),
+            }),
+            Err(GrepRootError::Conflict { .. }) => {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
+                Ok(GrepEnableOutcome::Superseded)
+            }
+            // A non-conflict failure may be an acknowledgement failure after
+            // the root update landed. Keep the checkpoint because the root
+            // may already reference it.
+            Err(error) => Err(error.into()),
         }
-        outcome
     }
 
     /// Disables grep with one root CAS. Existing segments become grep-GC
@@ -523,23 +533,20 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepLifecycle::Steady { .. } | GrepLifecycle::Disabled => None,
         };
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let published = async {
-            let next = backfilling_root(
-                namespace_id,
-                checkpoint.checkpoint_seq,
-                checkpoint.checkpoint_id.clone(),
-                current.manifest_state().index().next_run_ordinal,
-            )?;
-            self.advance_root(current, &next)
-                .await
-                .map_err(GrepError::from)
-        }
-        .await;
-        if matches!(&published, Err(GrepError::PublicationConflict { .. })) {
-            self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
-                .await?;
-        }
-        match published {
+        let next = match backfilling_root(
+            namespace_id,
+            checkpoint.checkpoint_seq,
+            checkpoint.checkpoint_id.clone(),
+            current.manifest_state().index().next_run_ordinal,
+        ) {
+            Ok(next) => next,
+            Err(error) => {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
+                return Err(error);
+            }
+        };
+        match self.advance_root(current, &next).await {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
                     self.release_checkpoint(namespace_id, &previous_checkpoint_id)
@@ -552,10 +559,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     },
                 ))
             }
-            Err(GrepError::PublicationConflict { .. }) => {
+            Err(GrepRootError::Conflict { .. }) => {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
                 Ok(build_report(namespace_id, GrepBuildOutcome::Superseded))
             }
-            Err(error) => Err(error),
+            // A non-conflict failure may be an acknowledgement failure after
+            // the root update landed. Keep the checkpoint because the root
+            // may already reference it.
+            Err(error) => Err(error.into()),
         }
     }
 
