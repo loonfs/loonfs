@@ -34,6 +34,117 @@ use loonfs_objectstore::{
 };
 use std::path::Path;
 
+const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
+    "aborted_at_ms",
+    "active_acquired_at_ms",
+    "active_deletion_seq",
+    "active_writer",
+    "active_writer_epoch",
+    "actual_attributes_revision_no",
+    "actual_head_seq",
+    "actual_revision",
+    "advance_retention",
+    "after_seq",
+    "allow_scan",
+    "allow_stale",
+    "attributes_changed",
+    "attributes_revision_no",
+    "bearer_auth",
+    "begin_put",
+    "budget_exhausted",
+    "built_through_seq",
+    "checkpoint_id",
+    "checkpoint_not_releasable",
+    "checkpoint_seq",
+    "commit_id",
+    "committed_at_ms",
+    "committed_fingerprint",
+    "committed_seq",
+    "compaction_at_capacity",
+    "compaction_required",
+    "compaction_running",
+    "compaction_started",
+    "complete_upload_prepared",
+    "completed_at_ms",
+    "content_changed",
+    "content_reclamation_deferred",
+    "content_ref",
+    "content_scan_deferred",
+    "content_store_id",
+    "content_tokens",
+    "created_at_ms",
+    "cursor_inode_id",
+    "degraded_retention",
+    "degraded_roots",
+    "deleted_at_seq",
+    "destination_exists",
+    "direct_multipart",
+    "direct_put",
+    "display_name",
+    "expected_attributes_revision_no",
+    "expected_head_seq",
+    "expected_inode_id",
+    "expected_revision",
+    "expected_revision_no",
+    "expires_at_ms",
+    "fenced_epoch",
+    "from_name",
+    "from_parent_inode_id",
+    "grace_window",
+    "grace_window_ms",
+    "head_seq",
+    "include_attributes",
+    "inode_id",
+    "inode_kind",
+    "manifest_id",
+    "max_objects",
+    "max_wal_tail_segments",
+    "name_key",
+    "namespace_id",
+    "new_namespace_id",
+    "next_after_seq",
+    "next_cursor",
+    "next_event_index",
+    "next_reclamation_at_ms",
+    "no_provider_timestamp",
+    "no_reference_manifest",
+    "no_replace",
+    "operation_id",
+    "operation_index",
+    "operation_kind",
+    "operation_part",
+    "parent_inode_id",
+    "part_size_bytes",
+    "path_prefix",
+    "prepare_content_ref",
+    "prepare_file_bytes",
+    "protocol_version",
+    "put_file",
+    "put_file_prepared",
+    "request_deadline_ms",
+    "request_id",
+    "requested_deletion_seq",
+    "retained_candidates",
+    "retention_floor_seq",
+    "revision_no",
+    "run_id",
+    "service_proxied",
+    "size_bytes",
+    "storage_checksum",
+    "target_namespace_id",
+    "target_seq",
+    "to_name",
+    "to_parent_inode_id",
+    "ttl_ms",
+    "unrecognized_key",
+    "update_attributes",
+    "upload_session_undecided",
+    "upload_session_window",
+    "validated_content_token",
+    "wal_flush",
+    "whole_file_sha256",
+];
+
 fn replace_file_options() -> PutFileOptions {
     PutFileOptions {
         behavior: DestinationBehavior::Replace,
@@ -98,6 +209,34 @@ fn error_status_mapping_matches_the_api_spec_table() {
         documented.is_empty(),
         "api.md documents codes this build does not register: {documented:?}"
     );
+    assert_api_spec_error_codes_are_registered(&spec);
+}
+
+fn assert_api_spec_error_codes_are_registered(spec: &str) {
+    for token in spec
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| is_snake_case_token(token))
+    {
+        if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token) {
+            continue;
+        }
+        assert!(
+            ErrorCode::parse(token).is_some(),
+            "api.md uses unregistered error-code-shaped token `{token}`"
+        );
+    }
+}
+
+fn is_snake_case_token(token: &str) -> bool {
+    token.contains('_')
+        && token.starts_with(|character: char| character.is_ascii_lowercase())
+        && !token.ends_with('_')
+        && !token.contains("__")
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;

@@ -624,14 +624,14 @@ fn local_open_error(
     derived_name: bool,
 ) -> CliError {
     if error.kind() == std::io::ErrorKind::NotFound {
-        return CliError::new(
-            "io_error",
+        let parent_error = std::io::Error::new(
+            error.kind(),
             format!(
-                "i/o error for `{}`: parent directory `{}` does not exist",
-                destination.display(),
+                "parent directory `{}` does not exist",
                 partial::parent_of(destination).display()
             ),
         );
+        return CliError::io_for_path(destination, parent_error);
     }
     local_destination_error(destination, error, force, derived_name)
 }

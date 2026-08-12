@@ -99,6 +99,11 @@ impl CliError {
         )
     }
 
+    /// Whether namespace resolution found no configured default.
+    pub(crate) fn is_no_default_namespace(&self) -> bool {
+        self.code == "no_default_namespace"
+    }
+
     pub(crate) fn profile_already_exists(name: &str) -> Self {
         Self::new(
             "profile_already_exists",
