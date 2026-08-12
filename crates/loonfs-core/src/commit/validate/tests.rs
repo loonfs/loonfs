@@ -10,7 +10,8 @@
 use super::super::{CommitIr, CommitOp, PlannedOp};
 use super::{build_commit_plan_for_publish, PublishCommitValidationContext};
 use crate::commit::{
-    materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, PreparedCommit,
+    materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator,
+    PreparedCommit,
 };
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
@@ -206,9 +207,26 @@ async fn build_commit_plan(
     context: &TestValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
     let accepted_rows = MetadataState::default();
+    let allocator = InodeAllocator::new(context.head.next_inode_id);
+    let mut allocation = allocator.begin_candidate();
+    for planned in &request.ops {
+        let assigned = match &planned.op {
+            CommitOp::CreateDirectory { child_inode_id, .. }
+            | CommitOp::CreateFile { child_inode_id, .. } => Some(*child_inode_id),
+            _ => None,
+        };
+        if let Some(assigned) = assigned {
+            assert_eq!(
+                allocation.allocate().expect("test inode allocation"),
+                assigned,
+                "test create operations must carry their planned inode ids"
+            );
+        }
+    }
     let result = build_commit_plan_for_publish(
         request,
         committed_at_ms,
+        &allocation,
         &PublishCommitValidationContext {
             head: &context.head,
             metadata_view: InMemoryMetadataView::in_memory(
@@ -396,10 +414,12 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![
             CommitOp::CreateDirectory {
+                child_inode_id: InodeId(2),
                 parent_inode_id: InodeId(1),
                 display_name: test_display_name("docs"),
             },
             CommitOp::CreateFile {
+                child_inode_id: InodeId(3),
                 parent_inode_id: InodeId(2),
                 display_name: test_display_name("readme.txt"),
                 content_ref: content_ref("content-1"),
@@ -458,6 +478,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
             commit_id: CommitId::parse("create-under-tombstone").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),
             ops: planned(vec![CommitOp::CreateFile {
+                child_inode_id: InodeId(4),
                 parent_inode_id: InodeId(2),
                 display_name: test_display_name("new.txt"),
                 content_ref: content_ref("content-2"),

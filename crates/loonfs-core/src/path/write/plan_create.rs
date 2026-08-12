@@ -7,7 +7,8 @@ use super::planning_helpers::{
     PublishPathPlanningView,
 };
 use crate::commit::{
-    CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition, CommitValidationError,
+    CandidateAllocation, CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
+    CommitValidationError,
 };
 use crate::error::{CoreError, Result};
 use crate::path::helpers::{ensure_mutation_path, final_component};
@@ -20,6 +21,7 @@ pub(super) async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     parents: bool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    allocation: &mut CandidateAllocation,
 ) -> Result<PlannedOperation> {
     ensure_mutation_path(absolute_path)?;
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
@@ -40,13 +42,14 @@ pub(super) async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
     let mut ops = Vec::new();
     let parent_inode_id = if parents {
         // The same ancestor auto-create the put-file plan performs.
-        let mut next_inode_id = view.next_inode_id;
-        publish_ensure_parent_directories(absolute_path, view, &mut ops, &mut next_inode_id).await?
+        publish_ensure_parent_directories(absolute_path, view, &mut ops, allocation).await?
     } else {
         publish_resolve_parent_directory(view, absolute_path).await?
     };
     let display_name = final_component(absolute_path)?;
+    let child_inode_id = allocation.allocate()?;
     ops.push(ApiCommitOp::CreateDirectory {
+        child_inode_id,
         parent_inode_id,
         display_name: display_name.clone(),
     });
@@ -152,6 +155,7 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     behavior: DestinationBehavior,
     expected_revision_no: Option<RevisionNo>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    allocation: &mut CandidateAllocation,
 ) -> Result<PlannedOperation> {
     ensure_mutation_path(absolute_path)?;
     if expected_revision_no.is_some() && behavior == DestinationBehavior::NoReplace {
@@ -168,10 +172,8 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
         .await;
 
     let mut ops = Vec::new();
-    let mut next_inode_id = view.next_inode_id;
     let final_parent_inode =
-        publish_ensure_parent_directories(absolute_path, view, &mut ops, &mut next_inode_id)
-            .await?;
+        publish_ensure_parent_directories(absolute_path, view, &mut ops, allocation).await?;
     let final_name = final_component(absolute_path)?;
     let mut preconditions = Vec::new();
 
@@ -219,7 +221,9 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
             if expected_revision_no.is_some() {
                 return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
             }
+            let child_inode_id = allocation.allocate()?;
             ops.push(ApiCommitOp::CreateFile {
+                child_inode_id,
                 parent_inode_id: final_parent_inode,
                 display_name: final_name.clone(),
                 content_ref,

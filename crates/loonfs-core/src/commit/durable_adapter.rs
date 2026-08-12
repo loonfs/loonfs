@@ -53,6 +53,7 @@ mod tests {
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),
             ops: vec![PlannedOp::unchecked(CommitOp::CreateDirectory {
+                child_inode_id: InodeId(2),
                 parent_inode_id: InodeId(1),
                 display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             })],

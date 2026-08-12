@@ -34,6 +34,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
         commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
         ops: vec![PlannedOp::unchecked(CommitOp::CreateDirectory {
+            child_inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
         })],
@@ -437,6 +438,7 @@ fn materialized_create_directory(
         commit_id: CommitId::parse(commit_id).expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
         ops: vec![PlannedOp::unchecked(CommitOp::CreateDirectory {
+            child_inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
         })],

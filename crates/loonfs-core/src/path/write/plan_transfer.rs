@@ -6,7 +6,9 @@ use super::planning_helpers::{
     publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory,
     publish_resolve_replace_destination, PlannedOperation, PublishPathPlanningView,
 };
-use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
+use crate::commit::{
+    CandidateAllocation, CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
+};
 use crate::error::{CoreError, Result};
 use crate::path::helpers::{ensure_mutation_path, final_component};
 use loonfs_api::{AbsolutePath, AttributeRevisionNo, DestinationBehavior, InodeKind};
@@ -84,6 +86,7 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     to_path: &AbsolutePath,
     behavior: DestinationBehavior,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    allocation: &mut CandidateAllocation,
 ) -> Result<PlannedOperation> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
@@ -155,7 +158,9 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
             });
         }
         ReplaceDestination::Vacant => {
+            let child_inode_id = allocation.allocate()?;
             ops.push(ApiCommitOp::CreateFile {
+                child_inode_id,
                 parent_inode_id: target_parent,
                 display_name: target_name.clone(),
                 content_ref: revision.content_ref,
@@ -176,11 +181,10 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
                 .attributes_at_visible_seq(source.inode_id)
                 .await?;
             if !source_attributes.is_empty() {
-                // The create above is this operation's only inode
-                // allocation, so the commit plan hands it the request's next
-                // free id.
+                // Both operations carry the one identity assigned above, so
+                // validation cannot allocate a different inode for either.
                 ops.push(ApiCommitOp::UpdateAttributes {
-                    inode_id: view.next_inode_id,
+                    inode_id: child_inode_id,
                     base_attributes_revision_no: AttributeRevisionNo(0),
                     attributes: source_attributes,
                 });

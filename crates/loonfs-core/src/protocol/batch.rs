@@ -137,43 +137,41 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 accepted_rows: session.accepted_rows(),
             };
             let request = candidate_request.request;
+            let semantic_identity = candidate_request.semantic_identity;
+            let allocation = candidate_request.allocation;
             if let Err(error) =
                 validate_commit_content_references(candidate, view.content_store_id())
             {
+                session.discard_candidate(allocation);
                 outcomes[index] = Some(Err(error));
                 continue;
             }
             let plan = {
                 let span = tracing::debug_span!("loonfs.phase", phase = "build_commit_plan");
-                match build_commit_plan_for_publish(&request, context.now_ms, &validation)
-                    .instrument(span)
-                    .await
+                match build_commit_plan_for_publish(
+                    &request,
+                    context.now_ms,
+                    &allocation,
+                    &validation,
+                )
+                .instrument(span)
+                .await
                 {
                     Ok(plan) => plan,
                     Err(error) => {
+                        session.discard_candidate(allocation);
                         outcomes[index] = Some(Err(error));
                         continue;
                     }
                 }
             };
-            // One allocator: the planner predicted these ids while resolving
-            // the request's operations, and the plan re-derives them from the
-            // operation list. A disagreement would mean an operation was
-            // parented under an inode nothing creates.
-            debug_assert_eq!(
-                plan.resulting_next_inode_id, candidate_request.predicted_next_inode_id,
-                "planner prediction and commit-plan allocation disagree"
-            );
             let prepared = {
                 let _span = tracing::debug_span!("loonfs.phase", phase = "PreparedCommit::prepare")
                     .entered();
-                match PreparedCommit::new(
-                    request,
-                    plan.clone(),
-                    candidate_request.semantic_identity,
-                ) {
+                match PreparedCommit::new(request, plan.clone(), semantic_identity) {
                     Ok(value) => value,
                     Err(error) => {
+                        session.discard_candidate(allocation);
                         outcomes[index] = Some(Err(CoreError::Internal(format!(
                             "commit preparation failed: {error}"
                         ))));
@@ -195,6 +193,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 match wal_payload_from_materialized_commit(&materialized) {
                     Ok(payload) => payload,
                     Err(error) => {
+                        session.discard_candidate(allocation);
                         outcomes[index] = Some(Err(error.into()));
                         continue;
                     }
@@ -204,7 +203,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "apply_committed_wal_record")
                         .entered();
-                session.apply_accepted_commit(&preview, &plan);
+                if let Err(error) = session.apply_accepted_commit(&preview, &plan, allocation) {
+                    outcomes[index] = Some(Err(error));
+                    continue;
+                }
             }
             accepted.push((index, materialized));
         }

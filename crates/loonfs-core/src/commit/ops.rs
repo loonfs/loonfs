@@ -42,6 +42,9 @@ impl PlannedOp {
 pub(crate) enum CommitOp {
     /// Create a directory under a parent inode.
     CreateDirectory {
+        /// Inode identity assigned once by the candidate allocator during
+        /// planning and carried unchanged through validation.
+        child_inode_id: InodeId,
         /// Visible directory that will own the new binding.
         parent_inode_id: InodeId,
         /// Requested child spelling, whose derived name key must be absent.
@@ -49,6 +52,9 @@ pub(crate) enum CommitOp {
     },
     /// Create a file under a parent inode.
     CreateFile {
+        /// Inode identity assigned once by the candidate allocator during
+        /// planning and carried unchanged through validation.
+        child_inode_id: InodeId,
         /// Visible directory that will own the new binding.
         parent_inode_id: InodeId,
         /// Requested child spelling, whose derived name key must be absent.
