@@ -47,7 +47,7 @@ impl CompletedUploadReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContentAdmission {
+pub(crate) struct ContentAdmission {
     content_store_id: ContentStoreId,
     content_ref: ContentRef,
 }

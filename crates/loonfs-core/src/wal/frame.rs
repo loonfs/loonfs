@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedWalSegment {
+pub(crate) struct PreparedWalSegment {
     pub object_key: String,
     pub segment_id: WalSegmentId,
     pub envelope: WalSegmentEnvelope,

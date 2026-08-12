@@ -771,7 +771,6 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::RestoreRevisionInodeMissing { .. }
         | CommitValidationError::DeleteFileInodeMissing { .. }
         | CommitValidationError::RenameInodeMissing { .. }
-        | CommitValidationError::RenameSourceBindingMissing { .. }
         | CommitValidationError::SourceBindingMissing { .. }
         | CommitValidationError::RenameTargetParentMissing { .. }
         | CommitValidationError::DeleteSubtreeRootMissing { .. }

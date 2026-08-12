@@ -47,6 +47,22 @@ impl CompactionOutcome {
     }
 }
 
+/// The closed outcome vocabulary for a publication delivered to its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishOutcome {
+    Ok,
+    Error,
+}
+
+impl PublishOutcome {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// One reclaimable family: its label, and the count a pass reports for it.
 type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 
@@ -267,11 +283,11 @@ impl RuntimeInstruments {
     }
 
     /// Reports one publication result delivered to its caller.
-    pub(crate) fn publisher_publish(&self, result: &'static str) {
+    pub(crate) fn publisher_publish(&self, outcome: PublishOutcome) {
         let Some(installed) = &self.installed else {
             return;
         };
-        installed.publisher.publish(result).increment(1);
+        installed.publisher.publish(outcome).increment(1);
     }
 
     /// Reports what one collection pass reclaimed and retained.
@@ -622,11 +638,11 @@ struct PublisherInstruments {
 
 impl PublisherInstruments {
     fn register(recorder: &dyn MetricsRecorder) -> Self {
-        let publishes = |result: &'static str| {
+        let publishes = |outcome: PublishOutcome| {
             recorder.register_counter(
                 "loonfs.publisher.publishes",
                 "Publication results delivered to their callers",
-                &[("result", result)],
+                &[("result", outcome.as_str())],
             )
         };
         Self {
@@ -661,16 +677,15 @@ impl PublisherInstruments {
                 "Decoded bytes held by the retained WAL-tail projections",
                 &[],
             ),
-            published_ok: publishes("ok"),
-            published_error: publishes("error"),
+            published_ok: publishes(PublishOutcome::Ok),
+            published_error: publishes(PublishOutcome::Error),
         }
     }
 
-    fn publish(&self, result: &'static str) -> &Arc<dyn CounterHandle> {
-        if result == "ok" {
-            &self.published_ok
-        } else {
-            &self.published_error
+    fn publish(&self, outcome: PublishOutcome) -> &Arc<dyn CounterHandle> {
+        match outcome {
+            PublishOutcome::Ok => &self.published_ok,
+            PublishOutcome::Error => &self.published_error,
         }
     }
 }
@@ -908,7 +923,7 @@ mod tests {
         assert!(fan_out_object_store_recorder(None, instruments.object_store_recorder()).is_none());
 
         instruments.publisher_batch(4);
-        instruments.publisher_publish("ok");
+        instruments.publisher_publish(PublishOutcome::Ok);
         instruments.maintenance_step(MaintenanceJobId::GC, MaintenanceStepConclusion::Idle, 1, 2);
     }
 

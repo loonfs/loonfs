@@ -28,13 +28,6 @@ pub struct LoadedMetadataRootControl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoadedWalFloorControl {
-    pub object_key: String,
-    pub identity: ControlObjectIdentity,
-    pub state: loonfs_api::wire::control::WalFloorState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadedHeadControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
@@ -127,18 +120,6 @@ pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
         |state: &HeadState| expect_namespace(expected_namespace_id, &state.namespace_id),
     )
     .await
-}
-
-pub async fn load_namespace_wal_floor_control<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<LoadedWalFloorControl, ControlObjectLoadError> {
-    let loaded = read_wal_floor_object(store, expected_namespace_id).await?;
-    Ok(LoadedWalFloorControl {
-        object_key: loaded.object_key,
-        identity: ControlObjectIdentity { etag: loaded.etag },
-        state: loaded.state,
-    })
 }
 
 pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(

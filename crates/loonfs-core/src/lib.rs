@@ -110,13 +110,13 @@ pub mod time;
 pub mod cache {
     pub use crate::recency::Recency;
 
+    pub use crate::checkpoint::cache::DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES;
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
         MetadataTableCacheStats, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError,
         StoredMetadataBlockKey, StoredMetadataBlockKind, WalTailProjectionCache,
         WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
-        DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-        DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+        DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
         load_deleted_namespace_head_summary, load_namespace_fold_basis,
@@ -133,9 +133,8 @@ pub mod control {
     };
     pub use crate::namespace::control::{
         load_namespace_checkpoint_record_control, load_namespace_head_control,
-        load_namespace_metadata_root_control, load_namespace_read_anchor,
-        load_namespace_wal_floor_control, ControlObjectIdentity, LoadedHeadControl,
-        LoadedMetadataRootControl, LoadedWalFloorControl,
+        load_namespace_metadata_root_control, load_namespace_read_anchor, ControlObjectIdentity,
+        LoadedHeadControl, LoadedMetadataRootControl,
     };
     pub use crate::namespace::{BasisManifest, MetadataBasis};
 }
@@ -146,7 +145,7 @@ pub mod control {
 pub mod publish {
     pub use crate::commit::{CommitFingerprint, CommitHeadPublishError};
     pub use crate::commit_engine::{
-        CommitCandidate, ContentPreparation, ContentPreparationError, NamespaceCommitEngine,
+        CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionState,
         WalTailPolicy, WriterSessionState,
     };
@@ -166,7 +165,7 @@ pub use checkpoint::{
 };
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
-pub use engine::{
+pub use protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
 };

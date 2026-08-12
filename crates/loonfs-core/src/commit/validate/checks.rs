@@ -198,7 +198,11 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
             } => {
                 let source_binding =
                     resolve_current_binding_for_mutation(metadata_state, *inode_id).await?;
-                validate_rename_source(metadata_state, *inode_id).await?;
+                let inode = metadata_state.inode_at_seq(*inode_id).await?.ok_or(
+                    CommitValidationError::RenameInodeMissing {
+                        inode_id: *inode_id,
+                    },
+                )?;
                 let new_name_key = validate_rename_target_name_absent(
                     metadata_state,
                     *inode_id,
@@ -206,7 +210,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     new_display_name,
                 )
                 .await?;
-                validate_rename_does_not_cycle(metadata_state, *inode_id, *new_parent_inode_id)
+                validate_rename_does_not_cycle(metadata_state, &inode, *new_parent_inode_id)
                     .await?;
                 validate_not_covered_by_tombstone(metadata_state, *inode_id, |tombstone| {
                     CommitValidationError::RenameInodeUnderSubtreeTombstone {
@@ -275,49 +279,13 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 parent_inode_id,
                 display_name,
             } => {
-                // The target must exist and be the root of the newest,
-                // still-live deletion. A child of a deleted directory is
-                // covered by its ancestor's tombstone, not its own —
-                // recover the directory, not the child.
-                if metadata_state.inode_at_seq(*inode_id).await?.is_none() {
-                    return Err(CommitValidationError::UndeleteInodeMissing {
-                        inode_id: *inode_id,
-                    }
-                    .into());
-                }
-                // Only a deletion from a strictly earlier commit is
-                // recoverable. Assigned sequences are guessable (head + 1),
-                // so without this bound one multi-op commit could delete,
-                // undelete, and re-delete an inode — minting two deletion
-                // generations that share a sequence and making the public
-                // `(inode, deleted_at_seq)` handle ambiguous. With it, two
-                // live deletions of one root can never share a sequence.
-                if *deleted_at_seq >= committed_seq {
-                    return Err(CommitValidationError::UndeleteTargetsCurrentCommit {
-                        inode_id: *inode_id,
-                        requested_seq: *deleted_at_seq,
-                    }
-                    .into());
-                }
-                let Some(active) = metadata_state.active_subtree_tombstone(*inode_id).await? else {
-                    return Err(CommitValidationError::UndeleteTargetNotDeleted {
-                        inode_id: *inode_id,
-                    }
-                    .into());
-                };
-                // Recovery is scoped to the deletion the caller observed,
-                // never "whatever is active now": a stale handle must not
-                // cancel a later delete of the same inode. The rule
-                // re-applies unchanged on every stale-head revalidation
-                // because the requested generation rides in the op.
-                if active.generation.seq != *deleted_at_seq {
-                    return Err(CommitValidationError::UndeleteGenerationMismatch {
-                        inode_id: *inode_id,
-                        requested_seq: *deleted_at_seq,
-                        active_seq: active.generation.seq,
-                    }
-                    .into());
-                }
+                let active = validate_undelete_target(
+                    metadata_state,
+                    *inode_id,
+                    *deleted_at_seq,
+                    committed_seq,
+                )
+                .await?;
                 // The new home mirrors create validation: an existing,
                 // visible directory parent (visibility rules out a parent
                 // inside the recovered subtree, so the bind cannot cycle),
@@ -342,14 +310,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 base_attributes_revision_no,
                 attributes,
             } => {
-                // The target is any visible inode, file or directory: an
-                // attribute belongs to the resource, not to file content.
-                if metadata_state.visible_inode(*inode_id).await?.is_none() {
-                    return Err(CommitValidationError::UpdateAttributesInodeMissing {
-                        inode_id: *inode_id,
-                    }
-                    .into());
-                }
+                validate_attributes_target_visible(metadata_state, *inode_id).await?;
                 validate_inode_attributes_revision_is(
                     metadata_state,
                     *inode_id,
@@ -464,6 +425,57 @@ fn next_attributes_revision_no(
             inode_id,
             base_attributes_revision_no,
         })
+}
+
+/// Requires the target to be the root of the requested live deletion.
+async fn validate_undelete_target<S: ObjectStore + ?Sized>(
+    metadata_state: &PublishValidationView<'_, S>,
+    inode_id: InodeId,
+    deleted_at_seq: ChangeSeq,
+    committed_seq: ChangeSeq,
+) -> Result<SubtreeTombstoneRecord, CoreError> {
+    // A child of a deleted directory is covered by its ancestor's tombstone,
+    // not its own — recover the directory, not the child.
+    if metadata_state.inode_at_seq(inode_id).await?.is_none() {
+        return Err(CommitValidationError::UndeleteInodeMissing { inode_id }.into());
+    }
+    // Only a deletion from a strictly earlier commit is recoverable.
+    // Assigned sequences are guessable (head + 1), so this prevents one
+    // multi-op commit from minting ambiguous deletion generations.
+    if deleted_at_seq >= committed_seq {
+        return Err(CommitValidationError::UndeleteTargetsCurrentCommit {
+            inode_id,
+            requested_seq: deleted_at_seq,
+        }
+        .into());
+    }
+    let Some(active) = metadata_state.active_subtree_tombstone(inode_id).await? else {
+        return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+    };
+    // Recovery is scoped to the deletion the caller observed, never whatever
+    // deletion is active now, and revalidation applies the same generation.
+    if active.generation.seq != deleted_at_seq {
+        return Err(CommitValidationError::UndeleteGenerationMismatch {
+            inode_id,
+            requested_seq: deleted_at_seq,
+            active_seq: active.generation.seq,
+        }
+        .into());
+    }
+
+    Ok(active)
+}
+
+/// Requires an attribute target to be visible, whether file or directory.
+async fn validate_attributes_target_visible<S: ObjectStore + ?Sized>(
+    metadata_state: &PublishValidationView<'_, S>,
+    inode_id: InodeId,
+) -> Result<(), CoreError> {
+    if metadata_state.visible_inode(inode_id).await?.is_none() {
+        return Err(CommitValidationError::UpdateAttributesInodeMissing { inode_id }.into());
+    }
+
+    Ok(())
 }
 
 /// The base-revision guard every `UpdateAttributes` op carries, whether or
@@ -854,43 +866,20 @@ async fn validate_restore_source_revision<S: ObjectStore + ?Sized>(
         )?)
 }
 
-async fn validate_rename_source<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishValidationView<'_, S>,
-    inode_id: InodeId,
-) -> Result<(), CoreError> {
-    metadata_state
-        .inode_at_seq(inode_id)
-        .await?
-        .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
-    if metadata_state
-        .current_parent_binding_for_child(inode_id)
-        .await?
-        .is_none()
-    {
-        return Err(CommitValidationError::RenameSourceBindingMissing { inode_id }.into());
-    }
-
-    Ok(())
-}
-
 async fn validate_rename_does_not_cycle<S: ObjectStore + ?Sized>(
     metadata_state: &PublishValidationView<'_, S>,
-    inode_id: InodeId,
+    inode: &InodeRecord,
     new_parent_inode_id: InodeId,
 ) -> Result<(), CoreError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id)
-        .await?
-        .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::Directory {
         return Ok(());
     }
     if metadata_state
-        .would_create_directory_cycle(inode_id, new_parent_inode_id)
+        .would_create_directory_cycle(inode.inode_id, new_parent_inode_id)
         .await?
     {
         return Err(CommitValidationError::RenameWouldCycleDirectory {
-            inode_id,
+            inode_id: inode.inode_id,
             new_parent_inode_id,
         }
         .into());

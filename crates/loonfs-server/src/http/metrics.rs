@@ -321,14 +321,8 @@ fn render_scrape_gauges(
     upload_permits: usize,
     download_permits: usize,
 ) {
-    for (field, value) in cache_gauges(cache) {
-        let name = format!("loonfs_cache_{field}");
-        write_gauge(
-            rendered,
-            &name,
-            &format!("Runtime cache counter `{field}`"),
-            value,
-        );
+    for (name, description, value) in cache_gauges(cache) {
+        write_gauge(rendered, name, description, value);
     }
     // Absent when this deployment keeps no local cache, so a scrape reports
     // nothing about a tier that does not exist rather than reporting zeros
@@ -444,7 +438,7 @@ fn local_cache_gauges(stats: &FoyerCacheStats) -> [(&'static str, &'static str, 
 ///
 /// Destructured without a rest pattern on purpose: a counter added to
 /// [`RuntimeCacheStats`] and not exported here fails to compile.
-fn cache_gauges(stats: &RuntimeCacheStats) -> [(&'static str, usize); 18] {
+fn cache_gauges(stats: &RuntimeCacheStats) -> [(&'static str, &'static str, usize); 18] {
     let RuntimeCacheStats {
         latest_metadata_view_reads,
         wal_tail_projection_cache_hits,
@@ -466,64 +460,94 @@ fn cache_gauges(stats: &RuntimeCacheStats) -> [(&'static str, usize); 18] {
         metadata_table_cache_filter_false_positives,
     } = *stats;
     [
-        ("latest_metadata_view_reads", latest_metadata_view_reads),
         (
-            "wal_tail_projection_cache_hits",
+            "loonfs_cache_latest_metadata_view_reads",
+            "Runtime cache counter `latest_metadata_view_reads`",
+            latest_metadata_view_reads,
+        ),
+        (
+            "loonfs_cache_wal_tail_projection_cache_hits",
+            "Runtime cache counter `wal_tail_projection_cache_hits`",
             wal_tail_projection_cache_hits,
         ),
         (
-            "wal_tail_projection_cache_misses",
+            "loonfs_cache_wal_tail_projection_cache_misses",
+            "Runtime cache counter `wal_tail_projection_cache_misses`",
             wal_tail_projection_cache_misses,
         ),
         (
-            "wal_tail_projection_cache_inserts",
+            "loonfs_cache_wal_tail_projection_cache_inserts",
+            "Runtime cache counter `wal_tail_projection_cache_inserts`",
             wal_tail_projection_cache_inserts,
         ),
         (
-            "wal_tail_projection_cache_evictions",
+            "loonfs_cache_wal_tail_projection_cache_evictions",
+            "Runtime cache counter `wal_tail_projection_cache_evictions`",
             wal_tail_projection_cache_evictions,
         ),
         (
-            "wal_tail_projection_cache_evicted_rows",
+            "loonfs_cache_wal_tail_projection_cache_evicted_rows",
+            "Runtime cache counter `wal_tail_projection_cache_evicted_rows`",
             wal_tail_projection_cache_evicted_rows,
         ),
         (
-            "wal_tail_projection_cache_evicted_decoded_bytes",
+            "loonfs_cache_wal_tail_projection_cache_evicted_decoded_bytes",
+            "Runtime cache counter `wal_tail_projection_cache_evicted_decoded_bytes`",
             wal_tail_projection_cache_evicted_decoded_bytes,
         ),
         (
-            "wal_tail_projection_cache_uncacheable_count",
+            "loonfs_cache_wal_tail_projection_cache_uncacheable_count",
+            "Runtime cache counter `wal_tail_projection_cache_uncacheable_count`",
             wal_tail_projection_cache_uncacheable_count,
         ),
         (
-            "wal_tail_projection_cache_uncacheable_rows",
+            "loonfs_cache_wal_tail_projection_cache_uncacheable_rows",
+            "Runtime cache counter `wal_tail_projection_cache_uncacheable_rows`",
             wal_tail_projection_cache_uncacheable_rows,
         ),
         (
-            "wal_tail_projection_cache_uncacheable_decoded_bytes",
+            "loonfs_cache_wal_tail_projection_cache_uncacheable_decoded_bytes",
+            "Runtime cache counter `wal_tail_projection_cache_uncacheable_decoded_bytes`",
             wal_tail_projection_cache_uncacheable_decoded_bytes,
         ),
         (
-            "wal_tail_projection_cache_cached_rows",
+            "loonfs_cache_wal_tail_projection_cache_cached_rows",
+            "Runtime cache counter `wal_tail_projection_cache_cached_rows`",
             wal_tail_projection_cache_cached_rows,
         ),
         (
-            "wal_tail_projection_cache_cached_decoded_bytes",
+            "loonfs_cache_wal_tail_projection_cache_cached_decoded_bytes",
+            "Runtime cache counter `wal_tail_projection_cache_cached_decoded_bytes`",
             wal_tail_projection_cache_cached_decoded_bytes,
         ),
-        ("metadata_table_cache_hits", metadata_table_cache_hits),
-        ("metadata_table_cache_misses", metadata_table_cache_misses),
-        ("metadata_table_cache_inserts", metadata_table_cache_inserts),
         (
-            "metadata_table_cache_evictions",
+            "loonfs_cache_metadata_table_cache_hits",
+            "Runtime cache counter `metadata_table_cache_hits`",
+            metadata_table_cache_hits,
+        ),
+        (
+            "loonfs_cache_metadata_table_cache_misses",
+            "Runtime cache counter `metadata_table_cache_misses`",
+            metadata_table_cache_misses,
+        ),
+        (
+            "loonfs_cache_metadata_table_cache_inserts",
+            "Runtime cache counter `metadata_table_cache_inserts`",
+            metadata_table_cache_inserts,
+        ),
+        (
+            "loonfs_cache_metadata_table_cache_evictions",
+            "Runtime cache counter `metadata_table_cache_evictions`",
             metadata_table_cache_evictions,
         ),
         (
-            "metadata_table_cache_filter_skips",
+            "loonfs_cache_metadata_table_cache_filter_skips",
+            "Runtime cache counter `metadata_table_cache_filter_skips`",
             metadata_table_cache_filter_skips,
         ),
         (
-            "metadata_table_cache_filter_false_positives",
+            "loonfs_cache_metadata_table_cache_filter_false_positives",
+            "Runtime cache counter `metadata_table_cache_filter_false_positives`",
             metadata_table_cache_filter_false_positives,
         ),
     ]

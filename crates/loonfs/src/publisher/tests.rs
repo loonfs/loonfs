@@ -501,11 +501,12 @@ fn publisher_trace_labels_are_low_cardinality() {
     // A result label says only whether the publication succeeded. The error
     // text is caller data and must never reach a trace label, where it would
     // make the label set unbounded.
-    assert_eq!(result_label(&Ok::<_, CoreError>(())), "ok");
+    assert_eq!(result_label(&Ok::<_, CoreError>(())).as_str(), "ok");
     assert_eq!(
         result_label(&Err::<(), _>(CoreError::Internal(
             "private error".to_owned()
-        ))),
+        )))
+        .as_str(),
         "error"
     );
     assert_eq!(usize_to_u64(7), 7);
