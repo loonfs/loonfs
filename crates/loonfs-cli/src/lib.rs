@@ -4,6 +4,10 @@
 //! remote profiles that talk to a LoonFS server. It keeps command output stable
 //! for humans and scripts.
 
+// The embedded runtime's composed async graph keeps growing; even with
+// the boxed entrypoint, rustc's future-layout query depth needs headroom
+// here. This is the raise rustc itself prescribes.
+#![recursion_limit = "256"]
 mod args;
 mod backend;
 mod backend_error;

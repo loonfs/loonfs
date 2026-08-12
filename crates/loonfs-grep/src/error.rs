@@ -94,11 +94,6 @@ impl From<GrepRootError> for GrepError {
                 message,
                 class,
             },
-            GrepRootError::MissingEtag { object_key } => Self::StoreUnavailable {
-                object_key,
-                message: "grep root has no etag for compare-and-swap".to_owned(),
-                class: StoreFailureClass::Other,
-            },
             GrepRootError::Conflict { object_key } => Self::PublicationConflict { object_key },
             error @ (GrepRootError::Corrupt { .. }
             | GrepRootError::MissingManifest { .. }

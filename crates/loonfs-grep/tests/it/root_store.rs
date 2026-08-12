@@ -3,6 +3,7 @@
 #![allow(clippy::panic)]
 
 use bytes::Bytes;
+use loonfs::StoreFailureClass;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_grep::keyspace::{manifest_key, manifests_prefix, root_key};
 use loonfs_grep::root::{
@@ -13,6 +14,7 @@ use loonfs_grep::root::{
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::stores::{KeyPredicate, MetadataMapStore};
 
 #[tokio::test]
 async fn load_rejects_namespace_identity_mismatch() {
@@ -48,6 +50,29 @@ async fn load_rejects_namespace_identity_mismatch() {
         load_grep_root(&store, &requested).await,
         Err(GrepRootError::IdentityMismatch { expected, actual, .. })
             if expected.as_str() == "requested" && actual.as_str() == "other"
+    ));
+}
+
+#[tokio::test]
+async fn load_requires_the_root_etag_as_a_store_contract() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = namespace_id("missing-etag");
+    seed_grep_root(&inner, &root(namespace_id.clone(), ChangeSeq(0)))
+        .await
+        .expect("seed root");
+    let store = MetadataMapStore::without_etag(inner, KeyPredicate::exact(root_key(&namespace_id)));
+
+    let error = load_grep_root(&store, &namespace_id)
+        .await
+        .expect_err("a loaded grep root requires its etag");
+    assert!(matches!(
+        error,
+        GrepRootError::Store {
+            class: StoreFailureClass::Other,
+            message,
+            ..
+        } if message.contains("required grep-root etag")
     ));
 }
 

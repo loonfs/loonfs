@@ -13,9 +13,7 @@ use loonfs_api::v0::{
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{FEATURE_ADMIN_GREP_INDEX, FEATURE_QUERY_GREP};
-use loonfs_grep::{
-    GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot, NamespaceReads,
-};
+use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
 
 #[cfg_attr(
     feature = "openapi",
@@ -61,9 +59,8 @@ pub(super) async fn grep(
     // through the same reader handle the core planes serve from.
     let store = state.writer.object_store();
     let reads = NamespaceReads::new(&state.reader, &namespace_id);
-    let snapshot = GrepIndexSnapshot::from_grep_root(&*store, &namespace_id, service).await;
     let response = service
-        .query(&request, &snapshot, &reads, &store)
+        .query(&request, &reads, &store)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(response))

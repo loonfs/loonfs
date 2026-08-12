@@ -27,6 +27,7 @@ use crate::metrics::RuntimeInstruments;
 use crate::{NamespaceId, Result, RuntimeError};
 use admission::{Admission, MaintenanceDispatch, MaintenanceKey, StepOutcome};
 pub(crate) use compaction::{BackgroundCompactions, CompactionStart};
+use futures::FutureExt as _;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -405,6 +406,9 @@ pub(crate) struct RunnerInner {
     state: Mutex<RunnerState>,
     wake: Arc<Notify>,
     counters: RunnerCounters,
+    /// Tasks a later spawn reaped after they panicked. Their join handles no
+    /// longer reach [`MaintenanceRunner::drain`], so the count does.
+    panicked_tasks: std::sync::atomic::AtomicUsize,
     /// Where settled steps report. The two [`RunnerCounters`] above stay
     /// where they are: they answer "is this happening at all", which a
     /// number on an existing trace answers for a reader with no metrics
@@ -471,6 +475,7 @@ impl MaintenanceRunner {
                 clock,
                 wake: Arc::new(Notify::new()),
                 counters: RunnerCounters::default(),
+                panicked_tasks: std::sync::atomic::AtomicUsize::new(0),
                 instruments,
                 compactions: Arc::new(Mutex::new(BTreeMap::new())),
                 compaction_permits: Arc::new(tokio::sync::Semaphore::new(
@@ -574,6 +579,10 @@ impl MaintenanceRunner {
                 }
             }
         }
+        panicked += self
+            .inner
+            .panicked_tasks
+            .load(std::sync::atomic::Ordering::SeqCst);
         if panicked > 0 {
             return Err(RuntimeError::RuntimeTask(format!(
                 "{panicked} background maintenance task(s) panicked"
@@ -692,7 +701,19 @@ impl RunnerInner {
             drop(future);
             return;
         }
-        state.tasks.retain(|task| !task.is_finished());
+        state.tasks.retain_mut(|task| {
+            if !task.is_finished() {
+                return true;
+            }
+            if task
+                .now_or_never()
+                .is_some_and(|outcome| outcome.is_err_and(|error| error.is_panic()))
+            {
+                self.panicked_tasks
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            false
+        });
         state.tasks.push(runtime.spawn(future));
     }
 }

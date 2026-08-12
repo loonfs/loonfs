@@ -73,37 +73,19 @@ async fn prefetch_recent_segments<S: ObjectStore + ?Sized>(
 }
 
 /// One walk down the chain links, from the visible tip towards the base.
-struct WalkedChain {
+enum WalkedChain {
     /// The segments the walk found, oldest first.
-    segments: Vec<ValidatedWalSegment>,
-    /// How many `get` requests the load issued, prefetch included. A
-    /// request that failed or missed counts, because the round trip
-    /// happened; a segment the prefetch delivered is not counted a second
-    /// time when the walk consumes it. This is never more than the
-    /// `max_segment_fetches` the caller gave.
-    fetches: usize,
-    /// `true` when the walk stopped at its fetch limit instead of reaching
-    /// the base. `segments` is then a partial chain. Nothing may replay
-    /// from it, and [`finish_chain`] rejects it.
-    stopped_at_limit: bool,
-}
-
-impl WalkedChain {
-    fn reached(segments: Vec<ValidatedWalSegment>, fetches: usize) -> Self {
-        Self {
-            segments,
-            fetches,
-            stopped_at_limit: false,
-        }
-    }
-
-    fn stopped_at_limit(fetches: usize) -> Self {
-        Self {
-            segments: Vec::new(),
-            fetches,
-            stopped_at_limit: true,
-        }
-    }
+    Reached {
+        segments: Vec<ValidatedWalSegment>,
+        /// How many `get` requests the load issued, prefetch included. A
+        /// request that failed or missed counts, because the round trip
+        /// happened; a segment the prefetch delivered is not counted a second
+        /// time when the walk consumes it.
+        fetches: usize,
+    },
+    /// The walk spent its fetch limit before reaching the base. Its partial
+    /// chain is dropped because nothing may replay from it.
+    LimitReached { fetches: usize },
 }
 
 /// Result of loading a WAL chain with a fetch limit.
@@ -140,16 +122,15 @@ pub(crate) async fn load_wal_chain_within<S: ObjectStore + ?Sized>(
     request: WalChainLoadRequest<'_>,
     max_segment_fetches: usize,
 ) -> Result<WalChainLoad, WalChainLoadError> {
-    let walked = walk_chain(store, &request, max_segment_fetches).await?;
-    if walked.stopped_at_limit {
-        return Ok(WalChainLoad::LimitReached {
-            requests_issued: walked.fetches,
-        });
+    match walk_chain(store, &request, max_segment_fetches).await? {
+        WalkedChain::Reached { segments, fetches } => Ok(WalChainLoad::Complete {
+            chain: finish_chain(&request, segments)?,
+            requests_issued: fetches,
+        }),
+        WalkedChain::LimitReached { fetches } => Ok(WalChainLoad::LimitReached {
+            requests_issued: fetches,
+        }),
     }
-    Ok(WalChainLoad::Complete {
-        chain: finish_chain(&request, walked.segments)?,
-        requests_issued: walked.fetches,
-    })
 }
 
 #[tracing::instrument(
@@ -163,12 +144,11 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: WalChainLoadRequest<'_>,
 ) -> Result<ValidatedWalChain, WalChainLoadError> {
-    // No caller here meters its own reads, so the walk runs to the base.
-    // A namespace cannot hold `usize::MAX` segments, so the walk never
-    // stops at this limit. If it somehow did, `finish_chain` would reject
-    // the partial chain rather than return it.
-    let walked = walk_chain(store, &request, usize::MAX).await?;
-    finish_chain(&request, walked.segments)
+    let WalkedChain::Reached { segments, .. } = walk_chain(store, &request, usize::MAX).await?
+    else {
+        unreachable!("a namespace cannot hold `usize::MAX` WAL segments")
+    };
+    finish_chain(&request, segments)
 }
 
 /// Walks the chain links from the visible tip down to the base, issuing at
@@ -185,7 +165,10 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
         });
     }
     if request.chain_base_seq == request.head_seq {
-        return Ok(WalkedChain::reached(Vec::new(), 0));
+        return Ok(WalkedChain::Reached {
+            segments: Vec::new(),
+            fetches: 0,
+        });
     }
 
     let mut pointer = request
@@ -228,7 +211,7 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
             Some(bytes) => bytes,
             None => {
                 if fetches >= max_segment_fetches {
-                    return Ok(WalkedChain::stopped_at_limit(fetches));
+                    return Ok(WalkedChain::LimitReached { fetches });
                 }
                 fetches += 1;
                 store
@@ -247,14 +230,11 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
             .map_err(|err| WalReplayError::Codec(err.to_string()))?;
         validate_pointer_matches_envelope(&pointer, &object_key, &envelope)?;
 
+        let reached_stop = envelope.payload.base_head_seq <= stop_after_seq;
         let prev = envelope.payload.prev_visible_segment.clone();
         reversed.push(ValidatedWalSegment::new(object_key.clone(), envelope));
 
-        if reversed
-            .last()
-            .map(|segment| segment.envelope().payload.base_head_seq <= stop_after_seq)
-            .unwrap_or(false)
-        {
+        if reached_stop {
             break;
         }
 
@@ -265,13 +245,13 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
     }
 
     reversed.reverse();
-    Ok(WalkedChain::reached(reversed, fetches))
+    Ok(WalkedChain::Reached {
+        segments: reversed,
+        fetches,
+    })
 }
 
 /// Validates one walked chain as a replayable run and hands it back.
-///
-/// A partial chain does not survive this: its oldest segment does not sit
-/// at the requested base, so the base check below rejects it.
 fn finish_chain(
     request: &WalChainLoadRequest<'_>,
     segments: Vec<ValidatedWalSegment>,

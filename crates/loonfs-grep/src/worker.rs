@@ -286,20 +286,21 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         }
 
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let current = load_grep_root(&self.store, namespace_id)
-            .await
-            .map_err(GrepError::from)?;
+        let current = match load_grep_root(&self.store, namespace_id).await {
+            Ok(current) => current,
+            Err(error) => {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
+                return Err(error.into());
+            }
+        };
         if let Some(current) = &current {
             if !matches!(
                 current.manifest_state().lifecycle(),
                 GrepLifecycle::Disabled
             ) {
-                self.release_checkpoint_if_unreferenced(
-                    namespace_id,
-                    &checkpoint.checkpoint_id,
-                    current.manifest_state(),
-                )
-                .await?;
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
                     state: current.manifest_state().lifecycle().clone(),
                 });
@@ -308,12 +309,19 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next_run_ordinal = current
             .as_ref()
             .map_or(0, |root| root.manifest_state().index().next_run_ordinal);
-        let next = backfilling_root(
+        let next = match backfilling_root(
             namespace_id,
             checkpoint.checkpoint_seq,
             checkpoint.checkpoint_id.clone(),
             next_run_ordinal,
-        )?;
+        ) {
+            Ok(next) => next,
+            Err(error) => {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
+                return Err(error);
+            }
+        };
         let published = match current {
             Some(current) => self.advance_root(&current, &next).await,
             None => self.seed_root(&next).await,
@@ -323,13 +331,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 state: published.manifest_state().lifecycle().clone(),
             }),
             Err(GrepRootError::Conflict { .. }) => {
-                self.release_superseded_checkpoint_if_unreferenced(
-                    namespace_id,
-                    &checkpoint.checkpoint_id,
-                )
-                .await?;
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
                 Ok(GrepEnableOutcome::Superseded)
             }
+            // A non-conflict failure may be an acknowledgement failure after
+            // the root update landed. Keep the checkpoint because the root
+            // may already reference it.
             Err(error) => Err(error.into()),
         }
     }
@@ -515,38 +523,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         Ok(())
     }
 
-    async fn release_checkpoint_if_unreferenced(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
-        root: &GrepManifestState,
-    ) -> Result<()> {
-        if !root_names_checkpoint(root, checkpoint_id) {
-            self.release_checkpoint(namespace_id, checkpoint_id).await?;
-        }
-        Ok(())
-    }
-
-    async fn release_superseded_checkpoint_if_unreferenced(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
-    ) -> Result<()> {
-        let winner = load_grep_root(&self.store, namespace_id)
-            .await
-            .map_err(GrepError::from)?;
-        if let Some(winner) = winner {
-            self.release_checkpoint_if_unreferenced(
-                namespace_id,
-                checkpoint_id,
-                winner.manifest_state(),
-            )
-            .await
-        } else {
-            self.release_checkpoint(namespace_id, checkpoint_id).await
-        }
-    }
-
     async fn restart_backfill(
         &self,
         namespace_id: &NamespaceId,
@@ -557,19 +533,24 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepLifecycle::Steady { .. } | GrepLifecycle::Disabled => None,
         };
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let next = backfilling_root(
+        let next = match backfilling_root(
             namespace_id,
             checkpoint.checkpoint_seq,
             checkpoint.checkpoint_id.clone(),
             current.manifest_state().index().next_run_ordinal,
-        )?;
+        ) {
+            Ok(next) => next,
+            Err(error) => {
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
+                return Err(error);
+            }
+        };
         match self.advance_root(current, &next).await {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
-                    if previous_checkpoint_id != checkpoint.checkpoint_id {
-                        self.release_checkpoint(namespace_id, &previous_checkpoint_id)
-                            .await?;
-                    }
+                    self.release_checkpoint(namespace_id, &previous_checkpoint_id)
+                        .await?;
                 }
                 Ok(build_report(
                     namespace_id,
@@ -579,13 +560,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 ))
             }
             Err(GrepRootError::Conflict { .. }) => {
-                self.release_superseded_checkpoint_if_unreferenced(
-                    namespace_id,
-                    &checkpoint.checkpoint_id,
-                )
-                .await?;
+                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                    .await?;
                 Ok(build_report(namespace_id, GrepBuildOutcome::Superseded))
             }
+            // A non-conflict failure may be an acknowledgement failure after
+            // the root update landed. Keep the checkpoint because the root
+            // may already reference it.
             Err(error) => Err(error.into()),
         }
     }
@@ -626,61 +607,40 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         // the watermark it hands the change feed is the target it reached.
         let (lifecycle, completed_checkpoint_id, built_through_seq) = match progress {
             CollectedProgress::Backfill {
+                checkpoint_id,
                 target_seq,
                 next_cursor,
-            } => {
-                let checkpoint_id = match current.manifest_state().lifecycle() {
-                    GrepLifecycle::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
-                    _ => {
-                        return Err(CoreError::Internal(
-                            "a collected grep backfill unit no longer matches its root".to_owned(),
-                        )
-                        .into())
-                    }
-                };
-                match next_cursor {
-                    Some(after_inode_id) => (
-                        GrepLifecycle::Backfilling {
-                            target_seq,
-                            cursor: Some(after_inode_id),
-                            checkpoint_id,
-                        },
-                        None,
+            } => match next_cursor {
+                Some(after_inode_id) => (
+                    GrepLifecycle::Backfilling {
                         target_seq,
-                    ),
-                    None => (
-                        GrepLifecycle::Steady {
-                            built_through_seq: target_seq,
-                            next_event_index: 0,
-                        },
-                        Some(checkpoint_id),
-                        target_seq,
-                    ),
-                }
-            }
+                        cursor: Some(after_inode_id),
+                        checkpoint_id,
+                    },
+                    None,
+                    target_seq,
+                ),
+                None => (
+                    GrepLifecycle::Steady {
+                        built_through_seq: target_seq,
+                        next_event_index: 0,
+                    },
+                    Some(checkpoint_id),
+                    target_seq,
+                ),
+            },
             CollectedProgress::Incremental {
                 run_seq: _,
                 built_through_seq,
                 next_event_index,
-            } => {
-                if !matches!(
-                    current.manifest_state().lifecycle(),
-                    GrepLifecycle::Steady { .. }
-                ) {
-                    return Err(CoreError::Internal(
-                        "a collected incremental grep unit no longer matches its root".to_owned(),
-                    )
-                    .into());
-                }
-                (
-                    GrepLifecycle::Steady {
-                        built_through_seq,
-                        next_event_index,
-                    },
-                    None,
+            } => (
+                GrepLifecycle::Steady {
                     built_through_seq,
-                )
-            }
+                    next_event_index,
+                },
+                None,
+                built_through_seq,
+            ),
         };
         let materialized = matches!(lifecycle, GrepLifecycle::Steady { .. });
         let next = GrepManifestState::new(
@@ -758,16 +718,6 @@ fn rebootstrap_required(error: &GrepError) -> bool {
     )
 }
 
-fn root_names_checkpoint(root: &GrepManifestState, checkpoint_id: &CheckpointId) -> bool {
-    matches!(
-        root.lifecycle(),
-        GrepLifecycle::Backfilling {
-            checkpoint_id: root_checkpoint_id,
-            ..
-        } if root_checkpoint_id == checkpoint_id
-    )
-}
-
 struct CollectedIndexUnit {
     postings: BTreeMap<Gram, Vec<GramPosting>>,
     stats: IndexingStats,
@@ -785,6 +735,7 @@ struct IndexingStats {
 /// progress, which used to be possible in the flat unit record.
 enum CollectedProgress {
     Backfill {
+        checkpoint_id: CheckpointId,
         target_seq: ChangeSeq,
         next_cursor: Option<InodeId>,
     },
@@ -880,6 +831,7 @@ async fn collect_backfill_unit(
         postings,
         stats,
         progress: CollectedProgress::Backfill {
+            checkpoint_id: checkpoint_id.clone(),
             target_seq,
             next_cursor,
         },

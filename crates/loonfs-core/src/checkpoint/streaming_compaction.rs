@@ -74,6 +74,7 @@ use loonfs_api::{ChangeSeq, ManifestId, MetadataCompactionId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -323,10 +324,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     frozen_floor_seq: ChangeSeq,
     policy: MetadataLsmPolicy,
 ) -> Result<MetadataMergeResult> {
-    // A step-contained merge has nothing to cancel it: it holds the step, and
-    // a shutdown waits for the step it is in.
-    let cancellation = MetadataCompactionCancellation::default();
-    let merge = GroupMerge::new(
+    let merge = StepGroupMerge(GroupMerge::new(
         store,
         namespace_id,
         group,
@@ -334,7 +332,6 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
         frozen_floor_seq,
         MetadataTableDestination::Published { namespace_id },
         policy,
-        &cancellation,
         runs.to_vec(),
         // The window is capped by the step's budgets, so the set of below-floor
         // unbound generations is capped with it and costs no store reads.
@@ -343,17 +340,8 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
         // ends in the step's own publication, so it has nothing to report
         // progress about.
         None,
-    );
-    match merge.run(None).await? {
-        MetadataCompactionOutcome::Completed(result) => Ok(result),
-        // Neither ending is reachable without a token to set and a lease to
-        // lose, and this merge has neither.
-        MetadataCompactionOutcome::Cancelled | MetadataCompactionOutcome::Fenced => {
-            Err(CoreError::Internal(
-                "a step-contained metadata merge cannot be cancelled or fenced".to_owned(),
-            ))
-        }
-    }
+    ));
+    merge.run().await
 }
 
 /// Rebuilds `spec`'s group from `spec`'s runs.
@@ -380,21 +368,25 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
             job_id: spec.job_id(),
         },
         policy,
-        cancellation,
         resolve_snapshot_runs(tables, spec)?,
         // A job has no bound on the group it rebuilds, so it reads the
         // snapshot per reverse row rather than holding a set that would follow
         // the group's size.
         ReverseBindResolution::PointProbeSnapshot,
-        Some(spec.input_rows()),
+        Some(ProgressReporter::new(spec.input_rows())),
     );
-    merge.run(Some(lease)).await
+    let mut control = JobMergeControl {
+        cancellation,
+        lease,
+    };
+    match merge.run(&mut control).await? {
+        Ok(result) => Ok(MetadataCompactionOutcome::Completed(result)),
+        Err(MergeStop::Cancelled) => Ok(MetadataCompactionOutcome::Cancelled),
+        Err(MergeStop::Fenced) => Ok(MetadataCompactionOutcome::Fenced),
+    }
 }
 
-/// How one cluster's merge ended.
-enum ClusterEnd {
-    /// Every row of the cluster was merged and its segments written.
-    Merged,
+enum MergeStop {
     Cancelled,
     Fenced,
 }
@@ -501,7 +493,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     )
     .await?
     {
-        MetadataCompactionOutcome::Completed(result) if !cancellation.is_cancelled() => result,
+        MetadataCompactionOutcome::Completed(result) => result,
         // The prefix belongs to garbage collection now, and the segments the
         // job wrote are being reaped. Publishing descriptors naming them is
         // exactly what the fence exists to stop.
@@ -515,10 +507,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
             );
             return Ok(MetadataCompactionJobOutcome::Fenced);
         }
-        // A token set after the last row still costs the job. Checked here so
-        // a shutdown does not spend the drain building a manifest and taking
-        // races for a publication it has already decided against.
-        MetadataCompactionOutcome::Completed(_) | MetadataCompactionOutcome::Cancelled => {
+        MetadataCompactionOutcome::Cancelled => {
             // The executor stops between block fetches, so what it wrote is
             // whatever segments had already filled. They are staged and named
             // by nothing. The lease is left where it is: it expires on its
@@ -919,7 +908,6 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     frozen_floor_seq: ChangeSeq,
     destination: MetadataTableDestination<'a>,
     policy: MetadataLsmPolicy,
-    cancellation: &'a MetadataCompactionCancellation,
     snapshot: Vec<MetadataRunManifest>,
     reverse_binds: ReverseBindResolution,
     probe_cache: MetadataTableCache,
@@ -929,10 +917,88 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// The last input row key seen in each family, which is what lets the merge
     /// refuse a family that holds one row key twice. One string per family.
     last_input_key_by_family: BTreeMap<MetadataTableFamily, String>,
-    /// The rows the input runs hold, and the read count the next progress line
-    /// is owed at. `None` for a merge short enough to have nothing to report.
-    input_rows: Option<u64>,
-    next_progress_rows: Option<u64>,
+    /// Progress state for an unbounded background merge. `None` for a merge
+    /// short enough to have nothing to report.
+    progress: Option<ProgressReporter>,
+}
+
+/// A merge owned by one bounded maintenance step. Its control type cannot
+/// produce cancellation or fencing, so its result carries neither state.
+struct StepGroupMerge<'a, S: ObjectStore + ?Sized>(GroupMerge<'a, S>);
+
+impl<'a, S: ObjectStore + ?Sized> StepGroupMerge<'a, S> {
+    async fn run(self) -> Result<MetadataMergeResult> {
+        let mut control = StepMergeControl;
+        match self.0.run(&mut control).await? {
+            Ok(result) => Ok(result),
+            Err(never) => match never {},
+        }
+    }
+}
+
+trait MergeControl {
+    type Stop;
+
+    fn cancellation(&self) -> Option<Self::Stop>;
+
+    async fn heartbeat<S: ObjectStore + ?Sized>(&mut self, store: &S)
+        -> Result<Option<Self::Stop>>;
+}
+
+struct StepMergeControl;
+
+impl MergeControl for StepMergeControl {
+    type Stop = Infallible;
+
+    fn cancellation(&self) -> Option<Self::Stop> {
+        None
+    }
+
+    async fn heartbeat<S: ObjectStore + ?Sized>(
+        &mut self,
+        _store: &S,
+    ) -> Result<Option<Self::Stop>> {
+        Ok(None)
+    }
+}
+
+struct JobMergeControl<'a, 'lease> {
+    cancellation: &'a MetadataCompactionCancellation,
+    lease: &'a mut CompactionLease<'lease>,
+}
+
+impl MergeControl for JobMergeControl<'_, '_> {
+    type Stop = MergeStop;
+
+    fn cancellation(&self) -> Option<Self::Stop> {
+        self.cancellation
+            .is_cancelled()
+            .then_some(MergeStop::Cancelled)
+    }
+
+    async fn heartbeat<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+    ) -> Result<Option<Self::Stop>> {
+        Ok(
+            (self.lease.heartbeat_if_due(store).await? == LeaseHold::Fenced)
+                .then_some(MergeStop::Fenced),
+        )
+    }
+}
+
+struct ProgressReporter {
+    input_rows: u64,
+    next_rows: u64,
+}
+
+impl ProgressReporter {
+    fn new(input_rows: u64) -> Self {
+        Self {
+            input_rows,
+            next_rows: PROGRESS_ROW_INTERVAL,
+        }
+    }
 }
 
 impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
@@ -945,10 +1011,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         frozen_floor_seq: ChangeSeq,
         destination: MetadataTableDestination<'a>,
         policy: MetadataLsmPolicy,
-        cancellation: &'a MetadataCompactionCancellation,
         snapshot: Vec<MetadataRunManifest>,
         reverse_binds: ReverseBindResolution,
-        input_rows: Option<u64>,
+        progress: Option<ProgressReporter>,
     ) -> Self {
         let input_bytes = snapshot
             .iter()
@@ -963,7 +1028,6 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             frozen_floor_seq,
             destination,
             policy,
-            cancellation,
             snapshot,
             reverse_binds,
             probe_cache: MetadataTableCache::new(MetadataTableCacheConfig {
@@ -976,28 +1040,27 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             canonical_digest: RowDigest::default(),
             index_digest: RowDigest::default(),
             last_input_key_by_family: BTreeMap::new(),
-            input_rows,
-            next_progress_rows: input_rows.map(|_| PROGRESS_ROW_INTERVAL),
+            progress,
         }
     }
 
     /// Merges every cluster of the group, in order.
-    ///
-    /// `lease` is the claim a caller that stages its output holds over it. A
-    /// merge that publishes inside its own step has none, and passes `None`.
-    async fn run(
+    async fn run<C: MergeControl>(
         mut self,
-        mut lease: Option<&mut CompactionLease<'_>>,
-    ) -> Result<MetadataCompactionOutcome> {
+        control: &mut C,
+    ) -> Result<std::result::Result<MetadataMergeResult, C::Stop>> {
         for cluster in retention_clusters(self.group) {
-            match self.run_cluster(cluster, lease.as_deref_mut()).await? {
-                ClusterEnd::Merged => {}
-                ClusterEnd::Cancelled => return Ok(MetadataCompactionOutcome::Cancelled),
-                ClusterEnd::Fenced => return Ok(MetadataCompactionOutcome::Fenced),
+            if let Err(stop) = self.run_cluster(cluster, control).await? {
+                return Ok(Err(stop));
             }
         }
         self.refuse_a_run_whose_index_disagrees()?;
-        Ok(MetadataCompactionOutcome::Completed(self.result))
+        // A token set after the final cluster still owns the outcome. The
+        // caller must not re-derive cancellation from a stale Completed value.
+        if let Some(stop) = control.cancellation() {
+            return Ok(Err(stop));
+        }
+        Ok(Ok(self.result))
     }
 
     /// Refuses a family that hands the merge one row key twice, and refuses a
@@ -1065,11 +1128,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     }
 
     /// Merges one cluster end to end.
-    async fn run_cluster(
+    async fn run_cluster<C: MergeControl>(
         &mut self,
         cluster: &RetentionCluster,
-        mut lease: Option<&mut CompactionLease<'_>>,
-    ) -> Result<ClusterEnd> {
+        control: &mut C,
+    ) -> Result<std::result::Result<(), C::Stop>> {
         // The descriptors are cloned out of the snapshot rather than borrowed
         // from it: an iterator outlives every other borrow the merge takes, and
         // a cluster opens one per run per family, which is a handful.
@@ -1101,18 +1164,16 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let mut operator = rule.operator();
         let mut locality: Option<String> = None;
         loop {
-            if self.cancellation.is_cancelled() {
-                return Ok(ClusterEnd::Cancelled);
+            if let Some(stop) = control.cancellation() {
+                return Ok(Err(stop));
             }
             // The claim on a staged merge's prefix is refreshed where it checks
             // whether it should stop, which is the one place it is guaranteed
             // to reach however long a merge runs. Losing it is one more way the
             // merge has to stop: the segments it has written belong to the
             // collector now.
-            if let Some(lease) = lease.as_deref_mut() {
-                if lease.heartbeat_if_due(self.store).await? == LeaseHold::Fenced {
-                    return Ok(ClusterEnd::Fenced);
-                }
+            if let Some(stop) = control.heartbeat(self.store).await? {
+                return Ok(Err(stop));
             }
             self.refill(&mut iterators).await?;
             let Some(next) = select_next_iterator(&iterators, cluster.locality) else {
@@ -1168,7 +1229,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .saturating_add(segments.iter().map(segment_object_len).sum());
             self.result.output_segments.extend(segments);
         }
-        Ok(ClusterEnd::Merged)
+        Ok(Ok(()))
     }
 
     /// Says where a long job has got to, at [`PROGRESS_ROW_INTERVAL`].
@@ -1180,15 +1241,14 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// step's budgets and the step publishes it. The counters are the merge's
     /// own; nothing is measured for this.
     fn report_progress(&mut self) {
-        let (Some(next_progress_rows), Some(input_rows)) =
-            (self.next_progress_rows, self.input_rows)
-        else {
+        let Some(progress) = &mut self.progress else {
             return;
         };
-        if self.result.rows_read < next_progress_rows {
+        if self.result.rows_read < progress.next_rows {
             return;
         }
-        self.next_progress_rows = Some(self.result.rows_read.saturating_add(PROGRESS_ROW_INTERVAL));
+        progress.next_rows = self.result.rows_read.saturating_add(PROGRESS_ROW_INTERVAL);
+        let input_rows = progress.input_rows;
         tracing::info!(
             namespace_id = self.namespace_id.as_str(),
             families = ?self.group.families(),

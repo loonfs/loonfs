@@ -26,7 +26,7 @@ use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_
 use loonfs_grep::root::{
     encode_grep_root, load_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer,
 };
-use loonfs_grep::{GrepIndexSnapshot, GrepWorker, NamespaceReads};
+use loonfs_grep::{GrepWorker, NamespaceReads};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -1027,9 +1027,8 @@ async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
         .expect("a query-serving app carries a grep service");
     let store = state.writer.object_store();
     let reads = NamespaceReads::new(&state.reader, &namespace_id);
-    let snapshot = GrepIndexSnapshot::from_grep_root(&*store, &namespace_id, service).await;
     let response = service
-        .query(&request, &snapshot, &reads, &store)
+        .query(&request, &reads, &store)
         .await
         .expect("grep caught-up index");
     assert_eq!(response.matches.len(), 1);
