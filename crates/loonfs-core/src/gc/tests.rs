@@ -2,6 +2,7 @@
 
 use super::budget::PassBudget;
 use super::config::GcConfig;
+use super::cursor::{CandidateFamily, GcCursor};
 use super::live_set::{recollect_live_set, LiveSet};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use crate::checkpoint::advance_retention_floor;
@@ -2207,6 +2208,118 @@ async fn a_lease_that_does_not_decode_fails_the_pass() {
             .expect("head a staged object")
             .is_some());
     }
+}
+
+/// Once a pass claims a stale compaction lease, every exit owes that lease a
+/// deletion. A later candidate failure must not strand the claim in `Reaping`
+/// just because the normal end of the prefix was never reached.
+#[tokio::test]
+async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let (inner, staged_key, lease_key) =
+        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+
+    let died_at_ms = now_after_newest_object(inner.inner(), &namespace_id, 0).await;
+    write_compaction_lease(&inner, &namespace_id, TEST_JOB_ID, died_at_ms).await;
+    let reclaimable_ms = now_after_newest_object(
+        inner.inner(),
+        &namespace_id,
+        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
+    )
+    .await;
+
+    // The lease sorts before the staged table. GC claims it first, then this
+    // injected metadata failure makes the table decision return early.
+    let store = FailStore::new(
+        inner,
+        KeyPredicate::exact(staged_key.clone()),
+        OperationClass::Head,
+        InjectedError::Transport("staged table metadata timed out".to_owned()),
+    );
+    store.fail_all();
+    let error = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
+        .await
+        .expect_err("the candidate read still fails the pass");
+
+    assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
+    assert!(
+        store
+            .inner()
+            .head(&lease_key)
+            .await
+            .expect("head the claimed lease")
+            .is_none(),
+        "pass settlement deletes the claimed lease on the error path"
+    );
+    assert!(
+        store
+            .inner()
+            .head(&staged_key)
+            .await
+            .expect("head the undecided table")
+            .is_some(),
+        "the failing candidate itself stays for a later pass"
+    );
+}
+
+/// A budget stop uses the same settlement boundary as an error. Once the
+/// lease candidate has been decided, the lookahead that notices an empty
+/// budget must close the claim before returning its cursor.
+#[tokio::test]
+async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let (store, staged_key, lease_key) =
+        namespace_with_staged_output(&temp_dir, &namespace_id, TEST_JOB_ID).await;
+
+    let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
+    write_compaction_lease(&store, &namespace_id, TEST_JOB_ID, died_at_ms).await;
+    let reclaimable = context(
+        now_after_newest_object(
+            store.inner(),
+            &namespace_id,
+            METADATA_COMPACTION_STAGING_GRACE_MS + 1,
+        )
+        .await,
+    );
+    let marking = marking_units(&store, &namespace_id, &reclaimable).await;
+
+    // Resume immediately before compaction staging and buy exactly its lease
+    // candidate. The staged table is the lookahead that stops the pass.
+    let mut bounded = config();
+    bounded.max_objects = Some(marking + 1);
+    bounded.cursor = Some(
+        GcCursor::after(
+            &namespace_id,
+            CandidateFamily::MetadataTables,
+            format!("{}~", metadata_table_prefix(namespace_id.as_str())),
+        )
+        .encode()
+        .expect("encode cursor"),
+    );
+    let report = gc_namespace(&store, &namespace_id, &bounded, &reclaimable)
+        .await
+        .expect("bounded pass");
+
+    assert!(report.budget_exhausted);
+    assert!(report.next_cursor.is_some());
+    assert!(
+        store
+            .head(&lease_key)
+            .await
+            .expect("head the claimed lease")
+            .is_none(),
+        "pass settlement deletes the claimed lease at the budget boundary"
+    );
+    assert!(
+        store
+            .head(&staged_key)
+            .await
+            .expect("head the unvisited table")
+            .is_some(),
+        "the cursor leaves the unvisited table for the resumed pass"
+    );
 }
 
 /// A published job's output is an ordinary referenced table. The manifest

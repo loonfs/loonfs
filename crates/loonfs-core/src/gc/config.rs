@@ -1,7 +1,9 @@
 //! GC configuration.
 
+use super::cursor::GcCursor;
 use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
+use loonfs_api::NamespaceId;
 use serde::{Deserialize, Serialize};
 
 /// The grace window for the sweep (format spec, "Garbage collection"). It is
@@ -70,5 +72,35 @@ impl GcConfig {
             ));
         }
         Ok(())
+    }
+}
+
+/// Validated, namespace-bound policy for one collection pass.
+///
+/// The decoded cursor belongs here because it controls this pass's walk. The
+/// original token is retained separately only because a pass that makes no
+/// progress must return it byte for byte; decoding and re-encoding is not the
+/// external contract.
+#[derive(Debug)]
+pub(super) struct GcPolicy {
+    pub(super) grace_window_ms: u64,
+    pub(super) max_objects: Option<u64>,
+    pub(super) resume: GcCursor,
+    pub(super) unchanged_cursor: Option<String>,
+}
+
+impl GcPolicy {
+    pub(super) fn settle(config: &GcConfig, namespace_id: &NamespaceId) -> Result<Self> {
+        config.validate()?;
+        let resume = match config.cursor.as_deref() {
+            Some(token) => GcCursor::decode(token, namespace_id)?,
+            None => GcCursor::initial(namespace_id),
+        };
+        Ok(Self {
+            grace_window_ms: config.grace_window_ms,
+            max_objects: config.max_objects,
+            resume,
+            unchanged_cursor: config.cursor.clone(),
+        })
     }
 }
