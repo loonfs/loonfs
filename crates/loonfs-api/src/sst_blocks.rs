@@ -127,6 +127,7 @@ pub struct SegmentFilter {
 ///
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum SstBlockCodecError {
     /// Reports a request to finish a segment before any row was supplied.
     #[error("segment must contain at least one row")]

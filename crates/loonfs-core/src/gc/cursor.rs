@@ -47,12 +47,12 @@ impl CandidateFamily {
 
     pub(super) fn prefix(self, namespace_id: &NamespaceId) -> String {
         match self {
-            Self::WalSegments => wal_segment_prefix(namespace_id.as_str()),
-            Self::MetadataTables => metadata_table_prefix(namespace_id.as_str()),
-            Self::CompactionStaging => metadata_compaction_prefix(namespace_id.as_str()),
-            Self::Manifests => metadata_manifest_prefix(namespace_id.as_str()),
-            Self::Checkpoints => checkpoint_prefix(namespace_id.as_str()),
-            Self::UploadSessions => upload_session_prefix(namespace_id.as_str()),
+            Self::WalSegments => wal_segment_prefix(namespace_id),
+            Self::MetadataTables => metadata_table_prefix(namespace_id),
+            Self::CompactionStaging => metadata_compaction_prefix(namespace_id),
+            Self::Manifests => metadata_manifest_prefix(namespace_id),
+            Self::Checkpoints => checkpoint_prefix(namespace_id),
+            Self::UploadSessions => upload_session_prefix(namespace_id),
         }
     }
 }
@@ -108,6 +108,7 @@ impl GcCursor {
             NamespaceCursorError::Malformed(_) | NamespaceCursorError::OutsideKeyspace => {
                 invalid_cursor()
             }
+            _ => invalid_cursor(),
         })
     }
 

@@ -171,7 +171,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
         loonfs::control::load_namespace_catalog_entry(&store(temp_dir.path()), &namespace_id)
             .await
             .expect("load catalog");
-    let key = content_blob(catalog.content_store_id().as_str(), &content_ref.content_id);
+    let key = content_blob(catalog.content_store_id(), &content_ref.content_id);
     let mut corrupted = payload.clone();
     corrupted[0] ^= 0xff;
     store(temp_dir.path())

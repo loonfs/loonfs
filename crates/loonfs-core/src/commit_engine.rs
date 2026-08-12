@@ -733,7 +733,7 @@ mod tests {
 
     async fn wal_segment_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
         store
-            .list_prefix_stream(&wal_segment_prefix(namespace_id.as_str()))
+            .list_prefix_stream(&wal_segment_prefix(namespace_id))
             .collect::<Vec<_>>()
             .await
             .len()
@@ -820,7 +820,7 @@ mod tests {
         // fence check uses and the closing etag recheck.
         let store = StdArc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
-            KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+            KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
             OperationClass::Read,
         ));
 

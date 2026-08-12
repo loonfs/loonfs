@@ -240,7 +240,7 @@ async fn manifest_runs<S: ObjectStore + ?Sized>(
     let root = loonfs_core::control::load_namespace_metadata_root_control(store, namespace_id)
         .await
         .expect("read the metadata root");
-    let key = metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
+    let key = metadata_manifest_object(namespace_id, &root.state.manifest_object_id);
     let bytes = store
         .get(&key, None)
         .await

@@ -85,7 +85,7 @@ async fn reads_commits_and_change_feed_never_list() {
     // hot path.
     store
         .put_if_absent(
-            &format!("{}zz-junk.tmp", wal_segment_prefix(namespace_id.as_str())),
+            &format!("{}zz-junk.tmp", wal_segment_prefix(&namespace_id)),
             Bytes::from_static(b"junk"),
         )
         .await
@@ -178,7 +178,7 @@ async fn maintenance_never_touches_the_wal_head() {
     )
     .await;
 
-    let head_key = wal_head(namespace_id.as_str());
+    let head_key = wal_head(&namespace_id);
     let before = store
         .get_with_metadata(&head_key)
         .await

@@ -281,7 +281,7 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     loaded_head_etag: &str,
     acquired_writer: &AcquiredWriter,
 ) -> Result<()> {
-    let object_key = wal_head(namespace_id.as_str());
+    let object_key = wal_head(namespace_id);
     let metadata = store
         .head(&object_key)
         .await

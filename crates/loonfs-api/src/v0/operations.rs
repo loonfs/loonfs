@@ -780,7 +780,6 @@ impl GcResponse {
 /// variant is the field of [`RetainedCandidates`] it counts into, where the
 /// reason itself is described.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RetainedReason {
     /// Counts into [`RetainedCandidates::referenced`].
     Referenced,

@@ -38,7 +38,7 @@ pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedWalFloorObject, ControlObjectLoadError> {
-    let object_key = wal_floor(expected_namespace_id.as_str());
+    let object_key = wal_floor(expected_namespace_id);
     load_control_object(
         store,
         object_key,
@@ -52,7 +52,7 @@ pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataRootObject, ControlObjectLoadError> {
-    let object_key = metadata_root(expected_namespace_id.as_str());
+    let object_key = metadata_root(expected_namespace_id);
     load_control_object(
         store,
         object_key,
@@ -112,7 +112,7 @@ pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
-    let object_key = wal_head(expected_namespace_id.as_str());
+    let object_key = wal_head(expected_namespace_id);
     load_control_object(
         store,
         object_key,

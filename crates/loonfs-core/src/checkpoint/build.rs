@@ -188,15 +188,11 @@ impl<'a> MetadataTableDestination<'a> {
 
     fn object_key(self, table_id: &MetadataTableId) -> String {
         match self {
-            Self::Published { namespace_id } => {
-                metadata_table(namespace_id.as_str(), table_id.as_str())
-            }
+            Self::Published { namespace_id } => metadata_table(namespace_id, table_id),
             Self::CompactionStaging {
                 namespace_id,
                 job_id,
-            } => {
-                metadata_compaction_table(namespace_id.as_str(), job_id.as_str(), table_id.as_str())
-            }
+            } => metadata_compaction_table(namespace_id, job_id, table_id),
         }
     }
 

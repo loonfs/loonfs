@@ -286,7 +286,8 @@ mod tests {
         let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
             .expect("construct configured local fs store")
             .into_shared();
-        let head_key = wal_head("ns-1");
+        let head_key =
+            wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
 
         store
             .put_overwrite(&head_key, Bytes::from_static(br#"{"ok":true}"#))

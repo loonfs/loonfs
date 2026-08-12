@@ -107,7 +107,7 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
         .expect("bootstrap namespace");
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![wal_head(namespace_id.as_str())],
+        vec![wal_head(&namespace_id)],
         "creation writes the head and nothing else"
     );
     assert!(
@@ -150,12 +150,11 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
     );
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
-        keys.iter()
-            .all(|key| key == &wal_head(namespace_id.as_str())
-                || key.starts_with(&format!(
-                    "namespaces/{}/wal/segments/",
-                    namespace_id.as_str()
-                ))),
+        keys.iter().all(|key| key == &wal_head(&namespace_id)
+            || key.starts_with(&format!(
+                "namespaces/{}/wal/segments/",
+                namespace_id.as_str()
+            ))),
         "before the first flush a namespace is a head plus its WAL: {keys:?}"
     );
 
@@ -166,7 +165,7 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
         .expect("flush");
     assert!(
         store
-            .head(&metadata_root(namespace_id.as_str()))
+            .head(&metadata_root(&namespace_id))
             .await
             .expect("probe root")
             .is_some(),
@@ -210,7 +209,7 @@ async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
     assert_eq!(loser.code(), ErrorCode::NamespaceExists);
     assert_eq!(
         namespace_keys(store.as_ref(), &namespace_id).await,
-        vec![wal_head(namespace_id.as_str())]
+        vec![wal_head(&namespace_id)]
     );
 }
 
@@ -361,7 +360,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(blobs_after, blobs_before, "fork must not copy content");
     assert_eq!(
         namespace_keys(&store, &clone_namespace_id).await,
-        vec![wal_head(clone_namespace_id.as_str())],
+        vec![wal_head(&clone_namespace_id)],
         "a fork target is its head and nothing else"
     );
 
@@ -490,10 +489,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .expect("clone metadata root");
     let clone_manifest_bytes = store
         .get(
-            &metadata_manifest_object(
-                clone_namespace_id.as_str(),
-                &clone_root.state.manifest_object_id,
-            ),
+            &metadata_manifest_object(&clone_namespace_id, &clone_root.state.manifest_object_id),
             None,
         )
         .await
@@ -574,7 +570,7 @@ async fn a_fork_basis_checksum_mismatch_is_corruption() {
         HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
     store
         .put_overwrite(
-            &wal_head(clone.as_str()),
+            &wal_head(&clone),
             Bytes::from(encode_control_object(&envelope).expect("encode head")),
         )
         .await
@@ -602,7 +598,7 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
         .expect("fork");
     assert!(
         store
-            .head(&metadata_root(clone.as_str()))
+            .head(&metadata_root(&clone))
             .await
             .expect("probe clone root")
             .is_none(),
@@ -621,7 +617,7 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
     .await
     .expect("read record")
     .expect("record exists");
-    let manifest_key = metadata_manifest_object(clone.as_str(), &record.manifest_object_id);
+    let manifest_key = metadata_manifest_object(&clone, &record.manifest_object_id);
     assert!(
         store
             .head(&manifest_key)
@@ -632,7 +628,7 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
     );
     assert!(
         store
-            .head(&metadata_root(clone.as_str()))
+            .head(&metadata_root(&clone))
             .await
             .expect("probe clone root")
             .is_some(),
@@ -763,10 +759,8 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
-    let manifest_key = metadata_manifest_object(
-        source_namespace_id.as_str(),
-        &source_record.manifest_object_id,
-    );
+    let manifest_key =
+        metadata_manifest_object(&source_namespace_id, &source_record.manifest_object_id);
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await
@@ -826,7 +820,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     );
     assert!(
         store
-            .head(&wal_head(source_namespace_id.as_str()))
+            .head(&wal_head(&source_namespace_id))
             .await
             .expect("head source head")
             .is_some(),
@@ -851,10 +845,10 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     .expect("encode foreign head");
     let store = InjectCreateFailureStore::new(
         inner,
-        KeyMatcher::Exact(wal_head(namespace_id.as_str())),
+        KeyMatcher::Exact(wal_head(&namespace_id)),
         InjectedCreateFailure::PreconditionFailed {
             write_attempted_object: false,
-            additional_writes: vec![(wal_head(namespace_id.as_str()), foreign_bytes.clone())],
+            additional_writes: vec![(wal_head(&namespace_id), foreign_bytes.clone())],
         },
     );
 
@@ -864,7 +858,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
     assert_eq!(
         store
-            .get(&wal_head(namespace_id.as_str()), None)
+            .get(&wal_head(&namespace_id), None)
             .await
             .expect("read head")
             .expect("head exists")
@@ -1021,11 +1015,11 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
     let surviving = namespace_keys(&store, &namespace_id).await;
     assert_eq!(
         surviving,
-        vec![wal_head(namespace_id.as_str())],
+        vec![wal_head(&namespace_id)],
         "reclamation leaves the tombstone head and nothing else"
     );
     assert!(store
-        .head(&wal_floor(namespace_id.as_str()))
+        .head(&wal_floor(&namespace_id))
         .await
         .expect("probe floor")
         .is_none());
@@ -1060,7 +1054,7 @@ impl ReleasePinAfterHeadStore {
     ) -> Self {
         Self {
             inner,
-            target_head_key: wal_head(target_namespace_id.as_str()),
+            target_head_key: wal_head(&target_namespace_id),
             after_head,
         }
     }

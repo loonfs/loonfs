@@ -105,7 +105,7 @@ fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
         // holds.
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::metadata_root(namespace_id.as_str()),
+            KeyPredicate::metadata_root(&namespace_id),
             OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
@@ -178,7 +178,7 @@ fn a_step_queued_at_the_global_cap_runs_without_another_publish() {
         // holds.
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::metadata_root(active_namespace.as_str()),
+            KeyPredicate::metadata_root(&active_namespace),
             OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
@@ -239,7 +239,7 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
         // holds.
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::metadata_root(active_namespace.as_str()),
+            KeyPredicate::metadata_root(&active_namespace),
             OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
@@ -319,7 +319,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
         // holds.
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::metadata_root(active_namespace.as_str()),
+            KeyPredicate::metadata_root(&active_namespace),
             OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
@@ -1038,8 +1038,7 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
         let root = load_namespace_metadata_root_control(&store, &namespace_id)
             .await
             .expect("load metadata root");
-        let manifest_key =
-            metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
+        let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest_object_id);
         let bytes = store
             .get(&manifest_key, None)
             .await

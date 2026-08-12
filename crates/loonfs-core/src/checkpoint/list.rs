@@ -46,7 +46,7 @@ pub(crate) async fn list_checkpoints<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::load_head)?;
 
-    let prefix = checkpoint_prefix(namespace_id.as_str());
+    let prefix = checkpoint_prefix(namespace_id);
     let mut keys = store.list_prefix_stream(&prefix);
     let mut checkpoints = Vec::new();
     while let Some(item) = keys.next().await {

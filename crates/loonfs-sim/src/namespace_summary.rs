@@ -102,17 +102,15 @@ mod tests {
         let namespace_id = NamespaceId::parse("sim").expect("valid namespace id");
 
         store
-            .put_overwrite(
-                &wal_head(namespace_id.as_str()),
-                Bytes::from_static(b"head"),
-            )
+            .put_overwrite(&wal_head(&namespace_id), Bytes::from_static(b"head"))
             .await
             .expect("head");
         store
             .put_overwrite(
                 &wal_segment(
-                    namespace_id.as_str(),
-                    "seg_00000000000000000000000000000001",
+                    &namespace_id,
+                    &loonfs_api::WalSegmentId::parse("00000000000000000001-644e4d336fd4ee33")
+                        .expect("valid WAL segment id"),
                 ),
                 Bytes::from_static(b"wal"),
             )

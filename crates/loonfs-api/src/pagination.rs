@@ -109,6 +109,7 @@ impl Default for PaginationPolicy {
 
 /// Invalid caller-supplied page size.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum LimitError {
     /// The caller supplied `limit=0`.
     #[error("limit must be greater than zero")]
@@ -350,6 +351,7 @@ pub fn decode_namespace_cursor<C: NamespaceCursor>(
 
 /// Why a namespace-bound cursor cannot resume the enumeration replaying it.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum NamespaceCursorError {
     /// Not a cursor this enumeration issued: unreadable, or from another
     /// endpoint, job, or cursor version.
@@ -365,6 +367,7 @@ pub enum NamespaceCursorError {
 
 /// Invalid opaque page cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum PageCursorError {
     /// The cursor was not hex-encoded JSON.
     #[error("invalid page cursor encoding")]

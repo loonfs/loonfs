@@ -215,7 +215,7 @@ mod tests {
     async fn absence_is_missing_object() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
 
         let error = load_head(&store, &object_key, &namespace_id)
             .await
@@ -228,7 +228,7 @@ mod tests {
     async fn permission_failure_preserves_its_store_class() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key.clone()),
@@ -254,7 +254,7 @@ mod tests {
     async fn other_provider_failure_preserves_its_store_class() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key.clone()),
@@ -280,7 +280,7 @@ mod tests {
     async fn missing_etag_is_a_store_failure() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
         let (_, bytes) = encoded_head(&namespace_id);
         write_bytes(&inner, &object_key, bytes).await;
         let store = MetadataMapStore::without_etag(inner, KeyPredicate::exact(object_key.clone()));
@@ -303,7 +303,7 @@ mod tests {
     async fn malformed_envelope_is_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
         write_bytes(&store, &object_key, b"not json".to_vec()).await;
 
         let error = load_head(&store, &object_key, &namespace_id)
@@ -317,7 +317,7 @@ mod tests {
     async fn wrong_envelope_kind_is_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
         let (_, bytes) = encoded_head(&namespace_id);
         let mut document: Value = serde_json::from_slice(&bytes).expect("envelope json");
         document["kind"] = Value::String(ControlObjectKind::WalFloor.as_str().to_owned());
@@ -343,7 +343,7 @@ mod tests {
     async fn checksum_disagreement_has_its_own_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
         let (_, bytes) = encoded_head(&namespace_id);
         let mut document: Value = serde_json::from_slice(&bytes).expect("envelope json");
         let recorded = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -374,7 +374,7 @@ mod tests {
         let (_directory, store) = local_store();
         let expected_namespace_id = namespace("demo");
         let actual_namespace_id = namespace("other");
-        let object_key = wal_head(expected_namespace_id.as_str());
+        let object_key = wal_head(&expected_namespace_id);
         let (_, bytes) = encoded_head(&actual_namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
@@ -396,7 +396,7 @@ mod tests {
     async fn other_identity_disagreement_is_not_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
         let (_, bytes) = encoded_head(&namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
@@ -424,7 +424,7 @@ mod tests {
     async fn successful_load_returns_state_key_and_etag() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(namespace_id.as_str());
+        let object_key = wal_head(&namespace_id);
         let (state, bytes) = encoded_head(&namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 

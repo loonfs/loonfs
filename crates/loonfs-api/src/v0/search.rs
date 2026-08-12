@@ -118,11 +118,10 @@ pub struct GrepResponse {
 
 /// Where a namespace's grep index is in its lifecycle.
 ///
-/// The phases carry different facts and never share a field: a backfill
-/// reports the sequence it is walking toward and how far the walk got, and
-/// only a steady index reports a watermark it has actually built through.
-/// A reader that wants "is this searchable, and through what?" asks the
-/// `steady` phase and nothing else.
+/// Each phase contains only the fields valid for that phase. `Backfilling`
+/// reports its target and current position. `Steady` reports how far the
+/// index has been built. Clients should treat a namespace as searchable only
+/// when the index is in the `Steady` phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "phase", rename_all = "snake_case")]

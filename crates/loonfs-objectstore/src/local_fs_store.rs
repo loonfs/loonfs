@@ -818,7 +818,7 @@ mod tests {
     async fn listing_tolerates_entries_that_vanish_mid_walk() {
         let temp_dir = TestDir::new("listing-races");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = wal_head("ns-1");
+        let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
             .await
@@ -847,7 +847,12 @@ mod tests {
         let temp_dir = TestDir::new("head-missing");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
 
-        let answer = store.head(&wal_head("ns-1")).await.expect("head succeeds");
+        let answer = store
+            .head(&wal_head(
+                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+            ))
+            .await
+            .expect("head succeeds");
         assert!(answer.is_none());
     }
 
@@ -883,7 +888,7 @@ mod tests {
     async fn overwrite_refreshes_head_and_visible_bytes() {
         let temp_dir = TestDir::new("overwrite");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = wal_head("ns-1");
+        let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
 
         let first = store
             .put(
@@ -923,7 +928,7 @@ mod tests {
     async fn ranged_reads_answer_their_range_and_refuse_impossible_ones() {
         let temp_dir = TestDir::new("ranged-reads");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = wal_head("ns-1");
+        let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
         let payload = Bytes::from_static(b"0123456789");
         store
             .put(&key, payload.clone(), PutMode::Overwrite)
@@ -967,7 +972,12 @@ mod tests {
             Err(ObjectStoreError::InvalidRange { .. })
         ));
         assert!(store
-            .get(&wal_head("ns-missing"), range(0, 4))
+            .get(
+                &wal_head(
+                    &loonfs_api::NamespaceId::parse("ns-missing").expect("valid namespace id")
+                ),
+                range(0, 4)
+            )
             .await
             .expect("a ranged read of a missing object is absent, not an error")
             .is_none());
@@ -982,7 +992,9 @@ mod tests {
 
         let temp_dir = TestDir::new("atomic-replacement");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local fs store"));
-        let key = wal_head("ns-atomic-replacement");
+        let key = wal_head(
+            &loonfs_api::NamespaceId::parse("ns-atomic-replacement").expect("valid namespace id"),
+        );
         store
             .put(
                 &key,
@@ -1037,7 +1049,11 @@ mod tests {
     async fn delete_is_idempotent_and_head_reflects_removal() {
         let temp_dir = TestDir::new("delete");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = upload_session("ns-1", "upl_00000000000000000000000000000001");
+        let key = upload_session(
+            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+            &loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
+                .expect("valid upload id"),
+        );
 
         store
             .put_if_absent(&key, Bytes::from_static(br#"{"created":true}"#))
@@ -1056,7 +1072,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compare_and_swap_is_safe_across_store_instances() {
         let temp_dir = TestDir::new("cross-instance-cas");
-        let key = wal_head("ns-cas");
+        let key = wal_head(&loonfs_api::NamespaceId::parse("ns-cas").expect("valid namespace id"));
         let seed = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         seed.put(&key, Bytes::from_static(b"0"), PutMode::CreateIfAbsent)
             .await
@@ -1114,7 +1130,8 @@ mod tests {
     async fn listings_hide_scratch_files_and_reject_scratch_keys() {
         let temp_dir = TestDir::new("scratch");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = wal_head("ns-scratch");
+        let key =
+            wal_head(&loonfs_api::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
             .await

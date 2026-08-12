@@ -26,7 +26,9 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestKind, NamespaceManifestPayload,
     NAMESPACE_MANIFEST_FORMAT_VERSION,
 };
-use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId, WriterEpoch};
+use loonfs_api::{
+    ChangeSeq, ManifestId, ManifestObjectId, MetadataCompactionId, NamespaceId, WriterEpoch,
+};
 use loonfs_objectstore::keys::{
     metadata_compaction_job_id_from_key, metadata_compaction_table, metadata_manifest_object,
     metadata_table,
@@ -163,7 +165,7 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     manifest_object_id: &ManifestObjectId,
 ) -> Result<NamespaceManifestEnvelope, ManifestLoadError> {
-    let manifest_key = metadata_manifest_object(namespace_id.as_str(), manifest_object_id);
+    let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
     load_namespace_manifest_envelope_if_present(
         store,
         namespace_id,
@@ -192,7 +194,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
     namespace_id: &NamespaceId,
     manifest_object_id: &ManifestObjectId,
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
-    let manifest_key = metadata_manifest_object(namespace_id.as_str(), manifest_object_id);
+    let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
     // Manifests are immutable per object key, so the decoded and validated
     // envelope is cacheable forever under that key.
     let fetch = || async {
@@ -570,10 +572,7 @@ fn validate_one_base_run_per_family_group(
 }
 
 pub(super) fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
-    metadata_table(
-        descriptor.owner_namespace_id.as_str(),
-        descriptor.table_id.as_str(),
-    )
+    metadata_table(&descriptor.owner_namespace_id, &descriptor.table_id)
 }
 
 /// Checks that a descriptor names one of the two keys a segment of its
@@ -593,13 +592,15 @@ pub(super) fn ensure_segment_object_key(
     descriptor: &MetadataFileRef,
 ) -> Result<(), ManifestLoadError> {
     let expected = metadata_file_object_key(descriptor);
-    let staged = metadata_compaction_job_id_from_key(&descriptor.object_key).map(|job_id| {
-        metadata_compaction_table(
-            descriptor.owner_namespace_id.as_str(),
-            job_id,
-            descriptor.table_id.as_str(),
-        )
-    });
+    let staged = metadata_compaction_job_id_from_key(&descriptor.object_key)
+        .and_then(|job_id| MetadataCompactionId::parse(job_id).ok())
+        .map(|metadata_compaction_id| {
+            metadata_compaction_table(
+                &descriptor.owner_namespace_id,
+                &metadata_compaction_id,
+                &descriptor.table_id,
+            )
+        });
     if descriptor.object_key == expected || staged.as_deref() == Some(&descriptor.object_key) {
         return Ok(());
     }

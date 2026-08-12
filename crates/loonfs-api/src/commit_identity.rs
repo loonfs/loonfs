@@ -143,13 +143,12 @@ enum OperationFingerprintInput<'a> {
     },
 }
 
-/// Canonical preimage for one attribute value.
+/// Stable fingerprint input for one attribute value.
 ///
-/// Restated here rather than embedding [`AttributeValue`]'s own encoding, for
-/// the same reason the content reference above is restated: the wire spelling
-/// of a value has to be free to change without restating the identity of
-/// every already-published update. The kind is part of the value, so a text
-/// and a one-member list fingerprint differently.
+/// This private representation keeps commit fingerprints independent of the
+/// wire encoding for [`AttributeValue`]. The variant remains part of the
+/// fingerprint, so a string and a one-item string list produce different
+/// fingerprints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AttributeValueFingerprintInput<'a> {

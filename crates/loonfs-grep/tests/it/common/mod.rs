@@ -183,7 +183,7 @@ pub(crate) mod control {
     }
 
     pub(crate) async fn head(store: &SharedObjectStore, namespace_id: &NamespaceId) -> HeadState {
-        let bytes = control_bytes(store, &keys::wal_head(namespace_id.as_str()))
+        let bytes = control_bytes(store, &keys::wal_head(namespace_id))
             .await
             .expect("namespace head exists");
         decode_control_object::<HeadState>(&bytes, ControlObjectKind::WalHead)
@@ -195,7 +195,7 @@ pub(crate) mod control {
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
     ) -> MetadataRootState {
-        let bytes = control_bytes(store, &keys::metadata_root(namespace_id.as_str()))
+        let bytes = control_bytes(store, &keys::metadata_root(namespace_id))
             .await
             .expect("metadata root exists");
         decode_control_object::<MetadataRootState>(&bytes, ControlObjectKind::MetadataRoot)
@@ -208,11 +208,8 @@ pub(crate) mod control {
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
     ) -> Option<CheckpointRecordState> {
-        let bytes = control_bytes(
-            store,
-            &keys::checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str()),
-        )
-        .await?;
+        let bytes =
+            control_bytes(store, &keys::checkpoint_record(namespace_id, checkpoint_id)).await?;
         Some(
             decode_control_object::<CheckpointRecordState>(
                 &bytes,

@@ -211,7 +211,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     let ns_other = NamespaceId::parse("other").expect("valid namespace id");
     let counting = Arc::new(CountingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::wal_head(ns_fence.as_str()),
+        KeyPredicate::wal_head(&ns_fence),
     ));
     let store: SharedObjectStore = counting.clone();
 
@@ -313,7 +313,7 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
     let namespace_id = NamespaceId::parse("nocache").expect("valid namespace id");
     let counting = Arc::new(CountingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::wal_head(namespace_id.as_str()),
+        KeyPredicate::wal_head(&namespace_id),
     ));
     let store: SharedObjectStore = counting.clone();
 
@@ -408,7 +408,7 @@ async fn read_after_write_is_served_from_seeded_caches() {
     // upload session that owns the staged content has to be read to be
     // completed on its own etag. One of each, and nothing else.
     let write_gets = recording.take_get_keys();
-    let uploads_prefix = loonfs_objectstore::keys::upload_session_prefix(namespace_id.as_str());
+    let uploads_prefix = loonfs_objectstore::keys::upload_session_prefix(&namespace_id);
     let classify = |suffix: &str| {
         write_gets
             .iter()

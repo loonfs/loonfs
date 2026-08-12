@@ -456,8 +456,7 @@ pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>
     store: &S,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<String> {
-    let staging_prefix =
-        loonfs_objectstore::keys::metadata_compaction_prefix(namespace_id.as_str());
+    let staging_prefix = loonfs_objectstore::keys::metadata_compaction_prefix(namespace_id);
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
     let staged: BTreeSet<String> =
         load_verified_manifest_tables(store, namespace_id, &manifest_object_id)
@@ -508,7 +507,7 @@ async fn current_manifest_key<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> String {
     metadata_manifest_object(
-        namespace_id.as_str(),
+        namespace_id,
         &current_manifest_object_id(store, namespace_id).await,
     )
 }

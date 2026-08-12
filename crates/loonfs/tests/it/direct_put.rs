@@ -582,10 +582,10 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         puts.2.expect("put c");
         puts.3.expect("put d");
 
-        // The already-proven candidates reach publisher admission together
-        // and publish as one batch: one WAL segment, one head CAS. The slow
-        // content-ref helper validates before admission and is intentionally
-        // outside this batching seam.
+        // The four prepared candidates are admitted together and published
+        // in one batch, producing one WAL segment and one head CAS. The slower
+        // content-reference helper validates before admission, so it is not
+        // part of this batching test.
         let segments_after = wal_segment_count(&object_store, &namespace_id).await;
         assert_eq!(segments_after - segments_before, 1);
 
@@ -688,10 +688,7 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
 fn begin_upload_validates_controls_without_replay_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "begin-upload-cache-test");
 
@@ -749,7 +746,7 @@ fn begin_upload_rejects_missing_and_unreadable_namespaces() {
     fs.begin_upload_blocking(&namespace_id)
         .expect("a live namespace admits uploads");
 
-    block_on(raw_store.delete(&wal_head(namespace_id.as_str()))).expect("delete head");
+    block_on(raw_store.delete(&wal_head(&namespace_id))).expect("delete head");
     assert_core_error_kind(
         fs.begin_upload_blocking(&namespace_id),
         ErrorCode::NamespaceNotFound,
@@ -771,7 +768,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     fs.create_namespace_blocking(&head_bad, CreateNamespaceOptions::default())
         .expect("create head-bad namespace");
     block_on(raw_store.put_overwrite(
-        &wal_head(head_bad.as_str()),
+        &wal_head(&head_bad),
         Bytes::from_static(br#"{"not":"a head"}"#),
     ))
     .expect("corrupt head");

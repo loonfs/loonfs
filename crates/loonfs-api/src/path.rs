@@ -46,6 +46,7 @@ pub const MAX_PATH_DEPTH: usize = 128;
 
 /// Describes why caller-supplied path or display-name text is not admissible.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum PathError {
     /// Reports an empty string where an absolute path was required.
     #[error("absolute path must not be empty")]

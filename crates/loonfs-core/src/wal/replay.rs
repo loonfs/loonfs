@@ -104,10 +104,8 @@ pub(super) fn validate_wal_segment_for_replay(
 ) -> Result<(), WalReplayError> {
     // The id shape is validated on decode: `segment_id` is a typed
     // `WalSegmentId`, so only well-formed ids can reach this point.
-    let expected_object_key = wal_segment(
-        envelope.payload.namespace_id.as_str(),
-        envelope.payload.segment_id.as_str(),
-    );
+    let expected_object_key =
+        wal_segment(&envelope.payload.namespace_id, &envelope.payload.segment_id);
 
     if object_key != expected_object_key {
         return Err(WalReplayError::ObjectKeyMismatch {

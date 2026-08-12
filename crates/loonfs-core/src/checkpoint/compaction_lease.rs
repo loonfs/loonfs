@@ -71,9 +71,9 @@ pub(crate) enum CompactionPrefixOwner {
 /// Reads the lease of one job and says who owns that job's prefix, claiming
 /// an expired lease on the way.
 ///
-/// `job_id` is the path component, not a parsed identity: a collector reads
-/// it off the key it is deciding. A lease naming a different job or namespace
-/// is corrupt because the key and embedded fence disagree.
+/// A collector parses `metadata_compaction_id` from the key it is deciding.
+/// A lease naming a different job or namespace is corrupt because the key
+/// and embedded fence disagree.
 ///
 /// The claim is the whole point of reading it. An expired `Active` lease
 /// alone proves nothing — the job may be resuming from a long stall right
@@ -82,17 +82,21 @@ pub(crate) enum CompactionPrefixOwner {
 pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    job_id: &str,
+    metadata_compaction_id: &MetadataCompactionId,
     now_ms: u64,
 ) -> Result<CompactionPrefixOwner> {
-    let object_key = metadata_compaction_lease(namespace_id.as_str(), job_id);
+    let object_key = metadata_compaction_lease(namespace_id, metadata_compaction_id);
     let loaded = load_control_object(
         store,
         object_key,
         ControlObjectKind::CompactionLease,
         |state: &MetadataCompactionLeaseState| {
             expect_namespace(namespace_id, &state.namespace_id)?;
-            expect_identity_field("compaction job id", job_id, state.job_id.as_str())
+            expect_identity_field(
+                "compaction job id",
+                metadata_compaction_id.as_str(),
+                state.job_id.as_str(),
+            )
         },
     )
     .await;
@@ -131,7 +135,7 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
                 object_key = object_key.as_str(),
-                job_id,
+                job_id = metadata_compaction_id.as_str(),
                 owner_id = reaping.owner_id.as_str(),
                 heartbeat_at_ms = reaping.heartbeat_at_ms,
                 "a streaming metadata compaction lease expired; garbage collection claimed its \
@@ -187,7 +191,7 @@ impl<'a> CompactionLease<'a> {
     ) -> Self {
         let started_monotonic_ms = timer.monotonic_now_ms();
         Self {
-            object_key: metadata_compaction_lease(namespace_id.as_str(), job_id.as_str()),
+            object_key: metadata_compaction_lease(namespace_id, job_id),
             state: MetadataCompactionLeaseState {
                 job_id: job_id.clone(),
                 namespace_id: namespace_id.clone(),

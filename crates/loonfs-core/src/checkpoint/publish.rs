@@ -36,7 +36,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     manifest: &NamespaceManifestEnvelope,
 ) -> std::result::Result<(), MetadataProjectionLoadError> {
     let manifest_key = metadata_manifest_object(
-        manifest.payload.namespace_id.as_str(),
+        &manifest.payload.namespace_id,
         &manifest.payload.manifest_object_id,
     );
     let manifest_bytes = Bytes::from(encode_namespace_manifest_json(manifest).map_err(|err| {
@@ -211,7 +211,7 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
     manifest: &NamespaceManifestEnvelope,
     updated_at_ms: u64,
 ) -> Result<Option<MetadataRootState>> {
-    let object_key = loonfs_objectstore::keys::metadata_root(namespace_id.as_str());
+    let object_key = loonfs_objectstore::keys::metadata_root(namespace_id);
     let next = MetadataRootState {
         namespace_id: namespace_id.clone(),
         manifest_id: manifest.payload.manifest_id,

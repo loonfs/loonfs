@@ -83,7 +83,7 @@ impl StaleHeadGetStore {
     fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: wal_head(namespace_id.as_str()),
+            head_key: wal_head(namespace_id),
             state: Mutex::new(StaleHeadGetState {
                 stale_head_body: None,
                 clean_head_gets_before_injection: None,
@@ -198,7 +198,7 @@ fn ack_lost_head_cas_store(
     root: impl AsRef<Path>,
     namespace_id: &NamespaceId,
 ) -> FailStore<LocalFsStore> {
-    let head_key = wal_head(namespace_id.as_str());
+    let head_key = wal_head(namespace_id);
     let store = FailStore::matching(
         LocalFsStore::new(root.as_ref()).expect("store"),
         move |operation: &OperationContext<'_>| {
@@ -244,7 +244,7 @@ impl StaleHeadAfterWalWriteStore {
     fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: wal_head(namespace_id.as_str()),
+            head_key: wal_head(namespace_id),
             injected_stale_head: Mutex::new(false),
         }
     }

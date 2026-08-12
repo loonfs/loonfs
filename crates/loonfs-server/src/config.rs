@@ -562,6 +562,10 @@ impl From<StoreConfigError> for ServerConfigError {
             StoreConfigError::InvalidField { field, reason } => {
                 ServerConfigError::InvalidField { field, reason }
             }
+            error => ServerConfigError::InvalidField {
+                field: "store",
+                reason: error.to_string(),
+            },
         }
     }
 }

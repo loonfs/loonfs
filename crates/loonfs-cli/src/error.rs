@@ -1,7 +1,7 @@
 //! [`CliError`]: the structured failure every command surfaces.
 
 use crate::config::NAMESPACE_ENV;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
 ///
@@ -25,16 +25,16 @@ use serde::{Deserialize, Serialize};
 ///   in both layers. A local configuration failure is `invalid_config`
 ///   whether the CLI or backend detects it, and registry codes are reserved
 ///   for failures a server could also produce.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CliError {
     pub code: String,
     pub message: String,
     /// Correlation id the server assigned to the failed request; absent for
     /// embedded and local failures, which have no server hop.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// Structured context for the code, when the backend carried any.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Box<loonfs_api::ErrorDetails>>,
 }
 

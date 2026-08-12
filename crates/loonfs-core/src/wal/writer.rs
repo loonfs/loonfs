@@ -79,7 +79,7 @@ pub(crate) fn prepare_wal_segment(
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
     let encoded_bytes = encode_wal_segment_envelope_zstd(&envelope)
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
-    let object_key = wal_segment(envelope.payload.namespace_id.as_str(), segment_id.as_str());
+    let object_key = wal_segment(&envelope.payload.namespace_id, &segment_id);
 
     Ok(PreparedWalSegment {
         object_key,

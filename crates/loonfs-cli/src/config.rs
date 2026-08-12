@@ -225,6 +225,7 @@ fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError
         StoreConfigError::InvalidField { field, reason } => {
             CliError::invalid_config(format!("invalid `{profile_name}.{field}`: {reason}"))
         }
+        error => CliError::invalid_config(format!("invalid `{profile_name}.store`: {error}")),
     }
 }
 

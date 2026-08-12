@@ -492,10 +492,8 @@ async fn foreign_metadata_file_owners(
             .await
             .expect("load metadata root")
             .state;
-    let key = loonfs_objectstore::keys::metadata_manifest_object(
-        namespace_id.as_str(),
-        &root.manifest_object_id,
-    );
+    let key =
+        loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &root.manifest_object_id);
     let bytes = store
         .get(&key, None)
         .await
@@ -871,7 +869,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
             .content_store_id()
             .clone();
     let object_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     store
         .put_overwrite(&object_key, bytes::Bytes::from_static(b"other bytes"))
         .await

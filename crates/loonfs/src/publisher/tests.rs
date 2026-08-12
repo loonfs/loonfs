@@ -38,7 +38,7 @@ fn blocking_head_cas_store(
 ) -> BlockingStore<LocalFsStore> {
     BlockingStore::new(
         LocalFsStore::new(root.as_ref()).expect("store"),
-        KeyPredicate::wal_head(namespace_id.as_str()),
+        KeyPredicate::wal_head(namespace_id),
         OperationClass::CompareAndSwap,
     )
 }
@@ -67,7 +67,7 @@ impl PanicHeadCasStore {
     fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: wal_head(namespace_id.as_str()),
+            head_key: wal_head(namespace_id),
             gate: Arc::new(PanicGate {
                 state: Mutex::new(PanicGateState {
                     armed: false,
@@ -183,7 +183,7 @@ fn lost_head_cas_ack_store(
 ) -> FailStore<LocalFsStore> {
     FailStore::new(
         LocalFsStore::new(root.as_ref()).expect("store"),
-        KeyPredicate::wal_head(namespace_id.as_str()),
+        KeyPredicate::wal_head(namespace_id),
         OperationClass::CompareAndSwap,
         InjectedError::Transport("injected lost head CAS acknowledgement".to_owned()),
     )
@@ -628,7 +628,9 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
     assert_eq!(pending_response.committed_seq, ChangeSeq(2));
 
     let wal_keys = shared
-        .list_prefix(&wal_segment_prefix("demo"))
+        .list_prefix(&wal_segment_prefix(
+            &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
+        ))
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 2);
@@ -1393,7 +1395,9 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     // The warmup published alone; the two concurrent submissions share
     // one segment.
     let wal_keys = shared
-        .list_prefix(&wal_segment_prefix("demo"))
+        .list_prefix(&wal_segment_prefix(
+            &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
+        ))
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 2);
@@ -1496,7 +1500,9 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     assert_eq!(committed_seqs, [ChangeSeq(2), ChangeSeq(3)]);
 
     let wal_keys = shared
-        .list_prefix(&wal_segment_prefix("demo"))
+        .list_prefix(&wal_segment_prefix(
+            &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
+        ))
         .await
         .expect("list wal");
     let mut record_counts = Vec::new();

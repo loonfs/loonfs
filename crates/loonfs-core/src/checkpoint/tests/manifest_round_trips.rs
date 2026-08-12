@@ -184,11 +184,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let manifest_key = format!(
-        "{}{:020}-",
-        metadata_manifest_prefix(namespace_id.as_str()),
-        2
-    );
+    let manifest_key = format!("{}{:020}-", metadata_manifest_prefix(&namespace_id), 2);
     let store = ConflictOnManifestCreateStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         manifest_key,
@@ -283,8 +279,9 @@ async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
     .expect("write second");
 
     let orphan_key = wal_segment(
-        namespace_id.as_str(),
-        "00000000000000000002-deadbeefdeadbeef",
+        &namespace_id,
+        &loonfs_api::WalSegmentId::parse("00000000000000000002-deadbeefdeadbeef")
+            .expect("valid WAL segment id"),
     );
     store
         .put_overwrite(&orphan_key, Bytes::from_static(b"not a wal envelope"))
@@ -603,10 +600,8 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
             .await
             .expect("load first manifest");
     let mut bad_base_manifest = first_materialized.manifest.clone();
-    let manifest_key = metadata_manifest_object(
-        namespace_id.as_str(),
-        &bad_base_manifest.payload.manifest_object_id,
-    );
+    let manifest_key =
+        metadata_manifest_object(&namespace_id, &bad_base_manifest.payload.manifest_object_id);
     let expected_base_key = {
         let base_descriptor = bad_base_manifest
             .payload
@@ -618,8 +613,8 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
             })
             .expect("base metadata file");
         let expected = metadata_table(
-            base_descriptor.owner_namespace_id.as_str(),
-            base_descriptor.table_id.as_str(),
+            &base_descriptor.owner_namespace_id,
+            &base_descriptor.table_id,
         );
         base_descriptor.object_key = format!("{}-wrong", base_descriptor.object_key);
         expected
@@ -645,10 +640,8 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
             .await
             .expect("load second manifest");
     let mut bad_l0_manifest = second_materialized.manifest.clone();
-    let manifest_key = metadata_manifest_object(
-        namespace_id.as_str(),
-        &bad_l0_manifest.payload.manifest_object_id,
-    );
+    let manifest_key =
+        metadata_manifest_object(&namespace_id, &bad_l0_manifest.payload.manifest_object_id);
     let expected_l0_key = {
         let l0_descriptor = bad_l0_manifest
             .payload
@@ -659,10 +652,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
                     && metadata_file.family == ApiMetadataTableFamily::Inodes
             })
             .expect("l0 metadata file");
-        let expected = metadata_table(
-            l0_descriptor.owner_namespace_id.as_str(),
-            l0_descriptor.table_id.as_str(),
-        );
+        let expected = metadata_table(&l0_descriptor.owner_namespace_id, &l0_descriptor.table_id);
         l0_descriptor.object_key = format!("{}-wrong", l0_descriptor.object_key);
         expected
     };
@@ -750,7 +740,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     match load_manifest_metadata_state_for_inspection_from_manifest(
         &store,
         &namespace_id,
-        &metadata_manifest_object(namespace_id.as_str(), &manifest.payload.manifest_object_id),
+        &metadata_manifest_object(&namespace_id, &manifest.payload.manifest_object_id),
         &manifest,
     )
     .await
