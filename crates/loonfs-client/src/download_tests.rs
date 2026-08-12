@@ -144,7 +144,7 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
         .await
         .expect_err("bytes that are not the granted object");
     assert!(
-        matches!(&error, ClientError::Http(message) if message.contains("grant named")),
+        matches!(&error, ClientError::Protocol(message) if message.contains("grant named")),
         "unexpected error: {error}"
     );
 }
@@ -196,7 +196,7 @@ async fn a_crc32c_only_grant_verifies_the_bytes_it_receives() {
         .await
         .expect_err("bytes that are not the granted object");
     assert!(
-        matches!(&error, ClientError::Http(message) if message.contains("grant named")),
+        matches!(&error, ClientError::Protocol(message) if message.contains("grant named")),
         "unexpected error: {error}"
     );
 }
@@ -243,7 +243,7 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
         }
     };
     assert!(
-        matches!(&error, ClientError::Http(message) if message.contains("grant named")),
+        matches!(&error, ClientError::Protocol(message) if message.contains("grant named")),
         "unexpected error: {error}"
     );
 }
@@ -362,7 +362,7 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
         .await
         .expect_err("a write capability cannot serve a read");
     assert!(
-        matches!(&error, ClientError::Http(message) if message.contains("presigned download method")),
+        matches!(&error, ClientError::Protocol(message) if message.contains("presigned download method")),
         "unexpected error: {error}"
     );
     assert!(sink.is_empty());

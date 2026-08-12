@@ -110,9 +110,9 @@ async fn aws_s3_real_provider_conformance() {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id.into(),
-        secret_access_key: config.secret_access_key.into(),
-        session_token: config.session_token.map(Into::into),
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        session_token: config.session_token,
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })
@@ -133,9 +133,9 @@ async fn aws_s3_streamed_write_round_trips() {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id.into(),
-        secret_access_key: config.secret_access_key.into(),
-        session_token: config.session_token.map(Into::into),
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        session_token: config.session_token,
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })
@@ -154,8 +154,8 @@ async fn cloudflare_r2_streamed_write_round_trips() {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id.into(),
-        secret_access_key: config.secret_access_key.into(),
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
@@ -175,9 +175,9 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id.into(),
-        secret_access_key: config.secret_access_key.into(),
-        session_token: config.session_token.map(Into::into),
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        session_token: config.session_token,
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })
@@ -232,8 +232,8 @@ async fn cloudflare_r2_real_provider_conformance() {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id.into(),
-        secret_access_key: config.secret_access_key.into(),
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
@@ -276,7 +276,7 @@ async fn azure_abs_real_provider_conformance() {
     let store = AzureAbsStore::new(AzureAbsStoreConfig {
         account_name: config.account_name,
         container_name: config.container_name,
-        access_key: config.access_key.into(),
+        access_key: config.access_key,
         endpoint_url: config.endpoint,
         key_prefix: Some(config.prefix),
     })
@@ -292,7 +292,7 @@ async fn azure_abs_streamed_write_round_trips() {
     let store = AzureAbsStore::new(AzureAbsStoreConfig {
         account_name: config.account_name,
         container_name: config.container_name,
-        access_key: config.access_key.into(),
+        access_key: config.access_key,
         endpoint_url: config.endpoint,
         key_prefix: Some(config.prefix),
     })

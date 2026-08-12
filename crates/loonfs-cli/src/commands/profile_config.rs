@@ -5,9 +5,9 @@ use crate::args::{InitArgs, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavio
 use crate::config::{non_empty_env, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
+use loonfs_api::SecretString;
 use loonfs_objectstore::{
-    ConfiguredObjectStoreKind, SecretString, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
-    SESSION_TOKEN_ENV,
+    ConfiguredObjectStoreKind, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV, SESSION_TOKEN_ENV,
 };
 
 const AWS_REGIONS: &[&str] = &[
@@ -852,7 +852,7 @@ mod tests {
     };
     use crate::args::{ProfileUpdateArgs, RuntimeBehavior};
     use crate::config::{ProfileConfig, StoreConfig};
-    use loonfs_objectstore::SecretString;
+    use loonfs_api::SecretString;
 
     #[test]
     fn create_profile_supports_azure_abs() {

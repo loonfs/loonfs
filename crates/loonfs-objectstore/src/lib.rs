@@ -29,7 +29,6 @@ pub mod probe;
 mod provider_object_store;
 mod retry;
 pub mod s3_compatible;
-mod secret;
 mod store_config;
 mod store_io_runtime;
 #[cfg(test)]
@@ -51,7 +50,6 @@ pub use provider_object_store::{
     PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE, PROVIDER_STREAMED_PART_WINDOW,
     PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
-pub use secret::SecretString;
 pub use store_config::{
     StoreConfig, StoreConfigError, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV, SESSION_TOKEN_ENV,
 };

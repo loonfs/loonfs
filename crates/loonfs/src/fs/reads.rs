@@ -78,33 +78,35 @@ impl FsReader {
         absolute_path: &str,
     ) -> Result<ListPathEntriesResponse> {
         let limit = default_page_limit();
-        let mut cursor = None;
-        let mut entries = Vec::new();
-        let mut envelope = None;
-        loop {
-            let (page, next_cursor) = self
+        let (first_page, mut next_cursor) = self
+            .list_path_entries_page_typed(
+                namespace_id,
+                absolute_path,
+                PageRequest {
+                    limit,
+                    cursor: None,
+                },
+                ListPathEntriesOptions::default(),
+            )
+            .await?;
+        let mut envelope = first_page;
+        while let Some(cursor) = next_cursor {
+            let (page, page_next_cursor) = self
                 .list_path_entries_page_typed(
                     namespace_id,
                     absolute_path,
-                    PageRequest { limit, cursor },
+                    PageRequest {
+                        limit,
+                        cursor: Some(cursor),
+                    },
                     ListPathEntriesOptions::default(),
                 )
                 .await?;
-            let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
-                namespace_id: page.namespace_id.clone(),
-                absolute_path: page.absolute_path.clone(),
-                head_seq: page.head_seq,
-                entries: Vec::new(),
-                next_cursor: None,
-            });
-            envelope_ref.head_seq = envelope_ref.head_seq.max(page.head_seq);
-            entries.extend(page.entries);
-            cursor = next_cursor;
-            if cursor.is_none() {
-                envelope_ref.entries = entries;
-                return Ok(envelope.expect("first page should initialize response envelope"));
-            }
+            envelope.head_seq = envelope.head_seq.max(page.head_seq);
+            envelope.entries.extend(page.entries);
+            next_cursor = page_next_cursor;
         }
+        Ok(envelope)
     }
 
     /// Lists one page of a directory together with the head the page was read

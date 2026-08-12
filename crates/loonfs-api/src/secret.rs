@@ -28,6 +28,11 @@ impl SecretString {
         Self(value.into())
     }
 
+    /// Returns whether the secret contains only whitespace.
+    pub fn is_blank(&self) -> bool {
+        self.0.trim().is_empty()
+    }
+
     /// Returns the raw secret. Keep the exposure site as small as possible.
     pub fn expose(&self) -> &str {
         &self.0
@@ -78,6 +83,12 @@ mod tests {
         assert_eq!(format!("{secret:?}"), "<redacted>");
         assert_eq!(format!("{secret}"), "<redacted>");
         assert_eq!(secret.expose(), "super-secret-value");
+    }
+
+    #[test]
+    fn blank_detection_ignores_surrounding_whitespace() {
+        assert!(SecretString::new(" \t\n").is_blank());
+        assert!(!SecretString::new(" secret ").is_blank());
     }
 
     #[test]

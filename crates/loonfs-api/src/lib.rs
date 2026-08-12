@@ -41,6 +41,7 @@ mod name_policy;
 pub mod options;
 mod pagination;
 mod path;
+mod secret;
 mod sst_blocks;
 pub mod v0;
 mod wal;
@@ -139,6 +140,7 @@ pub use path::{
     AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,
     MAX_PATH_DEPTH,
 };
+pub use secret::SecretString;
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `v0`; add here only what most consumers touch.

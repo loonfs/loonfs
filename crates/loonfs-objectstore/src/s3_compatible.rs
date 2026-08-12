@@ -11,7 +11,6 @@ use crate::presign::{
     S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
     CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
 };
-use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
@@ -22,7 +21,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::wire::hex::hex_encode_bytes;
+use loonfs_api::{wire::hex::hex_encode_bytes, SecretString};
 use loonfs_api::{ChecksumAlgorithm, StorageChecksum};
 use object_store::aws::{AmazonS3Builder, Checksum};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};

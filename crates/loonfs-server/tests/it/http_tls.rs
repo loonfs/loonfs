@@ -62,7 +62,7 @@ async fn a_client_without_the_certificate_authority_is_refused_at_the_handshake(
 
     let untrusting = Client::new(ClientConfig {
         server_url: harness.server_url.clone(),
-        auth_token: harness.auth_token.clone(),
+        auth_token: harness.auth_token.clone().map(Into::into),
         request_timeout_ms: None,
         disable_transient_retry: true,
         ca_cert_path: None,

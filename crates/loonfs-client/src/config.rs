@@ -3,6 +3,7 @@
 
 use crate::{ClientError, Result};
 use http::Uri;
+use loonfs_api::SecretString;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -18,7 +19,7 @@ pub struct ClientConfig {
     /// Base URL for the LoonFS server.
     pub server_url: String,
     /// Optional bearer token.
-    pub auth_token: Option<String>,
+    pub auth_token: Option<SecretString>,
     /// Optional overall per-request deadline in milliseconds. Unset means no
     /// whole-request deadline: requests are bounded only by the built-in
     /// 60-second socket inactivity timeouts, so slow-but-progressing large
@@ -64,7 +65,7 @@ impl ClientConfig {
     pub fn validate(&self) -> Result<()> {
         validate_absolute_http_url("server_url", &self.server_url)?;
         if let Some(token) = &self.auth_token {
-            if token.trim().is_empty() {
+            if token.is_blank() {
                 return Err(ClientError::ConfigValidation {
                     field: "auth_token",
                     reason: "must not be empty".to_owned(),

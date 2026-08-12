@@ -94,7 +94,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     TestServer {
         client: Client::new(ClientConfig {
             server_url: server_url.clone(),
-            auth_token,
+            auth_token: auth_token.map(Into::into),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -158,7 +158,7 @@ pub(crate) async fn start_tls_server(mut config: ServerConfig) -> TlsTestServer 
     TlsTestServer {
         client: Client::new(ClientConfig {
             server_url: server_url.clone(),
-            auth_token: auth_token.clone(),
+            auth_token: auth_token.clone().map(Into::into),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: Some(ca_cert_path.clone()),
@@ -205,7 +205,7 @@ pub(crate) async fn start_graceful_server(mut config: ServerConfig) -> GracefulT
     GracefulTestServer {
         client: Client::new(ClientConfig {
             server_url: server_url.clone(),
-            auth_token,
+            auth_token: auth_token.map(Into::into),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,

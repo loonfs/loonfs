@@ -726,7 +726,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     // The server accepts work while running.
     let client = Client::new(ClientConfig {
         server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".to_owned()),
+        auth_token: Some("test-token".into()),
         request_timeout_ms: None,
         disable_transient_retry: false,
         ca_cert_path: None,
@@ -1585,7 +1585,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
     for auth_token in [None, Some("wrong-token".to_owned())] {
         let client = Client::new(ClientConfig {
             server_url: format!("http://{addr}"),
-            auth_token,
+            auth_token: auth_token.map(Into::into),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -1742,7 +1742,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
 
     let client = Client::new(ClientConfig {
         server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".to_owned()),
+        auth_token: Some("test-token".into()),
         request_timeout_ms: None,
         disable_transient_retry: false,
         ca_cert_path: None,
@@ -2142,7 +2142,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
 
     let client_config = ClientConfig {
         server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".to_owned()),
+        auth_token: Some("test-token".into()),
         request_timeout_ms: None,
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
@@ -2212,7 +2212,7 @@ async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
 
     let client = Client::new(ClientConfig {
         server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".to_owned()),
+        auth_token: Some("test-token".into()),
         request_timeout_ms: None,
         disable_transient_retry: false,
         ca_cert_path: None,
@@ -2261,7 +2261,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
 
     let client_config = ClientConfig {
         server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".to_owned()),
+        auth_token: Some("test-token".into()),
         request_timeout_ms: None,
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
@@ -2386,7 +2386,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
 
     let client = Client::new(ClientConfig {
         server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".to_owned()),
+        auth_token: Some("test-token".into()),
         request_timeout_ms: None,
         disable_transient_retry: false,
         ca_cert_path: None,
@@ -2633,7 +2633,7 @@ async fn start_server_with_config(store: SharedObjectStore, config: ServerConfig
     TestHarness {
         client: Client::new(ClientConfig {
             server_url: format!("http://{}", addr),
-            auth_token: Some("test-token".to_owned()),
+            auth_token: Some("test-token".into()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -2995,7 +2995,7 @@ mod direct_download {
         });
         Client::new(ClientConfig {
             server_url: format!("http://{addr}"),
-            auth_token: Some("test-token".to_owned()),
+            auth_token: Some("test-token".into()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,

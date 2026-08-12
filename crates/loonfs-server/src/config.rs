@@ -3,8 +3,9 @@
 
 use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
 use loonfs::RuntimeCacheConfig;
+use loonfs_api::SecretString;
 use loonfs_grep::GrepWorkerConfig;
-use loonfs_objectstore::{ConfiguredObjectStore, SecretString, StoreConfigError};
+use loonfs_objectstore::{ConfiguredObjectStore, StoreConfigError};
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -1310,7 +1311,7 @@ root = "/tmp/loonfs-server"
 
         // The environment fills fields the file left unset.
         config.auth_token = None;
-        config.content_token_secret = loonfs_objectstore::SecretString::default();
+        config.content_token_secret = loonfs_api::SecretString::default();
         config.apply_env_fallbacks(
             Some("env-auth-token".to_owned()),
             Some("env-content-token-secret".to_owned()),
@@ -1323,7 +1324,7 @@ root = "/tmp/loonfs-server"
 
         // Blank environment values are ignored.
         config.auth_token = None;
-        config.content_token_secret = loonfs_objectstore::SecretString::default();
+        config.content_token_secret = loonfs_api::SecretString::default();
         config.apply_env_fallbacks(Some("   ".to_owned()), Some(String::new()));
         assert!(config.auth_token.is_none());
         assert!(config.content_token_secret().is_empty());

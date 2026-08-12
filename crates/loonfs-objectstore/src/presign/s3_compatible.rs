@@ -11,11 +11,10 @@ use crate::presign::v4::{
     canonical_query_string, hex_lower, normalize_header_value, percent_encode_path,
     percent_encode_segment, signing_dates, unix_ms,
 };
-use crate::secret::SecretString;
 use crate::ObjectStoreError;
 use base64::Engine as _;
 use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::{ChecksumAlgorithm, ContentRef, ContentRefKind, StorageChecksum};
+use loonfs_api::{ChecksumAlgorithm, ContentRef, ContentRefKind, SecretString, StorageChecksum};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
