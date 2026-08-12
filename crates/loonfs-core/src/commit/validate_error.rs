@@ -147,8 +147,6 @@ pub enum CommitValidationError {
     },
     #[error("rename source inode `{inode_id}` is missing")]
     RenameInodeMissing { inode_id: InodeId },
-    #[error("rename source inode `{inode_id}` has no current binding")]
-    RenameSourceBindingMissing { inode_id: InodeId },
     #[error("source inode `{inode_id}` has no current binding")]
     SourceBindingMissing { inode_id: InodeId },
     #[error("rename target parent inode `{parent_inode_id}` is missing")]

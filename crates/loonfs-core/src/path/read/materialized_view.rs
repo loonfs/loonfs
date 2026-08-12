@@ -10,7 +10,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::{
     LeafRevisionPrefetch, MetadataState, MetadataView, MetadataViewSession, ResolvedVisiblePath,
-    RevisionRecord, VisibleChildEntry,
+    RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 #[cfg(test)]
 use crate::namespace::basis::read_head_and_metadata_basis;
@@ -738,18 +738,18 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             "loonfs.phase",
             phase = "list_page_build_entries",
             list_page_children_returned = children.len() as u64,
-            list_page_visible_child_calls = tracing::field::Empty,
-            list_page_visible_inode_calls = tracing::field::Empty,
-            list_page_current_parent_binding_calls = tracing::field::Empty,
-            list_page_covering_tombstone_calls = tracing::field::Empty,
-            list_page_latest_revision_calls = tracing::field::Empty,
-            list_page_latest_attributes_calls = tracing::field::Empty,
-            list_page_direntry_child_scan_calls = tracing::field::Empty,
-            list_page_scan_prefix_calls = tracing::field::Empty,
-            list_page_scan_range_page_calls = tracing::field::Empty,
-            list_page_preload_unbind_range_scans = tracing::field::Empty,
-            list_page_preload_child_lookups = tracing::field::Empty,
-            list_page_preload_attribute_lookups = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[0] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[1] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[2] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[3] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[4] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[5] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[6] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[7] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[8] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[9] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[10] } = tracing::field::Empty,
+            { METADATA_VIEW_SESSION_COUNTER_FIELDS[11] } = tracing::field::Empty,
         );
         let entries = async {
             // A projected page reads every child's attributes as one wave,
@@ -778,52 +778,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         }
         .instrument(build_span.clone())
         .await?;
-        let counters = session.counters();
-        build_span.record(
-            "list_page_visible_child_calls",
-            counters.visible_child_calls,
-        );
-        build_span.record(
-            "list_page_visible_inode_calls",
-            counters.visible_inode_calls,
-        );
-        build_span.record(
-            "list_page_current_parent_binding_calls",
-            counters.current_parent_binding_calls,
-        );
-        build_span.record(
-            "list_page_covering_tombstone_calls",
-            counters.covering_tombstone_calls,
-        );
-        build_span.record(
-            "list_page_latest_revision_calls",
-            counters.latest_revision_calls,
-        );
-        build_span.record(
-            "list_page_latest_attributes_calls",
-            counters.latest_attributes_calls,
-        );
-        build_span.record(
-            "list_page_direntry_child_scan_calls",
-            counters.direntry_child_scan_calls,
-        );
-        build_span.record("list_page_scan_prefix_calls", counters.scan_prefix_calls);
-        build_span.record(
-            "list_page_scan_range_page_calls",
-            counters.scan_range_page_calls,
-        );
-        build_span.record(
-            "list_page_preload_unbind_range_scans",
-            counters.list_preload_unbind_range_scans,
-        );
-        build_span.record(
-            "list_page_preload_child_lookups",
-            counters.list_preload_child_lookups,
-        );
-        build_span.record(
-            "list_page_preload_attribute_lookups",
-            counters.preload_attribute_lookups,
-        );
+        session.counters().record_on(&build_span);
 
         Ok(Page {
             items: entries,

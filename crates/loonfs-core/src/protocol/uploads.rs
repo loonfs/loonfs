@@ -13,10 +13,6 @@ use crate::context::MutationContext;
 use crate::control_update::{
     read_upload_session_state, update_upload_session, UploadSessionUpdate,
 };
-use crate::engine::{
-    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
-    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
-};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::{
@@ -54,6 +50,54 @@ use loonfs_objectstore::{
     ByteStream, MultipartCompletion, MultipartPart, ObjectStore, PROVIDER_MULTIPART_PART_BYTES,
 };
 use std::num::NonZeroU64;
+
+/// Internal target used by server integrations before they mint a presigned URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectPutUploadTarget {
+    pub content_ref: ContentRef,
+    pub object_key: String,
+}
+
+/// Internal response for preparing a direct_put session before URL signing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginDirectPutUploadTargetResponse {
+    pub namespace_id: NamespaceId,
+    pub upload_id: UploadId,
+    pub target: DirectPutUploadTarget,
+}
+
+/// Internal multipart target used by the server before signing part URLs.
+///
+/// The session has an object identity but no content reference yet because
+/// the payload size and checksum are supplied at completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectMultipartUploadTarget {
+    pub object_key: String,
+    pub part_size_bytes: u64,
+}
+
+/// Internal response for preparing a direct_multipart session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginDirectMultipartUploadTargetResponse {
+    pub namespace_id: NamespaceId,
+    pub upload_id: UploadId,
+    pub target: DirectMultipartUploadTarget,
+}
+
+/// One part a server integration is about to sign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartPartTarget {
+    pub part_number: u32,
+    pub checksum: StorageChecksum,
+}
+
+/// Everything a server integration needs to sign one wave of part uploads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartPartTargets {
+    pub object_key: String,
+    pub provider_upload_id: String,
+    pub parts: Vec<MultipartPartTarget>,
+}
 
 pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
@@ -468,25 +512,6 @@ fn terminal_session_error(
     }
 }
 
-/// Returns the staged-content slot for an open session.
-///
-/// Completed and aborted sessions return their corresponding terminal
-/// errors.
-fn open_staging_slot<'a>(
-    state: &'a mut UploadSessionLifecycle,
-    upload_id: &UploadId,
-) -> Result<&'a mut Option<ContentRef>> {
-    match state {
-        UploadSessionLifecycle::Open { staged_content, .. } => Ok(staged_content),
-        UploadSessionLifecycle::Completed { .. } => Err(CoreError::UploadAlreadyCompleted {
-            upload_id: upload_id.clone(),
-        }),
-        UploadSessionLifecycle::Aborted { .. } => Err(CoreError::UploadNotFound {
-            upload_id: upload_id.clone(),
-        }),
-    }
-}
-
 /// What an open session has already staged, or `None` for one that has
 /// staged nothing — or that is past staging entirely.
 fn staged_content(state: &UploadSessionLifecycle) -> Option<&ContentRef> {
@@ -705,26 +730,30 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                 if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
                     return Err(error);
                 }
+                let UploadSessionLifecycle::Open {
+                    staged_content,
+                    staging_claimed_at_ms,
+                    ..
+                } = &mut state.state
+                else {
+                    return Err(CoreError::Internal(
+                        "upload session changed after its terminal-state check".to_owned(),
+                    ));
+                };
                 let response = UploadContentResponse {
                     namespace_id,
                     upload_id: upload_id.clone(),
                     content_ref: content_ref.clone(),
                 };
-                match staged_content(&state.state) {
+                match staged_content {
                     Some(existing) if existing == &content_ref => {
                         Ok(UploadSessionUpdate::Noop(response))
                     }
                     Some(_) => Err(CoreError::UploadContentConflict { upload_id }),
                     None if already_present => Err(CoreError::UploadContentConflict { upload_id }),
                     None => {
-                        if let UploadSessionLifecycle::Open {
-                            staging_claimed_at_ms,
-                            ..
-                        } = &mut state.state
-                        {
-                            *staging_claimed_at_ms = None;
-                        }
-                        *open_staging_slot(&mut state.state, &upload_id)? = Some(content_ref);
+                        *staging_claimed_at_ms = None;
+                        *staged_content = Some(content_ref);
                         Ok(UploadSessionUpdate::Replace {
                             next: Box::new(state),
                             outcome: response,

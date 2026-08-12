@@ -22,7 +22,7 @@
 mod block_fetch;
 mod block_load;
 mod build;
-mod cache;
+pub(crate) mod cache;
 mod compaction_lease;
 mod compaction_merge;
 mod compaction_output;
@@ -52,8 +52,7 @@ mod validate;
 pub use self::cache::{
     MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
     WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
-    DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+    DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};

@@ -4,7 +4,7 @@
 use super::visibility::unbind_matches_binding;
 use super::{
     AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
+    InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -40,25 +40,16 @@ impl Default for MetadataIndexes {
 }
 
 impl MetadataIndexes {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn rebuild(
-        inodes: &[InodeRecord],
-        binds: &[DirentryBindRecord],
-        unbinds: &[DirentryUnbindRecord],
-        revisions: &[RevisionRecord],
-        tombstones: &[SubtreeTombstoneRecord],
-        receipts: &[CommitReceiptRecord],
-        attributes_revisions: &[AttributesRevisionRecord],
-    ) -> Self {
+    pub(super) fn rebuild(state: &MetadataState) -> Self {
         let mut indexes = Self::default();
 
-        for inode in inodes {
+        for inode in &state.inodes {
             indexes.record_inode(inode);
         }
 
         let mut latest_by_parent_name = HashMap::<(InodeId, NameKey), DirentryBindRecord>::new();
         let mut latest_by_child = HashMap::<InodeId, DirentryBindRecord>::new();
-        for bind in binds {
+        for bind in &state.direntry_binds {
             indexes.indexed_seq = indexes.indexed_seq.max(bind.bind_seq);
             replace_if_newer_bind(
                 &mut latest_by_parent_name,
@@ -68,7 +59,7 @@ impl MetadataIndexes {
             replace_if_newer_bind(&mut latest_by_child, bind.child_inode_id, bind.clone());
         }
 
-        for unbind in unbinds {
+        for unbind in &state.direntry_unbinds {
             indexes.record_unbind(unbind);
         }
 
@@ -91,19 +82,19 @@ impl MetadataIndexes {
         }
         indexes.latest_bind_by_parent_name = latest_by_parent_name;
 
-        for revision in revisions {
+        for revision in &state.revisions {
             indexes.record_revision(revision);
         }
 
-        for tombstone in tombstones {
+        for tombstone in &state.subtree_tombstones {
             indexes.record_tombstone(tombstone);
         }
 
-        for receipt in receipts {
+        for receipt in &state.commit_receipts {
             indexes.record_commit_receipt(receipt);
         }
 
-        for attributes_revision in attributes_revisions {
+        for attributes_revision in &state.attributes_revisions {
             indexes.record_attributes_revision(attributes_revision);
         }
 

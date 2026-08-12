@@ -185,6 +185,16 @@ pub struct MetadataReorganizeReport {
     pub outcome: MetadataReorganizeOutcome,
 }
 
+fn report(
+    namespace_id: &NamespaceId,
+    outcome: MetadataReorganizeOutcome,
+) -> MetadataReorganizeReport {
+    MetadataReorganizeReport {
+        namespace_id: namespace_id.clone(),
+        outcome,
+    }
+}
+
 /// Runs at most one reorganization step against the current manifest. Each
 /// call reloads durable state, so callers may repeat it safely across process
 /// restarts.
@@ -230,10 +240,10 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         .map_err(CoreError::load_head)?
         .map(|loaded| loaded.state)
     else {
-        return Ok(MetadataReorganizeReport {
-            namespace_id: namespace_id.clone(),
-            outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs: 0 },
-        });
+        return Ok(report(
+            namespace_id,
+            MetadataReorganizeOutcome::NotNeeded { l0_runs: 0 },
+        ));
     };
     let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
         .await
@@ -246,10 +256,10 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     if l0_runs < policy.max_l0_runs.get()
         && !manifest_has_partial_reorganization(tables.scan_runs.as_ref())
     {
-        return Ok(MetadataReorganizeReport {
-            namespace_id: namespace_id.clone(),
-            outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
-        });
+        return Ok(report(
+            namespace_id,
+            MetadataReorganizeOutcome::NotNeeded { l0_runs },
+        ));
     }
     let Some(group) = select_family_group(
         &previous.payload,
@@ -257,10 +267,10 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     ) else {
         // L0 runs exist but hold no rows (empty families), or the only group
         // with rows is the one a job is rebuilding; nothing to fold here.
-        return Ok(MetadataReorganizeReport {
-            namespace_id: namespace_id.clone(),
-            outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
-        });
+        return Ok(report(
+            namespace_id,
+            MetadataReorganizeOutcome::NotNeeded { l0_runs },
+        ));
     };
     // The floor is read before the plan rather than after it, because a plan
     // that hands the group to a streaming compaction carries the floor that
@@ -286,18 +296,18 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let input = match selection.plan {
         Some(ReorganizationPlan::BoundedMerge(input)) => input,
         Some(ReorganizationPlan::FullCompaction(spec)) => {
-            return Ok(MetadataReorganizeReport {
-                namespace_id: namespace_id.clone(),
-                outcome: MetadataReorganizeOutcome::CompactionPlanned { group, spec },
-            })
+            return Ok(report(
+                namespace_id,
+                MetadataReorganizeOutcome::CompactionPlanned { group, spec },
+            ))
         }
         // A selected group holds L0 rows, so it holds runs, so the planner
         // always answers with one of the two plans above.
         None => {
-            return Ok(MetadataReorganizeReport {
-                namespace_id: namespace_id.clone(),
-                outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
-            })
+            return Ok(report(
+                namespace_id,
+                MetadataReorganizeOutcome::NotNeeded { l0_runs },
+            ))
         }
     };
 
@@ -360,9 +370,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     )
     .await?
     {
-        ManifestPublicationOutcome::Published(_) => Ok(MetadataReorganizeReport {
-            namespace_id: namespace_id.clone(),
-            outcome: MetadataReorganizeOutcome::UnitPublished {
+        ManifestPublicationOutcome::Published(_) => Ok(report(
+            namespace_id,
+            MetadataReorganizeOutcome::UnitPublished {
                 group,
                 folded_l0_rows: input.folded_l0_rows,
                 input_runs: input.runs.len(),
@@ -371,12 +381,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
                 manifest_id: manifest.payload.manifest_id,
                 bottom_anchored_merge_blocked,
             },
-        }),
+        )),
         ManifestPublicationOutcome::Superseded(_) | ManifestPublicationOutcome::RootCasRaceLost => {
-            Ok(MetadataReorganizeReport {
-                namespace_id: namespace_id.clone(),
-                outcome: MetadataReorganizeOutcome::Superseded,
-            })
+            Ok(report(namespace_id, MetadataReorganizeOutcome::Superseded))
         }
     }
 }

@@ -35,7 +35,7 @@ pub struct CommitCandidate {
 
 /// The result of preparing external content referenced by a mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContentPreparation {
+pub(crate) enum ContentPreparation {
     Ready(Vec<ContentAdmission>),
     Rejected(ContentPreparationError),
 }

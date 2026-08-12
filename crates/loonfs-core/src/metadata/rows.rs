@@ -346,33 +346,9 @@ impl MetadataState {
     }
 
     fn rebuild_indexes(&mut self) {
-        self.row_count = metadata_row_count(
-            &self.inodes,
-            &self.direntry_binds,
-            &self.direntry_unbinds,
-            &self.revisions,
-            &self.subtree_tombstones,
-            &self.commit_receipts,
-            &self.attributes_revisions,
-        );
-        self.decoded_bytes = metadata_decoded_bytes(
-            &self.inodes,
-            &self.direntry_binds,
-            &self.direntry_unbinds,
-            &self.revisions,
-            &self.subtree_tombstones,
-            &self.commit_receipts,
-            &self.attributes_revisions,
-        );
-        self.indexes = MetadataIndexes::rebuild(
-            &self.inodes,
-            &self.direntry_binds,
-            &self.direntry_unbinds,
-            &self.revisions,
-            &self.subtree_tombstones,
-            &self.commit_receipts,
-            &self.attributes_revisions,
-        );
+        self.row_count = metadata_row_count(self);
+        self.decoded_bytes = metadata_decoded_bytes(self);
+        self.indexes = MetadataIndexes::rebuild(self);
     }
 
     pub(crate) fn push_inode_record(&mut self, record: InodeRecord) {
@@ -465,59 +441,52 @@ impl MetadataStateBuilder {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn metadata_row_count(
-    inodes: &[InodeRecord],
-    direntry_binds: &[DirentryBindRecord],
-    direntry_unbinds: &[DirentryUnbindRecord],
-    revisions: &[RevisionRecord],
-    subtree_tombstones: &[SubtreeTombstoneRecord],
-    commit_receipts: &[CommitReceiptRecord],
-    attributes_revisions: &[AttributesRevisionRecord],
-) -> usize {
-    inodes
+fn metadata_row_count(state: &MetadataState) -> usize {
+    state
+        .inodes
         .len()
-        .saturating_add(direntry_binds.len())
-        .saturating_add(direntry_unbinds.len())
-        .saturating_add(revisions.len())
-        .saturating_add(subtree_tombstones.len())
-        .saturating_add(commit_receipts.len())
-        .saturating_add(attributes_revisions.len())
+        .saturating_add(state.direntry_binds.len())
+        .saturating_add(state.direntry_unbinds.len())
+        .saturating_add(state.revisions.len())
+        .saturating_add(state.subtree_tombstones.len())
+        .saturating_add(state.commit_receipts.len())
+        .saturating_add(state.attributes_revisions.len())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn metadata_decoded_bytes(
-    inodes: &[InodeRecord],
-    direntry_binds: &[DirentryBindRecord],
-    direntry_unbinds: &[DirentryUnbindRecord],
-    revisions: &[RevisionRecord],
-    subtree_tombstones: &[SubtreeTombstoneRecord],
-    commit_receipts: &[CommitReceiptRecord],
-    attributes_revisions: &[AttributesRevisionRecord],
-) -> usize {
-    size_of_val(inodes)
+fn metadata_decoded_bytes(state: &MetadataState) -> usize {
+    size_of_val(state.inodes.as_slice())
         .saturating_add(
-            direntry_binds
+            state
+                .direntry_binds
                 .iter()
                 .map(direntry_bind_decoded_bytes)
                 .sum::<usize>(),
         )
         .saturating_add(
-            direntry_unbinds
+            state
+                .direntry_unbinds
                 .iter()
                 .map(direntry_unbind_decoded_bytes)
                 .sum::<usize>(),
         )
-        .saturating_add(revisions.iter().map(revision_decoded_bytes).sum::<usize>())
-        .saturating_add(size_of_val(subtree_tombstones))
         .saturating_add(
-            commit_receipts
+            state
+                .revisions
+                .iter()
+                .map(revision_decoded_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(size_of_val(state.subtree_tombstones.as_slice()))
+        .saturating_add(
+            state
+                .commit_receipts
                 .iter()
                 .map(commit_receipt_decoded_bytes)
                 .sum::<usize>(),
         )
         .saturating_add(
-            attributes_revisions
+            state
+                .attributes_revisions
                 .iter()
                 .map(attributes_revision_decoded_bytes)
                 .sum::<usize>(),

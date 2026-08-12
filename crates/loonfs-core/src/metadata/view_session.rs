@@ -63,7 +63,7 @@ pub(crate) struct VisibleChildEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeafRevisionPrefetch {
+pub(crate) enum LeafRevisionPrefetch {
     Prefetch,
     Skip,
 }
@@ -84,11 +84,45 @@ pub(crate) struct MetadataViewSessionCounters {
     pub(crate) list_preload_child_lookups: u64,
 }
 
+pub(crate) const METADATA_VIEW_SESSION_COUNTER_FIELDS: [&str; 12] = [
+    "list_page_visible_child_calls",
+    "list_page_visible_inode_calls",
+    "list_page_current_parent_binding_calls",
+    "list_page_covering_tombstone_calls",
+    "list_page_latest_revision_calls",
+    "list_page_latest_attributes_calls",
+    "list_page_direntry_child_scan_calls",
+    "list_page_scan_prefix_calls",
+    "list_page_scan_range_page_calls",
+    "list_page_preload_unbind_range_scans",
+    "list_page_preload_child_lookups",
+    "list_page_preload_attribute_lookups",
+];
+
+impl MetadataViewSessionCounters {
+    pub(crate) fn record_on(self, span: &tracing::Span) {
+        let values = [
+            self.visible_child_calls,
+            self.visible_inode_calls,
+            self.current_parent_binding_calls,
+            self.covering_tombstone_calls,
+            self.latest_revision_calls,
+            self.latest_attributes_calls,
+            self.direntry_child_scan_calls,
+            self.scan_prefix_calls,
+            self.scan_range_page_calls,
+            self.list_preload_unbind_range_scans,
+            self.list_preload_child_lookups,
+            self.preload_attribute_lookups,
+        ];
+        for (field, value) in METADATA_VIEW_SESSION_COUNTER_FIELDS.iter().zip(values) {
+            span.record(*field, value);
+        }
+    }
+}
+
 /// One loaded-view session with memoized visibility reads.
-///
-/// This is part of the read surface consumed by `loonfs-grep`; construction
-/// stays on the loaded view so callers cannot assemble incoherent sessions.
-pub struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
+pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     base: MetadataView<'a, 'store, S>,
     inode_at_seq_cache: HashMap<InodeId, Option<InodeRecord>>,
     visible_inode_cache: HashMap<InodeId, Option<InodeRecord>>,
@@ -410,8 +444,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// have fetched. The canonical rules then decide over cache hits, so a
     /// cold resolution costs one round-trip wave per path component instead
     /// of five-plus sequential lookups each.
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub async fn resolve_visible_path(
+    pub(crate) async fn resolve_visible_path(
         &mut self,
         absolute_path: &AbsolutePath,
         prefetch_leaf_revision: LeafRevisionPrefetch,
@@ -584,8 +617,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 
     /// Returns the inode when it is visible in this session's snapshot.
     ///
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub async fn visible_inode(
+    pub(crate) async fn visible_inode(
         &mut self,
         inode_id: InodeId,
     ) -> Result<Option<InodeRecord>, CoreError> {
@@ -618,8 +650,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// and it cannot disagree with the enumeration that admitted the entry
     /// at the same seq.
     ///
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub async fn latest_revision_head_of_visible(
+    pub(crate) async fn latest_revision_head_of_visible(
         &mut self,
         inode_id: InodeId,
     ) -> Result<Option<RevisionRecord>, CoreError> {
@@ -706,8 +737,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 
     /// Returns the child's active parent binding at the visible sequence.
     ///
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub async fn current_parent_binding_for_child(
+    pub(crate) async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {

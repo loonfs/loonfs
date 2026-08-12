@@ -15,20 +15,20 @@ use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedControlWrite {
+pub(crate) struct PreparedControlWrite {
     pub object_key: String,
     pub encoded_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedCommitHeadPublish {
+pub(crate) struct PreparedCommitHeadPublish {
     pub resulting_head: HeadState,
     /// The physical write is kept together because its key and bytes are the
     /// only encoded representation the store operation needs.
     pub write: PreparedControlWrite,
 }
 
-pub fn prepare_commit_head_publish(
+pub(crate) fn prepare_commit_head_publish(
     current_head: &HeadState,
     plan: &CommitPlan,
     wal: &PreparedWalSegment,
@@ -146,7 +146,7 @@ fn next_recent_segments(
     recent
 }
 
-pub async fn publish_commit_head<S: ObjectStore + ?Sized>(
+pub(crate) async fn publish_commit_head<S: ObjectStore + ?Sized>(
     store: &S,
     expected_head_etag: &str,
     prepared: &PreparedCommitHeadPublish,

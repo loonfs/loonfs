@@ -29,8 +29,9 @@ pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
 pub(crate) use self::ops::{CommitOp, CommitPrecondition, PlannedOp};
 pub use self::plan::{CommitPlan, ResolvedBinding};
 pub(crate) use self::plan::{ValidatedCommitPlan, ValidatedOp};
-pub(crate) use self::publish::PreparedCommitHeadPublish;
-pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
+pub(crate) use self::publish::{
+    prepare_commit_head_publish, publish_commit_head, PreparedCommitHeadPublish,
+};
 pub use self::publish_error::CommitHeadPublishError;
 pub(crate) use self::validate::{
     validate_commit_for_publish, validate_ops, OpValidationCursor, PublishValidationView,

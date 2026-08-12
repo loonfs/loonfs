@@ -22,6 +22,7 @@
 //! shutdown with the maintenance runner.
 
 use crate::fs::{ReadCore, WriterBits};
+use crate::metrics::PublishOutcome;
 use crate::publish::{CommitCandidate, CommitRequest, PreparedContent};
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeCacheConfig, RuntimeError,
@@ -941,7 +942,7 @@ impl NamespacePublisher {
         }
         .instrument(publish_span.clone())
         .await;
-        publish_span.record("result", batch_result_label(&results));
+        publish_span.record("result", batch_result_label(&results).as_str());
         publish_span.record("retry_count", retry_count);
         drop(publish_span);
 
@@ -1151,7 +1152,7 @@ impl NamespacePublisher {
                 phase = "wait_for_result",
                 mode = self.trace_mode,
                 store_kind = self.trace_store_kind,
-                result,
+                result = result.as_str(),
                 wait_ms,
                 "publisher.wait_for_result"
             );
@@ -1240,19 +1241,19 @@ fn queued_candidates(state: &NamespacePublisherState) -> usize {
         .sum()
 }
 
-fn result_label<T, E>(result: &Result<T, E>) -> &'static str {
+fn result_label<T, E>(result: &Result<T, E>) -> PublishOutcome {
     if result.is_ok() {
-        "ok"
+        PublishOutcome::Ok
     } else {
-        "error"
+        PublishOutcome::Error
     }
 }
 
-fn batch_result_label(results: &[CommitResult]) -> &'static str {
+fn batch_result_label(results: &[CommitResult]) -> PublishOutcome {
     if results.iter().all(Result::is_ok) {
-        "ok"
+        PublishOutcome::Ok
     } else {
-        "error"
+        PublishOutcome::Error
     }
 }
 

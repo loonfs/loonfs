@@ -72,7 +72,6 @@ pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
     overlay: Option<&'a MetadataState>,
     wal_tail: Option<&'a MetadataState>,
     manifest: Option<&'a VerifiedMetadataTables<'store, S>>,
-    in_memory_base: Option<&'a MetadataState>,
     durable_cache: Option<&'a DurableVisibilityCache>,
 }
 
@@ -111,9 +110,8 @@ impl<'a> InMemoryMetadataView<'a> {
             snapshot: MetadataSnapshot { visible_seq },
             sources: MetadataSourceStack {
                 overlay,
-                wal_tail: None,
+                wal_tail: Some(base),
                 manifest: None,
-                in_memory_base: Some(base),
                 durable_cache: None,
             },
         }
@@ -134,7 +132,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 overlay: None,
                 wal_tail: Some(wal_tail_rows),
                 manifest: Some(tables),
-                in_memory_base: None,
                 durable_cache: None,
             },
         }
@@ -157,7 +154,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 overlay: None,
                 wal_tail: None,
                 manifest: Some(tables),
-                in_memory_base: None,
                 durable_cache: None,
             },
         }
@@ -174,7 +170,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 overlay: Some(overlay),
                 wal_tail: self.sources.wal_tail,
                 manifest: self.sources.manifest,
-                in_memory_base: self.sources.in_memory_base,
                 durable_cache: self.sources.durable_cache,
             },
         }
@@ -198,13 +193,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     pub(super) fn row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
-        [
-            self.sources.overlay,
-            self.sources.wal_tail,
-            self.sources.in_memory_base,
-        ]
-        .into_iter()
-        .flatten()
+        [self.sources.overlay, self.sources.wal_tail]
+            .into_iter()
+            .flatten()
     }
 
     fn overlay_state(&self) -> Option<&'a MetadataState> {
@@ -212,9 +203,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     fn durable_row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
-        [self.sources.wal_tail, self.sources.in_memory_base]
-            .into_iter()
-            .flatten()
+        self.sources.wal_tail.into_iter()
     }
 
     pub(super) fn manifest_tables(&self) -> Option<&'a VerifiedMetadataTables<'store, S>> {

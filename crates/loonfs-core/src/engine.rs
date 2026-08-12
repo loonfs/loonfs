@@ -13,7 +13,10 @@ use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{
     load_metadata_view, CurrentFileState, DirectDownloadTarget, LoadedMetadataView, ReadLoadContext,
 };
-use crate::protocol::CompletedUpload;
+use crate::protocol::{
+    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
+    MultipartPartTargets,
+};
 use crate::storage::content::FileContentStream;
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use crate::time::current_time_ms;
@@ -30,7 +33,7 @@ use loonfs_api::{
     CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
     ListCheckpointsResponse, NamespaceId, NamespaceSummary, Page, PageRequest,
-    ReleaseCheckpointResponse, RevisionNo, StorageChecksum, TrashEntry, TrashPageCursor, UploadId,
+    ReleaseCheckpointResponse, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -62,54 +65,6 @@ fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_
         Some(&context.table_cache),
         Some(&context.tail_cache),
     )
-}
-
-/// Internal target used by server integrations before they mint a presigned URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectPutUploadTarget {
-    pub content_ref: ContentRef,
-    pub object_key: String,
-}
-
-/// Internal response for preparing a direct_put session before URL signing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BeginDirectPutUploadTargetResponse {
-    pub namespace_id: NamespaceId,
-    pub upload_id: UploadId,
-    pub target: DirectPutUploadTarget,
-}
-
-/// Internal multipart target used by the server before signing part URLs.
-///
-/// The session has an object identity but no content reference yet because
-/// the payload size and checksum are supplied at completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectMultipartUploadTarget {
-    pub object_key: String,
-    pub part_size_bytes: u64,
-}
-
-/// Internal response for preparing a direct_multipart session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BeginDirectMultipartUploadTargetResponse {
-    pub namespace_id: NamespaceId,
-    pub upload_id: UploadId,
-    pub target: DirectMultipartUploadTarget,
-}
-
-/// One part a server integration is about to sign.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MultipartPartTarget {
-    pub part_number: u32,
-    pub checksum: StorageChecksum,
-}
-
-/// Everything a server integration needs to sign one wave of part uploads.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MultipartPartTargets {
-    pub object_key: String,
-    pub provider_upload_id: String,
-    pub parts: Vec<MultipartPartTarget>,
 }
 
 /// The actor identity a mutating engine publishes under.
