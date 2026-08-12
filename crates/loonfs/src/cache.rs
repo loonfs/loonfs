@@ -1,5 +1,5 @@
-//! Runtime caching: control-object reads and WAL-tail projections, plus the
-//! cache-management half of [`ReadCore`].
+//! Runtime caches for control-object reads and WAL-tail projections.
+//! This module also defines the cache-management methods on [`ReadCore`].
 //!
 //! Every cache revalidates against durable state before its contents are
 //! used; nothing here weakens read-after-write consistency.
@@ -29,8 +29,8 @@ pub(crate) struct RuntimeControlCache {
 #[derive(Debug, Default)]
 struct NamespaceControlCacheEntry {
     head: Option<CachedNamespaceAnchor>,
-    /// Stamp of this entry's newest queue position; older positions for the
-    /// same namespace are ghosts.
+    /// Recency stamp assigned on the most recent access. Recency records with
+    /// an older stamp for this namespace are ignored.
     last_touch: u64,
 }
 
@@ -40,10 +40,10 @@ pub(crate) struct CachedControl<T> {
     pub(crate) state: T,
 }
 
-/// Head snapshot pinned together with the metadata basis it authorized when
-/// the snapshot was taken. The pair stays consistent even when compaction
-/// moves the live root past this head; reads at the pin replay a little
-/// more WAL until the cache refreshes.
+/// A head snapshot and the metadata basis it authorized at that point.
+/// Keeping them together ensures reads use a consistent pair. If compaction
+/// advances the live root, reads may replay additional WAL entries until the
+/// cache refreshes.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedNamespaceAnchor {
     pub(crate) head: CachedControl<HeadState>,
@@ -173,7 +173,7 @@ impl RuntimeControlCache {
         }
     }
 
-    /// Namespace-terminal removal: the whole entry goes.
+    /// Removes all cached control state for a deleted namespace.
     fn remove_namespace(&mut self, namespace_id: &NamespaceId) {
         self.namespaces.remove(namespace_id);
     }

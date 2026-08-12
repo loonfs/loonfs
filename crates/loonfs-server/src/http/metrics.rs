@@ -302,18 +302,16 @@ fn write_entry(rendered: &mut String, name: &str, entry: &MetricEntry) {
     }
 }
 
-/// Appends values that are read when a scrape asks rather than accumulated:
-/// what foyer says about the local block cache, Linux process RSS, and the
-/// transfer slots this server has free.
+/// Appends current gauge values sampled during a scrape: local cache state,
+/// Linux process RSS, and available transfer slots.
 fn render_scrape_gauges(
     rendered: &mut String,
     local_cache: Option<FoyerCacheStats>,
     upload_permits: usize,
     download_permits: usize,
 ) {
-    // Absent when this deployment keeps no local cache, so a scrape reports
-    // nothing about a tier that does not exist rather than reporting zeros
-    // that read like an idle one.
+    // Omit local-cache metrics when this server has no local cache. Reporting
+    // zeros would incorrectly suggest that an enabled cache is idle.
     if let Some(local_cache) = local_cache {
         for (name, description, value) in local_cache_gauges(&local_cache) {
             write_gauge(rendered, name, description, value);
@@ -369,14 +367,14 @@ fn process_resident_bytes() -> Option<u64> {
     None
 }
 
-/// What foyer says about the local block cache, as gauges.
+/// Converts the current Foyer local-cache statistics into gauges.
 ///
 /// These are foyer's own numbers, read at scrape time; the cache's hits,
 /// misses, and inserts are reported through the runtime's recorder like
 /// every other instrument and are already in the snapshot above.
 ///
-/// Destructured without a rest pattern so a field added to [`FoyerCacheStats`]
-/// and not exported here fails to compile.
+/// Listing every field makes this code fail to compile when `FoyerCacheStats`
+/// gains a field, which ensures new statistics are considered for export.
 fn local_cache_gauges(stats: &FoyerCacheStats) -> [(&'static str, &'static str, u64); 6] {
     let FoyerCacheStats {
         memory_bytes,

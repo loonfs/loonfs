@@ -96,7 +96,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
         ) >= 1.0
     );
 
-    // Object-store and cache activity both arrive through the recorder.
+    // The recorder includes both object-store and cache activity.
     assert!(
         series(
             &first,

@@ -120,8 +120,8 @@ struct GrepBlockCacheInner {
 #[derive(Debug)]
 struct CacheSlot {
     block: DecodedGrepBlock,
-    /// Stamp of this entry's newest queue position; older positions for the
-    /// same key are ghosts.
+    /// Recency stamp assigned on the most recent access. Recency records with
+    /// an older stamp for this key are ignored.
     last_touch: u64,
 }
 
@@ -152,7 +152,7 @@ impl GrepBlockCache {
         }
     }
 
-    /// Creates a cache whose activity is registered with `recorder`.
+    /// Creates a cache and records its activity with `recorder`.
     pub fn with_metrics(max_decoded_bytes: usize, recorder: &dyn MetricsRecorder) -> Self {
         Self {
             max_decoded_bytes,
@@ -301,8 +301,8 @@ impl GrepBlockCacheInner {
     }
 }
 
-/// Whether a queue position still names the entry's newest access. An entry
-/// that was replaced, evicted, or re-touched leaves stale positions behind.
+/// Returns `true` when `stamp` matches the key's most recent access.
+/// Replacing, evicting, or accessing an entry can leave older recency records.
 fn slot_is_live(
     entries: &HashMap<GrepBlockCacheKey, CacheSlot>,
     key: &GrepBlockCacheKey,
@@ -342,7 +342,8 @@ impl GrepBlockCacheMetrics {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic)]
-    // A reading of the wrong kind is a bug in the test fixture.
+    // The metric helper below expects counters and panics if a test requests
+    // a metric of another type.
 
     use super::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind};
     use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};

@@ -52,7 +52,7 @@ pub struct MetadataTableCacheStats {
     pub filter_false_positives: usize,
 }
 
-/// Receives decoded metadata-table cache events for runtime metrics.
+/// Receives decoded metadata-table cache events so they can be recorded as metrics.
 pub trait MetadataTableCacheObserver: Send + Sync + 'static {
     fn hit(&self);
     fn miss(&self);
@@ -136,11 +136,8 @@ pub struct MetadataTableCache {
     /// One cell per in-flight block fetch, keyed by the block's cache key,
     /// so concurrent readers share a single ranged GET per block.
     in_flight: Mutex<HashMap<MetadataTableCacheKey, Arc<OnceCell<DecodedMetadataTableBlock>>>>,
-    /// The node-local cache of encoded stored blocks this cache misses
-    /// into, when the runtime was built with one. It lives here so the two
-    /// tiers are available together: a path that carries no table cache —
-    /// maintenance, reorganization, collection, and retention all pass
-    /// none — reaches neither tier, and needs no separate wiring to say so.
+    /// Optional node-local cache for encoded blocks. Keeping it with the
+    /// decoded cache ensures callers use both cache tiers or neither tier.
     stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
 }
 
@@ -167,8 +164,8 @@ struct MetadataTableCacheInner {
 #[derive(Debug)]
 struct CacheSlot {
     block: DecodedMetadataTableBlock,
-    /// Stamp of this entry's newest queue position; older positions for the
-    /// same key are ghosts.
+    /// Recency stamp assigned on the most recent access. Recency records with
+    /// an older stamp for this key are ignored.
     last_touch: u64,
 }
 
@@ -187,8 +184,8 @@ impl MetadataTableCache {
         Self::with_stored_block_cache(config, None)
     }
 
-    /// Sizes a cache that also carries a node-local cache of encoded stored
-    /// blocks beneath it. Passing `None` is exactly [`Self::new`].
+    /// Creates a decoded-block cache with an optional encoded-block cache.
+    /// Passing `None` is equivalent to [`Self::new`].
     pub fn with_stored_block_cache(
         config: MetadataTableCacheConfig,
         stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
@@ -196,7 +193,7 @@ impl MetadataTableCache {
         Self::with_stored_block_cache_and_observer(config, stored_block_cache, None)
     }
 
-    /// Sizes a cache and reports its activity to `observer`.
+    /// Creates a cache that reports activity to the optional `observer`.
     pub fn with_stored_block_cache_and_observer(
         config: MetadataTableCacheConfig,
         stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
@@ -212,8 +209,7 @@ impl MetadataTableCache {
         }
     }
 
-    /// The node-local stored-block cache this cache misses into, if the
-    /// runtime was built with one.
+    /// Returns the node-local encoded-block cache, if one was configured.
     pub fn stored_block_cache(&self) -> Option<&Arc<dyn StoredMetadataBlockCache>> {
         self.stored_block_cache.as_ref()
     }
@@ -373,8 +369,8 @@ impl MetadataTableCacheInner {
     }
 }
 
-/// Whether a queue position still names the entry's newest access. An entry
-/// that was replaced, evicted, or re-touched leaves stale positions behind.
+/// Returns `true` when `stamp` matches the key's most recent access.
+/// Replacing, evicting, or accessing an entry can leave older recency records.
 fn slot_is_live(
     entries: &HashMap<MetadataTableCacheKey, CacheSlot>,
     key: &MetadataTableCacheKey,
@@ -414,7 +410,7 @@ pub struct WalTailProjectionCacheStats {
     pub cached_decoded_bytes: usize,
 }
 
-/// Receives WAL-tail projection cache events for runtime metrics.
+/// Receives WAL-tail projection cache events so they can be recorded as metrics.
 pub trait WalTailProjectionCacheObserver: Send + Sync + 'static {
     fn hit(&self);
     fn miss(&self);
@@ -433,9 +429,7 @@ pub struct WalTailProjectionCacheKey {
     pub head_etag: String,
 }
 
-/// What one entry counts against the row and byte budgets. The projection
-/// carries both totals, and a projection in the cache is immutable, so the
-/// cache reads them rather than keeping its own copies.
+/// Returns the row count and decoded size charged to the cache budgets.
 fn projection_weight(rows: &MetadataState) -> (usize, usize) {
     (rows.row_count(), rows.decoded_bytes())
 }
@@ -469,8 +463,8 @@ struct WalTailProjectionCacheInner {
 #[derive(Debug)]
 struct WalTailProjectionCacheSlot {
     rows: Arc<MetadataState>,
-    /// Stamp of this entry's newest queue position; older positions for the
-    /// same key are ghosts.
+    /// Recency stamp assigned on the most recent access. Recency records with
+    /// an older stamp for this key are ignored.
     last_touch: u64,
 }
 
@@ -492,7 +486,7 @@ impl WalTailProjectionCache {
         Self::with_observer(config, None)
     }
 
-    /// Sizes a cache and reports its activity to `observer`.
+    /// Creates a cache that reports activity to the optional `observer`.
     pub fn with_observer(
         config: WalTailProjectionCacheConfig,
         observer: Option<Arc<dyn WalTailProjectionCacheObserver>>,

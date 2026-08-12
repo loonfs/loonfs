@@ -121,14 +121,14 @@ impl RuntimeInstruments {
         })
     }
 
-    /// Reports one latest-view read through the runtime cache path.
+    /// Records one latest-view read handled by the runtime cache.
     pub(crate) fn latest_metadata_view_read(&self) {
         if let Some(installed) = &self.installed {
             installed.cache.latest_metadata_view_reads.increment(1);
         }
     }
 
-    /// The decoded metadata-table cache's metrics observer, when installed.
+    /// Returns the metadata-table cache metrics observer, if metrics are enabled.
     pub(crate) fn metadata_table_cache_observer(
         &self,
     ) -> Option<Arc<dyn MetadataTableCacheObserver>> {
@@ -136,7 +136,7 @@ impl RuntimeInstruments {
         Some(observer)
     }
 
-    /// The WAL-tail projection cache's metrics observer, when installed.
+    /// Returns the WAL-tail projection cache metrics observer, if metrics are enabled.
     pub(crate) fn wal_tail_projection_cache_observer(
         &self,
     ) -> Option<Arc<dyn WalTailProjectionCacheObserver>> {
@@ -566,7 +566,7 @@ impl MaintenanceJobInstruments {
     }
 }
 
-/// Runtime-owned cache instruments, registered as one closed set.
+/// Metrics for caches owned by the runtime. All instruments are registered together.
 struct RuntimeCacheInstruments {
     latest_metadata_view_reads: Arc<dyn CounterHandle>,
     metadata_table: Arc<MetadataTableCacheInstruments>,
