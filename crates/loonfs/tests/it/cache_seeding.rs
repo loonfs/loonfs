@@ -217,10 +217,11 @@ fn runtime_cache_can_be_disabled() {
 #[test]
 fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
     let temp_dir = tempdir().expect("tempdir");
-    let shared_store = store(temp_dir.path());
-    let setup = open_runtime(shared_store.clone(), "tail-count-setup");
     let first = NamespaceId::parse("first").expect("valid namespace id");
     let second = NamespaceId::parse("second").expect("valid namespace id");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &first));
+    let shared_store = raw_store.store();
+    let setup = open_runtime(shared_store.clone(), "tail-count-setup");
 
     setup
         .create_namespace_blocking(&first, CreateNamespaceOptions::default())
@@ -250,10 +251,11 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
     assert_eq!(after_second.wal_tail_projection_cache_evictions, 1);
     assert!(after_second.wal_tail_projection_cache_cached_rows > 0);
 
+    raw_store.reset_wal_get_count();
     fs.get_file_bytes_blocking(&first, "/file.txt")
         .expect("first tail projection reloads after eviction");
     let after_reload = fs.runtime_cache_stats();
-    assert_eq!(after_reload.wal_tail_projection_cache_misses, 3);
+    assert_eq!(raw_store.wal_get_count(), 1);
     assert_eq!(after_reload.wal_tail_projection_cache_evictions, 2);
 }
 

@@ -504,11 +504,11 @@ mod tests {
     }
 
     fn presigner(key_prefix: Option<&str>) -> GcsV4Presigner {
+        let (_key_dir, service_account_key_path) =
+            gcs_fixture_service_account_key_file("gcs-presign");
         GcsV4Presigner::new(GcsPresignerConfig {
             bucket: "bucket".to_owned(),
-            service_account_key_path: gcs_fixture_service_account_key_file("gcs-presign")
-                .display()
-                .to_string(),
+            service_account_key_path: service_account_key_path.display().to_string(),
             key_prefix: key_prefix.map(ToOwned::to_owned),
         })
         .expect("signer")
@@ -691,14 +691,12 @@ mod tests {
     #[test]
     fn an_unusable_key_prefix_fails_construction() {
         for raw_prefix in ["tenant-a//bad", "../escape"] {
+            let (_key_dir, service_account_key_path) =
+                gcs_fixture_service_account_key_file("gcs-presign-prefix");
             assert!(matches!(
                 GcsV4Presigner::new(GcsPresignerConfig {
                     bucket: "bucket".to_owned(),
-                    service_account_key_path: gcs_fixture_service_account_key_file(
-                        "gcs-presign-prefix"
-                    )
-                    .display()
-                    .to_string(),
+                    service_account_key_path: service_account_key_path.display().to_string(),
                     key_prefix: Some(raw_prefix.to_owned()),
                 }),
                 Err(ObjectStoreError::InvalidKey { .. })
@@ -815,20 +813,17 @@ mod tests {
 
     #[test]
     fn a_key_file_that_cannot_sign_fails_construction() {
-        let dir = gcs_fixture_service_account_key_file("gcs-presign-bad")
-            .parent()
-            .expect("fixture dir")
-            .to_path_buf();
+        let (key_dir, _key_path) = gcs_fixture_service_account_key_file("gcs-presign-bad");
 
-        let not_json = dir.join("not-json.json");
+        let not_json = key_dir.path().join("not-json.json");
         std::fs::write(&not_json, b"this is not a service account").expect("write");
-        let no_pem = dir.join("no-pem.json");
+        let no_pem = key_dir.path().join("no-pem.json");
         std::fs::write(
             &no_pem,
             br#"{"client_email":"a@b.iam.gserviceaccount.com","private_key":"private_key"}"#,
         )
         .expect("write");
-        let missing = dir.join("absent.json");
+        let missing = key_dir.path().join("absent.json");
 
         for path in [not_json, no_pem, missing] {
             assert!(

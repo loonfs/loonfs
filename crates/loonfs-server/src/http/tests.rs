@@ -213,6 +213,86 @@ fn error_status_mapping_matches_the_api_spec_table() {
     assert_api_spec_error_codes_are_registered(&spec);
 }
 
+#[test]
+fn registered_limit_keys_match_the_api_spec_table() {
+    let spec = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/api.md"
+    ))
+    .expect("read docs/specs/api.md");
+    let table = spec
+        .split("Registered limit keys:")
+        .nth(1)
+        .expect("api.md registered-limit table intro")
+        .split("### 2.2 Feature registry")
+        .next()
+        .expect("api.md registered-limit table end");
+    let documented: std::collections::BTreeSet<_> = table
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `"))
+        .filter_map(|line| line.split('`').next())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let capability_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../loonfs-api/src/capability.rs"
+    ));
+    let registered: std::collections::BTreeSet<_> = capability_source
+        .split("pub const LIMIT_")
+        .skip(1)
+        .filter_map(|declaration| declaration.split(';').next())
+        .filter_map(|declaration| declaration.split_once('"').map(|(_, value)| value))
+        .filter_map(|value| value.split('"').next())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    assert_eq!(documented, registered);
+}
+
+#[test]
+fn error_detail_fields_match_the_api_spec_table() {
+    let spec = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/api.md"
+    ))
+    .expect("read docs/specs/api.md");
+    let table = spec
+        .split("The codes that populate it:")
+        .nth(1)
+        .expect("api.md error-details table intro")
+        .split("One code exists specifically")
+        .next()
+        .expect("api.md error-details table end");
+    let documented: std::collections::BTreeSet<_> = table
+        .lines()
+        .filter(|line| line.starts_with('|'))
+        .filter_map(|line| line.trim_matches('|').split('|').nth(1))
+        .flat_map(|fields| fields.split('`').skip(1).step_by(2))
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let operations_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../loonfs-api/src/v0/operations.rs"
+    ));
+    let details_body = operations_source
+        .split("pub struct ErrorDetails {")
+        .nth(1)
+        .expect("ErrorDetails declaration")
+        .split("\n}")
+        .next()
+        .expect("ErrorDetails body");
+    let registered: std::collections::BTreeSet<_> = details_body
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("pub "))
+        .filter_map(|field| field.split(':').next())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    assert_eq!(documented, registered);
+}
+
 fn assert_api_spec_error_codes_are_registered(spec: &str) {
     for token in spec
         .split('`')
@@ -241,7 +321,10 @@ fn is_snake_case_token(token: &str) -> bool {
 }
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{BlockingStore, BufferWatchStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{
+    BlockingStore, BufferWatchStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    OperationContext, OperationKind,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -294,92 +377,6 @@ impl ObjectStore for StaleHeadOnceStore {
             if let Some(existing) = self.inner.get(key, None).await? {
                 let _ = self.inner.put_overwrite(key, existing).await?;
             }
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
-#[derive(Debug)]
-struct FaultGrepRootStore {
-    inner: LocalFsStore,
-    root_key: String,
-    fail_next_root_read: AtomicBool,
-    conflict_next_root_publication: AtomicBool,
-}
-
-impl FaultGrepRootStore {
-    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner: LocalFsStore::new(root.as_ref()).expect("construct local store"),
-            root_key: grep_root_key(namespace_id),
-            fail_next_root_read: AtomicBool::new(false),
-            conflict_next_root_publication: AtomicBool::new(false),
-        }
-    }
-
-    fn fail_next_root_read(&self) {
-        self.fail_next_root_read.store(true, Ordering::SeqCst);
-    }
-
-    fn conflict_next_root_publication(&self) {
-        self.conflict_next_root_publication
-            .store(true, Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl ObjectStore for FaultGrepRootStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        if key == self.root_key && self.fail_next_root_read.swap(false, Ordering::SeqCst) {
-            return Err(ObjectStoreError::transport(
-                key,
-                "injected grep-root outage",
-            ));
-        }
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.root_key
-            && matches!(
-                &mode,
-                PutMode::CreateIfAbsent | PutMode::CompareAndSwap { .. }
-            )
-            && self
-                .conflict_next_root_publication
-                .swap(false, Ordering::SeqCst)
-        {
-            return Err(ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            });
         }
         self.inner.put(key, bytes, mode).await
     }
@@ -1149,13 +1146,18 @@ async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
 async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-error-store");
-    let fault_store = Arc::new(FaultGrepRootStore::new(temp_dir.path(), &namespace_id));
+    let fault_store = Arc::new(FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        KeyPredicate::exact(grep_root_key(&namespace_id)),
+        OperationClass::GetWithMetadata,
+        InjectedError::Transport("injected grep-root outage".to_owned()),
+    ));
     let store = fault_store.clone() as SharedObjectStore;
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "store-server").await;
-    fault_store.fail_next_root_read();
+    fault_store.fail_next(1);
     let client = &harness.client;
     let binding = grep_error_request();
     let result = client.grep(&namespace_id, &binding);
@@ -1252,13 +1254,27 @@ async fn grep_error_identity_mismatch_is_index_corrupt_and_core_reads_survive() 
 async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-error-conflict");
-    let fault_store = Arc::new(FaultGrepRootStore::new(temp_dir.path(), &namespace_id));
+    let root_key = grep_root_key(&namespace_id);
+    let fault_store = Arc::new(FailStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        move |context: &OperationContext<'_>| {
+            context.key() == root_key
+                && matches!(
+                    context.kind(),
+                    OperationKind::Put {
+                        mode: PutMode::CreateIfAbsent | PutMode::CompareAndSwap { .. },
+                        ..
+                    }
+                )
+        },
+        InjectedError::PreconditionFailed,
+    ));
     let store = fault_store.clone() as SharedObjectStore;
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_admin_error_server(store, temp_dir.path(), "conflict-server").await;
-    fault_store.conflict_next_root_publication();
+    fault_store.fail_next(1);
     let client = &harness.client;
     let result = client.enable_grep_index(&namespace_id);
     assert_grep_api_error_and_core_read(

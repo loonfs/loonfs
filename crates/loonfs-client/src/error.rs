@@ -10,28 +10,48 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ClientError {
+    /// Reading the client configuration failed.
     #[error("failed to read config: {0}")]
     ConfigIo(String),
+    /// Decoding the client configuration failed.
     #[error("failed to decode config: {0}")]
     ConfigDecode(String),
+    /// The client configuration omitted a required field.
     #[error("missing `{field}`")]
-    MissingConfigField { field: &'static str },
+    MissingConfigField {
+        /// Name of the required field.
+        field: &'static str,
+    },
+    /// A client configuration field failed validation.
     #[error("invalid `{field}`: {reason}")]
-    ConfigValidation { field: &'static str, reason: String },
+    ConfigValidation {
+        /// Name of the invalid field.
+        field: &'static str,
+        /// Plain-English reason the value is invalid.
+        reason: String,
+    },
+    /// A namespace-qualified path failed validation.
     #[error("invalid namespace path `{0}`")]
     InvalidNamespacePath(String),
+    /// A commit id failed validation.
     #[error("invalid commit_id `{0}`")]
     InvalidCommitId(String),
+    /// A checkpoint id failed validation.
     #[error("invalid checkpoint_id `{0}`")]
     InvalidCheckpointId(String),
+    /// An HTTP transport operation failed.
     #[error("http error: {0}")]
     Http(String),
+    /// The server returned a structured API error response.
     #[error("server returned {status} {code}: {message}")]
     Api {
+        /// HTTP response status.
         status: u16,
+        /// Stable machine-readable API error code.
         code: String,
         /// Capability feature key accompanying `not_supported` errors.
         feature: Option<String>,
+        /// Human-readable error message.
         message: String,
         /// Correlation id the server assigned to the failed request.
         request_id: Option<String>,
@@ -50,8 +70,10 @@ pub enum ClientError {
         /// The caps it exceeded, named so a caller can act on them.
         reason: String,
     },
+    /// Reading or writing a streamed payload failed.
     #[error("i/o error: {0}")]
     Io(String),
+    /// Encoding or decoding JSON failed.
     #[error("json error: {0}")]
     Json(String),
     /// A well-formed response that breaks a shape rule the API spec states.

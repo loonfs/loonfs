@@ -49,7 +49,8 @@ pub(super) struct DeleteNamespaceQuery {
         description = "Returns a summary of supported features and limits.",
         responses(
             (status = 200, description = "Capability document", body = loonfs_api::CapabilityDocument),
-            (status = 401, description = "Unauthorized", body = ApiError)
+            (status = 401, description = "Unauthorized", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -174,7 +175,8 @@ pub(super) async fn capabilities(
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 409, description = "Namespace already exists or is partial", body = ApiError),
-            (status = 410, description = "Namespace id was deleted and retired", body = ApiError)
+            (status = 410, description = "Namespace id was deleted and retired", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -204,7 +206,8 @@ pub(super) async fn create_namespace(
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -241,7 +244,8 @@ pub(super) async fn namespace_status(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Delete conflict", body = ApiError),
-            (status = 410, description = "Namespace already deleted", body = ApiError)
+            (status = 410, description = "Namespace already deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -282,7 +286,8 @@ pub(super) async fn delete_namespace(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Source namespace not found", body = ApiError),
             (status = 409, description = "Fork conflict", body = ApiError),
-            (status = 410, description = "Source namespace deleted", body = ApiError)
+            (status = 410, description = "Source namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -316,7 +321,8 @@ pub(super) async fn fork_namespace(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 503, description = "Checkpoint unavailable", body = ApiError)
+            (status = 503, description = "Checkpoint unavailable", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -350,7 +356,8 @@ pub(super) async fn create_checkpoint(
             (status = 200, description = "Active checkpoint records", body = ListCheckpointsResponse),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError)
+            (status = 404, description = "Namespace not found", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -385,7 +392,8 @@ pub(super) async fn list_checkpoints(
             (status = 200, description = "Checkpoint released (or already gone)", body = ReleaseCheckpointResponse),
             (status = 400, description = "Invalid id, or the checkpoint is fork-owned", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError)
+            (status = 404, description = "Namespace not found", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]

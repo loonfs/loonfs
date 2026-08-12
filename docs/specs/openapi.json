@@ -28,6 +28,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           }
         },
         "security": [
@@ -63,6 +66,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           }
         }
       }
@@ -85,6 +91,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "503": {
             "description": "Shutdown has begun; admission is closed",
@@ -161,6 +170,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           }
         }
       },
@@ -233,6 +245,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "410": {
             "description": "Namespace deleted",
@@ -325,6 +340,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           }
         }
       }
@@ -378,6 +396,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "500": {
             "description": "The grep index is corrupt or its backing store is unavailable",
@@ -461,6 +482,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Lost a grep root-pointer publication race; retry",
@@ -554,6 +578,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Lost a grep root-pointer publication race; retry",
@@ -846,6 +873,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           }
         }
       }
@@ -898,6 +928,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Namespace already exists or is partial",
@@ -982,6 +1015,9 @@
               }
             }
           },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1063,6 +1099,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Delete conflict",
@@ -1167,6 +1206,9 @@
               }
             }
           },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1249,6 +1291,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Operation conflict",
@@ -1469,6 +1514,9 @@
               }
             }
           },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1588,6 +1636,9 @@
               }
             }
           },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1688,6 +1739,9 @@
               }
             }
           },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1779,6 +1833,9 @@
               }
             }
           },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -1859,6 +1916,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "410": {
             "description": "Namespace deleted",
@@ -1942,6 +2002,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Fork conflict",
@@ -2045,6 +2108,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "410": {
             "description": "Namespace deleted",
@@ -2159,6 +2225,9 @@
               }
             }
           },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -2251,6 +2320,9 @@
               }
             }
           },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
           "410": {
             "description": "Namespace deleted",
             "content": {
@@ -2332,6 +2404,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Upload already completed",
@@ -2434,6 +2509,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Upload completion conflict",
@@ -2663,6 +2741,9 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
           },
           "409": {
             "description": "Upload already completed",
@@ -6253,6 +6334,58 @@
         "format": "int64",
         "description": "Monotonically increasing writer epoch for namespace write fencing.",
         "minimum": 0
+      }
+    },
+    "responses": {
+      "DeadlineExceededResponse": {
+        "description": "The server cancelled this bounded request at `request_deadline_ms`; a mutation may still land and must be reconciled before retrying.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "description": "HTTP error body used by LoonFS APIs.",
+              "required": [
+                "code",
+                "message"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
+                },
+                "details": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorDetails",
+                      "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
+                    }
+                  ]
+                },
+                "feature": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
+                },
+                "message": {
+                  "type": "string",
+                  "description": "Human-readable error message."
+                },
+                "request_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
+                }
+              }
+            }
+          }
+        }
       }
     },
     "securitySchemes": {

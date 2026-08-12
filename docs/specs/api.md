@@ -126,8 +126,8 @@ Registered limit keys:
 
 | Limit key | Meaning |
 | --- | --- |
-| `pagination.default_limit` | Default page size applied when a paged request omits `limit`. |
-| `pagination.max_limit` | Largest accepted page size for paged requests. |
+| `pagination.default_limit` | Default page size applied when a paged request omits `limit`. An explicit `limit=0` is rejected with 400 `invalid_request`. |
+| `pagination.max_limit` | Largest accepted page size for paged requests. A `limit` greater than this value is rejected with 400 `invalid_request`. |
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `core.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
 | `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds what the service buffers on a client's behalf; this one is the provider's own single-request ceiling and is typically far larger. A claim above it answers `content_too_large` at begin, rather than being signed into a write the provider would refuse. Advertised only alongside `core.uploads.direct_put`. |
 | `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through a download grant (`POST .../filesystem/downloads`) when `core.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
@@ -1403,7 +1403,7 @@ each attribute map may be 64 KiB, and no request declares a byte budget, so a
 listing carries attributes only when the caller asks and sizes its pages for
 what comes back.
 
-A cursor is an ordering resume, not a snapshot pin. Every cursor in the API
+A cursor is an opaque ordering resume, not a snapshot pin. Every cursor in the API
 — directory listing, revision listing, grep, and the change feed alike —
 tolerates forward head drift: commits landing mid-listing never retire it,
 and the resumed page evaluates at the then-current head, continuing strictly
@@ -1416,6 +1416,7 @@ changes between pages. Only a cursor minted ahead of the serving head
 answers `rebootstrap_required` — drift tolerance runs forward, never
 backward. (A malformed cursor, or one replayed against a different target,
 stays `invalid_request`.)
+An unrecognized cursor version is also rejected as `invalid_request`.
 
 ```json
 {

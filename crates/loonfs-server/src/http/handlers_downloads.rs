@@ -44,7 +44,8 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, or revision not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "Direct download is unsupported", body = ApiError)
+            (status = 501, description = "Direct download is unsupported", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]

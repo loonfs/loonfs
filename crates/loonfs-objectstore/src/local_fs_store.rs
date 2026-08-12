@@ -791,14 +791,12 @@ mod tests {
     use crate::keys::{upload_session, wal_head};
     use bytes::Bytes;
     use std::fs;
-    use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::Barrier;
 
     #[test]
     fn construction_requires_atomic_rename_replace_support() {
-        let temp_dir = TestDir::new("construction-gate");
+        let temp_dir = test_dir("construction-gate");
         let result = LocalFsStore::new(temp_dir.path());
 
         #[cfg(unix)]
@@ -816,7 +814,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn listing_tolerates_entries_that_vanish_mid_walk() {
-        let temp_dir = TestDir::new("listing-races");
+        let temp_dir = test_dir("listing-races");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
         store
@@ -844,7 +842,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_head_of_a_missing_object_answers_gone() {
-        let temp_dir = TestDir::new("head-missing");
+        let temp_dir = test_dir("head-missing");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
 
         let answer = store
@@ -863,7 +861,7 @@ mod tests {
     // directly instead.
     #[tokio::test]
     async fn a_digest_read_of_a_vanished_object_answers_gone() {
-        let temp_dir = TestDir::new("digest-vanished");
+        let temp_dir = test_dir("digest-vanished");
         let vanished = temp_dir.path().join("vanished.json");
 
         let answer = LocalFsStore::read_for_digest("namespaces/ns-1/wal/head.json", &vanished)
@@ -874,7 +872,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_digest_read_that_fails_for_another_reason_stays_an_error() {
-        let temp_dir = TestDir::new("digest-error");
+        let temp_dir = test_dir("digest-error");
         let directory = temp_dir.path().join("dir");
         fs::create_dir(&directory).expect("create directory");
 
@@ -886,7 +884,7 @@ mod tests {
 
     #[tokio::test]
     async fn overwrite_refreshes_head_and_visible_bytes() {
-        let temp_dir = TestDir::new("overwrite");
+        let temp_dir = test_dir("overwrite");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
 
@@ -926,7 +924,7 @@ mod tests {
     /// and a start past the object or a descending range is refused.
     #[tokio::test]
     async fn ranged_reads_answer_their_range_and_refuse_impossible_ones() {
-        let temp_dir = TestDir::new("ranged-reads");
+        let temp_dir = test_dir("ranged-reads");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
         let payload = Bytes::from_static(b"0123456789");
@@ -990,7 +988,7 @@ mod tests {
         const READER_COUNT: usize = 4;
         const REPLACEMENT_COUNT: u8 = 32;
 
-        let temp_dir = TestDir::new("atomic-replacement");
+        let temp_dir = test_dir("atomic-replacement");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local fs store"));
         let key = wal_head(
             &loonfs_api::NamespaceId::parse("ns-atomic-replacement").expect("valid namespace id"),
@@ -1047,7 +1045,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_is_idempotent_and_head_reflects_removal() {
-        let temp_dir = TestDir::new("delete");
+        let temp_dir = test_dir("delete");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = upload_session(
             &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
@@ -1071,7 +1069,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compare_and_swap_is_safe_across_store_instances() {
-        let temp_dir = TestDir::new("cross-instance-cas");
+        let temp_dir = test_dir("cross-instance-cas");
         let key = wal_head(&loonfs_api::NamespaceId::parse("ns-cas").expect("valid namespace id"));
         let seed = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         seed.put(&key, Bytes::from_static(b"0"), PutMode::CreateIfAbsent)
@@ -1128,7 +1126,7 @@ mod tests {
 
     #[tokio::test]
     async fn listings_hide_scratch_files_and_reject_scratch_keys() {
-        let temp_dir = TestDir::new("scratch");
+        let temp_dir = test_dir("scratch");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key =
             wal_head(&loonfs_api::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
@@ -1166,34 +1164,10 @@ mod tests {
         ));
     }
 
-    struct TestDir {
-        path: PathBuf,
-    }
-
-    impl TestDir {
-        #[allow(clippy::disallowed_methods)]
-        fn new(label: &str) -> Self {
-            // Test-only unique paths are an entropy boundary, not protocol time.
-            let stamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "loonfs-local-fs-{label}-{}-{stamp}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&path).expect("create temp dir");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
+    fn test_dir(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("loonfs-local-fs-{label}-"))
+            .tempdir()
+            .expect("create temp dir")
     }
 }

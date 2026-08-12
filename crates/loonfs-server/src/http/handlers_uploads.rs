@@ -106,7 +106,8 @@ pub(super) struct UploadPathParams {
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "Requested upload mode is unsupported", body = ApiError)
+            (status = 501, description = "Requested upload mode is unsupported", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -272,7 +273,8 @@ async fn begin_direct_multipart_upload(
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload already completed", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "Direct multipart upload is unsupported", body = ApiError)
+            (status = 501, description = "Direct multipart upload is unsupported", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -552,7 +554,8 @@ pub(super) async fn upload_content(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload completion conflict", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -594,7 +597,8 @@ pub(super) async fn complete_upload(
             (status = 400, description = "Invalid upload id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -645,7 +649,8 @@ pub(super) async fn read_upload_status(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload already completed", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]

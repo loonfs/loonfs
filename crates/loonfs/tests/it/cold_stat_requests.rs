@@ -13,7 +13,7 @@ use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
     MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
 };
-use loonfs_api::wire::manifest::decode_namespace_manifest_json;
+use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataTableFamily};
 use loonfs_api::AbsolutePath;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -158,7 +158,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .metadata_files
         .iter()
         .filter(|descriptor| {
-            descriptor.level == 0 && format!("{:?}", descriptor.family) == "DirentryBinds"
+            descriptor.level == 0 && descriptor.family == MetadataTableFamily::DirentryBinds
         })
         .map(|descriptor| descriptor.run_seq)
         .collect();

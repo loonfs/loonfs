@@ -20,9 +20,7 @@ use loonfs_objectstore::s3_compatible::{
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreError;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
 
 #[test]
 fn key_builders_cover_locked_object_families() {
@@ -101,21 +99,21 @@ fn provider_env_example_covers_real_provider_contract() {
 
 #[tokio::test]
 async fn local_fs_passes_the_store_contract_probe() {
-    let temp_dir = TestDir::new("contract-probe");
+    let temp_dir = test_dir("contract-probe");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_store_contract_probe_passes(&store).await;
+    assert_store_contract_probe_passes(&store, false).await;
 }
 
 #[tokio::test]
 async fn local_fs_rejects_path_traversal_keys() {
-    let temp_dir = TestDir::new("invalid-key");
+    let temp_dir = test_dir("invalid-key");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_rejects_invalid_keys_consistently(&store).await;
 }
 
 #[tokio::test]
 async fn local_fs_streamed_write_round_trips() {
-    let temp_dir = TestDir::new("streamed-write");
+    let temp_dir = test_dir("streamed-write");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_streamed_write_round_trips(&store).await;
 }
@@ -136,7 +134,7 @@ async fn aws_s3_real_provider_conformance() {
         force_path_style: false,
     })
     .expect("create AWS S3 object store");
-    assert_provider_conformance(&store).await;
+    assert_provider_conformance(&store, true).await;
 }
 
 /// The streamed write against live AWS S3. Separate from the conformance
@@ -256,7 +254,7 @@ async fn cloudflare_r2_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
-    assert_provider_conformance(&store).await;
+    assert_provider_conformance(&store, true).await;
 }
 
 #[tokio::test]
@@ -270,7 +268,7 @@ async fn gcp_gcs_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create GCP GCS object store");
-    assert_provider_conformance(&store).await;
+    assert_provider_conformance(&store, true).await;
 }
 
 #[tokio::test]
@@ -300,7 +298,7 @@ async fn azure_abs_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Azure Blob Storage object store");
-    assert_provider_conformance(&store).await;
+    assert_provider_conformance(&store, false).await;
 }
 
 #[tokio::test]
@@ -325,8 +323,8 @@ async fn azure_abs_streamed_write_round_trips() {
 /// The probe is the production surface an operator runs, and running it
 /// here is what stops the two from drifting: a contract check changes for
 /// production and for this sweep in one edit, or not at all.
-async fn assert_provider_conformance(store: &dyn ObjectStore) {
-    assert_store_contract_probe_passes(store).await;
+async fn assert_provider_conformance(store: &dyn ObjectStore, direct_put_proven: bool) {
+    assert_store_contract_probe_passes(store, direct_put_proven).await;
     assert_rejects_invalid_keys_consistently(store).await;
 }
 
@@ -337,16 +335,18 @@ async fn assert_provider_conformance(store: &dyn ObjectStore) {
 /// `GetObjectAttributes` was read off exactly this output, so a failure
 /// shows every check's verdict rather than the first one that broke.
 ///
-/// `stored_checksum_readback` may answer `unsupported`: that is the
-/// capability line for presigned direct uploads, and GCS and Azure Blob
-/// Storage both sit on the far side of it. Every other check must pass
-/// outright on every provider this suite covers, multipart included.
-async fn assert_store_contract_probe_passes(store: &dyn ObjectStore) {
+/// `stored_checksum_readback` may answer `unsupported` only for providers
+/// this suite marks as unable to offer direct puts. AWS S3, Cloudflare R2,
+/// and GCS are direct-put-proven, so checksum readback must work for them;
+/// every other check must pass outright on every provider.
+async fn assert_store_contract_probe_passes(store: &dyn ObjectStore, direct_put_proven: bool) {
     let run_id = loonfs_api::generated_id("probe");
     let report = run_store_contract_probe(store, &run_id).await;
     let acceptable = report.checks.iter().all(|check| match check.outcome {
         StoreProbeOutcome::Passed => true,
-        StoreProbeOutcome::Unsupported => check.name == "stored_checksum_readback",
+        StoreProbeOutcome::Unsupported => {
+            check.name == "stored_checksum_readback" && !direct_put_proven
+        }
         StoreProbeOutcome::Failed { .. } => false,
     });
     assert!(
@@ -466,34 +466,9 @@ async fn assert_rejects_invalid_keys_consistently(store: &dyn ObjectStore) {
     }
 }
 
-#[derive(Debug)]
-struct TestDir {
-    path: PathBuf,
-}
-
-impl TestDir {
-    #[allow(clippy::disallowed_methods)]
-    fn new(label: &str) -> Self {
-        // Test-only unique paths are an entropy boundary, not protocol time.
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "loonfs-objectstore-{label}-{}-{stamp}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
+fn test_dir(label: &str) -> TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("loonfs-objectstore-{label}-"))
+        .tempdir()
+        .expect("create temp dir")
 }

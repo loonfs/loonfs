@@ -4,9 +4,7 @@
 //! GrepWorker lifecycle, rebootstrap, query contracts, and GC boundaries.
 
 use crate::common::{control, grep_with, GrepHost};
-use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter,
     GcConfig, MaintenancePlan, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
@@ -32,17 +30,17 @@ use loonfs_objectstore::keys::{
     metadata_manifest_prefix, metadata_table_prefix, upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+use loonfs_objectstore::{ObjectStore, PutMode};
+use loonfs_test_support::stores::{
+    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+    OperationContext, OperationKind, RecordedOperation, RecordingStore,
 };
-use loonfs_test_support::stores::{FailStore, InjectedError, OperationContext, OperationKind};
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::sync::Semaphore;
 
 fn request(pattern: &str) -> GrepRequest {
     GrepRequest {
@@ -106,89 +104,6 @@ async fn new_query(
         grep_request,
     )
     .await
-}
-
-#[derive(Debug)]
-struct BlockingGrepRootCasStore {
-    inner: SharedObjectStore,
-    root_key: String,
-    blocked_once: AtomicBool,
-    entered: Semaphore,
-    release: Semaphore,
-}
-
-impl BlockingGrepRootCasStore {
-    fn new(inner: SharedObjectStore, root_key: String) -> Self {
-        Self {
-            inner,
-            root_key,
-            blocked_once: AtomicBool::new(false),
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        }
-    }
-
-    async fn wait_until_blocked(&self) {
-        self.entered
-            .acquire()
-            .await
-            .expect("blocking store remains open")
-            .forget();
-    }
-
-    fn unblock(&self) {
-        self.release.add_permits(1);
-    }
-}
-
-#[async_trait]
-impl ObjectStore for BlockingGrepRootCasStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let should_block = key == self.root_key
-            && matches!(&mode, PutMode::CompareAndSwap { .. })
-            && !self.blocked_once.swap(true, Ordering::SeqCst);
-        if should_block {
-            self.entered.add_permits(1);
-            self.release
-                .acquire()
-                .await
-                .expect("blocking store remains open")
-                .forget();
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
 }
 
 fn normalize_namespace(mut response: GrepResponse, namespace_id: &NamespaceId) -> GrepResponse {
@@ -1759,10 +1674,12 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
         .last_modified_ms
         .expect("the local store stamps its objects");
 
-    let blocking = Arc::new(BlockingGrepRootCasStore::new(
+    let blocking = Arc::new(BlockingStore::new(
         base.clone(),
-        root_key(&namespace_id),
+        KeyPredicate::exact(root_key(&namespace_id)),
+        OperationClass::CompareAndSwap,
     ));
+    blocking.block_next();
     let store: SharedObjectStore = blocking.clone();
     let advance = advance_grep_root(&*store, &current, &next);
     let collect = async {
@@ -1771,7 +1688,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
             .await
             .garbage_collect_namespace(&namespace_id, published_at_ms, &GrepGcRequest::default())
             .await;
-        blocking.unblock();
+        blocking.release();
         report
     };
     let (advanced, report) = tokio::join!(advance, collect);
@@ -1821,84 +1738,16 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
         .is_some());
 }
 
-#[derive(Debug)]
-struct AgedMetadataStore {
-    inner: LocalFsStore,
-    listed_prefixes: Mutex<Vec<String>>,
-}
-
-impl AgedMetadataStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("local store"),
-            listed_prefixes: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn age(mut metadata: ObjectMetadata) -> ObjectMetadata {
-        metadata.last_modified_ms = Some(0);
-        metadata
-    }
-
-    fn clear_listed_prefixes(&self) {
-        self.listed_prefixes.lock().expect("prefix lock").clear();
-    }
-
-    fn listed_prefixes(&self) -> Vec<String> {
-        self.listed_prefixes.lock().expect("prefix lock").clone()
-    }
-}
-
-#[async_trait]
-impl ObjectStore for AgedMetadataStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        Ok(self.inner.head(key).await?.map(Self::age))
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        Ok(self.inner.get_with_metadata(key).await?.map(|mut body| {
-            body.metadata = Self::age(body.metadata);
-            body
-        }))
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await.map(Self::age)
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.listed_prefixes
-            .lock()
-            .expect("prefix lock")
-            .push(prefix.to_owned());
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
 #[tokio::test]
 async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_keyspaces() {
     let temp_dir = tempdir().expect("tempdir");
-    let aged_store = Arc::new(AgedMetadataStore::new(temp_dir.path()));
+    let aged_store = Arc::new(RecordingStore::new(
+        MetadataMapStore::aged(
+            LocalFsStore::new(temp_dir.path()).expect("local store"),
+            KeyPredicate::any(),
+        ),
+        KeyPredicate::any(),
+    ));
     let store: SharedObjectStore = aged_store.clone();
     let live_namespace = NamespaceId::parse("gc-live").expect("namespace id");
     let deleted_namespace = NamespaceId::parse("gc-deleted").expect("namespace id");
@@ -2082,13 +1931,21 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         )
         .await
         .expect("write grep sentinel");
-    aged_store.clear_listed_prefixes();
+    aged_store.reset();
     admin
         .gc_namespace(&live_namespace, &GcConfig::default())
         .await
         .expect("core gc");
+    let listed_prefixes: Vec<_> = aged_store
+        .take()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::List { prefix } => Some(prefix),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        aged_store.listed_prefixes(),
+        listed_prefixes,
         vec![
             // Marking lists the records it roots from, then the manifests
             // it ages to find its reference manifest.
@@ -2117,7 +1974,10 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
 /// Seeds one namespace with an index plus a fixed set of aged orphans, so
 /// two stores can be built identically and collected differently.
 async fn seed_collectable_namespace(root: &Path, namespace_id: &NamespaceId) -> SharedObjectStore {
-    let store: SharedObjectStore = Arc::new(AgedMetadataStore::new(root));
+    let store: SharedObjectStore = Arc::new(MetadataMapStore::aged(
+        LocalFsStore::new(root).expect("local store"),
+        KeyPredicate::any(),
+    ));
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("gc-budget-writer")
         .min_publish_interval_ms(0)
