@@ -184,19 +184,18 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
 )]
 struct LoonfsOpenApi;
 
-/// Reusable 408 response emitted when request middleware reaches the
-/// deployment's configured deadline.
+/// OpenAPI definition for the 408 response returned after a request deadline.
 #[derive(utoipa::ToResponse)]
 #[response(
-    description = "The server cancelled this bounded request at `request_deadline_ms`; a mutation may still land and must be reconciled before retrying."
+    description = "The request exceeded `request_deadline_ms`. A timed-out mutation may still complete, so clients must determine its outcome before retrying."
 )]
 #[expect(
     dead_code,
-    reason = "the newtype exists only to describe the reusable OpenAPI response body"
+    reason = "used only to generate the reusable OpenAPI response schema"
 )]
 pub(super) struct DeadlineExceededResponse(#[to_schema] ApiError);
 
-/// Adds the shared deadline response to one deadline-bounded operation.
+/// Adds the shared 408 response to an OpenAPI operation.
 pub(super) struct DeadlineExceededResponses;
 
 impl utoipa::IntoResponses for DeadlineExceededResponses {

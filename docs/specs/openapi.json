@@ -6338,7 +6338,7 @@
     },
     "responses": {
       "DeadlineExceededResponse": {
-        "description": "The server cancelled this bounded request at `request_deadline_ms`; a mutation may still land and must be reconciled before retrying.",
+        "description": "The request exceeded `request_deadline_ms`. A timed-out mutation may still complete, so clients must determine its outcome before retrying.",
         "content": {
           "application/json": {
             "schema": {

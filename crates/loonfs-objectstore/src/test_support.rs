@@ -42,8 +42,8 @@ pub(crate) const GCS_FIXTURE_CLIENT_EMAIL: &str =
 /// Writes the fixture key to a fresh temporary file and returns its path,
 /// because every GCS constructor takes the key as a path to read.
 ///
-/// The returned directory owns the fixture's lifetime, so callers keep it
-/// until the provider or signer has read the returned path.
+/// Returns the temporary directory and the path to the fixture key file.
+/// Keep the directory alive while using the path; dropping it deletes the file.
 pub(crate) fn gcs_fixture_service_account_key_file(
     label: &str,
 ) -> (tempfile::TempDir, std::path::PathBuf) {

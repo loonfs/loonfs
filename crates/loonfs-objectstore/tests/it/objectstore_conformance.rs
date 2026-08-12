@@ -335,10 +335,10 @@ async fn assert_provider_conformance(store: &dyn ObjectStore, direct_put_proven:
 /// `GetObjectAttributes` was read off exactly this output, so a failure
 /// shows every check's verdict rather than the first one that broke.
 ///
-/// `stored_checksum_readback` may answer `unsupported` only for providers
-/// this suite marks as unable to offer direct puts. AWS S3, Cloudflare R2,
-/// and GCS are direct-put-proven, so checksum readback must work for them;
-/// every other check must pass outright on every provider.
+/// `stored_checksum_readback` may return `unsupported` only for providers that
+/// do not offer direct PUT. AWS S3, Cloudflare R2, and GCS are tested with
+/// direct PUT enabled, so they must return stored checksums. Every other probe
+/// check must pass for every provider.
 async fn assert_store_contract_probe_passes(store: &dyn ObjectStore, direct_put_proven: bool) {
     let run_id = loonfs_api::generated_id("probe");
     let report = run_store_contract_probe(store, &run_id).await;
