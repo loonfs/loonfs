@@ -22,13 +22,13 @@ pub(crate) fn prepare_wal_segment(
 
     let mut payload_records: Vec<WalCommitPayload> = Vec::with_capacity(records.len());
     for record in records {
-        if record.prepared.plan.namespace_id != namespace_id {
+        if record.commit.namespace_id != namespace_id {
             return Err(WalBuildError::SegmentNamespaceMismatch {
-                record: record.prepared.plan.namespace_id.clone(),
+                record: record.commit.namespace_id.clone(),
                 segment: namespace_id.clone(),
             });
         }
-        let payload_record = wal_payload_from_materialized_commit(record)?;
+        let payload_record = wal_payload_from_materialized_commit(record);
         if let Some(previous) = payload_records.last() {
             let expected = previous
                 .seq

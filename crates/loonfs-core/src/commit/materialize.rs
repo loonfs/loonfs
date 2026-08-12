@@ -1,6 +1,6 @@
 //! Materializes a prepared commit into ordered WAL deltas.
 
-use super::{PreparedCommit, ResolvedBinding, ValidatedOp};
+use super::{CommitPlan, ResolvedBinding, ValidatedOp};
 use loonfs_api::wire::manifest::DeletedDirentry;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{InodeKind, RevisionNo};
@@ -15,7 +15,7 @@ pub struct MaterializedCommitDelta {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaterializedCommit {
-    pub prepared: PreparedCommit,
+    pub commit: CommitPlan,
     /// Observational wall-clock stamp from the publishing request context,
     /// carried into the durable WAL payload. Not part of the semantic
     /// identity: two materializations of one prepared commit under
@@ -24,17 +24,14 @@ pub(crate) struct MaterializedCommit {
     pub deltas: Vec<MaterializedCommitDelta>,
 }
 
-pub(crate) fn materialize_commit(
-    prepared: PreparedCommit,
-    committed_at_ms: u64,
-) -> MaterializedCommit {
+pub(crate) fn materialize_commit(commit: CommitPlan, committed_at_ms: u64) -> MaterializedCommit {
     let mut deltas = Vec::new();
-    for op in &prepared.plan.validated_ops {
+    for op in &commit.validated_ops {
         deltas.append(&mut materialize_validated_op(op));
     }
 
     MaterializedCommit {
-        prepared,
+        commit,
         committed_at_ms,
         deltas,
     }

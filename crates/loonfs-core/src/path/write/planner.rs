@@ -190,8 +190,8 @@ fn attribute(error: CoreError, index: usize, operation_count: usize) -> CoreErro
 mod tests {
     use super::*;
     use crate::commit::{
-        build_commit_plan_for_publish, CandidateAllocation, CommitIr, CommitOp, CommitPlan,
-        CommitValidationError, InodeAllocator, PublishCommitValidationContext,
+        validate_commit_for_publish, CandidateAllocation, CommitIr, CommitOp,
+        CommitValidationError, InodeAllocator, PublishCommitValidationContext, ValidatedCommitPlan,
     };
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
@@ -350,7 +350,7 @@ mod tests {
         namespace_id: &NamespaceId,
         commit_id: &str,
         planned: TestPlannedCommit,
-    ) -> Result<CommitPlan> {
+    ) -> Result<ValidatedCommitPlan> {
         let (view, _projection) = load_publish_metadata_view(
             store,
             None,
@@ -361,7 +361,7 @@ mod tests {
         )
         .await?;
         let empty_overlay = MetadataState::default();
-        build_commit_plan_for_publish(
+        validate_commit_for_publish(
             &CommitIr {
                 namespace_id: namespace_id.clone(),
                 commit_id: CommitId::parse(commit_id).expect("valid commit id"),
@@ -370,7 +370,6 @@ mod tests {
                 message: None,
             },
             1,
-            &planned.allocation,
             &PublishCommitValidationContext {
                 head: view.head(),
                 metadata_view: view.metadata_view(),

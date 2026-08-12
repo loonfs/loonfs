@@ -20,11 +20,6 @@ pub struct PreparedWalSegment {
 pub enum WalBuildError {
     #[error("WAL segment contains no records")]
     EmptySegment,
-    #[error("WAL build namespace mismatch: request `{request}`, plan `{plan}`")]
-    NamespaceMismatch {
-        request: NamespaceId,
-        plan: NamespaceId,
-    },
     #[error("WAL segment namespace mismatch: record `{record}`, segment `{segment}`")]
     SegmentNamespaceMismatch {
         record: NamespaceId,

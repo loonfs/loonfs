@@ -80,19 +80,21 @@ impl PublishPlanningSession {
         .await
     }
 
+    /// Commits the candidate-local allocator fork and returns the new
+    /// authoritative batch position.
+    pub(crate) fn commit_candidate(
+        &mut self,
+        allocation: CandidateAllocation,
+    ) -> Result<loonfs_api::InodeId> {
+        self.inode_allocator.commit_candidate(allocation)
+    }
+
     /// Folds an accepted commit into the session so later candidates in the
     /// same batch plan and validate against it.
-    pub(crate) fn apply_accepted_commit(
-        &mut self,
-        preview: &WalCommitPayload,
-        plan: &CommitPlan,
-        allocation: CandidateAllocation,
-    ) -> Result<()> {
-        let resulting_next_inode_id = self.inode_allocator.commit_candidate(allocation)?;
+    pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
         self.accepted_rows.apply_committed_wal_record_mut(preview);
         self.head.seq = plan.assigned_seq;
-        self.head.next_inode_id = resulting_next_inode_id;
-        Ok(())
+        self.head.next_inode_id = plan.resulting_next_inode_id;
     }
 }
 

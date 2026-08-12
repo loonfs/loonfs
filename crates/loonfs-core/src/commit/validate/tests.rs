@@ -8,10 +8,9 @@
 #![allow(clippy::panic)]
 
 use super::super::{CommitIr, CommitOp, PlannedOp};
-use super::{build_commit_plan_for_publish, PublishCommitValidationContext};
+use super::{validate_commit_for_publish, PublishCommitValidationContext};
 use crate::commit::{
     materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator,
-    PreparedCommit,
 };
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
@@ -207,7 +206,7 @@ async fn build_commit_plan(
     context: &TestValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
     let accepted_rows = MetadataState::default();
-    let allocator = InodeAllocator::new(context.head.next_inode_id);
+    let mut allocator = InodeAllocator::new(context.head.next_inode_id);
     let mut allocation = allocator.begin_candidate();
     for planned in &request.ops {
         let assigned = match &planned.op {
@@ -223,10 +222,9 @@ async fn build_commit_plan(
             );
         }
     }
-    let result = build_commit_plan_for_publish(
+    let result = validate_commit_for_publish(
         request,
         committed_at_ms,
-        &allocation,
         &PublishCommitValidationContext {
             head: &context.head,
             metadata_view: InMemoryMetadataView::in_memory(
@@ -239,10 +237,14 @@ async fn build_commit_plan(
     )
     .await;
 
-    result.map_err(|error| match error {
+    let validated = result.map_err(|error| match error {
         CoreError::CommitValidation(error) => error,
         error => panic!("unexpected validation dependency error: {error}"),
-    })
+    })?;
+    let resulting_next_inode_id = allocator
+        .commit_candidate(allocation)
+        .expect("commit test allocation");
+    Ok(validated.prepare(request.clone(), test_fingerprint(), resulting_next_inode_id))
 }
 
 /// Every attribute update carries its own revision guard, whether or not the
@@ -702,10 +704,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("replace then restore in same request should validate");
-    let materialized = materialize_commit(
-        PreparedCommit::new(request, plan, test_fingerprint()).expect("prepare commit"),
-        4_200,
-    );
+    let materialized = materialize_commit(plan, 4_200);
     assert!(matches!(
         &materialized.deltas[1].wal_delta,
         WalDelta::AppendFileRevision {
@@ -754,10 +753,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("restore then restore in same request should validate");
-    let materialized = materialize_commit(
-        PreparedCommit::new(request, plan, test_fingerprint()).expect("prepare commit"),
-        4_200,
-    );
+    let materialized = materialize_commit(plan, 4_200);
     assert!(matches!(
         &materialized.deltas[0].wal_delta,
         WalDelta::AppendFileRevision {
