@@ -33,7 +33,6 @@ pub(crate) use self::publish::PreparedCommitHeadPublish;
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 pub use self::publish_error::CommitHeadPublishError;
 pub(crate) use self::validate::{
-    validate_commit_for_publish, validate_ops, OpValidationCursor, PublishCommitValidationContext,
-    PublishValidationView,
+    validate_commit_for_publish, validate_ops, OpValidationCursor, PublishValidationView,
 };
 pub use self::validate_error::CommitValidationError;

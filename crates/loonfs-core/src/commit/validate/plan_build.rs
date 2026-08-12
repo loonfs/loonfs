@@ -11,20 +11,14 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_api::ChangeSeq;
 use loonfs_objectstore::ObjectStore;
 
-#[derive(Clone, Copy)]
-pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
-    pub(crate) head: &'a HeadState,
-    pub(crate) metadata_view: MetadataView<'a, 'a, S>,
-    pub(crate) accepted_rows: &'a MetadataState,
-}
-
 pub(crate) async fn validate_commit_for_publish<S: ObjectStore + ?Sized>(
     request: &CommitIr,
     committed_at_ms: u64,
-    context: &PublishCommitValidationContext<'_, S>,
+    head: &HeadState,
+    metadata_view: MetadataView<'_, '_, S>,
+    accepted_rows: &MetadataState,
 ) -> Result<ValidatedCommitPlan, CoreError> {
-    let committed_seq = context
-        .head
+    let committed_seq = head
         .seq
         .0
         .checked_add(1)
@@ -33,9 +27,9 @@ pub(crate) async fn validate_commit_for_publish<S: ObjectStore + ?Sized>(
     build_commit_plan(
         request,
         committed_at_ms,
-        context.head,
+        head,
         committed_seq,
-        PublishValidationView::new(context.metadata_view, context.accepted_rows, committed_seq),
+        PublishValidationView::new(metadata_view, accepted_rows, committed_seq),
     )
     .await
 }

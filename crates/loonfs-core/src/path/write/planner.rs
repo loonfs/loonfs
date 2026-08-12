@@ -191,13 +191,13 @@ mod tests {
     use super::*;
     use crate::commit::{
         validate_commit_for_publish, CandidateAllocation, CommitIr, CommitOp,
-        CommitValidationError, InodeAllocator, PublishCommitValidationContext, ValidatedCommitPlan,
+        CommitValidationError, InodeAllocator, ValidatedCommitPlan,
     };
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::path::read::{load_metadata_view, ReadLoadContext};
     use crate::path::write::ops::{delete_path, put_file_bytes};
-    use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::{
         AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -310,23 +310,16 @@ mod tests {
         namespace_id: &NamespaceId,
         request: &CommitRequest,
     ) -> Result<TestPlannedCommit> {
-        let (view, _projection) = load_publish_metadata_view(
-            store,
-            None,
-            namespace_id,
-            None,
-            None,
-            &PublishTailOptions::default(),
-        )
-        .await
-        .expect("publish view");
+        let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest())
+            .await
+            .expect("metadata view");
         let empty_overlay = MetadataState::default();
         let allocator = InodeAllocator::new(view.head().next_inode_id);
         let mut allocation = allocator.begin_candidate();
         let commit = plan_commit_against_publish_view(
             request,
             view.head(),
-            view.metadata_view(),
+            view.projected_metadata_view(),
             &empty_overlay,
             1,
             &mut allocation,
@@ -351,15 +344,7 @@ mod tests {
         commit_id: &str,
         planned: TestPlannedCommit,
     ) -> Result<ValidatedCommitPlan> {
-        let (view, _projection) = load_publish_metadata_view(
-            store,
-            None,
-            namespace_id,
-            None,
-            None,
-            &PublishTailOptions::default(),
-        )
-        .await?;
+        let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest()).await?;
         let empty_overlay = MetadataState::default();
         validate_commit_for_publish(
             &CommitIr {
@@ -370,11 +355,9 @@ mod tests {
                 message: None,
             },
             1,
-            &PublishCommitValidationContext {
-                head: view.head(),
-                metadata_view: view.metadata_view(),
-                accepted_rows: &empty_overlay,
-            },
+            view.head(),
+            view.projected_metadata_view(),
+            &empty_overlay,
         )
         .await
     }
@@ -437,18 +420,11 @@ mod tests {
         .await
         .expect("put file");
 
-        let (view, _projection) = load_publish_metadata_view(
-            &store,
-            None,
-            &namespace_id,
-            None,
-            None,
-            &PublishTailOptions::default(),
-        )
-        .await
-        .expect("publish view");
+        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+            .await
+            .expect("metadata view");
         let resolved = view
-            .metadata_view()
+            .projected_metadata_view()
             .resolve_visible_path(&AbsolutePath::parse("/docs/nested/a.txt").expect("path"))
             .await
             .expect("resolve created file");

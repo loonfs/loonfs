@@ -405,7 +405,7 @@ impl NamespaceCommitEngine {
             store,
             self.table_cache.as_deref(),
             &self.namespace_id,
-            Some(acquired_writer),
+            acquired_writer,
             self.publish_tail_projection.as_ref(),
             tail_options,
         )

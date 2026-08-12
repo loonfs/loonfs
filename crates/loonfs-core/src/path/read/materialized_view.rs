@@ -186,6 +186,16 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
+    #[cfg(test)]
+    pub(crate) fn head(&self) -> &HeadState {
+        &self.head
+    }
+
+    #[cfg(test)]
+    pub(crate) fn projected_metadata_view(&self) -> MetadataView<'_, '_, S> {
+        self.metadata_view()
+    }
+
     async fn load_at_head(
         store: &'a S,
         namespace_id: &NamespaceId,
