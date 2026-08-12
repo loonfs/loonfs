@@ -769,15 +769,13 @@ impl Client {
     ///
     /// A deployment that advertises no cap is left on the proxied path:
     /// nothing here knows it would refuse.
-    pub async fn offers_direct_download(&self, size_bytes: u64) -> bool {
-        let Ok(capabilities) = self.capabilities().await else {
-            return false;
-        };
-        capabilities.supports(FEATURE_DOWNLOADS_DIRECT_GET)
+    pub async fn offers_direct_download(&self, size_bytes: u64) -> Result<bool> {
+        let capabilities = self.capabilities().await?;
+        Ok(capabilities.supports(FEATURE_DOWNLOADS_DIRECT_GET)
             && capabilities
                 .limits
                 .get(LIMIT_DOWNLOAD_MAX_CONTENT_BYTES)
-                .is_some_and(|proxy_cap| size_bytes > *proxy_cap)
+                .is_some_and(|proxy_cap| size_bytes > *proxy_cap))
     }
 
     /// Asks for one short-lived capability to read a file's content object
@@ -1448,7 +1446,7 @@ impl Client {
         // never refuses. Both streaming transports measure the payload as
         // they send it, and the one that cannot — a whole-object write —
         // measures it in the pass it has to make anyway.
-        match self.provisional_transport(source.size_bytes()).await {
+        match self.provisional_transport(source.size_bytes()).await? {
             UploadTransport::Multipart => {
                 let (stream, _) = source.into_stream();
                 self.stage_via_multipart(
@@ -1536,13 +1534,14 @@ impl Client {
     /// payload without sending a byte, and any refusal comes after. Where
     /// one is not, the payload streams to the service, which measures it as
     /// it receives it and answers `content_too_large` if it must.
-    async fn provisional_transport(&self, size_hint: Option<u64>) -> UploadTransport {
-        match self.transport_for(size_hint).await {
+    async fn provisional_transport(&self, size_hint: Option<u64>) -> Result<UploadTransport> {
+        let capabilities = self.capabilities().await?;
+        Ok(match Self::transport_for(&capabilities, size_hint) {
             Ok(transport) => transport,
             Err(no_fit) => no_fit
                 .direct_put_algorithm
                 .map_or(UploadTransport::Proxied, UploadTransport::DirectPut),
-        }
+        })
     }
 
     /// Routes a payload whose length this client measured, refusing when no
@@ -1552,12 +1551,13 @@ impl Client {
     /// moves rather than after the capped proxy has read and rejected the
     /// whole payload.
     async fn transport_for_measured(&self, size: MeasuredBytes) -> Result<UploadTransport> {
-        self.transport_for(Some(size.0))
-            .await
-            .map_err(|no_fit| ClientError::UploadTooLarge {
+        let capabilities = self.capabilities().await?;
+        Self::transport_for(&capabilities, Some(size.0)).map_err(|no_fit| {
+            ClientError::UploadTooLarge {
                 size_bytes: size.0,
                 reason: no_fit.reason,
-            })
+            }
+        })
     }
 
     /// The best transport for a payload of this length, against what the
@@ -1575,15 +1575,10 @@ impl Client {
     /// assumed about how the deployment is configured, which is why the
     /// document is fetched even for a small payload: the fetch happens once
     /// per client and is cached, so the round trip is paid at most once.
-    async fn transport_for(
-        &self,
+    fn transport_for(
+        capabilities: &CapabilityDocument,
         size_bytes: Option<u64>,
     ) -> std::result::Result<UploadTransport, NoTransportFits> {
-        let Ok(capabilities) = self.capabilities().await else {
-            // A deployment that will not describe itself gets the transport
-            // that needs no description.
-            return Ok(UploadTransport::Proxied);
-        };
         // Below one part there is nothing to cut, and a length nobody knows
         // cannot rule parts out.
         let worth_cutting = size_bytes.is_none_or(|size| size >= STREAMING_PUT_MIN_BYTES);

@@ -165,15 +165,14 @@ here rather than advertised as a capability.
 | AWS S3 | Yes, provider multipart | One part (8 MiB by default), whatever the object's size |
 | Cloudflare R2 | Yes, provider multipart | One part, whatever the object's size |
 | Other S3-compatible endpoints | Yes, provider multipart | One part, whatever the object's size |
-| Google Cloud Storage | No | The whole payload, bounded by `upload.max_content_bytes` |
-| Azure Blob Storage | No | The whole payload, bounded by `upload.max_content_bytes` |
+| Google Cloud Storage | Yes, provider multipart | One part, whatever the object's size |
+| Azure Blob Storage | Yes, provider multipart | One part, whatever the object's size |
 | Local filesystem | Yes, staging file | One chunk as it arrives |
 
-The two providers without an incremental write are not broken by this and
-are not silently degraded either: they buffer and write in one request,
-which is exactly what every provider did before, and the byte cap that
-bounded that buffering still bounds it. Adding an incremental write for them
-is a provider-adapter change, not a contract change.
+Every built-in provider has a real incremental write path. Cloud providers
+regroup the incoming stream into provider multipart parts, while the local
+filesystem stages chunks into a file. The server therefore retains only one
+part or chunk for a proxied upload, independent of the object's total size.
 
 ## 5. Local Filesystem Provider
 

@@ -255,6 +255,20 @@ async fn gcp_gcs_real_provider_conformance() {
 }
 
 #[tokio::test]
+#[ignore = "requires real GCP GCS credentials"]
+async fn gcp_gcs_streamed_write_round_trips() {
+    let config = GcpGcsConformanceConfig::from_env()
+        .expect("load GCP GCS real-provider conformance environment");
+    let store = GcpGcsStore::new(GcpGcsStoreConfig {
+        bucket: config.bucket,
+        service_account_key_path: config.service_account_key_path,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create GCP GCS object store");
+    assert_streamed_write_round_trips(&store).await;
+}
+
+#[tokio::test]
 #[ignore = "requires real Azure Blob Storage credentials"]
 async fn azure_abs_real_provider_conformance() {
     let config = AzureAbsConformanceConfig::from_env()
@@ -268,6 +282,22 @@ async fn azure_abs_real_provider_conformance() {
     })
     .expect("create Azure Blob Storage object store");
     assert_provider_conformance(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Azure Blob Storage credentials"]
+async fn azure_abs_streamed_write_round_trips() {
+    let config = AzureAbsConformanceConfig::from_env()
+        .expect("load Azure Blob Storage real-provider conformance environment");
+    let store = AzureAbsStore::new(AzureAbsStoreConfig {
+        account_name: config.account_name,
+        container_name: config.container_name,
+        access_key: config.access_key.into(),
+        endpoint_url: config.endpoint,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create Azure Blob Storage object store");
+    assert_streamed_write_round_trips(&store).await;
 }
 
 /// The live provider sweep: the store contract probe, plus the key

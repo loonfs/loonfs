@@ -848,6 +848,19 @@ async fn a_refusal_reports_the_measured_length_not_the_declared_one() {
     }
 }
 
+#[tokio::test]
+async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy() {
+    let transport = test_transport::script([Outcome::Success(b"not json".to_vec())]);
+
+    let error = client()
+        .put_file_bytes(&spec(), b"payload", &PutFileOptions::default())
+        .await
+        .expect_err("capability discovery failure must remain visible");
+
+    assert!(matches!(error, ClientError::Json(_)), "{error:?}");
+    assert_eq!(transport.attempts(), 1);
+}
+
 /// A file-backed source is the dominant case, and it pays nothing extra:
 /// the second pass re-opens the file the caller named, so the payload is
 /// never copied anywhere — not into memory and not into a spool.

@@ -381,10 +381,9 @@ impl ObjectStore for S3CompatibleStore {
 
         let headers = &response.headers;
         let Some(storage_checksum) = s3_stored_checksum(headers) else {
-            return Err(ObjectStoreError::transport(
-                key,
-                "provider reported no full-object checksum for this object".to_owned(),
-            ));
+            return Err(ObjectStoreError::StoredChecksumMissing {
+                object_key: key.to_owned(),
+            });
         };
         let size_bytes = headers
             .get(http::header::CONTENT_LENGTH)

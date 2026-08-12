@@ -410,7 +410,7 @@ impl ResolvedTarget {
         start_offset: u64,
     ) -> Result<FileDownload, BackendError> {
         if let (Self::Remote(target), Some(size_bytes)) = (self, size_bytes) {
-            if target.client.offers_direct_download(size_bytes).await {
+            if target.client.offers_direct_download(size_bytes).await? {
                 let grant = target.client.begin_download(spec, revision_no).await?;
                 return Ok(FileDownload::Direct {
                     stream: Box::new(

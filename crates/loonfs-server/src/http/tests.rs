@@ -2294,6 +2294,64 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     server.abort();
 }
 
+#[tokio::test]
+async fn download_admission_is_held_until_the_response_body_is_consumed() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seed_writer,
+        &namespace_id("demo"),
+        "/note.txt",
+        b"bounded",
+        "download-body-permit-seed-01",
+    )
+    .await;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.max_concurrent_downloads = 1;
+    let (router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v0/namespaces/demo/filesystem/content?path=%2Fnote.txt")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .expect("download request"),
+        )
+        .await
+        .expect("download response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        response.headers().get(axum::http::header::CONTENT_TYPE),
+        Some(&axum::http::HeaderValue::from_static(
+            "application/octet-stream"
+        ))
+    );
+    assert_eq!(state.download_permits.available_permits(), 0);
+
+    let next_permit = state.download_permits.clone().acquire_owned();
+    tokio::pin!(next_permit);
+    assert!(matches!(
+        futures::poll!(next_permit.as_mut()),
+        std::task::Poll::Pending
+    ));
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("download body");
+    assert_eq!(&body[..], b"bounded");
+    let acquired = next_permit
+        .await
+        .expect("the next download is admitted after full consumption");
+    drop(acquired);
+    assert_eq!(state.download_permits.available_permits(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     let temp_dir = tempdir().expect("tempdir");
