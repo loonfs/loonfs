@@ -255,13 +255,14 @@ Maintenance
     Advance the retention floor, surrendering replay history below the
     flushed manifest head; file revision history is never affected
 
-  loonfs admin gc [--grace-window-ms <ms>] [--max-objects <n>]
+  loonfs admin gc [--grace-window-ms <ms>] [--max-objects <n>] [--cursor <token>]
     Run mark-and-sweep collection, looping bounded passes through
     completion; --max-objects examines at most that many candidates and
-    returns after one pass, and --grace-window-ms protects objects younger
-    than the window. A run that takes more than one pass reports each pass
-    on standard error as it lands, and the summary says what the pass kept
-    and mostly why; --json carries every retention reason
+    returns after one pass, --cursor resumes from a previous pass's
+    next_cursor for the same namespace, and --grace-window-ms protects
+    objects younger than the window. A run that takes more than one pass
+    reports each pass on standard error as it lands, and the summary says
+    what the pass kept and mostly why; --json carries every retention reason
 
   loonfs admin store-probe
     Prove the profile's object store honours the contract LoonFS depends on

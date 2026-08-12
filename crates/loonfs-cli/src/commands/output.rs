@@ -9,11 +9,43 @@ use loonfs_api::v0::{
     GrepIndexStatusResponse, StoreProbeCheckOutcome, StoreProbeResponse,
 };
 use loonfs_api::{
-    AuthoritativePathEntry, ChangeSeq, CommitId, CreateCheckpointResponse, DeleteNamespaceResponse,
-    FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse, MaintenanceStepResponse,
-    NamespaceId, NamespaceSummary, ReleaseCheckpointResponse,
+    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, CreateCheckpointResponse,
+    DeleteNamespaceResponse, FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse,
+    MaintenanceStepResponse, NamespaceId, NamespaceSummary, ReleaseCheckpointResponse,
 };
 use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct ListingHeadDrift {
+    pub first_head_seq: ChangeSeq,
+    pub last_head_seq: ChangeSeq,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ListingHeadObservation {
+    first_head_seq: Option<ChangeSeq>,
+    last_head_seq: Option<ChangeSeq>,
+}
+
+impl ListingHeadObservation {
+    pub(crate) fn observe(&mut self, head_seq: ChangeSeq) {
+        self.first_head_seq.get_or_insert(head_seq);
+        self.last_head_seq = Some(head_seq);
+    }
+
+    pub(crate) fn last(&self) -> Option<ChangeSeq> {
+        self.last_head_seq
+    }
+
+    pub(crate) fn drift(&self) -> Option<ListingHeadDrift> {
+        let first_head_seq = self.first_head_seq?;
+        let last_head_seq = self.last_head_seq?;
+        (first_head_seq != last_head_seq).then_some(ListingHeadDrift {
+            first_head_seq,
+            last_head_seq,
+        })
+    }
+}
 
 /// One failed item inside a recursive transfer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -142,6 +174,13 @@ pub(crate) enum CommandData {
     Changes(ChangesResponse),
     Trash(TrashListing),
     PathEntries {
+        namespace_id: NamespaceId,
+        absolute_path: AbsolutePath,
+        /// Namespace head the final page was read from.
+        head_seq: ChangeSeq,
+        /// Heads observed when this invocation crossed namespace states.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        head_drift: Option<ListingHeadDrift>,
         entries: Vec<AuthoritativePathEntry>,
         /// Where a bounded listing stopped, and how to resume it.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,6 +219,9 @@ pub(crate) enum CommandData {
         destination: String,
         files: u64,
         directories: u64,
+        /// Heads observed while listing the source tree.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        head_drift: Option<ListingHeadDrift>,
         failures: Vec<TreeTransferFailure>,
     },
     FileMutation {
@@ -268,5 +310,42 @@ impl CommandData {
                 .any(|check| check.outcome == StoreProbeCheckOutcome::Failed),
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path_entries(head_drift: Option<ListingHeadDrift>) -> CommandData {
+        CommandData::PathEntries {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            absolute_path: AbsolutePath::parse("/docs").expect("absolute path"),
+            head_seq: ChangeSeq(8),
+            head_drift,
+            entries: Vec::new(),
+            next_cursor: None,
+        }
+    }
+
+    #[test]
+    fn listing_head_drift_serializes_only_after_the_head_moves() {
+        let mut heads = ListingHeadObservation::default();
+        heads.observe(ChangeSeq(5));
+        assert_eq!(heads.last(), Some(ChangeSeq(5)));
+        assert_eq!(heads.drift(), None);
+
+        let settled = serde_json::to_value(path_entries(heads.drift())).expect("serialize listing");
+        assert!(settled.get("head_drift").is_none(), "{settled}");
+
+        heads.observe(ChangeSeq(8));
+        let drifted = serde_json::to_value(path_entries(heads.drift())).expect("serialize listing");
+        assert_eq!(
+            drifted["head_drift"],
+            serde_json::json!({
+                "first_head_seq": 5,
+                "last_head_seq": 8,
+            })
+        );
     }
 }

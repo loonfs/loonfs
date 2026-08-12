@@ -93,6 +93,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "from_parent_inode_id",
     "grace_window",
     "grace_window_ms",
+    "head_drift",
     "head_seq",
     "include_attributes",
     "inode_id",

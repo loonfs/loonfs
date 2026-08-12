@@ -101,7 +101,7 @@ async fn run_admin_gc(
     let mut request = GcRequest {
         grace_window_ms: args.grace_window_ms,
         max_objects: Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS)),
-        cursor: None,
+        cursor: args.cursor,
     };
     let mut progress = PassProgress::new(runtime);
     let mut response = None;
