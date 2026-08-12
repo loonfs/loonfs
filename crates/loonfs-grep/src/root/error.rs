@@ -92,8 +92,6 @@ pub enum GrepRootError {
         expected: NamespaceId,
         actual: NamespaceId,
     },
-    #[error("grep root `{object_key}` has no etag for compare-and-swap")]
-    MissingEtag { object_key: String },
     #[error("grep root publication conflict for `{object_key}`")]
     Conflict { object_key: String },
     #[error("grep root advance changes namespace from `{expected}` to `{actual}`")]

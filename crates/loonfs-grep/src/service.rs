@@ -1,5 +1,4 @@
-//! [`GrepService`]: query planning and execution over one pinned snapshot
-//! of a namespace.
+//! [`GrepService`]: query planning and execution over grep index state.
 
 use crate::cache::{
     DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind,
@@ -75,12 +74,6 @@ pub(crate) const SCAN_DIRECTORY_PAGE_ENTRIES: usize = 1000;
 /// number of content reads.
 pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 
-/// The immutable gram-index state one query reads.
-#[derive(Debug, Clone)]
-pub struct GrepIndexSnapshot {
-    state: Result<MaterializedGrepIndexSnapshot>,
-}
-
 #[derive(Debug, Clone)]
 struct MaterializedGrepIndexSnapshot {
     built_through_seq: ChangeSeq,
@@ -99,34 +92,25 @@ struct GrepQuerySegment {
     payload_checksum: String,
 }
 
-impl GrepIndexSnapshot {
-    /// Captures unreadable grep extension state while preserving error precedence.
-    pub fn from_error(error: GrepError) -> Self {
-        Self { state: Err(error) }
-    }
-
-    /// Freshly loads the grep pointer, then loads or reuses its immutable manifest.
-    ///
-    /// Missing or disabled roots and incomplete backfills remain
-    /// not-materialized. Unreadable derived state retains its actionable
-    /// grep-specific failure without changing core read behavior.
-    pub async fn from_grep_root<S: ObjectStore + ?Sized>(
+impl GrepService {
+    /// Freshly loads the grep pointer, then loads or reuses its immutable
+    /// manifest.
+    async fn load_index_snapshot<S: ObjectStore + ?Sized>(
+        &self,
         store: &S,
         namespace_id: &NamespaceId,
-        service: &GrepService,
-    ) -> Self {
-        let pointer = match load_grep_root_pointer(store, namespace_id).await {
-            Ok(Some(pointer)) => pointer,
-            Ok(None) => return Self::from_error(GrepError::NotEnabled),
-            Err(error) => return Self::from_error(error.into()),
-        };
+    ) -> Result<MaterializedGrepIndexSnapshot> {
+        let pointer = load_grep_root_pointer(store, namespace_id)
+            .await
+            .map_err(GrepError::from)?
+            .ok_or(GrepError::NotEnabled)?;
         let manifest_id = pointer.pointer().manifest_id();
         let cache_key = GrepBlockCacheKey {
             payload_checksum: pointer.pointer().manifest_payload_checksum().to_owned(),
             block_kind: GrepBlockKind::Manifest,
             block_offset: 0,
         };
-        let state = match service
+        let state = match self
             .block_cache
             .get_or_load(&cache_key, || async {
                 let manifest = load_grep_manifest(store, namespace_id, pointer.pointer())
@@ -165,17 +149,17 @@ impl GrepIndexSnapshot {
                 | DecodedGrepBlock::Index { .. }
                 | DecodedGrepBlock::Data { .. },
             ) => {
-                return Self::from_error(GrepError::CorruptIndex {
+                return Err(GrepError::CorruptIndex {
                     message: format!(
                         "grep manifest `{}` resolved to a non-manifest cache entry",
                         manifest_key(namespace_id, manifest_id)
                     ),
                 });
             }
-            Err(error) => return Self::from_error(error),
+            Err(error) => return Err(error),
         };
         if state.namespace_id() != namespace_id {
-            return Self::from_error(GrepError::CorruptIndex {
+            return Err(GrepError::CorruptIndex {
                 message: format!(
                     "grep manifest `{}` names namespace `{}` instead of requested namespace `{namespace_id}`",
                     manifest_key(namespace_id, manifest_id),
@@ -183,46 +167,42 @@ impl GrepIndexSnapshot {
                 ),
             });
         }
-        Self::from_state(&state)
+        materialized_snapshot_from_state(&state)
     }
+}
 
-    fn from_state(root: &GrepManifestState) -> Self {
-        // Only a steady root has a watermark, and only a watermark makes an
-        // index answerable: the other two phases refuse the query outright
-        // rather than borrow a sequence they do not own.
-        let (built_through_seq, next_event_index) = match root.lifecycle() {
-            GrepLifecycle::Disabled => return Self::from_error(GrepError::NotEnabled),
-            GrepLifecycle::Backfilling { .. } => return Self::from_error(GrepError::Backfilling),
-            GrepLifecycle::Steady {
-                built_through_seq,
-                next_event_index,
-            } => (*built_through_seq, *next_event_index),
-        };
-        let segments = root
-            .segments()
-            .iter()
-            .map(|segment| GrepQuerySegment {
-                object_key: segment_key(root.namespace_id(), &segment.segment_id),
-                min_key: segment.min_row_key.clone(),
-                max_key: segment.max_row_key.clone(),
-                index_block: segment.index_block,
-                filter_block: segment.filter_block,
-                filter_inline: segment.filter_inline.clone(),
-                payload_checksum: segment.payload_checksum.clone(),
-            })
-            .collect();
-        Self {
-            state: Ok(MaterializedGrepIndexSnapshot {
-                built_through_seq,
-                next_event_index,
-                segments,
-            }),
-        }
-    }
-
-    fn materialized(&self) -> Result<&MaterializedGrepIndexSnapshot> {
-        self.state.as_ref().map_err(Clone::clone)
-    }
+fn materialized_snapshot_from_state(
+    root: &GrepManifestState,
+) -> Result<MaterializedGrepIndexSnapshot> {
+    // Only a steady root has a watermark, and only a watermark makes an
+    // index answerable: the other two phases refuse the query outright
+    // rather than borrow a sequence they do not own.
+    let (built_through_seq, next_event_index) = match root.lifecycle() {
+        GrepLifecycle::Disabled => return Err(GrepError::NotEnabled),
+        GrepLifecycle::Backfilling { .. } => return Err(GrepError::Backfilling),
+        GrepLifecycle::Steady {
+            built_through_seq,
+            next_event_index,
+        } => (*built_through_seq, *next_event_index),
+    };
+    let segments = root
+        .segments()
+        .iter()
+        .map(|segment| GrepQuerySegment {
+            object_key: segment_key(root.namespace_id(), &segment.segment_id),
+            min_key: segment.min_row_key.clone(),
+            max_key: segment.max_row_key.clone(),
+            index_block: segment.index_block,
+            filter_block: segment.filter_block,
+            filter_inline: segment.filter_inline.clone(),
+            payload_checksum: segment.payload_checksum.clone(),
+        })
+        .collect();
+    Ok(MaterializedGrepIndexSnapshot {
+        built_through_seq,
+        next_event_index,
+        segments,
+    })
 }
 
 /// Namespace-independent grep execution over a decoded-block cache.
@@ -680,7 +660,6 @@ impl GrepService {
     pub async fn query<S: ObjectStore>(
         &self,
         request: &GrepRequest,
-        snapshot: &GrepIndexSnapshot,
         reads: &NamespaceReads<'_>,
         store: &S,
     ) -> Result<GrepResponse> {
@@ -725,7 +704,9 @@ impl GrepService {
             None => None,
         };
 
-        let snapshot = snapshot.materialized()?;
+        let snapshot = self
+            .load_index_snapshot(store, reads.namespace_id())
+            .await?;
 
         // Line-anchored semantics: `^` and `$` match line boundaries, the
         // grep-family contract. The planner parses with the same flags so

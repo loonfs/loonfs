@@ -31,8 +31,8 @@ use loonfs_api::{
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
-    GrepGcJob, GrepIndexSnapshot, GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
-    GREP_GC_JOB, GREP_INDEX_JOB,
+    GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads, GREP_GC_JOB,
+    GREP_INDEX_JOB,
 };
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -279,9 +279,8 @@ impl EmbeddedBackend {
     ) -> Result<GrepResponse, BackendError> {
         let store = self.writer.object_store();
         let reads = NamespaceReads::new(&self.reader, namespace_id);
-        let snapshot = GrepIndexSnapshot::from_grep_root(&*store, namespace_id, &self.grep).await;
         self.grep
-            .query(request, &snapshot, &reads, &store)
+            .query(request, &reads, &store)
             .await
             .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
     }

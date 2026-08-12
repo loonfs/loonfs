@@ -286,7 +286,7 @@ impl BackgroundCompactions {
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<NamespaceId, NamespaceCompactions>> {
         self.namespaces
             .lock()
-            .expect("background compaction lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -391,13 +391,10 @@ impl CompactionSlot {
         let claimed = self
             .namespaces
             .lock()
-            .map(|namespaces| {
-                namespaces
-                    .values()
-                    .filter(|entry| entry.active.is_some())
-                    .count()
-            })
-            .unwrap_or(0);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|entry| entry.active.is_some())
+            .count();
         let running = MAX_CONCURRENT_COMPACTIONS.saturating_sub(self.permits.available_permits());
         runner
             .instruments
@@ -408,9 +405,10 @@ impl CompactionSlot {
 impl Drop for CompactionSlot {
     fn drop(&mut self) {
         {
-            let Ok(mut namespaces) = self.namespaces.lock() else {
-                return;
-            };
+            let mut namespaces = self
+                .namespaces
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(entry) = namespaces.get_mut(&self.namespace_id) else {
                 return;
             };

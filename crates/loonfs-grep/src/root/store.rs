@@ -15,16 +15,14 @@ use crate::keyspace::{manifest_key, root_key};
 use bytes::Bytes;
 use loonfs::StoreFailureClass;
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::{
-    ImmutableWriteError, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError, PutMode};
 
 /// A verified grep root pointer and metadata from the same store read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedGrepRootPointer {
     object_key: String,
     envelope: GrepRootEnvelope,
-    metadata: ObjectMetadata,
+    etag: String,
 }
 
 impl LoadedGrepRootPointer {
@@ -40,8 +38,8 @@ impl LoadedGrepRootPointer {
         self.envelope.pointer()
     }
 
-    pub fn metadata(&self) -> &ObjectMetadata {
-        &self.metadata
+    pub fn etag(&self) -> &str {
+        &self.etag
     }
 }
 
@@ -73,10 +71,6 @@ impl LoadedGrepRoot {
     pub fn manifest_state(&self) -> &GrepManifestState {
         self.manifest.manifest_state()
     }
-
-    pub fn metadata(&self) -> &ObjectMetadata {
-        self.pointer.metadata()
-    }
 }
 
 /// Loads and verifies one namespace's mutable grep root pointer.
@@ -92,6 +86,7 @@ pub async fn load_grep_root_pointer<S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
+    let etag = required_etag(&object_key, body.metadata.etag)?;
     let envelope = decode_grep_root(&body.bytes).map_err(|error| corrupt(&object_key, error))?;
     if envelope.pointer().namespace_id() != namespace_id {
         return Err(GrepRootError::IdentityMismatch {
@@ -103,7 +98,7 @@ pub async fn load_grep_root_pointer<S: ObjectStore + ?Sized>(
     Ok(Some(LoadedGrepRootPointer {
         object_key,
         envelope,
-        metadata: body.metadata,
+        etag,
     }))
 }
 
@@ -192,11 +187,12 @@ pub async fn seed_grep_root<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(store_error(&object_key, &error)),
     };
+    let etag = required_etag(&object_key, metadata.etag)?;
     Ok(LoadedGrepRoot {
         pointer: LoadedGrepRootPointer {
             object_key,
             envelope,
-            metadata,
+            etag,
         },
         manifest,
     })
@@ -225,16 +221,6 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
             message: format!("loaded root key does not match `{expected_key}`"),
         });
     }
-    let expected_etag =
-        current
-            .pointer
-            .metadata
-            .etag
-            .as_deref()
-            .ok_or_else(|| GrepRootError::MissingEtag {
-                object_key: current.pointer.object_key.clone(),
-            })?;
-
     let written = write_grep_manifest(store, next).await?;
     let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
         next.namespace_id().clone(),
@@ -249,7 +235,7 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
             &current.pointer.object_key,
             Bytes::from(bytes),
             PutMode::CompareAndSwap {
-                expected_etag: expected_etag.to_owned(),
+                expected_etag: current.pointer.etag.clone(),
             },
         )
         .await
@@ -262,11 +248,12 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(store_error(&current.pointer.object_key, &error)),
     };
+    let etag = required_etag(&current.pointer.object_key, metadata.etag)?;
     Ok(LoadedGrepRoot {
         pointer: LoadedGrepRootPointer {
             object_key: current.pointer.object_key.clone(),
             envelope,
-            metadata,
+            etag,
         },
         manifest: written.envelope,
     })
@@ -319,6 +306,14 @@ fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepRootError {
         message: error.message(),
         class: StoreFailureClass::of(error),
     }
+}
+
+fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
+    etag.ok_or_else(|| GrepRootError::Store {
+        object_key: object_key.to_owned(),
+        message: "object store omitted the required grep-root etag".to_owned(),
+        class: StoreFailureClass::Other,
+    })
 }
 
 fn immutable_write_error(error: ImmutableWriteError) -> GrepRootError {

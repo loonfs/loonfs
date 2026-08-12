@@ -766,19 +766,42 @@ async fn shutdown_clears_pending_work_and_refuses_later_nudges() {
 
 #[tokio::test]
 async fn drain_surfaces_a_panicked_step() {
-    let job = TestJob::answering(StepAnswer::Panic);
-    let runner = enabled_runner(job);
-    let namespace_id = namespace_id("panics");
+    let job = TestJob::scripted(
+        [StepAnswer::Panic],
+        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+    );
+    let runner = enabled_runner(job.clone());
+    let panicked_namespace_id = namespace_id("panics");
+    let later_namespace_id = namespace_id("runs-later");
 
-    runner.handle().nudge(TEST_JOB, &namespace_id);
+    runner.handle().nudge(TEST_JOB, &panicked_namespace_id);
+    wait_for(
+        || {
+            runner
+                .inner
+                .lock_state()
+                .tasks
+                .iter()
+                .any(tokio::task::JoinHandle::is_finished)
+        },
+        "the panicked task to finish",
+    )
+    .await;
+    // Spawning this step reaps the finished panic before drain can join it.
+    runner.handle().nudge(TEST_JOB, &later_namespace_id);
     let error = runner.drain().await.expect_err("a panicked step surfaces");
     assert!(
         error.to_string().contains("panicked"),
         "drain reports panicked tasks: {error}"
     );
     assert!(
-        !runner.is_pending(TEST_JOB, &namespace_id),
+        !runner.is_pending(TEST_JOB, &panicked_namespace_id),
         "a panicked step releases its key and its permit"
+    );
+    assert_eq!(
+        job.stepped(),
+        vec!["panics".to_owned(), "runs-later".to_owned()],
+        "the interleaved spawn runs after reaping the panic"
     );
 }
 

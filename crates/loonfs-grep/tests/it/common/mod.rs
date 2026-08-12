@@ -13,7 +13,7 @@ use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId};
 use loonfs_grep::root::GrepLifecycle;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
-    GrepIndexSnapshot, GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
+    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use std::sync::Arc;
@@ -234,8 +234,7 @@ pub(crate) async fn grep_with(
     request: &GrepRequest,
 ) -> Result<GrepResponse, GrepError> {
     let reads = NamespaceReads::new(reader, namespace_id);
-    let snapshot = GrepIndexSnapshot::from_grep_root(&**store, namespace_id, service).await;
-    service.query(request, &snapshot, &reads, store).await
+    service.query(request, &reads, store).await
 }
 
 /// Classifies a key by durable family instead of by its spelling, so the
