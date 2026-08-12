@@ -11,12 +11,12 @@
 //! age and decides the rest itself, from the reference anchor in
 //! `gc/live_set.rs`.
 
-use crate::checkpoint::record::encode_checkpoint_record;
+use crate::checkpoint::record::{encode_checkpoint_record, load_checkpoint_record_at_key};
 use crate::context::MutationContext;
+use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-    ControlObjectKind,
+    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
 };
 use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, NamespaceId, RetainedReason};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -59,23 +59,13 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     namespace_deleted: bool,
     context: &MutationContext,
 ) -> Result<CheckpointSweep> {
-    let Some(body) = store
-        .get_with_metadata(key)
-        .await
-        .map_err(|error| CoreError::store(key, &error))?
-    else {
-        return Ok(CheckpointSweep::Retain);
+    let loaded = load_checkpoint_record_at_key(store, key).await;
+    let loaded = match loaded {
+        Ok(loaded) => loaded,
+        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(CheckpointSweep::Retain),
+        Err(error) => return Err(core_control_load_error(error)),
     };
-    let Ok(envelope) = decode_control_object::<CheckpointRecordState>(
-        &body.bytes,
-        ControlObjectKind::CheckpointRecord,
-    ) else {
-        return Ok(CheckpointSweep::Retain);
-    };
-    let record = envelope.state;
-    if record.namespace_id != *namespace_id {
-        return Ok(CheckpointSweep::Retain);
-    }
+    let record = loaded.state;
     if let CheckpointRecordLifecycle::Released { released_at_ms } = record.state {
         let aged = context.now_ms.saturating_sub(released_at_ms) >= grace_window_ms;
         return Ok(if aged {
@@ -100,15 +90,12 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     if !releasable {
         return Ok(CheckpointSweep::Retain);
     }
-    let Some(etag) = body.metadata.etag.as_deref() else {
-        return Ok(CheckpointSweep::Retain);
-    };
     let mut released = record;
     released.state = CheckpointRecordLifecycle::Released {
         released_at_ms: context.now_ms,
     };
     let bytes = encode_checkpoint_record(&released)?;
-    match store.compare_and_swap(key, etag, bytes).await {
+    match store.compare_and_swap(key, &loaded.etag, bytes).await {
         Ok(_) => Ok(CheckpointSweep::Released),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
             tracing::debug!(

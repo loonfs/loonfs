@@ -179,7 +179,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         upload_id,
-        |mut state: UploadSessionState, _metadata| async move {
+        |mut state: UploadSessionState| async move {
             if !matches!(state.state, UploadSessionLifecycle::Open { .. }) {
                 return Ok(UploadSessionUpdate::Noop(None));
             }

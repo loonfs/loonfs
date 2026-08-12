@@ -66,7 +66,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_head = crate::namespace::control::read_head_object(store, source_namespace_id)
         .await
         .map_err(CoreError::load_head)?
-        .envelope
         .state;
     let fork_seq = source_record.manifest_head_seq;
 

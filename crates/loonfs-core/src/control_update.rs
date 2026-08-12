@@ -1,16 +1,20 @@
 //! Read-modify-write loops for control objects: load, edit, and
 //! compare-and-swap the head or an upload session on its etag.
 
-use crate::error::{CoreError, StoreFailureClass};
-use crate::namespace::control::{read_head_object, ControlObjectLoadError, LoadedHeadObject};
+use crate::control_object::{
+    core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
+    ControlObjectLoadError, LoadedControl,
+};
+use crate::error::CoreError;
+use crate::namespace::control::{read_head_object, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
-    UploadSessionEnvelope, UploadSessionState,
+    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, UploadSessionEnvelope,
+    UploadSessionState,
 };
 use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::upload_session;
-use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use std::future::Future;
 use thiserror::Error;
 
@@ -41,8 +45,6 @@ pub(crate) enum UploadSessionCas<T> {
 pub(crate) enum ControlUpdateError {
     #[error(transparent)]
     LoadHead(ControlObjectLoadError),
-    #[error("missing etag for `{object_key}`")]
-    MissingEtag { object_key: String },
     #[error("control object codec error for `{object_key}`: {message}")]
     Codec { object_key: String, message: String },
     #[error("control object store error for `{object_key}`: {message}")]
@@ -70,12 +72,10 @@ where
         let loaded = read_head_object(store, namespace_id)
             .await
             .map_err(|error| E::from(ControlUpdateError::LoadHead(error)))?;
-        let expected_etag = required_etag(&loaded.metadata, &loaded.object_key).map_err(E::from)?;
-
         let HeadReplacement { next, outcome } = update(&loaded)?;
         let encoded = encode_head(*next, &loaded.object_key).map_err(E::from)?;
         match store
-            .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
+            .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
             .await
         {
             Ok(_) => return Ok(outcome),
@@ -109,11 +109,7 @@ where
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     for _attempt in 0..max_attempts {
-        match try_update_upload_session(store, namespace_id, upload_id, |state, _metadata| {
-            update(state)
-        })
-        .await?
-        {
+        match try_update_upload_session(store, namespace_id, upload_id, &mut update).await? {
             UploadSessionCas::Applied(outcome) => return Ok(outcome),
             UploadSessionCas::Conflict => continue,
         }
@@ -136,12 +132,11 @@ pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
 ) -> crate::error::Result<UploadSessionCas<T>>
 where
     S: ObjectStore + ?Sized,
-    F: FnOnce(UploadSessionState, ObjectMetadata) -> Fut,
+    F: FnOnce(UploadSessionState) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
-    let expected_etag = required_etag_core(&loaded.metadata, &loaded.object_key)?.to_owned();
-    match update(loaded.envelope.state, loaded.metadata).await? {
+    match update(loaded.state).await? {
         UploadSessionUpdate::Noop(outcome) => Ok(UploadSessionCas::Applied(outcome)),
         UploadSessionUpdate::Replace { next, outcome } => {
             let envelope =
@@ -155,7 +150,7 @@ where
                 CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
             })?;
             match store
-                .compare_and_swap(&loaded.object_key, &expected_etag, Bytes::from(encoded))
+                .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
                 .await
             {
                 Ok(_) => Ok(UploadSessionCas::Applied(outcome)),
@@ -180,29 +175,6 @@ fn encode_head(next: HeadState, object_key: &str) -> Result<Vec<u8>, ControlUpda
     })
 }
 
-fn required_etag<'a>(
-    metadata: &'a ObjectMetadata,
-    object_key: &str,
-) -> Result<&'a str, ControlUpdateError> {
-    metadata
-        .etag
-        .as_deref()
-        .ok_or_else(|| ControlUpdateError::MissingEtag {
-            object_key: object_key.to_owned(),
-        })
-}
-
-fn required_etag_core<'a>(
-    metadata: &'a ObjectMetadata,
-    object_key: &str,
-) -> crate::error::Result<&'a str> {
-    metadata.etag.as_deref().ok_or_else(|| CoreError::Store {
-        object_key: object_key.to_owned(),
-        message: "missing control object etag".to_owned(),
-        class: StoreFailureClass::Other,
-    })
-}
-
 /// Reads an upload session without retaining its ETag. Use this for status
 /// checks and other operations that do not need to update the session.
 pub(crate) async fn read_upload_session_state<S: ObjectStore + ?Sized>(
@@ -212,16 +184,10 @@ pub(crate) async fn read_upload_session_state<S: ObjectStore + ?Sized>(
 ) -> crate::error::Result<UploadSessionState> {
     Ok(read_upload_session_object(store, namespace_id, upload_id)
         .await?
-        .envelope
         .state)
 }
 
-#[derive(Debug, Clone)]
-struct LoadedUploadSessionObject {
-    object_key: String,
-    metadata: ObjectMetadata,
-    envelope: UploadSessionEnvelope,
-}
+type LoadedUploadSessionObject = LoadedControl<UploadSessionState>;
 
 async fn read_upload_session_object<S: ObjectStore + ?Sized>(
     store: &S,
@@ -229,33 +195,23 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
 ) -> crate::error::Result<LoadedUploadSessionObject> {
     let object_key = upload_session(namespace_id.as_str(), upload_id.as_str());
-    let body = store
-        .get_with_metadata(&object_key)
-        .await
-        .map_err(|err| CoreError::store(&object_key, &err))?
-        .ok_or_else(|| CoreError::UploadNotFound {
-            upload_id: upload_id.clone(),
-        })?;
-    let envelope: UploadSessionEnvelope =
-        decode_control_object(&body.bytes, ControlObjectKind::UploadSession).map_err(|err| {
-            CoreError::Internal(format!("invalid upload session `{object_key}`: {err}"))
-        })?;
-    if envelope.state.namespace_id != *namespace_id {
-        return Err(CoreError::Internal(format!(
-            "upload session namespace mismatch for `{object_key}`"
-        )));
-    }
-    if envelope.state.upload_id != *upload_id {
-        return Err(CoreError::Internal(format!(
-            "upload session id mismatch for `{object_key}`"
-        )));
-    }
-
-    Ok(LoadedUploadSessionObject {
+    let loaded = load_control_object(
+        store,
         object_key,
-        metadata: body.metadata,
-        envelope,
-    })
+        ControlObjectKind::UploadSession,
+        |state: &UploadSessionState| {
+            expect_namespace(namespace_id, &state.namespace_id)?;
+            expect_identity_field("upload id", upload_id.as_str(), state.upload_id.as_str())
+        },
+    )
+    .await;
+    match loaded {
+        Ok(loaded) => Ok(loaded),
+        Err(ControlObjectLoadError::MissingObject { .. }) => Err(CoreError::UploadNotFound {
+            upload_id: upload_id.clone(),
+        }),
+        Err(error) => Err(core_control_load_error(error)),
+    }
 }
 
 #[cfg(test)]
@@ -299,7 +255,7 @@ mod tests {
         store.fail_next(1);
 
         let outcome = update_head(&store, &namespace_id, 3, |loaded| {
-            let mut next = loaded.envelope.state.clone();
+            let mut next = loaded.state.clone();
             next.seq.0 += 1;
             Ok::<_, ControlUpdateError>(HeadReplacement {
                 next: Box::new(next),
@@ -325,14 +281,18 @@ mod tests {
         let error = update_head(&store, &namespace_id, 3, |loaded| {
             closure_called.store(true, Ordering::SeqCst);
             Ok::<_, ControlUpdateError>(HeadReplacement {
-                next: Box::new(loaded.envelope.state.clone()),
+                next: Box::new(loaded.state.clone()),
                 outcome: (),
             })
         })
         .await
         .expect_err("missing etag should fail");
 
-        assert!(matches!(error, ControlUpdateError::MissingEtag { .. }));
+        assert!(matches!(
+            error,
+            ControlUpdateError::LoadHead(ControlObjectLoadError::Store { message, .. })
+                if message.contains("required control-object etag")
+        ));
         assert!(!closure_called.load(Ordering::SeqCst));
     }
 }

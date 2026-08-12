@@ -6,9 +6,10 @@
 //! (format spec, "Creating a namespace").
 
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::control_object::ControlObjectLoadError;
+use crate::error::{CoreError, StoreFailureClass};
 use crate::metadata::{InodeRecord, MetadataState};
-use crate::namespace::control::{read_head_object, ControlObjectLoadError};
+use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceState,
@@ -51,6 +52,10 @@ impl BootstrapNamespaceError {
             BootstrapNamespaceError::EmptyHolderId => ErrorCode::InvalidRequest,
             BootstrapNamespaceError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
             BootstrapNamespaceError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+            BootstrapNamespaceError::Head(ControlObjectLoadError::Store {
+                class: StoreFailureClass::PermissionDenied,
+                ..
+            }) => ErrorCode::PermissionDenied,
             BootstrapNamespaceError::Head(_) => ErrorCode::ServerError,
             BootstrapNamespaceError::Core(error) => error.code(),
         }
@@ -151,7 +156,7 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
         Ok(_) => Ok(NamespaceHeadInstall::Landed),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
             let existing = match read_head_object(store, namespace_id).await {
-                Ok(loaded) => loaded.envelope.state,
+                Ok(loaded) => loaded.state,
                 // An unreadable head still occupies the id: report the
                 // corruption rather than a lifecycle answer this attempt
                 // cannot support.

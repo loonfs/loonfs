@@ -2,8 +2,8 @@
 //! sessions from publishing interleaved commits.
 
 use crate::context::MutationContext;
+use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
-use crate::namespace::control::ControlObjectLoadError;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState, WriterBlock};
 use loonfs_api::{NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
@@ -59,7 +59,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         namespace_id,
         MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
         |loaded_head| {
-            let head = &loaded_head.envelope.state;
+            let head = &loaded_head.state;
             // Check for deletion before incrementing the epoch. A deleted namespace
             // never grants another writer epoch, including to the writer recorded in
             // its tombstone.
@@ -120,7 +120,6 @@ impl From<ControlUpdateError> for WriterEpochAcquireError {
     fn from(value: ControlUpdateError) -> Self {
         match value {
             ControlUpdateError::LoadHead(error) => Self::LoadHead(error),
-            ControlUpdateError::MissingEtag { object_key } => Self::MissingHeadEtag { object_key },
             ControlUpdateError::Codec {
                 object_key,
                 message,
@@ -248,7 +247,6 @@ mod tests {
         let head = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head.writer_epoch, WriterEpoch(9));
         let writer = head.writer.expect("writer block");
@@ -289,7 +287,6 @@ mod tests {
         let head = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head.state, NamespaceState::Deleted);
         assert_eq!(head.writer_epoch, WriterEpoch(7));
@@ -347,7 +344,6 @@ mod tests {
         let head = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         let writer = head.writer.expect("writer block");
         assert_eq!(writer.writer_id, "writer-b");
@@ -415,7 +411,6 @@ mod tests {
         let head = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head.seq, ChangeSeq(3));
         assert_eq!(head.writer.expect("writer block").writer_id, "writer-a");
@@ -465,7 +460,6 @@ mod tests {
         let head = read_head_object(&store.inner, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head.state, NamespaceState::Active);
         let writer = head.writer.expect("writer block");
@@ -581,7 +575,6 @@ mod tests {
         let head = read_head_object(&store.inner, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head.writer_epoch, WriterEpoch(9));
         assert_eq!(head.writer.expect("writer block").writer_id, "writer-c");

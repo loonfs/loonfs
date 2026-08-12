@@ -210,7 +210,6 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
     let head = read_head_object(store, namespace_id)
         .await
         .expect("read head")
-        .envelope
         .state;
     crate::namespace::basis::resolve_retention_floor_seq(store, &head)
         .await
@@ -343,7 +342,6 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
     read_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
-        .envelope
         .state
         .manifest_id
 }
@@ -385,7 +383,6 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     let manifest_id = read_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
-        .envelope
         .state
         .manifest_id;
     let materialized =
@@ -502,7 +499,6 @@ async fn current_manifest_object_id<S: ObjectStore + ?Sized>(
     read_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
-        .envelope
         .state
         .manifest_object_id
 }
@@ -533,7 +529,6 @@ async fn load_current_projection<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?
-        .envelope
         .state;
     Ok(CurrentProjection {
         head,

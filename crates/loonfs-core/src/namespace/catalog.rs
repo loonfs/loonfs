@@ -1,7 +1,8 @@
 //! The namespace catalog: the namespace's immutable identity — its content
 //! store and name policy — read from the head that carries them.
 
-use crate::namespace::control::{read_head_object, ControlObjectLoadError};
+use crate::control_object::ControlObjectLoadError;
+use crate::namespace::control::read_head_object;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -55,9 +56,7 @@ pub async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     expected_namespace_id: &NamespaceId,
 ) -> Result<VerifiedNamespaceCatalogEntry, NamespaceCatalogLoadError> {
     let head = read_head_object(store, expected_namespace_id).await?;
-    Ok(VerifiedNamespaceCatalogEntry::from_head(
-        &head.envelope.state,
-    ))
+    Ok(VerifiedNamespaceCatalogEntry::from_head(&head.state))
 }
 
 pub(crate) async fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(

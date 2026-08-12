@@ -8,9 +8,9 @@
 use crate::checkpoint::ManifestLoadError;
 use crate::commit::{CommitHeadPublishError, CommitValidationError};
 use crate::commit_engine::ContentPreparationError;
+use crate::control_object::ControlObjectLoadError;
 use crate::metadata::VisiblePathError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
-use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::writer_epoch::WriterEpochAcquireError;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
@@ -630,14 +630,16 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
     }
 }
 
-fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
+pub(crate) fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
     match error {
         ControlObjectLoadError::MissingObject { .. } => ErrorCode::NamespaceNotFound,
         ControlObjectLoadError::RootAheadOfHead { .. } => ErrorCode::StaleHead,
         ControlObjectLoadError::NamespaceMismatch { .. }
+        | ControlObjectLoadError::IdentityMismatch { .. }
+        | ControlObjectLoadError::KeyLayout { .. }
         | ControlObjectLoadError::ChecksumMismatch { .. }
         | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,
-        ControlObjectLoadError::Store { .. } => ErrorCode::ServerError,
+        ControlObjectLoadError::Store { class, .. } => classify_store_failure(*class),
     }
 }
 
@@ -682,8 +684,8 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
             ControlUpdateError::LoadHead(error) => {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             }
-            // The remaining variants (missing etag, codec, control store error,
-            // retries exhausted) are control-plane plumbing failures with no
+            // The remaining variants (codec, control store error, retries
+            // exhausted) are control-plane plumbing failures with no
             // single object key in scope at this blanket conversion. They share
             // the ServerError wire code with `Store`; keep the detail as a
             // prefixed message.
@@ -816,9 +818,15 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataViewError, WriterFence,
+        CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataViewError,
+        StoreFailureClass, WriterFence,
     };
     use crate::commit_engine::ContentPreparationError;
+    use crate::control_object::ControlObjectLoadError;
+    use crate::control_update::ControlUpdateError;
+    use crate::namespace::catalog::NamespaceCatalogLoadError;
+    use crate::namespace::writer_epoch::WriterEpochAcquireError;
+    use crate::namespace::BootstrapNamespaceError;
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_api::{
         ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId, RevisionNo, WriterEpoch,
@@ -1054,5 +1062,28 @@ mod tests {
         let transport = ObjectStoreError::transport("namespaces/demo/wal/head.json", "timed out");
         let error = CoreError::store("namespaces/demo/wal/head.json", &transport);
         assert_eq!(error.code(), ErrorCode::ServerError);
+    }
+
+    #[test]
+    fn control_object_permission_failure_survives_every_head_wrapper() {
+        let denied = ControlObjectLoadError::Store {
+            object_key: "namespaces/demo/wal/head.json".to_owned(),
+            message: "permission denied: bucket policy".to_owned(),
+            class: StoreFailureClass::PermissionDenied,
+        };
+
+        let core_wrappers = [
+            CoreError::load_head(denied.clone()),
+            CoreError::WriterEpoch(WriterEpochAcquireError::LoadHead(denied.clone())),
+            CoreError::from(NamespaceCatalogLoadError::LoadHead(denied.clone())),
+            CoreError::from(ControlUpdateError::LoadHead(denied.clone())),
+        ];
+        for error in core_wrappers {
+            assert_eq!(error.code(), ErrorCode::PermissionDenied);
+        }
+        assert_eq!(
+            BootstrapNamespaceError::Head(denied).code(),
+            ErrorCode::PermissionDenied
+        );
     }
 }

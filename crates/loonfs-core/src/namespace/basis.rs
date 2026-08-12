@@ -14,10 +14,10 @@
 //!    against the identity and checksum the head recorded. A mismatch is
 //!    corruption, never a fallback.
 
+use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
 use crate::namespace::control::{
-    read_head_and_metadata_root_if_present, read_wal_floor_object, ControlObjectLoadError,
-    LoadedHeadObject,
+    read_head_and_metadata_root_if_present, read_wal_floor_object, LoadedHeadObject,
 };
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{manifest_object_id_manifest_id, ChangeSeq, ManifestId, ManifestObjectId};
@@ -88,11 +88,11 @@ pub(crate) async fn read_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     let basis = match root {
         Some(root) => MetadataBasis::Manifest(BasisManifest {
             owner_namespace_id: namespace_id.clone(),
-            manifest_id: root.envelope.state.manifest_id,
-            manifest_object_id: root.envelope.state.manifest_object_id,
-            manifest_payload_checksum: root.envelope.state.manifest_payload_checksum,
+            manifest_id: root.state.manifest_id,
+            manifest_object_id: root.state.manifest_object_id,
+            manifest_payload_checksum: root.state.manifest_payload_checksum,
         }),
-        None => metadata_basis_without_root(&head.envelope.state)?,
+        None => metadata_basis_without_root(&head.state)?,
     };
     Ok(LoadedNamespaceBasis { head, basis })
 }
@@ -147,7 +147,7 @@ pub(crate) async fn resolve_retention_floor_seq<S: ObjectStore + ?Sized>(
     head: &HeadState,
 ) -> Result<ChangeSeq, ControlObjectLoadError> {
     match read_wal_floor_object(store, &head.namespace_id).await {
-        Ok(loaded) => Ok(loaded.envelope.state.floor_seq),
+        Ok(loaded) => Ok(loaded.state.floor_seq),
         Err(ControlObjectLoadError::MissingObject { .. }) => Ok(namespace_birth_seq(head)),
         Err(error) => Err(error),
     }

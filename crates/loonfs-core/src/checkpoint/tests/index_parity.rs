@@ -136,8 +136,8 @@ pub(super) async fn overwrite_manifest(
     let loaded_root = read_metadata_root_object(store, namespace_id)
         .await
         .expect("read root");
-    if loaded_root.envelope.state.manifest_id == manifest_id {
-        let mut root = loaded_root.envelope.state;
+    if loaded_root.state.manifest_id == manifest_id {
+        let mut root = loaded_root.state;
         root.manifest_object_id = manifest_object_id;
         root.manifest_payload_checksum = updated_manifest.payload_checksum.clone();
         let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(

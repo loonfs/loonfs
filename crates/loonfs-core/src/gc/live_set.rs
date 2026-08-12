@@ -4,18 +4,17 @@
 use super::budget::PassBudget;
 use super::fork_checkpoints::fork_target_proven_gone;
 use super::reap::{lease_expired, manifest_object_id_of};
+use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::checkpoint::{load_namespace_manifest_envelope_if_present, ManifestLoadFailureClass};
 use crate::context::MutationContext;
+use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::{
     read_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
 };
 use crate::wal::{load_wal_chain_within, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
-use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-    ControlObjectKind, NamespaceState,
-};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle, NamespaceState};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
@@ -277,7 +276,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<LiveSetCollection> {
     let now_ms = context.now_ms;
-    let head = &loaded.head.envelope.state;
+    let head = &loaded.head.state;
     // A namespace with no root of its own roots no manifest here: the
     // genesis basis has none, and a fork target's basis is a source-prefix
     // object that the source's own pass protects through the fork-owned
@@ -337,84 +336,58 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         if !budget.try_charge() {
             return Ok(LiveSetCollection::BudgetExhausted);
         }
-        let Some(body) = store
-            .get_with_metadata(&key)
-            .await
-            .map_err(|error| CoreError::store(&key, &error))?
-        else {
-            continue;
+        let loaded = load_checkpoint_record_at_key(store, &key).await;
+        let record = match loaded {
+            Ok(loaded) => loaded.state,
+            Err(ControlObjectLoadError::MissingObject { .. }) => continue,
+            Err(error) => return Err(core_control_load_error(error)),
         };
-        match decode_control_object::<CheckpointRecordState>(
-            &body.bytes,
-            ControlObjectKind::CheckpointRecord,
-        ) {
-            Ok(envelope) => {
-                let record = envelope.state;
-                // What makes a record a candidate depends on who owns it.
-                // A user pin answers to its own expiry. A fork pin answers
-                // to its target's fate, and only to that: the lease is one
-                // input to proving an attempt abandoned, never a reason to
-                // drop a pin whose target is alive and reading through it.
-                // Every check here is repeated at decision time; this only
-                // selects candidates.
-                let candidate = match &record.owner {
-                    _ if record.state != (CheckpointRecordLifecycle::Active {}) => true,
-                    CheckpointOwner::User { .. } => lease_expired(&record, now_ms),
-                    CheckpointOwner::Fork {
-                        target_namespace_id,
-                    } => {
-                        if !budget.try_charge() {
-                            return Ok(LiveSetCollection::BudgetExhausted);
-                        }
-                        fork_target_proven_gone(store, target_namespace_id, &record, context)
-                            .await?
-                    }
-                };
-                if namespace_deleted {
-                    // On a terminal namespace only a fork record with a live
-                    // target roots anything; every other record is an
-                    // ordinary candidate, and its basis is not rooted (no
-                    // reader can reach a tombstone).
-                    if candidate || matches!(record.owner, CheckpointOwner::User { .. }) {
-                        continue;
-                    }
-                    live.manifests.insert(record.manifest_object_id.clone());
-                    active_record_bases
-                        .entry(record.manifest_object_id)
-                        .or_default()
-                        .push(key.clone());
-                    live.checkpoint_keys.insert(key);
-                    continue;
+        // What makes a record a candidate depends on who owns it.
+        // A user pin answers to its own expiry. A fork pin answers
+        // to its target's fate, and only to that: the lease is one
+        // input to proving an attempt abandoned, never a reason to
+        // drop a pin whose target is alive and reading through it.
+        // Every check here is repeated at decision time; this only
+        // selects candidates.
+        let candidate = match &record.owner {
+            _ if record.state != (CheckpointRecordLifecycle::Active {}) => true,
+            CheckpointOwner::User { .. } => lease_expired(&record, now_ms),
+            CheckpointOwner::Fork {
+                target_namespace_id,
+            } => {
+                if !budget.try_charge() {
+                    return Ok(LiveSetCollection::BudgetExhausted);
                 }
-                live.manifests.insert(record.manifest_object_id.clone());
-                // A candidate still roots its basis above; it is only kept
-                // out of the protected key set so the sweep can act on it.
-                if candidate {
-                    continue;
-                }
-                active_record_bases
-                    .entry(record.manifest_object_id)
-                    .or_default()
-                    .push(key.clone());
-                live.checkpoint_keys.insert(key);
+                fork_target_proven_gone(store, target_namespace_id, &record, context).await?
             }
-            // Nothing but checkpoint records lives under this prefix, so
-            // bytes that do not decode as one are corruption rather than an
-            // ambiguous root. `checkpoint/list.rs` reads the same prefix and
-            // reaches the same conclusion. The store read above already
-            // fails the pass, so every error left here is a decode error.
-            //
-            // Retaining instead would hide the damage permanently: the key
-            // would join `checkpoint_keys`, which is what keeps the sweep
-            // from deleting it, and the degraded flag would suppress
-            // manifest and table reclamation on this pass and on every pass
-            // after it, with nothing logged.
-            Err(error) => {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "`{key}` is not a checkpoint record: {error}"
-                )));
+        };
+        if namespace_deleted {
+            // On a terminal namespace only a fork record with a live
+            // target roots anything; every other record is an
+            // ordinary candidate, and its basis is not rooted (no
+            // reader can reach a tombstone).
+            if candidate || matches!(record.owner, CheckpointOwner::User { .. }) {
+                continue;
             }
+            live.manifests.insert(record.manifest_object_id.clone());
+            active_record_bases
+                .entry(record.manifest_object_id)
+                .or_default()
+                .push(key.clone());
+            live.checkpoint_keys.insert(key);
+            continue;
         }
+        live.manifests.insert(record.manifest_object_id.clone());
+        // A candidate still roots its basis above; it is only kept
+        // out of the protected key set so the sweep can act on it.
+        if candidate {
+            continue;
+        }
+        active_record_bases
+            .entry(record.manifest_object_id)
+            .or_default()
+            .push(key.clone());
+        live.checkpoint_keys.insert(key);
     }
 
     // Live manifests protect their tables (rule 6: only validated manifests

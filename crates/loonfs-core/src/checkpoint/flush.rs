@@ -237,7 +237,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     let loaded = read_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
-    let head = loaded.head.envelope.state;
+    let head = loaded.head.state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {

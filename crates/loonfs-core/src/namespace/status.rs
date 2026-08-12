@@ -38,7 +38,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
-    let head = loaded.head.envelope.state;
+    let head = loaded.head.state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: expected_namespace_id.clone(),
@@ -150,7 +150,6 @@ pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?
-        .envelope
         .state;
     if head.state != NamespaceState::Deleted {
         return Err(CoreError::Internal(format!(

@@ -36,7 +36,7 @@ impl ManifestSwapOnCasConflictStore {
         let loaded = read_metadata_root_object(&self.inner, &self.namespace_id)
             .await
             .expect("read root for swap");
-        let mut root = loaded.envelope.state;
+        let mut root = loaded.state;
         // Same-seq replacement referencing a different manifest: the shape a
         // pure compaction publishes.
         root.manifest_id = ManifestId(root.manifest_id.0 + 1);
@@ -126,7 +126,7 @@ impl FloorRaiseOnCasConflictStore {
         // The namespace may not have published a floor yet: create and fork
         // write none, so the competitor may be the first writer too.
         let mut floor = match read_wal_floor_object(&self.inner, &self.namespace_id).await {
-            Ok(loaded) => loaded.envelope.state,
+            Ok(loaded) => loaded.state,
             Err(_) => loonfs_api::wire::control::WalFloorState {
                 namespace_id: self.namespace_id.clone(),
                 floor_seq: ChangeSeq(0),
@@ -1168,7 +1168,6 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
     let root_after = read_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
-        .envelope
         .state;
     assert_eq!(
         root_after.manifest_object_id,

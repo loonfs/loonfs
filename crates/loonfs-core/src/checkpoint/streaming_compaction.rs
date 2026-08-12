@@ -654,7 +654,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
             .await
             .map_err(CoreError::load_head)?
-            .map(|loaded| loaded.envelope.state)
+            .map(|loaded| loaded.state)
         else {
             return Ok(Finalization::Abandoned);
         };
@@ -748,7 +748,7 @@ async fn load_current_manifest_tables<'a, S: ObjectStore + ?Sized>(
     let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
-        .map(|loaded| loaded.envelope.state)
+        .map(|loaded| loaded.state)
     else {
         return Ok(None);
     };

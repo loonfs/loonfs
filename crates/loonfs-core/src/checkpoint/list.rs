@@ -10,15 +10,14 @@
 //! released are gone from the answer: a release is what stops a record
 //! pinning anything, and a released record awaiting its reap pins nothing.
 
-use super::record::read_checkpoint_record;
+use super::record::load_checkpoint_record_at_key;
+use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::read_head_object;
 use futures::StreamExt;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
-use loonfs_api::{
-    CheckpointId, CheckpointOwnerSummary, CheckpointSummary, ListCheckpointsResponse, NamespaceId,
-};
-use loonfs_objectstore::keys::{checkpoint_prefix, checkpoint_record};
+use loonfs_api::{CheckpointOwnerSummary, CheckpointSummary, ListCheckpointsResponse, NamespaceId};
+use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::ObjectStore;
 
 /// Lists every active checkpoint record under `namespace_id`, oldest first.
@@ -52,12 +51,12 @@ pub(crate) async fn list_checkpoints<S: ObjectStore + ?Sized>(
     let mut checkpoints = Vec::new();
     while let Some(item) = keys.next().await {
         let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
-        let checkpoint_id = checkpoint_id_of(&key, namespace_id)?;
         // Gone between the listing and the read: reaped underneath this
         // call, which is the same answer as never having been there.
-        let Some(loaded) = read_checkpoint_record(store, namespace_id, &checkpoint_id).await?
-        else {
-            continue;
+        let loaded = match load_checkpoint_record_at_key(store, &key).await {
+            Ok(loaded) => loaded,
+            Err(ControlObjectLoadError::MissingObject { .. }) => continue,
+            Err(error) => return Err(core_control_load_error(error)),
         };
         if loaded.state.state != (CheckpointRecordLifecycle::Active {}) {
             continue;
@@ -92,23 +91,5 @@ pub(crate) async fn list_checkpoints<S: ObjectStore + ?Sized>(
     Ok(ListCheckpointsResponse {
         namespace_id: namespace_id.clone(),
         checkpoints,
-    })
-}
-
-/// The record id a checkpoint key names.
-///
-/// Nothing but records lives under this prefix, so a key that is not one is
-/// corruption rather than a foreign object to step over: an inventory that
-/// silently skips what it cannot read would answer "no roots" for a
-/// namespace that has one.
-fn checkpoint_id_of(key: &str, namespace_id: &NamespaceId) -> Result<CheckpointId> {
-    let parsed = key
-        .rsplit('/')
-        .next()
-        .and_then(|name| name.strip_suffix(".json"))
-        .and_then(|id| CheckpointId::parse(id).ok())
-        .filter(|id| checkpoint_record(namespace_id.as_str(), id.as_str()) == key);
-    parsed.ok_or_else(|| {
-        CoreError::NamespaceCorrupt(format!("`{key}` is not a checkpoint record key"))
     })
 }

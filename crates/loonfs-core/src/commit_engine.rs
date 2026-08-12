@@ -783,7 +783,6 @@ mod tests {
         let epoch_after_takeover = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state
             .writer_epoch;
 
@@ -805,7 +804,6 @@ mod tests {
         let head = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head.writer_epoch, epoch_after_takeover);
         assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
@@ -940,7 +938,6 @@ mod tests {
         let epoch_after_fencing = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state
             .writer_epoch;
 
@@ -965,7 +962,6 @@ mod tests {
         let head = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head.writer_epoch, epoch_after_fencing);
         assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
@@ -995,7 +991,6 @@ mod tests {
         let head_before = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
 
         let mut over_budget = NamespaceCommitEngine::new(namespace_id.clone())
@@ -1028,7 +1023,6 @@ mod tests {
         let head_after = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head_after.seq, head_before.seq);
         assert_eq!(head_after.visible_wal_tip, head_before.visible_wal_tip);
@@ -1051,7 +1045,6 @@ mod tests {
         let head_final = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .envelope
             .state;
         assert_eq!(head_final.seq, ChangeSeq(1));
         // Two engines are two sessions, and each acquires its own epoch: the
