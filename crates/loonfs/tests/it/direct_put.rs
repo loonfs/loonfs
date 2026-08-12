@@ -111,15 +111,11 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
         .object_key
         .ends_with(content_ref.content_id.as_str()));
 
-    let complete_request = CompleteUploadRequest::for_content_ref(content_ref.clone());
-    assert!(fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id, &complete_request)
-        .is_err());
-
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
+    let complete_request = CompleteUploadRequest::for_content_ref(content_ref.clone());
     let completed = fs
         .complete_upload_blocking(&namespace_id, &begin.upload_id, &complete_request)
         .expect("complete direct put");

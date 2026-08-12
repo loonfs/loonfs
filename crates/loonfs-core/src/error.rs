@@ -684,11 +684,17 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
             ControlUpdateError::LoadHead(error) => {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             }
-            // The remaining variants (codec, control store error, retries
-            // exhausted) are control-plane plumbing failures with no
-            // single object key in scope at this blanket conversion. They share
-            // the ServerError wire code with `Store`; keep the detail as a
-            // prefixed message.
+            ControlUpdateError::Store {
+                object_key,
+                message,
+                class,
+            } => CoreError::Store {
+                object_key,
+                message,
+                class,
+            },
+            // Codec and retry exhaustion are non-store control-plane
+            // failures. Preserve their prefixed detail as an internal error.
             other => CoreError::Internal(other.to_string()),
         }
     }
@@ -699,10 +705,9 @@ fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> Error
         WriterEpochAcquireError::LoadHead(error) => classify_control_object_load_error(error),
         WriterEpochAcquireError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
         WriterEpochAcquireError::EmptyWriterId
-        | WriterEpochAcquireError::MissingHeadEtag { .. }
         | WriterEpochAcquireError::WriterEpochOverflow { .. }
-        | WriterEpochAcquireError::HeadWrite(_)
         | WriterEpochAcquireError::RetryExhausted { .. } => ErrorCode::ServerError,
+        WriterEpochAcquireError::HeadWrite { class, .. } => classify_store_failure(*class),
     }
 }
 

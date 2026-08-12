@@ -11,7 +11,7 @@
 
 use super::budget::PassBudget;
 use super::live_set::LiveSet;
-use crate::checkpoint::load_verified_manifest_tables;
+use crate::checkpoint::{load_verified_manifest_tables, ManifestLoadFailureClass};
 use crate::context::MutationContext;
 use crate::control_update::{
     read_upload_session_state, try_update_upload_session, UploadSessionCas, UploadSessionUpdate,
@@ -230,7 +230,8 @@ enum ContentReference {
 }
 
 /// What the reference scan has produced for this invocation.
-enum CollectedReferences {
+#[derive(Debug)]
+pub(super) enum CollectedReferences {
     /// The scan has not run yet. Only the memo starts here.
     NotYet,
     /// A root could not be read, so this pass has no reference set at all
@@ -315,7 +316,7 @@ impl ContentReferences {
 ///
 /// Every return is a verdict the memo can hold: an attempt that has run
 /// never comes back as [`CollectedReferences::NotYet`].
-async fn collect_referenced_content<S: ObjectStore + ?Sized>(
+pub(super) async fn collect_referenced_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     live: &LiveSet,
@@ -326,18 +327,33 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
         if !budget.try_charge() {
             return Ok(CollectedReferences::Deferred);
         }
-        let Ok(tables) =
-            load_verified_manifest_tables(store, namespace_id, manifest_object_id).await
-        else {
-            return Ok(CollectedReferences::Unavailable);
-        };
+        let tables =
+            match load_verified_manifest_tables(store, namespace_id, manifest_object_id).await {
+                Ok(tables) => tables,
+                Err(error) => match error.failure_class() {
+                    ManifestLoadFailureClass::Store => {
+                        tracing::warn!(
+                            namespace_id = %namespace_id,
+                            manifest_object_id = %manifest_object_id,
+                            error = %error,
+                            "a content-reference manifest did not read; retaining completed content"
+                        );
+                        return Ok(CollectedReferences::Unavailable);
+                    }
+                    ManifestLoadFailureClass::Corrupt => {
+                        return Err(CoreError::NamespaceCorrupt(format!(
+                            "a content-reference manifest does not load: {error}"
+                        )));
+                    }
+                },
+            };
         let mut lower_bound = lookup_keys::REVISION_ROW_PREFIX.to_owned();
         let upper_bound = string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX);
         loop {
             if !budget.try_charge() {
                 return Ok(CollectedReferences::Deferred);
             }
-            let Ok(rows) = tables
+            let rows = match tables
                 .scan_range_page_with_keys(
                     MetadataTableFamily::Revisions,
                     &lower_bound,
@@ -345,8 +361,24 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
                     REVISION_SCAN_WAVE_ROWS,
                 )
                 .await
-            else {
-                return Ok(CollectedReferences::Unavailable);
+            {
+                Ok(rows) => rows,
+                Err(error) => match error.failure_class() {
+                    ManifestLoadFailureClass::Store => {
+                        tracing::warn!(
+                            namespace_id = %namespace_id,
+                            manifest_object_id = %manifest_object_id,
+                            error = %error,
+                            "content-reference rows did not read; retaining completed content"
+                        );
+                        return Ok(CollectedReferences::Unavailable);
+                    }
+                    ManifestLoadFailureClass::Corrupt => {
+                        return Err(CoreError::NamespaceCorrupt(format!(
+                            "content-reference rows do not load: {error}"
+                        )));
+                    }
+                },
             };
             let exhausted = rows.len() < REVISION_SCAN_WAVE_ROWS;
             match rows.last() {

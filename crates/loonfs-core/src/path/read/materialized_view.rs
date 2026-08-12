@@ -622,6 +622,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         entry.revision_no = Some(revision.revision_no);
         entry.size_bytes = Some(revision.content_ref.size_bytes);
         entry.content_ref = Some(revision.content_ref.clone());
+        entry.committed_at_ms = Some(revision.committed_at_ms);
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
             .await?;
@@ -674,29 +675,26 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             validate_directory_cursor(cursor, &resolved)?;
         }
 
-        if resolved.inode_kind == InodeKind::File {
-            if request.cursor.is_some() {
-                return Err(invalid_cursor(
-                    "directory cursor cannot resume a file listing",
-                ));
+        match resolved.inode_kind {
+            InodeKind::File => {
+                if request.cursor.is_some() {
+                    return Err(invalid_cursor(
+                        "directory cursor cannot resume a file listing",
+                    ));
+                }
+                return Ok(Page {
+                    items: vec![
+                        self.build_authoritative_path_entry_with_session(
+                            &mut session,
+                            &resolved,
+                            attributes,
+                        )
+                        .await?,
+                    ],
+                    next_cursor: None,
+                });
             }
-            return Ok(Page {
-                items: vec![
-                    self.build_authoritative_path_entry_with_session(
-                        &mut session,
-                        &resolved,
-                        attributes,
-                    )
-                    .await?,
-                ],
-                next_cursor: None,
-            });
-        }
-        if resolved.inode_kind != InodeKind::Directory {
-            return Err(CoreError::ExpectedDirectory {
-                path: resolved.absolute_path,
-                kind: resolved.inode_kind,
-            });
+            InodeKind::Directory => {}
         }
 
         let start_after = request

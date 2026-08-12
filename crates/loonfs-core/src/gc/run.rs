@@ -24,6 +24,15 @@ use loonfs_api::{ContentStoreId, NamespaceId, RetainedReason, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepCandidateFamily {
+    WalSegments,
+    MetadataTables,
+    CompactionStaging,
+    Manifests,
+    Checkpoints,
+}
+
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -202,17 +211,23 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
 
     /// Decides one candidate using the pass-owned verifier and family state.
     async fn process_candidate(&mut self, family: CandidateFamily, key: &str) -> Result<SweepStep> {
-        if family == CandidateFamily::UploadSessions {
-            self.process_upload_session(key).await?;
-            return Ok(SweepStep::Continue);
-        }
-
-        if family == CandidateFamily::Checkpoints
-            && self.initial_live.missing_basis_records.contains(key)
-        {
-            self.process_missing_basis_checkpoint(key).await?;
-            return Ok(SweepStep::Continue);
-        }
+        let family = match family {
+            CandidateFamily::UploadSessions => {
+                self.process_upload_session(key).await?;
+                return Ok(SweepStep::Continue);
+            }
+            CandidateFamily::Checkpoints
+                if self.initial_live.missing_basis_records.contains(key) =>
+            {
+                self.process_missing_basis_checkpoint(key).await?;
+                return Ok(SweepStep::Continue);
+            }
+            CandidateFamily::WalSegments => SweepCandidateFamily::WalSegments,
+            CandidateFamily::MetadataTables => SweepCandidateFamily::MetadataTables,
+            CandidateFamily::CompactionStaging => SweepCandidateFamily::CompactionStaging,
+            CandidateFamily::Manifests => SweepCandidateFamily::Manifests,
+            CandidateFamily::Checkpoints => SweepCandidateFamily::Checkpoints,
+        };
 
         // Objects reachable from the invocation's root snapshot — either
         // anchor's — are skipped, while every selected candidate is
@@ -236,33 +251,31 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         }
 
         match family {
-            CandidateFamily::WalSegments => self.process_wal_segment(key).await?,
-            CandidateFamily::MetadataTables => self.process_metadata_table(key).await?,
-            CandidateFamily::CompactionStaging => self.process_compaction_staging(key).await?,
-            CandidateFamily::Manifests => self.process_manifest(key).await?,
-            CandidateFamily::Checkpoints => self.process_checkpoint(key).await?,
-            CandidateFamily::UploadSessions => unreachable!("uploads return before selection"),
+            SweepCandidateFamily::WalSegments => self.process_wal_segment(key).await?,
+            SweepCandidateFamily::MetadataTables => self.process_metadata_table(key).await?,
+            SweepCandidateFamily::CompactionStaging => self.process_compaction_staging(key).await?,
+            SweepCandidateFamily::Manifests => self.process_manifest(key).await?,
+            SweepCandidateFamily::Checkpoints => self.process_checkpoint(key).await?,
         }
         Ok(SweepStep::Continue)
     }
 
-    fn is_selected(&self, family: CandidateFamily, key: &str) -> bool {
+    fn is_selected(&self, family: SweepCandidateFamily, key: &str) -> bool {
         match family {
-            CandidateFamily::WalSegments => !self.initial_live.protects_wal_segment(key),
+            SweepCandidateFamily::WalSegments => !self.initial_live.protects_wal_segment(key),
             // A staged segment a publication landed is named by the manifest
             // like any other table, so the same root set answers for both
             // families.
-            CandidateFamily::MetadataTables | CandidateFamily::CompactionStaging => {
+            SweepCandidateFamily::MetadataTables | SweepCandidateFamily::CompactionStaging => {
                 !self.initial_live.tables.contains(key)
             }
-            CandidateFamily::Manifests => match manifest_object_id_of(key) {
+            SweepCandidateFamily::Manifests => match manifest_object_id_of(key) {
                 Some(Ok(id)) => !self.initial_live.manifests.contains(&id),
                 // A key that names no readable manifest is reachable from no
                 // root. The family decision retains unrecognized names.
                 None | Some(Err(_)) => true,
             },
-            CandidateFamily::Checkpoints => !self.initial_live.checkpoint_keys.contains(key),
-            CandidateFamily::UploadSessions => false,
+            SweepCandidateFamily::Checkpoints => !self.initial_live.checkpoint_keys.contains(key),
         }
     }
 

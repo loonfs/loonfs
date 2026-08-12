@@ -138,7 +138,20 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             Ok(lease_expired(record, context.now_ms))
         }
-        // An unreadable target head is not verifiably deleted; retain.
-        Err(_) => Ok(false),
+        Err(error) => match &error {
+            // An unreadable target head is not verifiably deleted; retain.
+            ControlObjectLoadError::Store { object_key, .. } => {
+                tracing::warn!(
+                    namespace_id = %target_namespace_id,
+                    object_key,
+                    error = %error,
+                    "the fork target head did not read; retaining its source checkpoint"
+                );
+                Ok(false)
+            }
+            _ => Err(CoreError::NamespaceCorrupt(format!(
+                "the fork target head does not load: {error}"
+            ))),
+        },
     }
 }

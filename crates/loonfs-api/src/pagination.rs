@@ -89,7 +89,6 @@ impl PaginationPolicy {
     pub fn resolve_limit(self, requested: Option<u32>) -> Result<EffectiveLimit, LimitError> {
         match requested {
             None => Ok(EffectiveLimit(self.default_limit)),
-            Some(0) => Err(LimitError::Zero),
             Some(value) if value > self.max_limit.get() => Err(LimitError::ExceedsMax {
                 requested: value,
                 max_limit: self.max_limit.get(),

@@ -5,7 +5,7 @@ use crate::control_object::{
     core_control_load_error, expect_identity_field, expect_namespace, load_control_object,
     ControlObjectLoadError, LoadedControl,
 };
-use crate::error::CoreError;
+use crate::error::{CoreError, StoreFailureClass};
 use crate::namespace::control::{read_head_object, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -48,7 +48,11 @@ pub(crate) enum ControlUpdateError {
     #[error("control object codec error for `{object_key}`: {message}")]
     Codec { object_key: String, message: String },
     #[error("control object store error for `{object_key}`: {message}")]
-    Store { object_key: String, message: String },
+    Store {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
     #[error("control object update retries exhausted after {attempts} attempts")]
     RetryExhausted { attempts: usize },
 }
@@ -85,7 +89,8 @@ where
             Err(error) => {
                 return Err(E::from(ControlUpdateError::Store {
                     object_key: loaded.object_key,
-                    message: error.to_string(),
+                    message: error.message(),
+                    class: StoreFailureClass::of(&error),
                 }))
             }
         }

@@ -882,12 +882,16 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
     )
     .await
     .expect("create file");
+    let replacement_context = MutationContext {
+        writer_id: context.writer_id.clone(),
+        now_ms: 2_000,
+    };
     write_file_bytes(
         &store,
         &namespace_id,
         "/docs/rev.txt",
         b"two",
-        &context,
+        &replacement_context,
         Some("rev-replace"),
     )
     .await
@@ -915,6 +919,8 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
             .await
             .expect("read first revision");
     assert_eq!(historical.bytes, b"one");
+    assert_eq!(historical.entry.committed_at_ms, Some(context.now_ms));
+    assert_eq!(entry.committed_at_ms, Some(replacement_context.now_ms));
     let inode_historical =
         read_file_revision_bytes_for_inode(&store, &namespace_id, inode_id, RevisionNo(2))
             .await
