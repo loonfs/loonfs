@@ -42,25 +42,16 @@ pub(crate) const GCS_FIXTURE_CLIENT_EMAIL: &str =
 /// Writes the fixture key to a fresh temporary file and returns its path,
 /// because every GCS constructor takes the key as a path to read.
 ///
-/// Each call gets its own directory. A wall-clock stamp alone does not
-/// guarantee that: several tests ask for this fixture under the same label,
-/// the clock's resolution is coarser than the gap between them, and two
-/// callers landing on one directory then truncate and re-write the same file
-/// while the other is reading it. The counter is what actually makes the
-/// path unique within a run; the stamp separates runs.
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn gcs_fixture_service_account_key_file(label: &str) -> std::path::PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-
-    // Test-only unique paths are an entropy boundary, not protocol time.
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_nanos();
-    let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("loonfs-objectstore-{label}-{stamp}-{ordinal}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let path = dir.join("service-account.json");
+/// Returns the temporary directory and the path to the fixture key file.
+/// Keep the directory alive while using the path; dropping it deletes the file.
+pub(crate) fn gcs_fixture_service_account_key_file(
+    label: &str,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("loonfs-objectstore-{label}-"))
+        .tempdir()
+        .expect("create temp dir");
+    let path = dir.path().join("service-account.json");
     std::fs::write(&path, GCS_FIXTURE_SERVICE_ACCOUNT_KEY).expect("write fixture service account");
-    path
+    (dir, path)
 }

@@ -304,7 +304,8 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_keys_are_rejected_before_generation_tokens() {
-        let service_account_key_path = gcs_fixture_service_account_key_file("gcs-invalid-key");
+        let (_key_dir, service_account_key_path) =
+            gcs_fixture_service_account_key_file("gcs-invalid-key");
         let store = GcpGcsStore::new(GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
             service_account_key_path: service_account_key_path.display().to_string(),
@@ -322,7 +323,8 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_compare_and_swap_rejects_the_mismatched_token_semantics() {
-        let service_account_key_path = gcs_fixture_service_account_key_file("gcs-streamed-cas");
+        let (_key_dir, service_account_key_path) =
+            gcs_fixture_service_account_key_file("gcs-streamed-cas");
         let store = GcpGcsStore::new(GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
             service_account_key_path: service_account_key_path.display().to_string(),
@@ -362,11 +364,8 @@ mod tests {
     /// failure on the first completion.
     #[test]
     fn a_service_account_key_that_cannot_sign_stops_the_store_from_being_built() {
-        let dir = gcs_fixture_service_account_key_file("gcs-unsignable")
-            .parent()
-            .expect("fixture dir")
-            .to_path_buf();
-        let unsignable = dir.join("unsignable.json");
+        let (key_dir, _key_path) = gcs_fixture_service_account_key_file("gcs-unsignable");
+        let unsignable = key_dir.path().join("unsignable.json");
         std::fs::write(
             &unsignable,
             br#"{"client_email":"a@b.iam.gserviceaccount.com","private_key":"private_key","disable_oauth":true}"#,

@@ -12,6 +12,8 @@
 //! and the two surfaces share one definition of every option struct (they
 //! live in `loonfs-api`) so their arguments cannot drift apart.
 
+#![warn(missing_docs)]
+
 mod config;
 mod error;
 mod payload;
@@ -242,25 +244,25 @@ impl DirectDownloadStream {
 /// to fail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultipartUploadResume {
+    /// Upload session ID returned by the server.
     pub upload_id: UploadId,
     /// The part size the session was opened with. A resumed upload must cut
     /// the payload exactly as the interrupted one did, or the parts it
     /// sends will not line up with the ones already there.
     pub part_size_bytes: u64,
+    /// Metadata for parts that have already been uploaded.
     pub parts: Vec<CompletedUploadPart>,
 }
 
-/// Where a caller records a direct multipart upload as it happens, so a
-/// later run can resume it.
+/// Saves direct multipart upload progress so an interrupted upload can resume.
 ///
-/// Both methods are called on the thread driving the upload, between
-/// network round trips, so an implementation that writes to disk is doing
-/// it at the right moment: after the part it describes is durable, and
-/// before the next one starts.
+/// The client calls these methods synchronously after opening the session and
+/// after each successful part upload. Implementations may persist this data
+/// before the next network request starts.
 pub trait MultipartUploadJournal: Send + Sync {
-    /// A session was opened, with the part geometry the server chose.
+    /// Records a newly opened session and its required part size.
     fn began(&self, upload_id: &UploadId, part_size_bytes: u64);
-    /// One part landed in object storage.
+    /// Records a part after it has been uploaded successfully.
     fn part_completed(&self, part: &CompletedUploadPart);
 }
 
@@ -538,6 +540,7 @@ impl Client {
             .clone())
     }
 
+    /// Creates an empty namespace with the given ID.
     pub async fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceSummary> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
@@ -550,6 +553,7 @@ impl Client {
         .await
     }
 
+    /// Returns the namespace's current status.
     pub async fn namespace_status(
         &self,
         namespace_id: &NamespaceId,
@@ -580,6 +584,7 @@ impl Client {
             .await
     }
 
+    /// Creates a new namespace from the source namespace's current state.
     pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
@@ -683,6 +688,7 @@ impl Client {
         self.request_json::<(), _>(self.get(&url), None).await
     }
 
+    /// Reads the file's current contents into memory.
     pub async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/content?path={}",
@@ -693,6 +699,7 @@ impl Client {
         self.request_bytes(&url).await
     }
 
+    /// Reads the requested file revision into memory.
     pub async fn get_file_revision_bytes(
         &self,
         spec: &NamespacePath,
@@ -859,6 +866,7 @@ impl Client {
         Ok(size_bytes)
     }
 
+    /// Returns one page of revisions for a file.
     pub async fn list_file_revisions_page(
         &self,
         spec: &NamespacePath,
@@ -877,6 +885,7 @@ impl Client {
             .await
     }
 
+    /// Returns one page of recoverable deletions in a namespace.
     pub async fn list_trash_page(
         &self,
         namespace_id: &NamespaceId,
@@ -894,6 +903,7 @@ impl Client {
             .await
     }
 
+    /// Checks the server's health endpoint.
     pub async fn health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
         self.call_with_transport_retry(&self.get(&url), None)
@@ -901,6 +911,7 @@ impl Client {
         Ok(())
     }
 
+    /// Starts an upload session using the transport selected by the request.
     pub async fn begin_upload(
         &self,
         namespace_id: &NamespaceId,
@@ -1023,6 +1034,7 @@ impl Client {
         })
     }
 
+    /// Uploads in-memory bytes directly to object storage using a presigned URL.
     pub async fn upload_via_presigned_url(
         &self,
         access: &ObjectTransferAccess,
@@ -1053,6 +1065,7 @@ impl Client {
             .map(|_| ())
     }
 
+    /// Uploads in-memory bytes through the server for a service-proxied session.
     pub async fn upload_content(
         &self,
         namespace_id: &NamespaceId,
@@ -1146,6 +1159,7 @@ impl Client {
             .await
     }
 
+    /// Completes an upload session after verifying the uploaded content.
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
@@ -1161,6 +1175,7 @@ impl Client {
             .await
     }
 
+    /// Returns committed changes after the given sequence number.
     pub async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
@@ -2207,6 +2222,7 @@ impl Client {
         .await
     }
 
+    /// Creates a directory at the requested path.
     pub async fn create_directory(
         &self,
         spec: &NamespacePath,
@@ -2229,6 +2245,7 @@ impl Client {
         Ok(response)
     }
 
+    /// Deletes the requested path.
     pub async fn delete_path(
         &self,
         spec: &NamespacePath,
@@ -2279,6 +2296,7 @@ impl Client {
         Ok(response)
     }
 
+    /// Moves a path within one namespace.
     pub async fn move_path(
         &self,
         from: &NamespacePath,
@@ -2310,6 +2328,7 @@ impl Client {
         Ok(response)
     }
 
+    /// Copies a path within one namespace.
     pub async fn copy_path(
         &self,
         from: &NamespacePath,
@@ -2372,6 +2391,7 @@ impl Client {
         Ok(response)
     }
 
+    /// Makes an earlier file revision the current revision.
     pub async fn restore_file_revision(
         &self,
         spec: &NamespacePath,

@@ -369,7 +369,10 @@ async fn method_not_allowed() -> ApiResponseError {
         summary = "Check health",
         description = "Returns `ok` when the server is running and can accept requests.",
         security(()),
-        responses((status = 200, description = "Server health check", body = String))
+        responses(
+            (status = 200, description = "Server health check", body = String),
+            crate::http::openapi::DeadlineExceededResponses
+        )
     )
 )]
 async fn health() -> &'static str {
@@ -390,7 +393,8 @@ async fn health() -> &'static str {
         security(()),
         responses(
             (status = 200, description = "The server admits new work", body = String),
-            (status = 503, description = "Shutdown has begun; admission is closed", body = loonfs_api::ApiError)
+            (status = 503, description = "Shutdown has begun; admission is closed", body = loonfs_api::ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -426,7 +430,8 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
                        deployment's bearer token.",
         responses(
             (status = 200, description = "Prometheus text exposition", body = String),
-            (status = 401, description = "Missing or invalid bearer token", body = loonfs_api::ApiError)
+            (status = 401, description = "Missing or invalid bearer token", body = loonfs_api::ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]

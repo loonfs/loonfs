@@ -116,7 +116,8 @@ pub(super) struct ChangesQuery {
             (status = 400, description = "Invalid path, limit, cursor, or include_attributes", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -170,7 +171,8 @@ pub(super) async fn list_path_entries(
             (status = 400, description = "Invalid path or include_attributes", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -284,7 +286,8 @@ pub(super) async fn get_file_bytes(
             (status = 200, description = "Recoverable deletions", body = ListTrashResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -330,7 +333,8 @@ pub(super) async fn list_trash(
             (status = 400, description = "Invalid path", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -376,7 +380,8 @@ pub(super) async fn list_file_revisions(
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 409, description = "Operation conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 503, description = "Commit unavailable", body = ApiError)
+            (status = 503, description = "Commit unavailable", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]
@@ -490,7 +495,8 @@ pub(super) async fn apply_commit(
             (status = 400, description = "Invalid change cursor or limit", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
         )
     )
 )]

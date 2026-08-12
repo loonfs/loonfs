@@ -5,9 +5,6 @@
 //! building and folding.
 
 use crate::common::{is_content_object, GrepHost};
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
@@ -21,15 +18,13 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
 use loonfs_test_support::ids::nonzero_usize;
+use loonfs_test_support::stores::{
+    ConcurrencyWatchStore, CountingStore, KeyPredicate, OperationClass, RecordingStore,
+};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn request(pattern: &str) -> GrepRequest {
@@ -359,7 +354,14 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     const FILES_PER_STEP: usize = 500;
 
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(BuildContentAccountingStore::new(temp_dir.path()));
+    let content_keys = KeyPredicate::new(is_content_object);
+    let raw_store = Arc::new(RecordingStore::new(
+        CountingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            content_keys.clone(),
+        ),
+        content_keys,
+    ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-thousand-atomic").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
@@ -421,7 +423,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .await
         .expect("publish thousand-file commit");
 
-    raw_store.reset_content_reads();
+    raw_store.reset();
+    raw_store.inner().reset();
     let first = first_worker
         .build_step(&namespace_id, policy)
         .await
@@ -433,12 +436,13 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
             ..
         } if indexed_revisions == FILES_PER_STEP as u64
     ));
-    let first_reads = raw_store.take_content_reads();
+    let first_reads = raw_store.take_get_keys();
+    let first_read_bytes = raw_store.inner().snapshot().read_bytes;
     assert_eq!(first_reads.len(), FILES_PER_STEP);
     assert!(
-        content_read_bytes(&first_reads) <= max_content_bytes_per_step,
-        "first step read {} content bytes past its {max_content_bytes_per_step}-byte budget",
-        content_read_bytes(&first_reads)
+        first_read_bytes <= max_content_bytes_per_step,
+        "first step read {first_read_bytes} content bytes past its \
+         {max_content_bytes_per_step}-byte budget"
     );
 
     let partial = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
@@ -488,7 +492,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     // can resume only from the published manifest cursor.
     let resumed_host = GrepHost::new(&store, "grams-resumed-worker").await;
     let resumed_worker = &resumed_host.worker;
-    raw_store.reset_content_reads();
+    raw_store.reset();
+    raw_store.inner().reset();
     let second = resumed_worker
         .build_step(&namespace_id, policy)
         .await
@@ -500,15 +505,16 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
             ..
         } if indexed_revisions == FILES_PER_STEP as u64
     ));
-    let second_reads = raw_store.take_content_reads();
+    let second_reads = raw_store.take_get_keys();
+    let second_read_bytes = raw_store.inner().snapshot().read_bytes;
     assert_eq!(second_reads.len(), FILES_PER_STEP);
     assert!(
-        content_read_bytes(&second_reads) <= max_content_bytes_per_step,
-        "resumed step read {} content bytes past its {max_content_bytes_per_step}-byte budget",
-        content_read_bytes(&second_reads)
+        second_read_bytes <= max_content_bytes_per_step,
+        "resumed step read {second_read_bytes} content bytes past its \
+         {max_content_bytes_per_step}-byte budget"
     );
-    let first_keys: BTreeSet<_> = first_reads.iter().map(|(key, _)| key).collect();
-    let second_keys: BTreeSet<_> = second_reads.iter().map(|(key, _)| key).collect();
+    let first_keys: BTreeSet<_> = first_reads.iter().collect();
+    let second_keys: BTreeSet<_> = second_reads.iter().collect();
     assert!(
         first_keys.is_disjoint(&second_keys),
         "the fresh worker must not re-read any indexed-prefix content"
@@ -583,10 +589,6 @@ async fn collect_grep_paths(
         };
         request.cursor = Some(cursor);
     }
-}
-
-fn content_read_bytes(reads: &[(String, usize)]) -> u64 {
-    reads.iter().map(|(_, bytes)| *bytes as u64).sum::<u64>()
 }
 
 /// Ten one-file rounds cross the default delta-fold threshold, so the
@@ -665,160 +667,8 @@ async fn grep_answers_identically_across_tiered_folds() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// Accounts full content-blob GETs issued by one explicit worker step.
-#[derive(Debug)]
-struct BuildContentAccountingStore {
-    inner: LocalFsStore,
-    content_reads: Mutex<Vec<(String, usize)>>,
-}
-
-impl BuildContentAccountingStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            content_reads: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn reset_content_reads(&self) {
-        self.content_reads
-            .lock()
-            .expect("content read accounting lock")
-            .clear();
-    }
-
-    fn take_content_reads(&self) -> Vec<(String, usize)> {
-        std::mem::take(
-            &mut *self
-                .content_reads
-                .lock()
-                .expect("content read accounting lock"),
-        )
-    }
-
-    fn record_content_read(&self, key: &str, bytes: usize) {
-        if is_content_object(key) {
-            self.content_reads
-                .lock()
-                .expect("content read accounting lock")
-                .push((key.to_owned(), bytes));
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for BuildContentAccountingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let body = self.inner.get_with_metadata(key).await?;
-        if let Some(body) = &body {
-            self.record_content_read(key, body.bytes.len());
-        }
-        Ok(body)
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        let bytes = self.inner.get(key, range).await?;
-        if let Some(bytes) = &bytes {
-            self.record_content_read(key, bytes.len());
-        }
-        Ok(bytes)
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
-/// Counts store GETs against gram index segment objects, so tests can
-/// assert how many posting-block reads a query cost.
-#[derive(Debug)]
-struct IndexSegmentGetCountingStore {
-    inner: LocalFsStore,
-    index_segment_gets: AtomicUsize,
-}
-
-impl IndexSegmentGetCountingStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            index_segment_gets: AtomicUsize::new(0),
-        }
-    }
-
-    fn index_segment_get_count(&self) -> usize {
-        self.index_segment_gets.load(Ordering::SeqCst)
-    }
-
-    fn record_if_index_segment(&self, key: &str) {
-        if key.contains("/extensions/grep/segments/") && key.ends_with(".sst.zst") {
-            self.index_segment_gets.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for IndexSegmentGetCountingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.record_if_index_segment(key);
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.record_if_index_segment(key);
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
+fn index_segment_keys() -> KeyPredicate {
+    KeyPredicate::new(|key| key.contains("/extensions/grep/segments/") && key.ends_with(".sst.zst"))
 }
 
 /// Index segment blocks are immutable and keyed by payload checksum, so the
@@ -827,7 +677,10 @@ impl ObjectStore for IndexSegmentGetCountingStore {
 #[tokio::test]
 async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
+    let raw_store = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        index_segment_keys(),
+    ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
 
@@ -867,13 +720,13 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
-    let before_first = raw_store.index_segment_get_count();
+    let before_first = raw_store.count(OperationClass::Read);
     let first = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("first grep");
     assert_eq!(first.matches.len(), 1);
-    let after_first = raw_store.index_segment_get_count();
+    let after_first = raw_store.count(OperationClass::Read);
     assert!(
         after_first > before_first,
         "the first grep must read posting blocks from the store"
@@ -884,7 +737,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .await
         .expect("second grep");
     assert_eq!(second.matches, first.matches);
-    let after_second = raw_store.index_segment_get_count();
+    let after_second = raw_store.count(OperationClass::Read);
     assert_eq!(
         after_second, after_first,
         "an identical grep through the same service must serve every \
@@ -1007,80 +860,6 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// Records the key of every store GET against a content blob object, so
-/// tests can assert exactly which file contents a query fetched.
-#[derive(Debug)]
-struct ContentBlobGetRecordingStore {
-    inner: LocalFsStore,
-    content_blob_gets: Mutex<Vec<String>>,
-}
-
-impl ContentBlobGetRecordingStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            content_blob_gets: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn content_blob_get_keys(&self) -> Vec<String> {
-        self.content_blob_gets
-            .lock()
-            .expect("content GET log lock")
-            .clone()
-    }
-
-    fn record_if_content_blob(&self, key: &str) {
-        if is_content_object(key) {
-            self.content_blob_gets
-                .lock()
-                .expect("content GET log lock")
-                .push(key.to_owned());
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for ContentBlobGetRecordingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.record_if_content_blob(key);
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.record_if_content_blob(key);
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
 /// An unindexed-tail candidate larger than the index eligibility cap can
 /// never pass verification, so grep must skip it on its declared size
 /// alone: no content GET for it, unchanged page budgets, and a cursor
@@ -1088,7 +867,10 @@ impl ObjectStore for ContentBlobGetRecordingStore {
 #[tokio::test]
 async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(ContentBlobGetRecordingStore::new(temp_dir.path()));
+    let raw_store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::new(is_content_object),
+    ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-oversized-tail").expect("namespace id");
 
@@ -1152,7 +934,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     // No step after these writes: bravo and charlie stay in the unindexed
     // tail, where no gram filter screens candidates before verification.
 
-    let gets_before_greps = raw_store.content_blob_get_keys().len();
+    raw_store.reset();
 
     let mut first_page = request("needle");
     first_page.limit = Some(1);
@@ -1191,8 +973,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         "the first page's cursor must sit between alpha and charlie"
     );
 
-    let content_gets = raw_store.content_blob_get_keys();
-    let fetched_during_greps = &content_gets[gets_before_greps..];
+    let fetched_during_greps = raw_store.take_get_keys();
     assert!(
         !fetched_during_greps.is_empty(),
         "the greps must fetch the small candidates' contents"
@@ -1213,7 +994,10 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 #[tokio::test]
 async fn worker_and_service_share_decoded_index_blocks() {
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
+    let raw_store = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        index_segment_keys(),
+    ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-shared-cache").expect("namespace id");
 
@@ -1254,7 +1038,7 @@ async fn worker_and_service_share_decoded_index_blocks() {
         max_decoded_input_rows_per_step: nonzero_usize(1),
         ..GramIndexBuildPolicy::default()
     };
-    let gets_before_fold = raw_store.index_segment_get_count();
+    let gets_before_fold = raw_store.count(OperationClass::Read);
     let stats_before_fold = host.block_cache.stats();
     let fold = host
         .worker
@@ -1269,7 +1053,7 @@ async fn worker_and_service_share_decoded_index_blocks() {
         }
     ));
     assert!(
-        raw_store.index_segment_get_count() > gets_before_fold,
+        raw_store.count(OperationClass::Read) > gets_before_fold,
         "the worker must load its snapshot's segment blocks"
     );
     let stats_after_fold = host.block_cache.stats();
@@ -1278,14 +1062,14 @@ async fn worker_and_service_share_decoded_index_blocks() {
         "the worker must publish decoded blocks to the shared cache"
     );
 
-    let gets_before_query = raw_store.index_segment_get_count();
+    let gets_before_query = raw_store.count(OperationClass::Read);
     let result = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep after worker load");
     assert_eq!(result.matches.len(), 8);
     assert_eq!(
-        raw_store.index_segment_get_count() - gets_before_query,
+        raw_store.count(OperationClass::Read) - gets_before_query,
         0,
         "the service must not refetch index-segment sections the worker warmed"
     );
@@ -1295,86 +1079,6 @@ async fn worker_and_service_share_decoded_index_blocks() {
     );
 
     writer.shutdown().await.expect("writer shutdown");
-}
-
-/// Tracks how many GETs against gram index segment objects are in flight
-/// at once. The yield before each forwarded read lets sibling fetches
-/// issued in the same fan-out begin before this one completes, so the
-/// peak observes overlap exactly when the caller issued the GETs
-/// concurrently; serial callers can never raise it above one.
-#[derive(Debug)]
-struct InFlightIndexGetProbeStore {
-    inner: LocalFsStore,
-    in_flight: AtomicUsize,
-    peak: AtomicUsize,
-}
-
-impl InFlightIndexGetProbeStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            in_flight: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
-        }
-    }
-
-    fn peak_in_flight(&self) -> usize {
-        self.peak.load(Ordering::SeqCst)
-    }
-
-    async fn probed<T, F>(&self, key: &str, read: F) -> T
-    where
-        F: std::future::Future<Output = T>,
-    {
-        if !key.contains("/extensions/grep/segments/") || !key.ends_with(".sst.zst") {
-            return read.await;
-        }
-        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak.fetch_max(now, Ordering::SeqCst);
-        tokio::task::yield_now().await;
-        let result = read.await;
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
-        result
-    }
-}
-
-#[async_trait]
-impl ObjectStore for InFlightIndexGetProbeStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.probed(key, self.inner.get_with_metadata(key)).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.probed(key, self.inner.get(key, range)).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
 }
 
 /// A cold fold — nothing decoded its snapshot before — must fan out its
@@ -1390,7 +1094,10 @@ impl ObjectStore for InFlightIndexGetProbeStore {
 #[tokio::test]
 async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(InFlightIndexGetProbeStore::new(temp_dir.path()));
+    let raw_store = Arc::new(ConcurrencyWatchStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        index_segment_keys(),
+    ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-fold-fan-out").expect("namespace id");
 
@@ -1413,7 +1120,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
     // construction, the triggered fold reading its snapshot of every
     // accumulated delta run.
     let mut rounds = 0u32;
-    while raw_store.peak_in_flight() == 0 {
+    while raw_store.reads().peak_in_flight == 0 {
         rounds += 1;
         assert!(
             rounds <= 24,
@@ -1431,7 +1138,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
         drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
-    let peak = raw_store.peak_in_flight();
+    let peak = raw_store.reads().peak_in_flight;
     assert!(
         peak > 1,
         "a cold fold's segment opens must overlap, got a serial peak of {peak}"

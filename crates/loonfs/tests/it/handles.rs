@@ -934,16 +934,12 @@ fn writer_builder_rejects_zero_maintenance_concurrency() {
                 .build(),
         );
 
-        match result {
-            Err(RuntimeError::Config(message)) => {
-                assert!(message.contains("`max_concurrent_maintenance`"));
-                assert!(message.contains("`FsBackgroundWork::ManualOnly`"));
-            }
-            Err(other) => {
-                panic!("expected config error for zero maintenance cap, got {other:?}")
-            }
+        let error = match result {
+            Err(error) => error,
             Ok(_) => panic!("zero maintenance concurrency must be rejected"),
-        }
+        };
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        assert!(error.to_string().contains("`max_concurrent_maintenance`"));
     }
 }
 

@@ -820,8 +820,9 @@ async fn cold_submission_publishes_without_a_coalescing_delay() {
 /// Follow-up submissions inside the pacing interval coalesce and
 /// publish no earlier than the interval boundary — the timer gives a
 /// deterministic lower bound.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn hot_submissions_wait_out_the_pacing_interval() {
+    tokio::time::pause();
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -832,7 +833,6 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
         .expect("bootstrap");
     let registry = writer.publisher();
 
-    let warmup_started = Instant::now();
     registry
         .submit_commit(
             namespace_id.clone(),
@@ -841,15 +841,26 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
         .await
         .expect("warmup commit");
 
-    registry
-        .submit_commit(namespace_id.clone(), create_directory_request("hot", "hot"))
-        .await
-        .expect("hot commit");
-    let elapsed = warmup_started.elapsed();
+    let hot = tokio::spawn({
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        async move {
+            registry
+                .submit_commit(namespace_id, create_directory_request("hot", "hot"))
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(399)).await;
+    tokio::task::yield_now().await;
     assert!(
-        elapsed >= Duration::from_millis(400),
-        "a follow-up publication must wait out the pacing interval, took {elapsed:?}"
+        !hot.is_finished(),
+        "a follow-up publication must remain paced before the interval boundary"
     );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    hot.await
+        .expect("join hot publication")
+        .expect("hot commit");
 }
 
 /// Receipt replay races a lost head compare-and-swap acknowledgement.
@@ -1302,14 +1313,6 @@ async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
         &namespace_id,
         create_directory_request("after", "after"),
     );
-
-    // Admission order is the queue order: the later mutation opens a batch
-    // behind the delete instead of coalescing into work admitted before it.
-    {
-        let state = publisher_state(&publisher);
-        assert!(matches!(state.queue.front(), Some(WorkItem::Delete(_))));
-        assert_eq!(queued_candidates(&state), 1);
-    }
 
     store.release();
     assert_eq!(

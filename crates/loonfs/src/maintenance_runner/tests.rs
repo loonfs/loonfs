@@ -1016,16 +1016,23 @@ async fn at_most_the_process_limit_of_compactions_run_however_many_namespaces_pl
         .take(compaction::MAX_CONCURRENT_COMPACTIONS)
         .collect();
     let admitted = Arc::new(AtomicU64::new(0));
+    let waiting_started = Arc::new(AtomicU64::new(0));
     let waiting: Vec<_> = claims
         .map(|mut claim| {
             let admitted = Arc::clone(&admitted);
+            let waiting_started = Arc::clone(&waiting_started);
             tokio::spawn(async move {
+                waiting_started.fetch_add(1, Ordering::SeqCst);
                 assert!(claim.admitted().await, "a freed permit admits this job");
                 admitted.fetch_add(1, Ordering::SeqCst);
             })
         })
         .collect();
-    tokio::task::yield_now().await;
+    wait_for(
+        || waiting_started.load(Ordering::SeqCst) == waiting.len() as u64,
+        "every queued compaction to start waiting",
+    )
+    .await;
     assert_eq!(
         admitted.load(Ordering::SeqCst),
         0,
@@ -1096,9 +1103,12 @@ async fn cancellation_reaches_a_job_that_is_still_waiting_for_a_permit() {
     assert!(queued.is_queued());
 
     let ran = Arc::new(AtomicU64::new(0));
+    let waiting_started = Arc::new(AtomicU64::new(0));
     let waiting = tokio::spawn({
         let ran = Arc::clone(&ran);
+        let waiting_started = Arc::clone(&waiting_started);
         async move {
+            waiting_started.store(1, Ordering::SeqCst);
             let admitted = queued.admitted().await;
             if admitted {
                 ran.fetch_add(1, Ordering::SeqCst);
@@ -1106,7 +1116,11 @@ async fn cancellation_reaches_a_job_that_is_still_waiting_for_a_permit() {
             admitted
         }
     });
-    tokio::task::yield_now().await;
+    wait_for(
+        || waiting_started.load(Ordering::SeqCst) == 1,
+        "the queued compaction to start waiting",
+    )
+    .await;
 
     compactions.cancel_all();
 

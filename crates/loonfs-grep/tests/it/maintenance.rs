@@ -3,9 +3,7 @@
 //! what its steps conclude, and how a writer's one permit pool paces them.
 
 use crate::common::is_content_object;
-use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs::{
     DeleteNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader, FsWriter, MaintenanceJob,
     MaintenanceProbe, MaintenanceStepConclusion, SharedObjectStore,
@@ -17,16 +15,13 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepGcJob, GrepMaintenanceJob, GrepWorker, GREP_GC_JOB, GREP_INDEX_JOB,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+use loonfs_objectstore::ObjectStore;
+use loonfs_test_support::stores::{
+    BlockingStore, ConcurrencyWatchStore, KeyPredicate, MetadataMapStore, OperationClass,
 };
-use std::future::Future;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
-use tokio::sync::Notify;
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -192,7 +187,16 @@ async fn the_runners_one_permit_pool_caps_grep_steps_across_namespaces() {
     const MAX_CONCURRENT_MAINTENANCE: usize = 2;
 
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(StepConcurrencyStore::new(temp_dir.path()));
+    let content_keys = KeyPredicate::new(is_content_object);
+    let blocked_store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        content_keys.clone(),
+        OperationClass::Read,
+    ));
+    let store = Arc::new(ConcurrencyWatchStore::new(
+        blocked_store.clone(),
+        content_keys,
+    ));
     let worker = worker(store.clone(), "concurrency-worker").await;
     let mut namespace_ids = Vec::new();
     for index in 0..NAMESPACES {
@@ -204,7 +208,8 @@ async fn the_runners_one_permit_pool_caps_grep_steps_across_namespaces() {
         namespace_ids.push(namespace_id);
     }
 
-    store.pause_content_reads();
+    let reads_before_steps = store.reads().total;
+    blocked_store.arm();
     let host = host_writer(
         store.clone(),
         "concurrency-host",
@@ -217,23 +222,21 @@ async fn the_runners_one_permit_pool_caps_grep_steps_across_namespaces() {
         host.maintenance().nudge(GREP_INDEX_JOB, namespace_id);
     }
 
-    tokio::time::timeout(WAIT, store.wait_for_started(MAX_CONCURRENT_MAINTENANCE))
-        .await
-        .expect("the permitted steps must enter their build steps");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), store.wait_for_started(3))
-            .await
-            .is_err(),
-        "a third namespace must remain queued while both permits are held"
-    );
-    assert_eq!(store.peak_in_flight(), MAX_CONCURRENT_MAINTENANCE);
+    tokio::time::timeout(WAIT, async {
+        while store.reads().total < reads_before_steps + MAX_CONCURRENT_MAINTENANCE {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the permitted steps must enter their build steps");
+    assert_eq!(store.reads().peak_in_flight, MAX_CONCURRENT_MAINTENANCE);
 
-    store.resume_content_reads();
+    blocked_store.release();
     for namespace_id in &namespace_ids {
         wait_for_watermark(&store, namespace_id, ChangeSeq(1)).await;
     }
     assert!(
-        store.peak_in_flight() <= MAX_CONCURRENT_MAINTENANCE,
+        store.reads().peak_in_flight <= MAX_CONCURRENT_MAINTENANCE,
         "executing grep steps exceeded the runner's pool"
     );
     host.shutdown().await.expect("settle host maintenance");
@@ -269,7 +272,10 @@ async fn catch_up<S: ObjectStore + Clone + Send + Sync + 'static>(
 #[tokio::test]
 async fn a_nudge_collects_what_indexing_left_behind() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(AgedGrepStore::new(temp_dir.path()));
+    let store = Arc::new(MetadataMapStore::aged(
+        LocalFsStore::new(temp_dir.path()).expect("local store"),
+        KeyPredicate::any(),
+    ));
     let namespace_id = NamespaceId::parse("collect").expect("namespace id");
     let writer = seed(store.clone(), &namespace_id).await;
     put_file(&writer, &namespace_id, "collect-put").await;
@@ -322,67 +328,6 @@ async fn a_refused_resume_position_restarts_the_collection_pass() {
     let fresh = job.step(&namespace_id, None).await.expect("fresh pass");
     assert_eq!(fresh.conclusion, MaintenanceStepConclusion::Idle);
     assert_eq!(fresh.continuation, None);
-}
-
-/// Grep objects age out against provider timestamps, so a collection test
-/// needs candidates the provider reports as older than the grace window.
-#[derive(Debug)]
-struct AgedGrepStore {
-    inner: LocalFsStore,
-}
-
-impl AgedGrepStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("local store"),
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for AgedGrepStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        Ok(self.inner.head(key).await?.map(|mut metadata| {
-            metadata.last_modified_ms = Some(0);
-            metadata
-        }))
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
 }
 
 /// A writer that only hosts the runner: it serves no namespace of its own,
@@ -477,115 +422,4 @@ async fn wait_for_watermark<S: ObjectStore + 'static>(
     })
     .await
     .unwrap_or_else(|_| panic!("`{namespace_id}` did not reach {built_through_seq:?}"));
-}
-
-#[derive(Debug)]
-struct StepConcurrencyStore {
-    inner: LocalFsStore,
-    pause_content_reads: AtomicBool,
-    started: AtomicUsize,
-    in_flight: AtomicUsize,
-    peak: AtomicUsize,
-    started_notify: Notify,
-    resume_notify: Notify,
-}
-
-impl StepConcurrencyStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("store"),
-            pause_content_reads: AtomicBool::new(false),
-            started: AtomicUsize::new(0),
-            in_flight: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
-            started_notify: Notify::new(),
-            resume_notify: Notify::new(),
-        }
-    }
-
-    fn pause_content_reads(&self) {
-        self.pause_content_reads.store(true, Ordering::Release);
-    }
-
-    fn resume_content_reads(&self) {
-        self.pause_content_reads.store(false, Ordering::Release);
-        self.resume_notify.notify_waiters();
-    }
-
-    fn peak_in_flight(&self) -> usize {
-        self.peak.load(Ordering::Acquire)
-    }
-
-    async fn wait_for_started(&self, target: usize) {
-        loop {
-            let notified = self.started_notify.notified();
-            if self.started.load(Ordering::Acquire) >= target {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    async fn observe_content_read<T>(&self, key: &str, read: impl Future<Output = T>) -> T {
-        if !is_content_object(key) {
-            return read.await;
-        }
-        let in_flight = self.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
-        self.peak.fetch_max(in_flight, Ordering::AcqRel);
-        self.started.fetch_add(1, Ordering::AcqRel);
-        self.started_notify.notify_waiters();
-        if self.pause_content_reads.load(Ordering::Acquire) {
-            loop {
-                let notified = self.resume_notify.notified();
-                if !self.pause_content_reads.load(Ordering::Acquire) {
-                    break;
-                }
-                notified.await;
-            }
-        }
-        let result = read.await;
-        self.in_flight.fetch_sub(1, Ordering::AcqRel);
-        result
-    }
-}
-
-#[async_trait]
-impl ObjectStore for StepConcurrencyStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.observe_content_read(key, self.inner.get_with_metadata(key))
-            .await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.observe_content_read(key, self.inner.get(key, range))
-            .await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
 }

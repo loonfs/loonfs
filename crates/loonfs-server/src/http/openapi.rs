@@ -72,7 +72,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_query::gc_grep_index,
         crate::http::handlers_store::probe_store
     ),
-    components(schemas(
+    components(
+        schemas(
         loonfs_api::CapabilityDocument,
         ApiError,
         loonfs_api::ErrorDetails,
@@ -163,7 +164,9 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::StoreProbeCheckOutcome,
         loonfs_api::v0::StoreProbeCheckResult,
         loonfs_api::v0::StoreProbeResponse
-    )),
+        ),
+        responses(DeadlineExceededResponse)
+    ),
     // Applies to every operation that does not override it. `/health` and
     // `/readiness` do, with `security(())`: they are the probe surface and
     // answer unauthenticated by design.
@@ -180,6 +183,33 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
     )
 )]
 struct LoonfsOpenApi;
+
+/// OpenAPI definition for the 408 response returned after a request deadline.
+#[derive(utoipa::ToResponse)]
+#[response(
+    description = "The request exceeded `request_deadline_ms`. A timed-out mutation may still complete, so clients must determine its outcome before retrying."
+)]
+#[expect(
+    dead_code,
+    reason = "used only to generate the reusable OpenAPI response schema"
+)]
+pub(super) struct DeadlineExceededResponse(#[to_schema] ApiError);
+
+/// Adds the shared 408 response to an OpenAPI operation.
+pub(super) struct DeadlineExceededResponses;
+
+impl utoipa::IntoResponses for DeadlineExceededResponses {
+    fn responses() -> std::collections::BTreeMap<
+        String,
+        utoipa::openapi::RefOr<utoipa::openapi::response::Response>,
+    > {
+        let (name, _) = <DeadlineExceededResponse as utoipa::ToResponse>::response();
+        utoipa::openapi::ResponsesBuilder::new()
+            .response("408", utoipa::openapi::Ref::from_response_name(name))
+            .build()
+            .into()
+    }
+}
 
 /// Declares the scheme the global requirement above names.
 ///

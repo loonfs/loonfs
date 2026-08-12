@@ -272,10 +272,8 @@ mod tests {
     use loonfs_api::ContentId;
     use loonfs_api::ContentRef;
     use loonfs_api::StorageChecksum;
-    use std::fs;
-    use std::path::PathBuf;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, UNIX_EPOCH};
 
     const AZURITE_ACCOUNT_KEY: &str =
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
@@ -283,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn configured_local_fs_scopes_optional_key_prefix() {
         let temp_dir = unique_temp_dir("configured-store-local");
-        let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
+        let store = ConfiguredObjectStore::local_fs(temp_dir.path(), Some("tenant-a"))
             .expect("construct configured local fs store")
             .into_shared();
         let head_key =
@@ -294,7 +292,7 @@ mod tests {
             .await
             .expect("write scoped object");
 
-        let raw_store = LocalFsStore::new(&temp_dir).expect("open raw store");
+        let raw_store = LocalFsStore::new(temp_dir.path()).expect("open raw store");
         assert!(raw_store
             .head(&format!("tenant-a/{head_key}"))
             .await
@@ -393,8 +391,9 @@ mod tests {
     /// suite has run against, offers direct transfers at all.
     #[test]
     fn configured_object_store_offers_direct_transfers_only_on_proven_endpoints() {
-        let local = ConfiguredObjectStore::local_fs(unique_temp_dir("configured-store-kind"), None)
-            .expect("construct local store");
+        let temp_dir = unique_temp_dir("configured-store-kind");
+        let local =
+            ConfiguredObjectStore::local_fs(temp_dir.path(), None).expect("construct local store");
         assert!(local.direct_transfers().is_none());
 
         assert!(aws_s3_store(None).direct_transfers().is_some());
@@ -518,23 +517,28 @@ mod tests {
     }
 
     fn gcs_store() -> ConfiguredObjectStore {
-        ConfiguredObjectStore::gcp_gcs(gcs_config()).expect("construct gcs store")
+        let (_key_dir, config) = gcs_config();
+        ConfiguredObjectStore::gcp_gcs(config).expect("construct gcs store")
     }
 
     /// The same deployment as it will be once a credentialed conformance run
     /// has flipped [`GCS_DIRECT_TRANSFERS_PROVEN`].
     fn proven_gcs_store() -> ConfiguredObjectStore {
-        ConfiguredObjectStore::gcp_gcs_proven(gcs_config(), true).expect("construct gcs store")
+        let (_key_dir, config) = gcs_config();
+        ConfiguredObjectStore::gcp_gcs_proven(config, true).expect("construct gcs store")
     }
 
-    fn gcs_config() -> GcpGcsStoreConfig {
-        GcpGcsStoreConfig {
-            bucket: "bucket".to_owned(),
-            service_account_key_path: gcs_fixture_service_account_key_file("configured-store-gcs")
-                .display()
-                .to_string(),
-            key_prefix: Some("tenant-a".to_owned()),
-        }
+    fn gcs_config() -> (tempfile::TempDir, GcpGcsStoreConfig) {
+        let (key_dir, service_account_key_path) =
+            gcs_fixture_service_account_key_file("configured-store-gcs");
+        (
+            key_dir,
+            GcpGcsStoreConfig {
+                bucket: "bucket".to_owned(),
+                service_account_key_path: service_account_key_path.display().to_string(),
+                key_prefix: Some("tenant-a".to_owned()),
+            },
+        )
     }
 
     /// A reference whose storage checksum is the CRC-32C GCS enforces.
@@ -613,7 +617,7 @@ mod tests {
     #[tokio::test]
     async fn configured_local_fs_preserves_invalid_key_errors() {
         let temp_dir = unique_temp_dir("configured-store-invalid-key");
-        let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
+        let store = ConfiguredObjectStore::local_fs(temp_dir.path(), Some("tenant-a"))
             .expect("construct configured local fs store")
             .into_shared();
 
@@ -627,15 +631,10 @@ mod tests {
         ));
     }
 
-    #[allow(clippy::disallowed_methods)]
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        // Test-only unique paths are an entropy boundary, not protocol time.
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("loonfs-objectstore-{label}-{stamp}"));
-        fs::create_dir_all(&path).expect("create temp dir");
-        path
+    fn unique_temp_dir(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("loonfs-objectstore-{label}-"))
+            .tempdir()
+            .expect("create temp dir")
     }
 }

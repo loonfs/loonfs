@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-// This file is imported as a helper module by provider tests and also compiled as its own test target.
-
 use loonfs_api::SecretString;
 use std::fmt;
 use std::fs;

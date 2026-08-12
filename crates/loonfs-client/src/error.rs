@@ -1,72 +1,94 @@
-//! [`ClientError`]: every failure the async client surfaces.
+//! Defines [`ClientError`], returned by asynchronous client operations.
 
 use loonfs_api::{ErrorCode, ErrorDetails};
 use thiserror::Error;
 
-/// Error returned by the async HTTP client.
+/// Error returned by the asynchronous HTTP client.
 ///
 /// Foreign causes (I/O, JSON, and HTTP transport) are captured as message
 /// strings rather than `#[source]` chains.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ClientError {
+    /// The client configuration could not be read.
     #[error("failed to read config: {0}")]
     ConfigIo(String),
+    /// The client configuration could not be decoded.
     #[error("failed to decode config: {0}")]
     ConfigDecode(String),
+    /// A required client configuration field is missing.
     #[error("missing `{field}`")]
-    MissingConfigField { field: &'static str },
+    MissingConfigField {
+        /// Name of the missing field.
+        field: &'static str,
+    },
+    /// A client configuration field contains an invalid value.
     #[error("invalid `{field}`: {reason}")]
-    ConfigValidation { field: &'static str, reason: String },
+    ConfigValidation {
+        /// Name of the field containing the invalid value.
+        field: &'static str,
+        /// Why the value is invalid.
+        reason: String,
+    },
+    /// A path is invalid or cannot be used with the requested namespace.
     #[error("invalid namespace path `{0}`")]
     InvalidNamespacePath(String),
+    /// A commit ID is invalid.
     #[error("invalid commit_id `{0}`")]
     InvalidCommitId(String),
+    /// A checkpoint ID is invalid.
     #[error("invalid checkpoint_id `{0}`")]
     InvalidCheckpointId(String),
+    /// Sending an HTTP request or reading its response failed.
     #[error("http error: {0}")]
     Http(String),
+    /// The server returned a structured API error response.
     #[error("server returned {status} {code}: {message}")]
     Api {
+        /// HTTP status code returned by the server.
         status: u16,
+        /// Machine-readable API error code returned by the server.
         code: String,
         /// Capability feature key accompanying `not_supported` errors.
         feature: Option<String>,
+        /// Error message returned by the server.
         message: String,
-        /// Correlation id the server assigned to the failed request.
+        /// Correlation ID assigned to the failed request.
         request_id: Option<String>,
-        /// Structured context for the code, when the server sent any. Boxed
-        /// so the rare detailed error does not widen every client result.
+        /// Additional structured error details, when provided by the server.
+        /// Boxed to keep the enum small.
         details: Option<Box<ErrorDetails>>,
     },
-    /// No upload transport this deployment offers can carry the payload.
+    /// None of the server's upload methods can accept the payload.
     ///
-    /// Raised before any byte moves, because the alternative is sending an
-    /// oversized payload into the capped proxy to be refused there.
+    /// Returned before any data is uploaded.
     #[error("payload of {size_bytes} bytes exceeds every upload transport this deployment offers: {reason}")]
     UploadTooLarge {
-        /// Complete length of the payload that could not be carried.
+        /// Total payload size in bytes.
         size_bytes: u64,
-        /// The caps it exceeded, named so a caller can act on them.
+        /// Description of the upload limits the payload exceeds.
         reason: String,
     },
+    /// Reading or writing streamed data failed.
     #[error("i/o error: {0}")]
     Io(String),
+    /// Serializing a request or decoding a JSON response failed.
     #[error("json error: {0}")]
     Json(String),
-    /// A well-formed response that breaks a shape rule the API spec states.
+    /// A decoded response violates the API contract.
     ///
-    /// Distinct from [`ClientError::Json`], which is a body that did not
-    /// decode: this one decoded and then said something the contract forbids,
-    /// so the client refuses it rather than passing a wrong answer along.
+    /// [`ClientError::Json`] means the response could not be decoded. This
+    /// variant means decoding succeeded, but the decoded value is not valid
+    /// according to the API specification.
     #[error("server response violates the API contract: {0}")]
     Protocol(String),
 }
 
 impl ClientError {
-    /// Returns the typed code for [`ClientError::Api`] errors, or `None` for
-    /// non-API errors and for codes this build does not know (clients must
-    /// tolerate unknown codes).
+    /// Returns the typed code for [`ClientError::Api`].
+    ///
+    /// Returns `None` for other error variants and for API codes this client
+    /// version does not recognize.
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
             ClientError::Api { code, .. } => ErrorCode::parse(code),
