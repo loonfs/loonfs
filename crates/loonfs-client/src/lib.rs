@@ -111,15 +111,17 @@ pub struct Client {
     base_url: String,
     auth_token: Option<SecretString>,
     http: reqwest::Client,
-    /// Caller-selected whole-request deadline, retained so retry attempts can
-    /// use the stricter of it and the remaining operation budget.
+    /// Optional timeout configured for each HTTP attempt.
+    ///
+    /// Replay-safe requests use the smaller of this value and the time left in
+    /// the total retry budget.
     request_timeout: Option<Duration>,
-    /// Whether retryable transport and server errors are retried (see
+    /// Whether the client retries eligible network and server errors (see
     /// [`ClientConfig::disable_transient_retry`]).
     transport_retry_enabled: bool,
-    /// Count, backoff, and elapsed-time bounds for replay-safe control calls.
+    /// Attempt count, delay, and total duration limits for replay-safe requests.
     transport_retry: TransportRetryPolicy,
-    /// Monotonic elapsed-time source for the operation deadline.
+    /// Monotonic clock used to enforce the total retry limit.
     timer: Arc<dyn transport::MonotonicTimer>,
     /// Capability document cache, shared by clones and filled on first use.
     capabilities: Arc<OnceLock<CapabilityDocument>>,
@@ -2174,23 +2176,13 @@ impl Client {
         }
     }
 
-    /// Decides whether a reused commit id already did this exact work.
+    /// Checks whether a commit-ID conflict came from retrying the same PUT.
     ///
-    /// The proof is the commit's whole semantic identity, not a selection of
-    /// its parts. The conflict reports the fingerprint the server's receipt
-    /// holds; this reads the one change that commit id landed, rebuilds this
-    /// request's fingerprint with the committed content reference in place
-    /// of the freshly uploaded one, and requires the two to be equal. That
-    /// covers the path, the replacement behavior, the expected revision, the
-    /// annotation, and that the original commit was this one put — every
-    /// field a future request gains is covered the day it joins the
-    /// preimage. What the fingerprint cannot speak to is whether the two
-    /// content objects hold the same bytes, so digest evidence answers that
-    /// separately.
-    ///
-    /// Nothing weaker counts: every way of failing to prove the two requests
-    /// are the same — including the upload having no answer to give — leaves
-    /// the original conflict standing, never agreement.
+    /// The shared helper loads the original change and compares the complete
+    /// request fingerprint. It also verifies that the new upload contains the
+    /// same bytes as the content from the original commit. If either check
+    /// cannot be completed or does not match, this method returns the original
+    /// conflict.
     async fn reconcile_commit_id_reuse(
         &self,
         spec: &NamespacePath,

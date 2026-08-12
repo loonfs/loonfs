@@ -194,14 +194,13 @@ impl FsWriter {
         }
     }
 
-    /// Determines whether a commit-id conflict is an idempotent retry of the
-    /// same file write.
+    /// Checks whether a commit-ID conflict came from retrying the same file
+    /// write.
     ///
-    /// The runtime compares the durable receipt's full request fingerprint with a
-    /// fingerprint rebuilt using the committed content reference. It separately
-    /// verifies that the newly staged payload matches the committed bytes. If
-    /// either comparison is unavailable or differs, the original conflict is
-    /// returned.
+    /// The shared helper compares the full request fingerprint and verifies
+    /// that the new upload contains the same bytes as the original commit. If
+    /// either check cannot be completed or does not match, this method returns
+    /// the original conflict.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,

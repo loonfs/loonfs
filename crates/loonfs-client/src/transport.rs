@@ -1,5 +1,5 @@
-//! The HTTP transport: request building, the bounded transport retry, and
-//! response-to-error mapping.
+//! Builds HTTP requests, applies retry limits, and converts responses into
+//! client errors.
 
 use crate::{Client, ClientError, PayloadStream, Result};
 use bytes::Bytes;
@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 
-/// Bounded retry configuration for one replay-safe server request.
+/// Retry limits for a request that is safe to send more than once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TransportRetryPolicy {
     pub(crate) max_retries: u32,
@@ -24,10 +24,10 @@ impl TransportRetryPolicy {
         max_retries: 3,
         initial_backoff: Duration::from_millis(250),
         max_backoff: Duration::from_secs(2),
-        // The server gives ordinary requests 60 seconds. Ninety seconds lets
-        // a client absorb brief connect failures and backoff around that one
-        // request while staying below the larger provider operation budget.
-        // Content transfers are explicitly exempt below.
+        // The server limits most requests to 60 seconds. A 90-second client
+        // budget leaves time for short connection failures and retry delays
+        // while remaining below the longer provider operation limit. Content
+        // transfer retries do not use this total budget.
         operation_deadline: Duration::from_secs(90),
     };
 }
@@ -37,12 +37,12 @@ impl TransportRetryPolicy {
 /// the caller forever.
 pub(crate) const IO_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Monotonic elapsed-time boundary used only by the transport retry budget.
+/// Provides elapsed time from a monotonic clock for the total retry limit.
 pub(crate) trait MonotonicTimer: std::fmt::Debug + Send + Sync {
     fn monotonic_now_ms(&self) -> u64;
 }
 
-/// Process-clock implementation for client operation deadlines.
+/// Monotonic clock used by the production client.
 #[derive(Debug, Default)]
 pub(crate) struct StdMonotonicTimer {
     origin: OnceLock<Instant>,
@@ -50,8 +50,8 @@ pub(crate) struct StdMonotonicTimer {
 
 impl MonotonicTimer for StdMonotonicTimer {
     fn monotonic_now_ms(&self) -> u64 {
-        // This is the client's elapsed-time boundary for self-imposed
-        // transport deadlines; no protocol state observes the reading.
+        // This value is used only for local retry timing. It is never stored
+        // or returned through the protocol.
         #[allow(clippy::disallowed_methods)]
         let now = Instant::now();
         let origin = self.origin.get_or_init(|| now);
@@ -59,7 +59,7 @@ impl MonotonicTimer for StdMonotonicTimer {
     }
 }
 
-/// Elapsed-time state shared by every retry attempt of one request.
+/// Tracks the time remaining in one request's total retry budget.
 struct OperationDeadline<'timer> {
     timer: &'timer dyn MonotonicTimer,
     started_ms: u64,
@@ -284,8 +284,7 @@ impl Client {
             .boxed())
     }
 
-    /// Retries transient transport failures and selected temporary server
-    /// errors with bounded exponential backoff.
+    /// Retries eligible network and server errors with exponential backoff.
     ///
     /// Callers use this only for reads, replay-safe commits, and idempotent
     /// operations. Lifecycle changes and upload-session creation use
@@ -302,11 +301,12 @@ impl Client {
             .map(|response| response.bytes)
     }
 
-    /// Retries a content transfer by count without bounding total duration.
+    /// Retries a content transfer using the attempt limit but no total time
+    /// limit.
     ///
-    /// A slow but progressing payload may outlive an ordinary request's
-    /// operation deadline. Its socket inactivity timeout and finite attempt
-    /// count still prevent an unbounded retry loop.
+    /// A transfer can exceed the normal 90-second retry limit while data is
+    /// still moving. The 60-second inactivity timeout and attempt limit still
+    /// bound stalled or repeatedly failing transfers.
     pub(crate) async fn call_content_with_transport_retry(
         &self,
         request: &WireRequest,
@@ -317,11 +317,8 @@ impl Client {
             .map(|response| response.bytes)
     }
 
-    /// [`Self::call_with_transport_retry`], keeping the response headers.
-    ///
-    /// A multipart part upload is the one call whose answer lives in a
-    /// header: the provider's etag for the accepted part, which the client
-    /// carries to completion.
+    /// Same as [`Self::call_with_transport_retry`], but also returns response
+    /// headers.
     pub(crate) async fn call_with_transport_retry_headers(
         &self,
         request: &WireRequest,
@@ -333,8 +330,8 @@ impl Client {
             .await
     }
 
-    /// The content-transfer form of
-    /// [`Self::call_with_transport_retry_headers`].
+    /// Same as [`Self::call_content_with_transport_retry`], but also returns
+    /// response headers. Multipart uploads use this to read the part ETag.
     pub(crate) async fn call_content_with_transport_retry_headers(
         &self,
         request: &WireRequest,
@@ -379,9 +376,10 @@ impl Client {
         }
     }
 
-    /// One attempt: build, send, and read the body. A served non-success
-    /// status is an error but not a transport failure — that distinction is
-    /// what the retry policy keys on.
+    /// Sends one request and reads its response body.
+    ///
+    /// A non-success HTTP status is a server response, not a network failure.
+    /// The retry policy handles those two failure types differently.
     async fn send(
         &self,
         request: &WireRequest,
@@ -566,10 +564,11 @@ fn render_send_error(
     }
 }
 
-/// The retry policy for one failed attempt: `transport` is whether the
-/// network layer itself reported the failure (classified before the error
-/// is flattened by `map_status_error`), and served envelopes retry only on
-/// the retryable-unavailability codes.
+/// Returns whether a failed request is eligible for an automatic retry.
+///
+/// Network failures are retryable. Server responses are retryable only when
+/// their error code identifies a temporary condition that requires no
+/// operator action.
 pub(crate) fn retryable_transport_failure(transport: bool, error: &ClientError) -> bool {
     transport
         || error
@@ -577,9 +576,9 @@ pub(crate) fn retryable_transport_failure(transport: bool, error: &ClientError) 
             .is_some_and(ErrorCode::retryable_without_operator_action)
 }
 
-/// Deterministic doubling, the same shape as the object-store transport
-/// retry: workspace policy avoids ambient randomness, and a bounded
-/// per-request retry does not need jitter.
+/// Computes deterministic exponential backoff for the requested retry number.
+///
+/// The delay doubles after each failure and never exceeds `max_backoff`.
 fn transport_retry_backoff(policy: &TransportRetryPolicy, retry: u32) -> Duration {
     let doublings = retry.saturating_sub(1).min(16);
     policy
@@ -588,7 +587,7 @@ fn transport_retry_backoff(policy: &TransportRetryPolicy, retry: u32) -> Duratio
         .min(policy.max_backoff)
 }
 
-/// Grants one retry under the count and optional operation-deadline budgets.
+/// Returns the delay before the next retry, or `None` when a limit is reached.
 fn next_transport_retry_backoff(
     policy: &TransportRetryPolicy,
     retries: &mut u32,
@@ -606,8 +605,8 @@ fn next_transport_retry_backoff(
 }
 
 #[allow(clippy::disallowed_methods)]
-// The client's own retry pacing between bounded attempts of one request; no
-// protocol time depends on it and replay never observes it.
+// This delay affects only local retry scheduling. It is not stored or exposed
+// through the protocol.
 async fn transport_retry_pause(backoff: Duration) {
     tokio::time::sleep(backoff).await;
 }
@@ -814,8 +813,7 @@ mod tests {
         }
     }
 
-    /// First reading starts the operation; every later reading has exhausted
-    /// the injected deadline.
+    /// Test clock that reports an expired deadline after its first read.
     #[derive(Debug, Default)]
     struct ExpiredAfterFirstRead {
         reads: AtomicU64,

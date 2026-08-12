@@ -20,11 +20,12 @@ pub struct ClientConfig {
     pub server_url: String,
     /// Optional bearer token.
     pub auth_token: Option<SecretString>,
-    /// Optional caller-selected whole-request deadline in milliseconds.
-    /// Unset leaves content transfers bounded only by their attempt counts
-    /// and the built-in 60-second socket inactivity timeout, so a slow but
-    /// progressing transfer is not cut off. Replay-safe control calls also
-    /// carry the transport policy's built-in total operation deadline.
+    /// Optional timeout for one HTTP request, in milliseconds.
+    ///
+    /// When this value is not set, content transfers may continue as long as
+    /// the connection makes progress. They still use a 60-second inactivity
+    /// timeout and a limited number of attempts. Other replay-safe requests
+    /// also have a built-in 90-second total retry limit.
     #[serde(default)]
     pub request_timeout_ms: Option<u64>,
     /// Disables the bounded automatic retry of quick-clearing transient

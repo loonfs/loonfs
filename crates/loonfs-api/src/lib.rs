@@ -13,11 +13,10 @@
 //! surfaces, so this crate — the shared vocabulary — owns the single
 //! definition rather than each surface keeping its own copy to drift.
 //!
-//! One module holds procedures rather than shapes: `commit_identity` computes
-//! the durable fingerprint of a mutation and reconciles a retried put against
-//! its receipt. It lives here for the same reason the operation language does
-//! — every surface must apply identical identity and evidence rules, so there
-//! is one implementation and no second reading of them.
+//! The `commit_identity` module contains shared logic rather than wire types.
+//! It computes durable mutation fingerprints and verifies retried PUT requests
+//! against existing commit receipts. Keeping this logic here ensures that the
+//! embedded runtime and HTTP client apply the same identity and content checks.
 //!
 //! Module rule: v0 HTTP shapes live in [`v0`]; the crate root keeps the
 //! ids/paths/errors/wire-format modules and re-exports the common v0

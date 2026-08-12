@@ -847,7 +847,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         })
     }
 
-    /// Reads the wall-clock boundary independently of writer identity.
+    /// Returns the current wall-clock time without requiring writer identity.
     fn now_ms(&self) -> Result<u64> {
         current_time_ms()
     }
