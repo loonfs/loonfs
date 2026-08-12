@@ -248,13 +248,19 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
             ))
         }
     };
-    Ok(
-        if manifest.payload_checksum == record.manifest_payload_checksum {
-            CheckpointBasisVerification::Verified
-        } else {
-            CheckpointBasisVerification::Invalid
-        },
-    )
+    if manifest.payload_checksum != record.manifest_payload_checksum {
+        // Both durable objects loaded successfully, so their disagreement is
+        // corruption rather than a retention race that a new checkpoint can fix.
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "checkpoint `{}` for namespace `{}` records manifest `{}` payload checksum `{}`, but the manifest carries `{}`",
+            record.checkpoint_id,
+            record.namespace_id,
+            record.manifest_object_id,
+            record.manifest_payload_checksum,
+            manifest.payload_checksum,
+        )));
+    }
+    Ok(CheckpointBasisVerification::Verified)
 }
 
 #[cfg(test)]

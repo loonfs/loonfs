@@ -89,9 +89,18 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             Err(error) => {
                 // Cleanup is best effort on an error and must not replace its
                 // original classification.
-                let _ =
+                if let Err(cleanup_error) =
                     release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms)
-                        .await;
+                        .await
+                {
+                    tracing::warn!(
+                        namespace_id = %namespace_id,
+                        checkpoint_id = %checkpoint_id,
+                        original_error = %error,
+                        cleanup_error = %cleanup_error,
+                        "failed to release a checkpoint record after basis verification failed"
+                    );
+                }
                 return Err(error);
             }
         };

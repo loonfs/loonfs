@@ -2,6 +2,103 @@
 
 use super::*;
 use loonfs_objectstore::keys::{checkpoint_prefix, wal_segment_prefix};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[derive(Debug)]
+struct ManifestChecksumMismatchOnceStore {
+    inner: LocalFsStore,
+    checkpoint_prefix: String,
+    manifest_key: String,
+    mismatched_manifest: Bytes,
+    mismatch_armed: AtomicBool,
+    mismatch_injected: AtomicBool,
+    checkpoint_writes: AtomicUsize,
+}
+
+impl ManifestChecksumMismatchOnceStore {
+    fn new(
+        inner: LocalFsStore,
+        namespace_id: &NamespaceId,
+        manifest_key: String,
+        mismatched_manifest: Bytes,
+    ) -> Self {
+        Self {
+            inner,
+            checkpoint_prefix: checkpoint_prefix(namespace_id.as_str()),
+            manifest_key,
+            mismatched_manifest,
+            mismatch_armed: AtomicBool::new(false),
+            mismatch_injected: AtomicBool::new(false),
+            checkpoint_writes: AtomicUsize::new(0),
+        }
+    }
+
+    fn inner(&self) -> &LocalFsStore {
+        &self.inner
+    }
+
+    fn checkpoint_writes(&self) -> usize {
+        self.checkpoint_writes.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ManifestChecksumMismatchOnceStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        let full_object = range.is_none();
+        let stored = self.inner.get(key, range).await?;
+        if key == self.manifest_key
+            && full_object
+            && self.mismatch_armed.swap(false, Ordering::SeqCst)
+        {
+            return Ok(Some(self.mismatched_manifest.clone()));
+        }
+        Ok(stored)
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let creates_checkpoint =
+            key.starts_with(&self.checkpoint_prefix) && matches!(&mode, PutMode::CreateIfAbsent);
+        let result = self.inner.put(key, bytes, mode).await;
+        if result.is_ok() && creates_checkpoint {
+            self.checkpoint_writes.fetch_add(1, Ordering::SeqCst);
+            // Only the first verification observes the contradiction. If the
+            // operation retries, the next basis is sound and would hide it.
+            if !self.mismatch_injected.swap(true, Ordering::SeqCst) {
+                self.mismatch_armed.store(true, Ordering::SeqCst);
+            }
+        }
+        result
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
 
 async fn current_manifest_id<S: ObjectStore + ?Sized>(
     store: &S,
@@ -713,6 +810,81 @@ async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_recor
         manifest_reads.load(std::sync::atomic::Ordering::SeqCst),
         2,
         "the injected failure follows the projection's manifest read"
+    );
+
+    let record_keys = store
+        .inner()
+        .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+        .await
+        .expect("list checkpoint records");
+    assert_eq!(record_keys.len(), 1, "the failed create wrote one record");
+    let checkpoint_id = record_keys[0]
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.strip_suffix(".json"))
+        .and_then(|id| CheckpointId::parse(id).ok())
+        .expect("checkpoint record key");
+    let record = read_checkpoint_record(store.inner(), &namespace_id, &checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("record remains for cleanup inspection")
+        .state;
+    assert_eq!(
+        record.state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+            released_at_ms: context.now_ms
+        }
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_checksum_disagreement_is_terminal_corruption_and_releases_record() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
+    bootstrap_namespace(&setup_store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    let manifest_key = current_manifest_key(&setup_store, &namespace_id).await;
+    let manifest_bytes = setup_store
+        .get(&manifest_key, None)
+        .await
+        .expect("read manifest")
+        .expect("current manifest exists");
+    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
+    let record_checksum = manifest.payload_checksum.clone();
+    let mut mismatched_payload = manifest.payload;
+    mismatched_payload.next_inode_id = InodeId(mismatched_payload.next_inode_id.0 + 1);
+    let mismatched_manifest = NamespaceManifestEnvelope::from_payload(mismatched_payload)
+        .expect("build mismatched manifest");
+    let manifest_checksum = mismatched_manifest.payload_checksum.clone();
+    assert_ne!(record_checksum, manifest_checksum);
+    let mismatched_bytes = Bytes::from(
+        encode_namespace_manifest_json(&mismatched_manifest).expect("encode mismatched manifest"),
+    );
+    let store = ManifestChecksumMismatchOnceStore::new(
+        setup_store,
+        &namespace_id,
+        manifest_key,
+        mismatched_bytes,
+    );
+
+    let error = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect_err("a durable checksum contradiction must fail checkpoint creation");
+
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+    let CoreError::NamespaceCorrupt(message) = error else {
+        panic!("expected namespace corruption, got {error:?}");
+    };
+    assert!(message.contains(&record_checksum));
+    assert!(message.contains(&manifest_checksum));
+    assert_eq!(
+        store.checkpoint_writes(),
+        1,
+        "the checksum contradiction must not be retried under a new checkpoint id"
     );
 
     let record_keys = store
