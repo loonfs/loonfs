@@ -14,14 +14,15 @@
 //! whole of the reuse check.
 
 use crate::{
-    AbsolutePath, AttributeRevisionNo, AttributeValue, ChangeSeq, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
-    RevisionNo,
+    AbsolutePath, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId, ContentEvidence,
+    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId,
+    NamespaceId, RevisionNo,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::future::Future;
 use thiserror::Error;
 
 /// Domain separator for the one mutation fingerprint preimage.
@@ -344,6 +345,117 @@ pub fn put_retry_fingerprint(
         expected_revision_no,
     };
     semantic_commit_fingerprint(namespace_id, message, std::slice::from_ref(&operation))
+}
+
+/// Receipt fields required to reconcile a put rejected for reusing a commit id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutRetryReceipt {
+    /// Sequence at which the earlier commit landed.
+    pub committed_seq: ChangeSeq,
+    /// Semantic fingerprint stored with the earlier commit.
+    pub committed_fingerprint: String,
+}
+
+/// Meaning of a surface-specific error during put retry reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PutRetryErrorClassification {
+    /// The put reused a commit id, with a durable receipt when one was available.
+    CommitIdReuseConflict(Option<PutRetryReceipt>),
+    /// Retention removed the change-feed evidence needed for reconciliation.
+    RebootstrapRequired,
+    /// Any error unrelated to commit-id reuse reconciliation.
+    Other,
+}
+
+/// Concrete put attempt being compared with a reused commit id's receipt.
+#[derive(Debug, Clone, Copy)]
+pub struct PutRetryAttempt<'a> {
+    /// Namespace the put targeted.
+    pub namespace_id: &'a NamespaceId,
+    /// Absolute path the put targeted.
+    pub path: &'a AbsolutePath,
+    /// Commit id rejected as already used.
+    pub commit_id: &'a CommitId,
+    /// Semantic put options supplied by the caller.
+    pub options: &'a crate::options::PutFileOptions,
+    /// Evidence about the newly staged payload.
+    pub staged: ContentEvidence<'a>,
+}
+
+/// Reconciles a put rejected for reusing a commit id against durable evidence.
+///
+/// The read closure receives the exclusive change-feed cursor immediately
+/// before the receipt's sequence and must return one page containing at most
+/// the requested row. A missing row, unavailable retained history, malformed
+/// receipt, fingerprint mismatch, or payload mismatch preserves the original
+/// conflict. Other read failures are returned directly.
+pub async fn reconcile_put_commit_id_reuse<E, ReadChange, ReadChangeFuture, ClassifyError>(
+    attempt: PutRetryAttempt<'_>,
+    conflict: E,
+    read_change: ReadChange,
+    classify_error: ClassifyError,
+) -> Result<crate::v0::CommitResponse, E>
+where
+    ReadChange: FnOnce(ChangeSeq) -> ReadChangeFuture,
+    ReadChangeFuture: Future<Output = Result<crate::v0::ChangesResponse, E>>,
+    ClassifyError: Fn(&E) -> PutRetryErrorClassification,
+{
+    let PutRetryErrorClassification::CommitIdReuseConflict(Some(receipt)) =
+        classify_error(&conflict)
+    else {
+        return Err(conflict);
+    };
+    let after_seq = ChangeSeq(receipt.committed_seq.0.saturating_sub(1));
+    let page = match read_change(after_seq).await {
+        Ok(page) => page,
+        Err(error)
+            if matches!(
+                classify_error(&error),
+                PutRetryErrorClassification::RebootstrapRequired
+            ) =>
+        {
+            return Err(conflict);
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(committed) = page.changes.into_iter().find(|change| {
+        change.seq == receipt.committed_seq && &change.commit_id == attempt.commit_id
+    }) else {
+        return Err(conflict);
+    };
+    let Some(content_ref) = sole_committed_content_ref(&committed) else {
+        return Err(conflict);
+    };
+    let retried = put_retry_fingerprint(
+        attempt.namespace_id,
+        attempt.path,
+        attempt.options.behavior,
+        attempt.options.expected_revision_no,
+        attempt.options.message.as_deref(),
+        content_ref,
+    );
+    if retried.ok().as_deref() != Some(receipt.committed_fingerprint.as_str())
+        || !content_ref.matches_evidence(attempt.staged)
+    {
+        return Err(conflict);
+    }
+    Ok(crate::v0::CommitResponse {
+        namespace_id: attempt.namespace_id.clone(),
+        commit_id: committed.commit_id,
+        committed_seq: committed.seq,
+    })
+}
+
+/// Returns the content one committed change wrote when it wrote exactly one.
+fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&ContentRef> {
+    let mut content = change.events.iter().filter_map(|event| match event {
+        crate::v0::FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
+        crate::v0::FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
+        _ => None,
+    });
+    let only = content.next()?;
+    content.next().is_none().then_some(only)
 }
 
 #[cfg(test)]
@@ -929,5 +1041,109 @@ mod tests {
                 "a changed {label} must change the fingerprint"
             );
         }
+    }
+
+    /// Pins the shared reconciliation verdicts independently of either the
+    /// embedded or HTTP surface adapter.
+    #[test]
+    fn put_retry_reconciliation_agrees_on_receipt_mismatch_and_unavailable_evidence() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        enum ReconciliationError {
+            Conflict(PutRetryReceipt),
+            EvidenceUnavailable,
+        }
+
+        fn classify(error: &ReconciliationError) -> PutRetryErrorClassification {
+            match error {
+                ReconciliationError::Conflict(receipt) => {
+                    PutRetryErrorClassification::CommitIdReuseConflict(Some(receipt.clone()))
+                }
+                ReconciliationError::EvidenceUnavailable => {
+                    PutRetryErrorClassification::RebootstrapRequired
+                }
+            }
+        }
+
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let path = AbsolutePath::parse("/report.txt").expect("valid path");
+        let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+        let committed_seq = ChangeSeq(7);
+        let bytes = b"stable bytes";
+        let content_ref = ContentRef::blob_v1(ContentId::generate(), bytes);
+        let options = crate::options::PutFileOptions {
+            commit_id: Some(commit_id.clone()),
+            ..crate::options::PutFileOptions::default()
+        };
+        let receipt = PutRetryReceipt {
+            committed_seq,
+            committed_fingerprint: put_retry_fingerprint(
+                &namespace_id,
+                &path,
+                options.behavior,
+                options.expected_revision_no,
+                options.message.as_deref(),
+                &content_ref,
+            )
+            .expect("fingerprint"),
+        };
+        let page = crate::v0::ChangesResponse {
+            namespace_id: namespace_id.clone(),
+            after_seq: ChangeSeq(6),
+            through_seq: committed_seq,
+            next_after_seq: None,
+            changes: vec![crate::v0::CommittedChange {
+                seq: committed_seq,
+                commit_id: commit_id.clone(),
+                committed_at_ms: 1,
+                message: None,
+                events: vec![crate::v0::FilesystemChange::ContentChanged {
+                    inode_id: InodeId(2),
+                    revision_no: RevisionNo(1),
+                    content_ref,
+                }],
+            }],
+        };
+
+        let matching_attempt = PutRetryAttempt {
+            namespace_id: &namespace_id,
+            path: &path,
+            commit_id: &commit_id,
+            options: &options,
+            staged: ContentEvidence::Bytes(bytes),
+        };
+        let reconciled = futures::executor::block_on(reconcile_put_commit_id_reuse(
+            matching_attempt,
+            ReconciliationError::Conflict(receipt.clone()),
+            |after_seq| {
+                assert_eq!(after_seq, ChangeSeq(6));
+                std::future::ready(Ok(page.clone()))
+            },
+            classify,
+        ))
+        .expect("matching receipt and evidence reconcile");
+        assert_eq!(reconciled.commit_id, commit_id);
+        assert_eq!(reconciled.committed_seq, committed_seq);
+
+        let mismatch = futures::executor::block_on(reconcile_put_commit_id_reuse(
+            PutRetryAttempt {
+                staged: ContentEvidence::Bytes(b"different bytes"),
+                ..matching_attempt
+            },
+            ReconciliationError::Conflict(receipt.clone()),
+            |_| std::future::ready(Ok(page.clone())),
+            classify,
+        ));
+        assert_eq!(
+            mismatch,
+            Err(ReconciliationError::Conflict(receipt.clone()))
+        );
+
+        let unavailable = futures::executor::block_on(reconcile_put_commit_id_reuse(
+            matching_attempt,
+            ReconciliationError::Conflict(receipt.clone()),
+            |_| std::future::ready(Err(ReconciliationError::EvidenceUnavailable)),
+            classify,
+        ));
+        assert_eq!(unavailable, Err(ReconciliationError::Conflict(receipt)));
     }
 }

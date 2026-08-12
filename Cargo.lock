@@ -1392,6 +1392,7 @@ dependencies = [
  "ciborium",
  "crc32c",
  "crc64fast-nvme",
+ "futures",
  "getrandom 0.3.4",
  "serde",
  "serde_bytes",

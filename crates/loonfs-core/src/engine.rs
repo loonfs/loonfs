@@ -703,7 +703,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             &content_store_id,
             upload_id,
-            self.mutation_context()?.now_ms,
+            self.now_ms()?,
         )
         .await
     }
@@ -843,8 +843,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         })?;
         Ok(MutationContext {
             writer_id: writer.writer_id.clone(),
-            now_ms: current_time_ms()?,
+            now_ms: self.now_ms()?,
         })
+    }
+
+    /// Reads the wall-clock boundary independently of writer identity.
+    fn now_ms(&self) -> Result<u64> {
+        current_time_ms()
     }
 }
 
@@ -991,6 +996,39 @@ mod tests {
             .await
             .expect("a reader-built engine serves reads");
         assert_eq!(changes.namespace_id, namespace_id);
+    }
+
+    #[tokio::test]
+    async fn reader_engine_reads_upload_status_without_writer_identity() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer =
+            NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("writer store"))
+                .namespace_id(namespace_id.clone())
+                .writer_id("writer-a")
+                .build()
+                .expect("writer engine builds");
+        writer
+            .bootstrap_namespace(BootstrapOptions::default())
+            .await
+            .expect("bootstrap namespace");
+        let begun = writer
+            .begin_upload(BeginUploadRequest::ServiceProxied {})
+            .await
+            .expect("begin upload");
+
+        let reader =
+            NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("reader store"))
+                .namespace_id(namespace_id)
+                .build_reader()
+                .expect("reader engine builds");
+        let (status, receipt) = reader
+            .read_upload_status(begun.upload_id())
+            .await
+            .expect("reader engine reads upload status");
+
+        assert_eq!(status.upload_id, *begun.upload_id());
+        assert!(receipt.is_none());
     }
 
     #[tokio::test]

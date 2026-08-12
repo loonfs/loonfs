@@ -1,4 +1,4 @@
-//! The HTTP transport: request building, the bounded transient retry, and
+//! The HTTP transport: request building, the bounded transport retry, and
 //! response-to-error mapping.
 
 use crate::{Client, ClientError, PayloadStream, Result};
@@ -6,21 +6,87 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_api::{ApiError, ErrorCode};
 use reqwest::Method;
+use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::Instant;
 
-/// Cap on attempts for transient-error retry: one initial try plus three
-/// retries, sleeping with doubling backoff in between.
-pub(crate) const MAX_TRANSIENT_ATTEMPTS: u32 = 4;
-/// First transient-retry sleep; doubles per retry up to
-/// [`MAX_TRANSIENT_RETRY_DELAY`].
-pub(crate) const INITIAL_TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(250);
-/// Ceiling for one transient-retry sleep.
-pub(crate) const MAX_TRANSIENT_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// Bounded retry configuration for one replay-safe server request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TransportRetryPolicy {
+    pub(crate) max_retries: u32,
+    pub(crate) initial_backoff: Duration,
+    pub(crate) max_backoff: Duration,
+    pub(crate) operation_deadline: Duration,
+}
+
+impl TransportRetryPolicy {
+    pub(crate) const DEFAULT: Self = Self {
+        max_retries: 3,
+        initial_backoff: Duration::from_millis(250),
+        max_backoff: Duration::from_secs(2),
+        // The server gives ordinary requests 60 seconds. Ninety seconds lets
+        // a client absorb brief connect failures and backoff around that one
+        // request while staying below the larger provider operation budget.
+        // Content transfers are explicitly exempt below.
+        operation_deadline: Duration::from_secs(90),
+    };
+}
 
 /// Socket read/write inactivity timeout applied to every request. A
 /// connection that makes no progress for this long fails instead of hanging
 /// the caller forever.
 pub(crate) const IO_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Monotonic elapsed-time boundary used only by the transport retry budget.
+pub(crate) trait MonotonicTimer: std::fmt::Debug + Send + Sync {
+    fn monotonic_now_ms(&self) -> u64;
+}
+
+/// Process-clock implementation for client operation deadlines.
+#[derive(Debug, Default)]
+pub(crate) struct StdMonotonicTimer {
+    origin: OnceLock<Instant>,
+}
+
+impl MonotonicTimer for StdMonotonicTimer {
+    fn monotonic_now_ms(&self) -> u64 {
+        // This is the client's elapsed-time boundary for self-imposed
+        // transport deadlines; no protocol state observes the reading.
+        #[allow(clippy::disallowed_methods)]
+        let now = Instant::now();
+        let origin = self.origin.get_or_init(|| now);
+        u64::try_from(now.saturating_duration_since(*origin).as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// Elapsed-time state shared by every retry attempt of one request.
+struct OperationDeadline<'timer> {
+    timer: &'timer dyn MonotonicTimer,
+    started_ms: u64,
+    deadline: Duration,
+}
+
+impl<'timer> OperationDeadline<'timer> {
+    fn start(timer: &'timer dyn MonotonicTimer, deadline: Duration) -> Self {
+        Self {
+            timer,
+            started_ms: timer.monotonic_now_ms(),
+            deadline,
+        }
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        let elapsed_ms = self
+            .timer
+            .monotonic_now_ms()
+            .saturating_sub(self.started_ms);
+        let deadline_ms = u64::try_from(self.deadline.as_millis()).unwrap_or(u64::MAX);
+        if elapsed_ms >= deadline_ms {
+            return None;
+        }
+        Some(Duration::from_millis(deadline_ms - elapsed_ms))
+    }
+}
 
 /// Reusable description of an outbound request.
 ///
@@ -131,7 +197,7 @@ impl Client {
             None => request,
         };
         let bytes = if retry {
-            self.call_with_transient_retry(&request, body.as_ref())
+            self.call_with_transport_retry(&request, body.as_ref())
                 .await?
         } else {
             self.call_once(&request, body.as_ref()).await?
@@ -141,7 +207,7 @@ impl Client {
 
     pub(crate) async fn request_bytes(&self, url: &str) -> Result<Vec<u8>> {
         let request = self.get(url);
-        self.call_with_transient_retry(&request, None).await
+        self.call_content_with_transport_retry(&request, None).await
     }
 
     /// Sends one request without retrying. Callers use this path when an
@@ -151,7 +217,7 @@ impl Client {
         request: &WireRequest,
         body: Option<&Bytes>,
     ) -> Result<Vec<u8>> {
-        self.send(request, body)
+        self.send(request, body, None)
             .await
             .map(|response| response.bytes)
             .map_err(|attempt| attempt.error)
@@ -226,38 +292,90 @@ impl Client {
     /// [`Self::call_once`] so an ambiguous success is visible. Conditions that
     /// require maintenance, such as `maintenance_required` or `index_lagging`,
     /// are not retried.
-    pub(crate) async fn call_with_transient_retry(
+    pub(crate) async fn call_with_transport_retry(
         &self,
         request: &WireRequest,
         body: Option<&Bytes>,
     ) -> Result<Vec<u8>> {
-        self.call_with_transient_retry_headers(request, body)
+        self.call_with_transport_retry_headers(request, body)
             .await
             .map(|response| response.bytes)
     }
 
-    /// [`Self::call_with_transient_retry`], keeping the response headers.
+    /// Retries a content transfer by count without bounding total duration.
+    ///
+    /// A slow but progressing payload may outlive an ordinary request's
+    /// operation deadline. Its socket inactivity timeout and finite attempt
+    /// count still prevent an unbounded retry loop.
+    pub(crate) async fn call_content_with_transport_retry(
+        &self,
+        request: &WireRequest,
+        body: Option<&Bytes>,
+    ) -> Result<Vec<u8>> {
+        self.call_content_with_transport_retry_headers(request, body)
+            .await
+            .map(|response| response.bytes)
+    }
+
+    /// [`Self::call_with_transport_retry`], keeping the response headers.
     ///
     /// A multipart part upload is the one call whose answer lives in a
     /// header: the provider's etag for the accepted part, which the client
     /// carries to completion.
-    pub(crate) async fn call_with_transient_retry_headers(
+    pub(crate) async fn call_with_transport_retry_headers(
         &self,
         request: &WireRequest,
         body: Option<&Bytes>,
     ) -> Result<WireResponse> {
-        let mut attempts = 0;
+        let deadline =
+            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.operation_deadline);
+        self.call_with_transport_retry_inner(request, body, Some(deadline))
+            .await
+    }
+
+    /// The content-transfer form of
+    /// [`Self::call_with_transport_retry_headers`].
+    pub(crate) async fn call_content_with_transport_retry_headers(
+        &self,
+        request: &WireRequest,
+        body: Option<&Bytes>,
+    ) -> Result<WireResponse> {
+        self.call_with_transport_retry_inner(request, body, None)
+            .await
+    }
+
+    async fn call_with_transport_retry_inner(
+        &self,
+        request: &WireRequest,
+        body: Option<&Bytes>,
+        deadline: Option<OperationDeadline<'_>>,
+    ) -> Result<WireResponse> {
+        let mut retries = 0;
+        let mut attempt_timeout = deadline.as_ref().map(|deadline| deadline.deadline);
         loop {
-            let attempt = match self.send(request, body).await {
+            let attempt = match self.send(request, body, attempt_timeout).await {
                 Ok(response) => return Ok(response),
                 Err(attempt) => attempt,
             };
-            attempts += 1;
-            let transient = transient_failure(attempt.transport, &attempt.error);
-            if !self.transient_retry || !transient || attempts >= MAX_TRANSIENT_ATTEMPTS {
+            let retryable = retryable_transport_failure(attempt.transport, &attempt.error);
+            if !self.transport_retry_enabled || !retryable {
                 return Err(attempt.error);
             }
-            transient_retry_pause(transient_retry_backoff(attempts)).await;
+            let Some(backoff) = next_transport_retry_backoff(
+                &self.transport_retry,
+                &mut retries,
+                deadline.as_ref(),
+            ) else {
+                return Err(attempt.error);
+            };
+            transport_retry_pause(backoff).await;
+            attempt_timeout = match deadline.as_ref() {
+                Some(deadline) => match deadline.remaining() {
+                    Some(remaining) => Some(remaining),
+                    None => return Err(attempt.error),
+                },
+                None => None,
+            };
         }
     }
 
@@ -268,6 +386,7 @@ impl Client {
         &self,
         request: &WireRequest,
         body: Option<&Bytes>,
+        attempt_timeout: Option<Duration>,
     ) -> std::result::Result<WireResponse, FailedAttempt> {
         #[cfg(test)]
         if let Some(outcome) = test_transport::next(request) {
@@ -279,6 +398,12 @@ impl Client {
             // it. That is what keeps a part upload's memory equal to the
             // part the caller is already holding, instead of twice it.
             builder = builder.body(bytes.clone());
+        }
+        if let Some(attempt_timeout) = attempt_timeout {
+            let attempt_timeout = self.request_timeout.map_or(attempt_timeout, |configured| {
+                configured.min(attempt_timeout)
+            });
+            builder = builder.timeout(attempt_timeout);
         }
         self.dispatch(request, builder).await
     }
@@ -445,7 +570,7 @@ fn render_send_error(
 /// network layer itself reported the failure (classified before the error
 /// is flattened by `map_status_error`), and served envelopes retry only on
 /// the retryable-unavailability codes.
-pub(crate) fn transient_failure(transport: bool, error: &ClientError) -> bool {
+pub(crate) fn retryable_transport_failure(transport: bool, error: &ClientError) -> bool {
     transport
         || error
             .code()
@@ -455,17 +580,35 @@ pub(crate) fn transient_failure(transport: bool, error: &ClientError) -> bool {
 /// Deterministic doubling, the same shape as the object-store transport
 /// retry: workspace policy avoids ambient randomness, and a bounded
 /// per-request retry does not need jitter.
-fn transient_retry_backoff(attempt: u32) -> Duration {
-    let doublings = attempt.saturating_sub(1).min(16);
-    INITIAL_TRANSIENT_RETRY_DELAY
+fn transport_retry_backoff(policy: &TransportRetryPolicy, retry: u32) -> Duration {
+    let doublings = retry.saturating_sub(1).min(16);
+    policy
+        .initial_backoff
         .saturating_mul(1u32 << doublings)
-        .min(MAX_TRANSIENT_RETRY_DELAY)
+        .min(policy.max_backoff)
+}
+
+/// Grants one retry under the count and optional operation-deadline budgets.
+fn next_transport_retry_backoff(
+    policy: &TransportRetryPolicy,
+    retries: &mut u32,
+    deadline: Option<&OperationDeadline<'_>>,
+) -> Option<Duration> {
+    if *retries >= policy.max_retries {
+        return None;
+    }
+    let remaining = match deadline {
+        Some(deadline) => deadline.remaining()?,
+        None => Duration::MAX,
+    };
+    *retries += 1;
+    Some(transport_retry_backoff(policy, *retries).min(remaining))
 }
 
 #[allow(clippy::disallowed_methods)]
 // The client's own retry pacing between bounded attempts of one request; no
 // protocol time depends on it and replay never observes it.
-async fn transient_retry_pause(backoff: Duration) {
+async fn transport_retry_pause(backoff: Duration) {
     tokio::time::sleep(backoff).await;
 }
 
@@ -646,7 +789,10 @@ pub(crate) mod test_transport {
 
 #[cfg(test)]
 mod tests {
-    use super::render_send_error;
+    use super::*;
+    use crate::ClientConfig;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     #[derive(Debug)]
     struct Layered {
@@ -666,6 +812,42 @@ mod tests {
                 .as_deref()
                 .map(|cause| cause as &(dyn std::error::Error + 'static))
         }
+    }
+
+    /// First reading starts the operation; every later reading has exhausted
+    /// the injected deadline.
+    #[derive(Debug, Default)]
+    struct ExpiredAfterFirstRead {
+        reads: AtomicU64,
+    }
+
+    impl MonotonicTimer for ExpiredAfterFirstRead {
+        fn monotonic_now_ms(&self) -> u64 {
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                0
+            } else {
+                100
+            }
+        }
+    }
+
+    fn deadline_client() -> Client {
+        let mut client = Client::new(ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        })
+        .expect("valid client config");
+        client.transport_retry = TransportRetryPolicy {
+            max_retries: 1,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+            operation_deadline: Duration::from_millis(100),
+        };
+        client.timer = Arc::new(ExpiredAfterFirstRead::default());
+        client
     }
 
     #[test]
@@ -705,5 +887,32 @@ mod tests {
             rendered,
             "request to `http://h/v0` failed: outer: inner detail"
         );
+    }
+
+    #[tokio::test]
+    async fn transport_retries_stop_when_the_operation_deadline_is_spent() {
+        let client = deadline_client();
+        let transport = test_transport::failures(1);
+
+        client
+            .call_with_transport_retry(&client.get("http://example.invalid/control"), None)
+            .await
+            .expect_err("the spent deadline must preserve the first failure");
+
+        assert_eq!(transport.attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn content_transfer_retries_are_exempt_from_the_operation_deadline() {
+        let client = deadline_client();
+        let transport = test_transport::failure_then_success(b"content".to_vec());
+
+        let bytes = client
+            .call_content_with_transport_retry(&client.get("http://example.invalid/content"), None)
+            .await
+            .expect("the count-bounded content retry succeeds");
+
+        assert_eq!(bytes, b"content");
+        assert_eq!(transport.attempts(), 2);
     }
 }
