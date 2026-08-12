@@ -1179,6 +1179,29 @@ fn progress_is_silent_unless_someone_is_watching() {
     assert_eq!(json_error(&clash)["code"], "path_conflict");
 }
 
+#[test]
+fn no_progress_silences_recursive_item_lines() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let tree = harness.temp_dir.path().join("quiet-tree");
+    fs::create_dir_all(tree.join("empty")).expect("create tree dirs");
+    fs::write(tree.join("doc.txt"), b"body").expect("write tree file");
+
+    let put = harness.run(&[
+        "--no-progress",
+        "put",
+        "-r",
+        tree.to_str().expect("utf-8 path"),
+        "/quiet-tree",
+    ]);
+
+    assert_success(&put);
+    assert_eq!(stderr_string(&put), "");
+}
+
 /// A large file and a pipe both round-trip through an embedded profile,
 /// and the retry contract holds for them exactly as it does for a payload
 /// small enough to hold.
@@ -3278,6 +3301,36 @@ fn current_reports_profile_specific_namespace() {
     assert_success(&current_alpha);
     assert_eq!(json_data(&current_alpha)["profile"], "alpha");
     assert_eq!(json_data(&current_alpha)["namespace"], "alpha-ns");
+}
+
+#[test]
+fn current_uses_namespace_from_environment() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "profile-default"]));
+    assert_success(&harness.run(&["use", "profile-default"]));
+
+    let current = harness.run_with_env(
+        &[("LOONFS_NAMESPACE", "from-environment")],
+        &["--json", "current"],
+    );
+
+    assert_success(&current);
+    assert_eq!(json_data(&current)["namespace"], "from-environment");
+}
+
+#[test]
+fn current_uses_profile_default_without_namespace_environment() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "profile-default"]));
+    assert_success(&harness.run(&["use", "profile-default"]));
+
+    // `Harness::run` spawns the command with `LOONFS_NAMESPACE` removed.
+    let current = harness.run(&["--json", "current"]);
+
+    assert_success(&current);
+    assert_eq!(json_data(&current)["namespace"], "profile-default");
 }
 
 #[test]

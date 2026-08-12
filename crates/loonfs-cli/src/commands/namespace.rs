@@ -8,10 +8,11 @@ use crate::args::{
 };
 use crate::config::mutate_config;
 use crate::error::CliError;
-use crate::profiles::{default_namespace, set_default_namespace};
+use crate::profiles::set_default_namespace;
 use crate::prompt::prompt_line;
 use crate::resolve::{
-    load_cli_config, parse_namespace_id, resolve_target_profile, resolve_target_profile_from_config,
+    load_cli_config, parse_namespace_id, resolve_namespace, resolve_target_profile,
+    resolve_target_profile_from_config,
 };
 use std::path::Path;
 
@@ -202,6 +203,14 @@ pub(crate) async fn run_namespace_current(
         crate::profiles::resolve_profile(&loaded.config, explicit_profile)
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = profile.mode_str().to_owned();
+    // `current` is a status command, so an unassigned namespace remains a
+    // successful `null`; configured values still use normal flag/env/profile
+    // precedence and validation.
+    let namespace = match resolve_namespace(&loaded.config, explicit_profile, None) {
+        Ok(resolved) => Some(resolved.namespace.to_string()),
+        Err(error) if error.is_no_default_namespace() => None,
+        Err(error) => return Err(fail_for(kind, profile_name, &mode, error)),
+    };
 
     Ok(CommandOutput {
         kind,
@@ -209,7 +218,7 @@ pub(crate) async fn run_namespace_current(
         mode: Some(mode),
         data: CommandData::Current {
             profile: profile_name.to_owned(),
-            namespace: default_namespace(profile).map(ToOwned::to_owned),
+            namespace,
         },
     })
 }

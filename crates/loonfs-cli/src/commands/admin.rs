@@ -147,8 +147,8 @@ async fn run_admin_gc(
 ///
 /// The first pass's line is written only once a second pass proves the run
 /// is a multi-pass one, so a single-pass run stays as quiet as it always
-/// was. Nothing is written at all under `--json`, where standard output is
-/// the whole answer.
+/// was. Nothing is written when progress is off or uses structured events;
+/// these pass summaries are human-readable prose.
 struct PassProgress {
     enabled: bool,
     held_first_line: Option<String>,
@@ -158,7 +158,7 @@ struct PassProgress {
 impl PassProgress {
     fn new(runtime: RuntimeBehavior) -> Self {
         Self {
-            enabled: !runtime.json,
+            enabled: runtime.progress.human_lines_enabled(),
             held_first_line: None,
             passes: 0,
         }
@@ -746,7 +746,11 @@ mod tests {
             json,
             no_input: true,
             interactive: false,
-            progress: ProgressMode::Off,
+            progress: if json {
+                ProgressMode::Events
+            } else {
+                ProgressMode::Human
+            },
         }
     }
 

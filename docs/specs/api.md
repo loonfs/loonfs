@@ -2172,7 +2172,7 @@ them. A search is a bounded sampling read over content, not an
 enumeration contract; a client that needs one consistent cut across pages
 re-issues the search when `head_seq` changes between pages. A cursor from
 a head newer than the serving view's is still rejected
-(`snapshot_unavailable`) — drift tolerance runs forward, never backward.
+(`rebootstrap_required`) — drift tolerance runs forward, never backward.
 
 A pattern with no required
 literal bytes is rejected with `query_unindexable` unless `allow_scan`

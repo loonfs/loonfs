@@ -92,10 +92,7 @@ pub async fn load_grep_root_pointer<S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
-    let envelope = decode_grep_root(&body.bytes).map_err(|error| GrepRootError::Corrupt {
-        object_key: object_key.clone(),
-        message: error.to_string(),
-    })?;
+    let envelope = decode_grep_root(&body.bytes).map_err(|error| corrupt(&object_key, error))?;
     if envelope.pointer().namespace_id() != namespace_id {
         return Err(GrepRootError::IdentityMismatch {
             object_key,
@@ -129,10 +126,7 @@ pub async fn load_grep_manifest<S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
-    let envelope = decode_grep_manifest(&bytes).map_err(|error| GrepRootError::Corrupt {
-        object_key: object_key.clone(),
-        message: error.to_string(),
-    })?;
+    let envelope = decode_grep_manifest(&bytes).map_err(|error| corrupt(&object_key, error))?;
     if envelope.payload_checksum() != pointer.manifest_payload_checksum() {
         return Err(GrepRootError::Corrupt {
             object_key,

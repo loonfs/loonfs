@@ -47,6 +47,12 @@ impl ProgressMode {
             Self::Off
         }
     }
+
+    /// Whether human-readable progress lines belong on standard error.
+    /// Event mode writes structured JSON through [`ProgressReporter`].
+    pub(crate) fn human_lines_enabled(self) -> bool {
+        self == Self::Human
+    }
 }
 
 /// Which transfer an event is about. The value an agent sees in `op`.

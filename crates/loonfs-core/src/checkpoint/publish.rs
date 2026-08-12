@@ -61,7 +61,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
         Err(ImmutableWriteError::Transport { source, .. }) => Err(
             MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ReadManifest {
                 object_key: manifest_key,
-                message: source.to_string(),
+                message: source.message(),
             }),
         ),
         Err(error) => Err(MetadataProjectionLoadError::ManifestLoad(

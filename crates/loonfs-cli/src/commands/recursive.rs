@@ -162,7 +162,7 @@ pub(crate) async fn run_put_tree(
         {
             Ok(_) => {
                 tally.directories += 1;
-                if !runtime.json {
+                if runtime.progress.human_lines_enabled() {
                     write_stderr_progress(format_args!("created {}", spec_target(&spec)));
                 }
             }
@@ -233,7 +233,7 @@ pub(crate) async fn run_put_tree(
         match result {
             Ok(target) => {
                 tally.files += 1;
-                if !runtime.json {
+                if runtime.progress.human_lines_enabled() {
                     write_stderr_progress(format_args!("stored {target}"));
                 }
             }
@@ -346,7 +346,7 @@ pub(crate) async fn run_get_tree(
         match result {
             Ok(local) => {
                 tally.files += 1;
-                if !runtime.json {
+                if runtime.progress.human_lines_enabled() {
                     write_stderr_progress(format_args!("wrote {local}"));
                 }
             }
@@ -405,7 +405,7 @@ pub(crate) async fn run_copy_tree(
         {
             Ok(_) => {
                 tally.directories += 1;
-                if !runtime.json {
+                if runtime.progress.human_lines_enabled() {
                     write_stderr_progress(format_args!("created {}", spec_target(&spec)));
                 }
             }
@@ -461,7 +461,7 @@ pub(crate) async fn run_copy_tree(
         match result {
             Ok(target) => {
                 tally.files += 1;
-                if !runtime.json {
+                if runtime.progress.human_lines_enabled() {
                     write_stderr_progress(format_args!("copied {target}"));
                 }
             }

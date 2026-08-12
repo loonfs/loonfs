@@ -228,13 +228,6 @@ pub(super) fn parent_of(destination: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-/// Shapes a note this build wrote and cannot now read. Nothing surfaces it:
-/// it is the reason a resume did not happen, not a failure of the download.
-#[allow(dead_code)]
-fn unreadable_note(error: serde_json::Error) -> CliError {
-    CliError::invalid_input(format!("unreadable partial-download note: {error}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
