@@ -266,6 +266,7 @@ pub struct TombstoneGeneration {
 /// Tombstones retain this binding after the corresponding unbind row may be
 /// collected. Undelete uses it to restore the original parent and name.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeletedDirentry {
     /// Directory that held the binding.

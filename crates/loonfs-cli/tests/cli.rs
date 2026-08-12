@@ -422,7 +422,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 
     let docs = harness.run(&["--json", "stat", "/docs"]);
     assert_success(&docs);
-    assert_eq!(json_data(&docs)["inode_kind"], "dir");
+    assert_eq!(json_data(&docs)["inode_kind"], "directory");
 
     let put = harness.run(&[
         "--json",
@@ -3592,7 +3592,7 @@ fn mkdir_parents_get_noclobber_and_version() {
     assert_eq!(json_data(&with_parents)["target"], "demo:/a/b/c");
     let created_ancestor = harness.run(&["--json", "stat", "/a/b"]);
     assert_success(&created_ancestor);
-    assert_eq!(json_data(&created_ancestor)["inode_kind"], "dir");
+    assert_eq!(json_data(&created_ancestor)["inode_kind"], "directory");
 
     // get refuses to clobber a local file unless forced.
     let payload = harness.temp_dir.path().join("f.txt");
@@ -4440,8 +4440,11 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         let bare_json = harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
         assert_success(&bare_json);
         let bare_entry = json_data(&bare_json);
-        assert_eq!(bare_entry["attributes"], serde_json::json!({}));
-        assert_eq!(bare_entry["attributes_revision_no"], 0);
+        assert_eq!(
+            bare_entry["attributes"]["attributes"],
+            serde_json::json!({})
+        );
+        assert_eq!(bare_entry["attributes"]["revision_no"], 0);
 
         let annotated = harness.run(&[
             "--json",
@@ -4481,7 +4484,7 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
             harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
         assert_success(&with_list_json);
         assert_eq!(
-            json_data(&with_list_json)["attributes"]["tags"],
+            json_data(&with_list_json)["attributes"]["attributes"]["tags"],
             serde_json::json!({ "kind": "string_list", "values": ["red", "blue"] })
         );
 
@@ -4496,10 +4499,13 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         let removed = harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
         assert_success(&removed);
         let entry = json_data(&removed);
-        assert!(entry["attributes"]["owner"].is_null());
-        assert_eq!(entry["attributes"]["note"]["value"], "has=equals");
+        assert!(entry["attributes"]["attributes"]["owner"].is_null());
+        assert_eq!(
+            entry["attributes"]["attributes"]["note"]["value"],
+            "has=equals"
+        );
         // Three effective updates, three revisions.
-        assert_eq!(entry["attributes_revision_no"], 3);
+        assert_eq!(entry["attributes"]["revision_no"], 3);
 
         // Attributes belong to the inode, so a directory takes them too.
         assert_success(&harness.run(&[
@@ -4519,7 +4525,6 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         assert_success(&listing);
         let listed = json_data(&listing);
         assert!(listed["entries"][0]["attributes"].is_null());
-        assert!(listed["entries"][0]["attributes_revision_no"].is_null());
     }
 }
 

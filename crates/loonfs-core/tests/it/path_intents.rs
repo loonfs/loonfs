@@ -306,9 +306,9 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let stat = resolve_path(&store, &namespace_id, "/docs/file-1.txt")
         .await
         .expect("stat file");
-    assert_eq!(stat.inode_kind, InodeKind::File);
-    assert_eq!(stat.size_bytes, Some("file-1-bytes".len() as u64));
-    assert!(stat.content_ref.is_some());
+    assert_eq!(stat.inode_kind(), InodeKind::File);
+    assert_eq!(stat.size_bytes(), Some("file-1-bytes".len() as u64));
+    assert!(stat.content_ref().is_some());
     assert_eq!(store.count(OperationClass::Read), 0);
 
     store.reset();
@@ -317,9 +317,9 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
         .expect("list docs");
     assert_eq!(entries.len(), 3);
     for entry in entries {
-        assert_eq!(entry.inode_kind, InodeKind::File);
-        assert_eq!(entry.size_bytes, Some("file-0-bytes".len() as u64));
-        assert!(entry.content_ref.is_some());
+        assert_eq!(entry.inode_kind(), InodeKind::File);
+        assert_eq!(entry.size_bytes(), Some("file-0-bytes".len() as u64));
+        assert!(entry.content_ref().is_some());
     }
     assert_eq!(store.count(OperationClass::Read), 0);
 
@@ -360,7 +360,7 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
         .await
         .expect("list with manifest");
 
-    assert_eq!(stat.size_bytes, Some(4));
+    assert_eq!(stat.size_bytes(), Some(4));
     assert_eq!(list.len(), 1);
 }
 
@@ -540,7 +540,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
 
     assert_eq!(actual, expected);
     assert_eq!(actual.absolute_path.as_str(), "/docs/report");
-    assert_eq!(actual.size_bytes, Some(5));
+    assert_eq!(actual.size_bytes(), Some(5));
 }
 
 #[tokio::test]
@@ -839,10 +839,10 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
             .iter()
             .find(|entry| named_entry(entry) == directory_name)
             .expect("directory entry");
-        assert_eq!(entry.inode_kind, InodeKind::Directory);
-        assert_eq!(entry.revision_no, None);
-        assert_eq!(entry.size_bytes, None);
-        assert!(entry.content_ref.is_none());
+        assert_eq!(entry.inode_kind(), InodeKind::Directory);
+        assert_eq!(entry.revision_no(), None);
+        assert_eq!(entry.size_bytes(), None);
+        assert!(entry.content_ref().is_none());
     }
 
     for (file_name, size) in [
@@ -854,10 +854,10 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
             .iter()
             .find(|entry| named_entry(entry) == file_name)
             .expect("file entry");
-        assert_eq!(entry.inode_kind, InodeKind::File);
-        assert_eq!(entry.revision_no, Some(RevisionNo(1)));
-        assert_eq!(entry.size_bytes, Some(size));
-        assert!(entry.content_ref.is_some());
+        assert_eq!(entry.inode_kind(), InodeKind::File);
+        assert_eq!(entry.revision_no(), Some(RevisionNo(1)));
+        assert_eq!(entry.size_bytes(), Some(size));
+        assert!(entry.content_ref().is_some());
     }
 }
 
@@ -919,8 +919,8 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
             .await
             .expect("read first revision");
     assert_eq!(historical.bytes, b"one");
-    assert_eq!(historical.entry.committed_at_ms, Some(context.now_ms));
-    assert_eq!(entry.committed_at_ms, Some(replacement_context.now_ms));
+    assert_eq!(historical.entry.committed_at_ms(), Some(context.now_ms));
+    assert_eq!(entry.committed_at_ms(), Some(replacement_context.now_ms));
     let inode_historical =
         read_file_revision_bytes_for_inode(&store, &namespace_id, inode_id, RevisionNo(2))
             .await
@@ -1402,7 +1402,7 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
     let docs = resolve_path(&store, &namespace_id("demo"), "/docs")
         .await
         .expect("resolve docs");
-    assert_eq!(docs.inode_kind, InodeKind::Directory);
+    assert_eq!(docs.inode_kind(), InodeKind::Directory);
 
     let missing_parent = create_directory_path(
         &store,
@@ -1599,7 +1599,8 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
         .expect("copy stat");
     assert_ne!(source.inode_id, copy.inode_id);
     assert_eq!(
-        source.content_ref, copy.content_ref,
+        source.content_ref(),
+        copy.content_ref(),
         "copy should reuse stored content ref"
     );
 }
@@ -1734,16 +1735,16 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
     let kept = &live_entries[0];
     assert_eq!(kept.absolute_path.as_str(), "/live/kept.txt");
     assert_eq!(
-        kept.size_bytes,
+        kept.size_bytes(),
         Some(b"alive".len() as u64),
         "listed entry carries its revision's size"
     );
     assert!(
-        kept.revision_no.is_some(),
+        kept.revision_no().is_some(),
         "listed entry carries its revision number"
     );
     assert!(
-        kept.content_ref.is_some(),
+        kept.content_ref().is_some(),
         "listed entry carries its content ref"
     );
 

@@ -1696,9 +1696,11 @@ object's final key is known from birth and belongs to exactly one session.
 The `transport` is settled when the session opens and never changes. Each
 `kind` carries exactly what its own path needs, and no other's:
 
-- `service_proxied`: no fields. The service receives the bytes and writes the
-  object, so it learns size and digest from the bytes as they pass and has
-  nothing to record up front.
+- `service_proxied`: `staging`, the staging sub-state for the bytes the service
+  receives and writes. It is `idle` before a request owns the slot, `claimed {
+  at_ms }` while one request has exclusive access, and `staged { content_ref }`
+  once the bytes have passed validation. The claim has no separate expiry;
+  the upload-session lease bounds one left behind by cancellation.
 - `direct_put`: `promised_content`, the content reference the presigned write
   is signed against. Its `storage_checksum` is given to the provider, which
   refuses any body that does not match, so the reference has to exist before
@@ -1726,31 +1728,29 @@ object is safe on every supported provider: it succeeds and leaves the object
 untouched, so cleanup never has to prove what state it is cleaning up first.
 
 The `state` carries what its own phase of the lifecycle needs. `open` carries
-`expires_at_ms` and, once bytes have passed validation, `staged_content`;
-`completed` carries `completed_at_ms` and the verified `content_ref`;
-`aborted` carries `aborted_at_ms`. A completed session's reference lives in
-exactly one place — the `completed` state — so no reader has to decide which
-of two copies is authoritative, and no writer can leave them disagreeing.
+`expires_at_ms`; `completed` carries `completed_at_ms` and the verified
+`content_ref`; `aborted` carries `aborted_at_ms`. Staging progress is part of
+the service-proxied transport because no other transport can stage through
+the service, and its enum makes an idle, claimed, and staged session mutually
+exclusive states.
 
-Four invariants are checked when the record is read, because the shape cannot
+Three invariants are checked when the record is read, because the shape cannot
 express them:
 
-- Every content reference the record holds — the transport's promise, the
-  staged reference, the completed reference — names the record's own
+- Every content reference the record holds — the transport's promise or
+  staged reference, and the completed reference — names the record's own
   `content_id`. A record that disagrees with itself describes two objects and
   could verify one while publishing the other.
 - The record carries a `transport` and a `state`. Neither has a default and
   neither may be omitted.
-- Only a `service_proxied` session holds `staged_content`: the other
-  transports write past the service, so nothing here validated their bytes.
 - A `direct_put` session's `completed` reference equals its
   `promised_content` in full, which is the reference the provider enforced
   and completion read back.
 
 A record that fails any of them is rejected outright, like any other
-corruption. This schema evolves in place at control-object version 1 before
-the first stable release; the implementation carries no compatibility shim
-for intermediate pre-release encodings, and in particular the earlier
+corruption. The staging enum is control-object version 2; the implementation
+carries no compatibility shim for intermediate pre-release encodings, and in
+particular the earlier
 encoding that spelled the transport as a bare `mode` beside independent
 optional `claimed_checksum`, `direct_put_content_ref`,
 `provider_multipart_upload_id`, `multipart_part_size_bytes`, and
@@ -1820,7 +1820,7 @@ Two rules make these envelopes evolvable:
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
-| Upload session | `upload_session` | JSON, uncompressed | 1 |
+| Upload session | `upload_session` | JSON, uncompressed | 2 |
 | Compaction lease | `compaction_lease` | JSON, uncompressed | 1 |
 
 JSON families keep their payload inline as raw JSON so manifests and control

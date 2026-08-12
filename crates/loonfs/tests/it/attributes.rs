@@ -134,12 +134,18 @@ fn a_write_is_visible_to_the_next_stat() {
     let entry = fs
         .stat_path_blocking(&namespace_id, "/docs/report.txt")
         .expect("stat");
-    assert_eq!(entry.attributes_revision_no, Some(AttributeRevisionNo(1)));
     assert_eq!(
         entry
             .attributes
             .as_ref()
-            .and_then(|attributes| attributes.get(&attribute_key("owner")))
+            .map(|projection| projection.revision_no),
+        Some(AttributeRevisionNo(1))
+    );
+    assert_eq!(
+        entry
+            .attributes
+            .as_ref()
+            .and_then(|projection| projection.attributes.get(&attribute_key("owner")))
             .cloned(),
         Some(attribute_text("platform"))
     );
@@ -158,20 +164,18 @@ fn a_write_is_visible_to_the_next_stat() {
     let cleared = fs
         .stat_path_blocking(&namespace_id, "/docs/report.txt")
         .expect("stat cleared");
-    assert_eq!(cleared.attributes_revision_no, Some(AttributeRevisionNo(2)));
     assert_eq!(
         cleared
             .attributes
             .as_ref()
-            .map(|attributes| attributes.len()),
-        Some(0)
+            .map(|projection| (projection.revision_no, projection.attributes.len())),
+        Some((AttributeRevisionNo(2), 0))
     );
 }
 
-/// The read options decide the projection, and both fields follow it
-/// together in every direction.
+/// The read options decide whether the grouped projection is present.
 #[test]
-fn read_options_project_both_attribute_fields_or_neither() {
+fn read_options_project_grouped_attributes_or_none() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-projection");
     let namespace_id = namespace_id("demo");
@@ -192,7 +196,6 @@ fn read_options_project_both_attribute_fields_or_neither() {
         .stat_path_blocking(&namespace_id, "/docs/report.txt")
         .expect("stat");
     assert!(default_stat.attributes.is_some());
-    assert!(default_stat.attributes_revision_no.is_some());
 
     let opted_out = block_on(fs.reader.stat_path_with_options(
         &namespace_id,
@@ -203,14 +206,12 @@ fn read_options_project_both_attribute_fields_or_neither() {
     ))
     .expect("stat without attributes");
     assert!(opted_out.attributes.is_none());
-    assert!(opted_out.attributes_revision_no.is_none());
 
     // Listing omits attributes by default, and includes them on request.
     let default_listing = fs.list_path_blocking(&namespace_id, "/docs").expect("list");
     assert_eq!(default_listing.len(), 2);
     for entry in &default_listing {
         assert!(entry.attributes.is_none());
-        assert!(entry.attributes_revision_no.is_none());
     }
 
     let projected = block_on(fs.reader.list_path_entries_page_with_options(
@@ -227,22 +228,20 @@ fn read_options_project_both_attribute_fields_or_neither() {
     .expect("list with attributes");
     assert_eq!(projected.entries.len(), 2);
     for entry in &projected.entries {
-        assert!(entry.attributes_are_projected_together());
-        let attributes = entry.attributes.as_ref().expect("projected map");
-        let revision = entry.attributes_revision_no.expect("projected revision");
+        let projection = entry.attributes.as_ref().expect("projected attributes");
         match entry.absolute_path.as_str() {
             "/docs/report.txt" => {
-                assert_eq!(revision, AttributeRevisionNo(1));
+                assert_eq!(projection.revision_no, AttributeRevisionNo(1));
                 assert_eq!(
-                    attributes.get(&attribute_key("owner")).cloned(),
+                    projection.attributes.get(&attribute_key("owner")).cloned(),
                     Some(attribute_text("platform"))
                 );
             }
             // An inode nobody annotated projects the cleared state, not an
             // absent one.
             _ => {
-                assert_eq!(revision, AttributeRevisionNo(0));
-                assert_eq!(attributes.len(), 0);
+                assert_eq!(projection.revision_no, AttributeRevisionNo(0));
+                assert_eq!(projection.attributes.len(), 0);
             }
         }
     }

@@ -10,13 +10,10 @@ use serde::{Deserialize, Serialize};
 
 /// Authoritative metadata for one visible path.
 ///
-/// This is the result shape for stat/list style reads. File entries include
-/// revision and content summary fields; directory entries leave those empty.
-///
-/// The two attribute fields are projected together or not at all. A read that
-/// asked for attributes carries both — including an empty map with the
-/// revision that map is at — and a read that did not carries neither, so
-/// absence never has to be read as "no attributes".
+/// This is the result shape for stat/list style reads. The entry kind carries
+/// the file-only revision and content summary, so a directory cannot carry a
+/// partial file payload. Attributes are likewise projected as one value or
+/// omitted as one value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AuthoritativePathEntry {
@@ -26,8 +23,9 @@ pub struct AuthoritativePathEntry {
     pub absolute_path: AbsolutePath,
     /// Stable inode identity for this item.
     pub inode_id: InodeId,
-    /// Whether the item is a file or directory.
-    pub inode_kind: InodeKind,
+    /// File-or-directory classification and its kind-specific payload.
+    #[serde(flatten)]
+    pub kind: AuthoritativePathEntryKind,
     /// Namespace head sequence this answer was read from.
     pub head_seq: ChangeSeq,
     /// Parent directory inode, or `None` for the root.
@@ -35,50 +33,99 @@ pub struct AuthoritativePathEntry {
     /// Stored display name for this path component, absent for the nameless root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<DisplayName>,
-    /// Current file revision number, for files.
-    pub revision_no: Option<RevisionNo>,
-    /// Current file size in bytes, for files.
-    pub size_bytes: Option<u64>,
-    /// Current content reference, for files.
-    pub content_ref: Option<ContentRef>,
-    /// Wall-clock stamp of the commit that created the current revision,
-    /// for files; directories carry no modification time in v0.
-    /// Observational: `head_seq` and revision sequences are the order.
+    /// The inode's attribute projection, when requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub committed_at_ms: Option<u64>,
-    /// The inode's complete attribute map, when the read projected
-    /// attributes. Present alongside `attributes_revision_no` or not at all.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attributes: Option<Attributes>,
-    /// The revision that attribute map is at, when the read projected
-    /// attributes. An inode that has never had attributes written is at
-    /// revision 0 with an empty map.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attributes_revision_no: Option<AttributeRevisionNo>,
+    pub attributes: Option<AuthoritativeAttributes>,
 }
 
 impl AuthoritativePathEntry {
-    /// Reports whether the entry's two attribute fields agree: both
-    /// projected, or neither.
-    ///
-    /// This says the entry is internally consistent, not that it answered
-    /// what was asked. A reader that made the request checks
-    /// [`Self::attributes_match_projection`] instead.
-    pub fn attributes_are_projected_together(&self) -> bool {
-        self.attributes.is_some() == self.attributes_revision_no.is_some()
+    /// Returns whether this entry is a file or directory.
+    pub const fn inode_kind(&self) -> InodeKind {
+        self.kind.inode_kind()
     }
 
-    /// Reports whether the entry projected what the request asked for:
-    /// `include` means both fields are present, and not including means
-    /// both are absent.
-    ///
-    /// An empty map counts as present. `{}` at its revision is the cleared
-    /// state, which is an answer, so a read that asked for attributes and
-    /// got nothing back did not receive the empty map — it received a
-    /// response that dropped the projection.
-    pub fn attributes_match_projection(&self, include: bool) -> bool {
-        self.attributes_are_projected_together() && self.attributes.is_some() == include
+    /// Returns the current revision number for a file entry.
+    pub const fn revision_no(&self) -> Option<RevisionNo> {
+        match &self.kind {
+            AuthoritativePathEntryKind::Directory {} => None,
+            AuthoritativePathEntryKind::File { revision_no, .. } => Some(*revision_no),
+        }
     }
+
+    /// Returns the current byte length for a file entry.
+    pub const fn size_bytes(&self) -> Option<u64> {
+        match &self.kind {
+            AuthoritativePathEntryKind::Directory {} => None,
+            AuthoritativePathEntryKind::File { size_bytes, .. } => Some(*size_bytes),
+        }
+    }
+
+    /// Returns the current content reference for a file entry.
+    pub const fn content_ref(&self) -> Option<&ContentRef> {
+        match &self.kind {
+            AuthoritativePathEntryKind::Directory {} => None,
+            AuthoritativePathEntryKind::File { content_ref, .. } => Some(content_ref),
+        }
+    }
+
+    /// Returns the current revision's commit stamp for a file entry.
+    pub const fn committed_at_ms(&self) -> Option<u64> {
+        match &self.kind {
+            AuthoritativePathEntryKind::Directory {} => None,
+            AuthoritativePathEntryKind::File {
+                committed_at_ms, ..
+            } => Some(*committed_at_ms),
+        }
+    }
+}
+
+/// Kind-specific metadata for an authoritative path entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "inode_kind", rename_all = "snake_case")]
+pub enum AuthoritativePathEntryKind {
+    /// A directory, which has no revision payload in v0.
+    #[cfg_attr(feature = "openapi", schema(title = "AuthoritativePathEntryDirectory"))]
+    Directory {},
+    /// A file and its current revision summary.
+    #[cfg_attr(feature = "openapi", schema(title = "AuthoritativePathEntryFile"))]
+    File {
+        /// Current file revision number.
+        revision_no: RevisionNo,
+        /// Current file size in bytes.
+        ///
+        /// This remains explicit even though `content_ref` also carries the
+        /// length because callers sort directory listings by this field.
+        size_bytes: u64,
+        /// Current content reference.
+        content_ref: ContentRef,
+        /// Wall-clock stamp of the commit that created the current revision.
+        /// Observational: `head_seq` and revision sequences are the order.
+        committed_at_ms: u64,
+    },
+}
+
+impl AuthoritativePathEntryKind {
+    /// Returns the stable inode classification represented by this payload.
+    pub const fn inode_kind(&self) -> InodeKind {
+        match self {
+            Self::Directory {} => InodeKind::Directory,
+            Self::File { .. } => InodeKind::File,
+        }
+    }
+}
+
+/// One inode's complete projected attribute state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AuthoritativeAttributes {
+    /// The attribute revision this projection represents.
+    pub revision_no: AttributeRevisionNo,
+    /// The complete attribute map at `revision_no`.
+    ///
+    /// An inode that has never had attributes written is at revision 0 with
+    /// an empty map.
+    pub attributes: Attributes,
 }
 
 /// One directory listing and the namespace head it was answered at.
@@ -128,16 +175,11 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             absolute_path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if parent_inode_id.is_some() { 2 } else { 1 }),
-            inode_kind: InodeKind::Directory,
+            kind: AuthoritativePathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
             parent_inode_id,
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
-            revision_no: None,
-            size_bytes: None,
-            content_ref: None,
-            committed_at_ms: None,
             attributes: None,
-            attributes_revision_no: None,
         }
     }
 
@@ -150,13 +192,10 @@ mod tests {
                 "namespace_id": "demo",
                 "absolute_path": "/docs",
                 "inode_id": 2,
-                "inode_kind": "dir",
+                "inode_kind": "directory",
                 "head_seq": 3,
                 "parent_inode_id": 1,
-                "display_name": "docs",
-                "revision_no": null,
-                "size_bytes": null,
-                "content_ref": null
+                "display_name": "docs"
             })
         );
 
@@ -177,14 +216,40 @@ mod tests {
                     "namespace_id": "demo",
                     "absolute_path": "/docs",
                     "inode_id": 2,
-                    "inode_kind": "dir",
+                    "inode_kind": "directory",
                     "head_seq": 3,
                     "parent_inode_id": 1,
-                    "display_name": "docs",
-                    "revision_no": null,
-                    "size_bytes": null,
-                    "content_ref": null
+                    "display_name": "docs"
                 }]
+            })
+        );
+    }
+
+    #[test]
+    fn a_file_entry_serializes_its_required_payload_with_the_kind() {
+        let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
+        let mut file = entry("/report.txt", Some(InodeId(1)), Some("report.txt"));
+        file.kind = AuthoritativePathEntryKind::File {
+            revision_no: RevisionNo(7),
+            size_bytes: 5,
+            content_ref: content_ref.clone(),
+            committed_at_ms: 1_752_624_000_000,
+        };
+
+        assert_eq!(
+            serde_json::to_value(file).expect("serialize file entry"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "absolute_path": "/report.txt",
+                "inode_id": 2,
+                "inode_kind": "file",
+                "revision_no": 7,
+                "size_bytes": 5,
+                "content_ref": content_ref,
+                "committed_at_ms": 1_752_624_000_000_u64,
+                "head_seq": 3,
+                "parent_inode_id": 1,
+                "display_name": "report.txt"
             })
         );
     }
@@ -199,29 +264,25 @@ mod tests {
         assert_eq!(named_json["display_name"], "docs");
     }
 
-    /// An unprojected entry omits both attribute fields; a projected one
-    /// carries both, and an empty map is a projected answer rather than an
-    /// absent one.
+    /// An unprojected entry omits attributes; a projected one carries the
+    /// map and revision together, and an empty map is a projected answer.
     #[test]
-    fn attribute_fields_serialize_together_or_not_at_all() {
+    fn attributes_serialize_as_one_optional_projection() {
         let unprojected = entry("/docs", Some(InodeId(1)), Some("docs"));
-        assert!(unprojected.attributes_are_projected_together());
         let unprojected_json =
             serde_json::to_value(&unprojected).expect("serialize unprojected entry");
         assert!(unprojected_json.get("attributes").is_none());
-        assert!(unprojected_json.get("attributes_revision_no").is_none());
 
         let mut projected = unprojected;
-        projected.attributes = Some(crate::Attributes::default());
-        projected.attributes_revision_no = Some(crate::AttributeRevisionNo(0));
-        assert!(projected.attributes_are_projected_together());
+        projected.attributes = Some(AuthoritativeAttributes {
+            revision_no: crate::AttributeRevisionNo(0),
+            attributes: crate::Attributes::default(),
+        });
         let projected_json = serde_json::to_value(&projected).expect("serialize projected entry");
-        assert_eq!(projected_json["attributes"], serde_json::json!({}));
-        assert_eq!(projected_json["attributes_revision_no"], 0);
-
-        let mut half_projected = projected;
-        half_projected.attributes_revision_no = None;
-        assert!(!half_projected.attributes_are_projected_together());
+        assert_eq!(
+            projected_json["attributes"],
+            serde_json::json!({ "revision_no": 0, "attributes": {} })
+        );
     }
 }
 

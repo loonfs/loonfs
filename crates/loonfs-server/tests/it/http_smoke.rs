@@ -241,7 +241,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .stat_path(&directory)
         .await
         .expect("stat directory");
-    assert_eq!(directory_entry.inode_kind, InodeKind::Directory);
+    assert_eq!(directory_entry.inode_kind(), InodeKind::Directory);
 
     let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("parse namespace path");
     let written = harness
@@ -263,7 +263,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     assert_eq!(written.committed_seq, ChangeSeq(2));
 
     let entry = harness.client.stat_path(&target).await.expect("stat path");
-    assert_eq!(entry.size_bytes, Some(16));
+    assert_eq!(entry.size_bytes(), Some(16));
 
     let bytes = harness
         .client
@@ -370,7 +370,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .stat_path(&clone_path)
         .await
         .expect("clone stat");
-    assert_eq!(source_entry.content_ref, clone_entry.content_ref);
+    assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
     assert_eq!(
         harness
             .client

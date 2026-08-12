@@ -237,7 +237,10 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .await
         .expect("stat created file");
     let inode_id = created.inode_id;
-    let first_content_ref = created.content_ref.expect("created file content ref");
+    let first_content_ref = created
+        .content_ref()
+        .cloned()
+        .expect("created file content ref");
 
     let replace = harness
         .client
@@ -274,7 +277,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .await
         .expect("stat restored file");
     assert_eq!(entry.inode_id, inode_id);
-    assert_eq!(entry.content_ref.as_ref(), Some(&first_content_ref));
+    assert_eq!(entry.content_ref(), Some(&first_content_ref));
     let bytes = harness
         .client
         .get_file_bytes(&target)

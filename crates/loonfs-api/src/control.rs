@@ -58,7 +58,7 @@ impl ControlObjectKind {
             Self::WalFloor => 1,
             Self::MetadataRoot => 1,
             Self::CheckpointRecord => 1,
-            Self::UploadSession => 1,
+            Self::UploadSession => 2,
             Self::CompactionLease => 1,
         }
     }
@@ -646,22 +646,61 @@ impl HeadState {
     }
 }
 
-/// Transport selected when an upload session is created.
-///
+/// Staging progress for a service-proxied upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxiedStaging {
+    /// No request owns the staging slot and no content has been staged.
+    Idle,
+    /// One request owns the staging slot.
+    Claimed {
+        /// Time at which the request claimed exclusive access.
+        at_ms: u64,
+    },
+    /// Content that passed validation and was recorded by the session.
+    Staged(ContentRef),
+}
+
+impl Serialize for ProxiedStaging {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Shape<'a> {
+            Idle {},
+            Claimed { at_ms: u64 },
+            Staged { content_ref: &'a ContentRef },
+        }
+
+        match self {
+            Self::Idle => Shape::Idle {}.serialize(serializer),
+            Self::Claimed { at_ms } => Shape::Claimed { at_ms: *at_ms }.serialize(serializer),
+            Self::Staged(content_ref) => Shape::Staged { content_ref }.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProxiedStaging {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        StrictProxiedStaging::deserialize(deserializer).map(Into::into)
+    }
+}
+
 /// The transport never changes, and each variant stores only the state
 /// required by that upload path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UploadSessionTransport {
     /// The service receives the bytes and writes the content object itself,
-    /// so it learns size and digest from the bytes as they pass and has
-    /// nothing to record here.
-    ///
-    /// Empty braces force serde to reject fields from another transport.
-    ///
-    /// A unit variant would silently ignore unexpected fields, which could drop
-    /// a provider upload id needed for cleanup.
-    ServiceProxied {},
+    /// so it learns size and digest from the bytes as they pass.
+    ServiceProxied {
+        /// Exclusive staging progress, which applies only to this transport.
+        staging: ProxiedStaging,
+    },
     /// The client writes the whole object through one presigned request.
     DirectPut {
         /// The reference that signed write is minted for.
@@ -695,12 +734,14 @@ pub enum UploadSessionTransport {
 }
 
 impl UploadSessionTransport {
-    /// The reference this transport was opened against, for the one
-    /// transport that is opened against anything.
-    fn promised_content(&self) -> Option<&ContentRef> {
+    /// The content reference this transport names, when it names one.
+    fn content_ref(&self) -> Option<&ContentRef> {
         match self {
             Self::DirectPut { promised_content } => Some(promised_content),
-            Self::ServiceProxied {} | Self::DirectMultipart { .. } => None,
+            Self::ServiceProxied {
+                staging: ProxiedStaging::Staged(content_ref),
+            } => Some(content_ref),
+            Self::ServiceProxied { .. } | Self::DirectMultipart { .. } => None,
         }
     }
 }
@@ -721,26 +762,6 @@ pub enum UploadSessionLifecycle {
         /// The record carries it so no session transition depends on an
         /// object's provider timestamp.
         expires_at_ms: u64,
-        /// Content this session has already written and proven, or `None`
-        /// before any bytes have passed validation.
-        ///
-        /// Only a service-proxied session stages: the other transports
-        /// write past this server, so what they wrote is established at
-        /// completion. Staged content lives here rather than beside the
-        /// state because it is the one thing about an open session that
-        /// changes, and because a terminal session has no use for it — a
-        /// completed one names its content once, below.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        staged_content: Option<ContentRef>,
-        /// Time at which the current staging request claimed exclusive access,
-        /// or `None` when no request is staging.
-        ///
-        /// The claim is acquired by compare-and-swap so only one request can write
-        /// the session's content object at a time. It has no separate expiry; the
-        /// upload session lease bounds a claim left behind by cancellation, after
-        /// which garbage collection aborts the session.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        staging_claimed_at_ms: Option<u64>,
     },
     /// Terminal: the content is durable and verified. This is the only state
     /// a receipt may be minted from, and the content reference it carries is
@@ -767,7 +788,7 @@ impl UploadSessionLifecycle {
     /// The content reference this state names, whichever state names one.
     fn content_ref(&self) -> Option<&ContentRef> {
         match self {
-            Self::Open { staged_content, .. } => staged_content.as_ref(),
+            Self::Open { .. } => None,
             Self::Completed { content_ref, .. } => Some(content_ref),
             Self::Aborted { .. } => None,
         }
@@ -791,8 +812,8 @@ impl std::fmt::Display for UploadSessionLifecycle {
 /// transport needs lives in its own variant and everything a state needs
 /// lives in its own variant, so the combinations that used to be spelled
 /// with independent optional fields — a proxied session holding a provider
-/// upload, a multipart session promising content, a completed reference in
-/// two places at once — are not shapes this type has.
+/// upload or a multipart session promising content — are not shapes this
+/// type has.
 ///
 /// See [upload before publish](../../../docs/specs/format.md#242-upload-before-publish).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -827,17 +848,14 @@ impl UploadSessionState {
     /// objects and cannot be acted on — a completion would verify one key
     /// and publish another.
     ///
-    /// The transport and the state must also agree on how the bytes got
-    /// there. Only a service-proxied session stages, because every other
-    /// transport writes past this server; and a direct-put session settles
-    /// on exactly the reference its write was signed against, because that
-    /// reference is what the provider enforced and what completion read
-    /// back. A record that says otherwise describes an upload that did not
-    /// happen.
+    /// A direct-put session must also settle on exactly the reference its
+    /// write was signed against, because that reference is what the provider
+    /// enforced and what completion read back. A record that says otherwise
+    /// describes an upload that did not happen.
     fn validate(&self) -> Result<(), String> {
         for content_ref in self
             .transport
-            .promised_content()
+            .content_ref()
             .into_iter()
             .chain(self.state.content_ref())
         {
@@ -849,43 +867,6 @@ impl UploadSessionState {
             }
         }
         match (&self.transport, &self.state) {
-            (
-                UploadSessionTransport::DirectPut { .. }
-                | UploadSessionTransport::DirectMultipart { .. },
-                UploadSessionLifecycle::Open {
-                    staged_content: Some(_),
-                    ..
-                },
-            ) => Err(format!(
-                "upload session `{}` writes past the service but holds staged content",
-                self.upload_id
-            )),
-            // Only a proxied session stages, so only a proxied session can
-            // hold the claim that makes staging exclusive.
-            (
-                UploadSessionTransport::DirectPut { .. }
-                | UploadSessionTransport::DirectMultipart { .. },
-                UploadSessionLifecycle::Open {
-                    staging_claimed_at_ms: Some(_),
-                    ..
-                },
-            ) => Err(format!(
-                "upload session `{}` writes past the service but holds a staging claim",
-                self.upload_id
-            )),
-            // The compare-and-swap that records staged content is the one
-            // that releases the claim, so the two never stand together.
-            (
-                UploadSessionTransport::ServiceProxied {},
-                UploadSessionLifecycle::Open {
-                    staged_content: Some(_),
-                    staging_claimed_at_ms: Some(_),
-                    ..
-                },
-            ) => Err(format!(
-                "upload session `{}` holds a staging claim over content it already staged",
-                self.upload_id
-            )),
             (
                 UploadSessionTransport::DirectPut { promised_content },
                 UploadSessionLifecycle::Completed { content_ref, .. },
@@ -914,7 +895,9 @@ struct StrictUploadSessionState {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StrictUploadSessionTransport {
-    ServiceProxied {},
+    ServiceProxied {
+        staging: StrictProxiedStaging,
+    },
     DirectPut {
         promised_content: StrictContentRef,
     },
@@ -927,7 +910,9 @@ enum StrictUploadSessionTransport {
 impl From<StrictUploadSessionTransport> for UploadSessionTransport {
     fn from(transport: StrictUploadSessionTransport) -> Self {
         match transport {
-            StrictUploadSessionTransport::ServiceProxied {} => Self::ServiceProxied {},
+            StrictUploadSessionTransport::ServiceProxied { staging } => Self::ServiceProxied {
+                staging: staging.into(),
+            },
             StrictUploadSessionTransport::DirectPut { promised_content } => Self::DirectPut {
                 promised_content: promised_content.into(),
             },
@@ -942,6 +927,24 @@ impl From<StrictUploadSessionTransport> for UploadSessionTransport {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictProxiedStaging {
+    Idle {},
+    Claimed { at_ms: u64 },
+    Staged { content_ref: StrictContentRef },
+}
+
+impl From<StrictProxiedStaging> for ProxiedStaging {
+    fn from(staging: StrictProxiedStaging) -> Self {
+        match staging {
+            StrictProxiedStaging::Idle {} => Self::Idle,
+            StrictProxiedStaging::Claimed { at_ms } => Self::Claimed { at_ms },
+            StrictProxiedStaging::Staged { content_ref } => Self::Staged(content_ref.into()),
+        }
+    }
+}
+
 /// The lifecycle read back through the same strict content-ref decoder the
 /// rest of the record uses, so a completed session's reference is held to
 /// the durable schema rather than the wire one.
@@ -950,10 +953,6 @@ impl From<StrictUploadSessionTransport> for UploadSessionTransport {
 enum StrictUploadSessionLifecycle {
     Open {
         expires_at_ms: u64,
-        #[serde(default)]
-        staged_content: Option<StrictContentRef>,
-        #[serde(default)]
-        staging_claimed_at_ms: Option<u64>,
     },
     Completed {
         completed_at_ms: u64,
@@ -967,15 +966,7 @@ enum StrictUploadSessionLifecycle {
 impl From<StrictUploadSessionLifecycle> for UploadSessionLifecycle {
     fn from(state: StrictUploadSessionLifecycle) -> Self {
         match state {
-            StrictUploadSessionLifecycle::Open {
-                expires_at_ms,
-                staged_content,
-                staging_claimed_at_ms,
-            } => Self::Open {
-                expires_at_ms,
-                staged_content: staged_content.map(Into::into),
-                staging_claimed_at_ms,
-            },
+            StrictUploadSessionLifecycle::Open { expires_at_ms } => Self::Open { expires_at_ms },
             StrictUploadSessionLifecycle::Completed {
                 completed_at_ms,
                 content_ref,

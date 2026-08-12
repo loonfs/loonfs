@@ -24,7 +24,8 @@ use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-    ControlObjectKind, UploadSessionLifecycle, UploadSessionState,
+    ControlObjectKind, ProxiedStaging, UploadSessionLifecycle, UploadSessionState,
+    UploadSessionTransport,
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
@@ -330,11 +331,11 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         upload_id: upload_id.clone(),
         content_id: loonfs_api::ContentId::generate(),
         created_at_ms: 1_000,
-        transport: loonfs_api::wire::control::UploadSessionTransport::ServiceProxied {},
+        transport: UploadSessionTransport::ServiceProxied {
+            staging: ProxiedStaging::Idle,
+        },
         state: loonfs_api::wire::control::UploadSessionLifecycle::Open {
             expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
-            staged_content: None,
-            staging_claimed_at_ms: None,
         },
     };
     let envelope = loonfs_api::wire::control::UploadSessionEnvelope::from_state(
@@ -801,11 +802,13 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
     let session = read_upload_session(store, namespace_id, upload_id)
         .await
         .expect("open session");
-    let content_ref = match session.state {
-        UploadSessionLifecycle::Open { staged_content, .. } => staged_content,
-        UploadSessionLifecycle::Completed { .. } | UploadSessionLifecycle::Aborted { .. } => None,
+    let content_ref = match session.transport {
+        UploadSessionTransport::ServiceProxied {
+            staging: ProxiedStaging::Staged(content_ref),
+        } => Some(content_ref),
+        _ => None,
     }
-    .expect("a staged session is open and carries the reference it wrote");
+    .expect("a staged session carries the reference it wrote");
     crate::protocol::complete_upload(
         store,
         namespace_id,

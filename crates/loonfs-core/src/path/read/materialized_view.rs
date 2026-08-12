@@ -21,10 +21,10 @@ use crate::storage::content::{content_object_key_for_ref, read_durable_content_b
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
-    AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
-    ContentStoreId, DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor,
-    InodeId, InodeKind, ManifestId, NamespaceId, Page, PageRequest, RevisionNo, TrashEntry,
-    TrashPageCursor,
+    AbsolutePath, AuthoritativeAttributes, AuthoritativeFileBytes, AuthoritativePathEntry,
+    AuthoritativePathEntryKind, ChangeSeq, ContentRef, ContentStoreId, DirectoryPageCursor,
+    DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestId,
+    NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -348,37 +348,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entry = self
             .resolve_path(absolute_path, AttributeProjection::Omit)
             .await?;
-        if entry.inode_kind != InodeKind::File {
-            return Err(CoreError::ExpectedFile {
-                path: entry.absolute_path.to_string(),
-                kind: entry.inode_kind,
-            });
-        }
-        let Some(content_ref) = entry.content_ref.clone() else {
-            self.trace_entry_without_content_ref(entry.inode_id, entry.revision_no);
-            return Err(CoreError::PathNotFound(absolute_path.to_owned()));
+        let content_ref = match &entry.kind {
+            AuthoritativePathEntryKind::File { content_ref, .. } => content_ref.clone(),
+            AuthoritativePathEntryKind::Directory {} => {
+                return Err(CoreError::ExpectedFile {
+                    path: entry.absolute_path.to_string(),
+                    kind: InodeKind::Directory,
+                });
+            }
         };
         Ok((entry, content_ref))
-    }
-
-    /// Says that a path resolved to a visible file whose revision named no
-    /// content, at the point the read turns that into not-found.
-    ///
-    /// The answer on the wire is deliberately the same as for a path that
-    /// does not exist, and it stays that way. This record is the only thing
-    /// that tells the two apart, so it carries the read's anchor as well as
-    /// the entry: an operator reads one line instead of reconstructing a
-    /// chain. It fires only on the broken case, so the ordinary read pays
-    /// nothing for it.
-    fn trace_entry_without_content_ref(&self, inode_id: InodeId, revision_no: Option<RevisionNo>) {
-        tracing::debug!(
-            head_seq = self.anchor.head_seq.0,
-            manifest_id = self.anchor.manifest_id.0,
-            manifest_head_seq = self.anchor.manifest_head_seq.0,
-            inode_id = inode_id.0,
-            revision_no = revision_no.map(|revision_no| revision_no.0),
-            "entry visible without content_ref"
-        );
     }
 
     /// The content store this view's namespace is bound to.
@@ -403,33 +382,25 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entry = self
             .resolve_path(absolute_path, AttributeProjection::Omit)
             .await?;
-        if entry.inode_kind != InodeKind::File {
-            return Err(CoreError::ExpectedFile {
-                path: entry.absolute_path.to_string(),
-                kind: entry.inode_kind,
-            });
-        }
+        let current_revision = match &entry.kind {
+            AuthoritativePathEntryKind::File {
+                revision_no,
+                content_ref,
+                ..
+            } => (*revision_no, content_ref.clone()),
+            AuthoritativePathEntryKind::Directory {} => {
+                return Err(CoreError::ExpectedFile {
+                    path: entry.absolute_path.to_string(),
+                    kind: InodeKind::Directory,
+                });
+            }
+        };
         let (revision_no, content_ref) = match revision_no {
             Some(requested) => {
                 let revision = self.revision_for_inode(entry.inode_id, requested).await?;
                 (revision.revision_no, revision.content_ref)
             }
-            // A visible file carries both; a path that resolves without
-            // them is the same absence a proxied read reports, and it says
-            // so in the same words.
-            None => {
-                // The ids are read out first, because the match moves the
-                // content reference out of the entry.
-                let inode_id = entry.inode_id;
-                let revision_no = entry.revision_no;
-                match (revision_no, entry.content_ref) {
-                    (Some(revision_no), Some(content_ref)) => (revision_no, content_ref),
-                    _ => {
-                        self.trace_entry_without_content_ref(inode_id, revision_no);
-                        return Err(CoreError::PathNotFound(absolute_path.to_owned()));
-                    }
-                }
-            }
+            None => current_revision,
         };
         let object_key = content_object_key_for_ref(&self.content_store_id, &content_ref)?;
 
@@ -449,10 +420,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entry = self
             .resolve_path(absolute_path, AttributeProjection::Omit)
             .await?;
-        if entry.inode_kind != InodeKind::File {
+        if matches!(entry.kind, AuthoritativePathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
                 path: entry.absolute_path.to_string(),
-                kind: entry.inode_kind,
+                kind: InodeKind::Directory,
             });
         }
         self.list_file_revisions_for_inode_page(entry.inode_id, request)
@@ -612,17 +583,19 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let mut entry = self
             .resolve_path(absolute_path, AttributeProjection::Omit)
             .await?;
-        if entry.inode_kind != InodeKind::File {
+        if matches!(entry.kind, AuthoritativePathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
                 path: entry.absolute_path.to_string(),
-                kind: entry.inode_kind,
+                kind: InodeKind::Directory,
             });
         }
         let revision = self.revision_for_inode(entry.inode_id, revision_no).await?;
-        entry.revision_no = Some(revision.revision_no);
-        entry.size_bytes = Some(revision.content_ref.size_bytes);
-        entry.content_ref = Some(revision.content_ref.clone());
-        entry.committed_at_ms = Some(revision.committed_at_ms);
+        entry.kind = AuthoritativePathEntryKind::File {
+            revision_no: revision.revision_no,
+            size_bytes: revision.content_ref.size_bytes,
+            content_ref: revision.content_ref.clone(),
+            committed_at_ms: revision.committed_at_ms,
+        };
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
             .await?;
@@ -790,40 +763,42 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// session's seq (both callers do), so the revision and attribute lookups
     /// do not re-derive the inode's visibility.
     ///
-    /// The two attribute fields are set together or left together: an
-    /// included projection carries the map and its revision even when the map
-    /// is empty, and an omitted one carries neither. Nothing in between is
-    /// representable from here.
+    /// An included attribute projection carries the map and its revision even
+    /// when the map is empty; an omitted one carries neither.
     async fn build_authoritative_path_entry_with_session(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved: &ResolvedVisiblePath,
         attributes: AttributeProjection,
     ) -> Result<AuthoritativePathEntry> {
-        let revision = if resolved.inode_kind == InodeKind::File {
-            session
-                .latest_revision_head_of_visible(resolved.inode_id)
-                .await?
-        } else {
-            None
+        let kind = match resolved.inode_kind {
+            InodeKind::Directory => AuthoritativePathEntryKind::Directory {},
+            InodeKind::File => {
+                let revision = session
+                    .latest_revision_head_of_visible(resolved.inode_id)
+                    .await?
+                    .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.clone()))?;
+                AuthoritativePathEntryKind::File {
+                    revision_no: revision.revision_no,
+                    size_bytes: revision.content_ref.size_bytes,
+                    content_ref: revision.content_ref,
+                    committed_at_ms: revision.committed_at_ms,
+                }
+            }
         };
         // Attributes belong to the inode, so a directory answers as readily
         // as a file; only the projection decides whether the read happens.
-        // The pair is unzipped into the entry's two fields, which is what
-        // makes a half-projected entry unrepresentable from here.
-        let (attributes_revision_no, attributes) = match attributes {
+        let attributes = match attributes {
             AttributeProjection::Include => {
-                Some(session.attributes_of_visible(resolved.inode_id).await?)
+                let (revision_no, attributes) =
+                    session.attributes_of_visible(resolved.inode_id).await?;
+                Some(AuthoritativeAttributes {
+                    revision_no,
+                    attributes,
+                })
             }
             AttributeProjection::Omit => None,
-        }
-        .unzip();
-        let content_ref = revision
-            .as_ref()
-            .map(|revision| revision.content_ref.clone());
-        let size_bytes = content_ref
-            .as_ref()
-            .map(|content_ref| content_ref.size_bytes);
+        };
         let absolute_path = AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {
             CoreError::NamespaceCorrupt(format!(
                 "resolved visible path `{}` is not a valid absolute path: {error}",
@@ -845,16 +820,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             namespace_id: self.namespace_id.clone(),
             absolute_path,
             inode_id: resolved.inode_id,
-            inode_kind: resolved.inode_kind,
+            kind,
             head_seq: self.head.seq,
             parent_inode_id: resolved.parent_inode_id,
             display_name,
-            revision_no: revision.as_ref().map(|revision| revision.revision_no),
-            size_bytes,
-            content_ref,
-            committed_at_ms: revision.as_ref().map(|revision| revision.committed_at_ms),
             attributes,
-            attributes_revision_no,
         })
     }
 
@@ -1029,11 +999,11 @@ mod tests {
         (temp_dir, store, namespace_id)
     }
 
-    /// A stat-shaped build with the projection on carries both attribute
-    /// fields; with it off it carries neither. The empty map is a projected
-    /// answer, not an absent one.
+    /// A stat-shaped build with the projection on carries the grouped
+    /// attribute state; with it off it carries none. The empty map is a
+    /// projected answer, not an absent one.
     #[tokio::test]
-    async fn an_entry_build_projects_both_attribute_fields_or_neither() {
+    async fn an_entry_build_projects_grouped_attributes_or_none() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
         let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
             .await
@@ -1044,14 +1014,17 @@ mod tests {
             .await
             .expect("stat annotated");
         assert_eq!(
-            annotated.attributes_revision_no,
+            annotated
+                .attributes
+                .as_ref()
+                .map(|projection| projection.revision_no),
             Some(AttributeRevisionNo(1))
         );
         assert_eq!(
             annotated
                 .attributes
                 .as_ref()
-                .and_then(|attributes| attributes.get(&attribute_key("owner")))
+                .and_then(|projection| projection.attributes.get(&attribute_key("owner")))
                 .cloned(),
             Some(AttributeValue::String {
                 value: "ops".to_owned()
@@ -1062,10 +1035,11 @@ mod tests {
             .resolve_path("/docs/bare", AttributeProjection::Include)
             .await
             .expect("stat bare");
-        assert_eq!(bare.attributes_revision_no, Some(AttributeRevisionNo(0)));
         assert_eq!(
-            bare.attributes.as_ref().map(|attributes| attributes.len()),
-            Some(0)
+            bare.attributes
+                .as_ref()
+                .map(|projection| (projection.revision_no, projection.attributes.len())),
+            Some((AttributeRevisionNo(0), 0))
         );
 
         let omitted = view
@@ -1073,14 +1047,6 @@ mod tests {
             .await
             .expect("stat without attributes");
         assert!(omitted.attributes.is_none());
-        assert!(omitted.attributes_revision_no.is_none());
-
-        for entry in [&annotated, &bare, &omitted] {
-            assert!(
-                entry.attributes_are_projected_together(),
-                "an entry carried one attribute field without the other: {entry:?}"
-            );
-        }
     }
 
     /// The listing pays for attributes only when it was asked to. The session
@@ -1118,7 +1084,6 @@ mod tests {
                     )
                     .await
                     .expect("build entry");
-                assert!(entry.attributes_are_projected_together());
                 assert_eq!(entry.attributes.is_some(), expect_projected);
             }
             assert_eq!(

@@ -17,8 +17,7 @@ use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::StreamExt;
-use loonfs_api::DestinationBehavior;
-use loonfs_api::InodeKind;
+use loonfs_api::{AuthoritativePathEntryKind, DestinationBehavior};
 use loonfs_client::{CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -603,18 +602,22 @@ async fn walk_remote_tree(
             };
             let mut child_components = components.clone();
             child_components.push(name.as_str().to_owned());
-            match entry.inode_kind {
-                InodeKind::Directory => {
+            match entry.kind {
+                AuthoritativePathEntryKind::Directory {} => {
                     tree.directories.push(child_components.clone());
                     queue.push_back((format!("{remote_dir}/{name}", name = name.as_str()), {
                         child_components
                     }));
                 }
-                InodeKind::File => tree.files.push(FileJob {
+                AuthoritativePathEntryKind::File {
+                    size_bytes,
+                    content_ref,
+                    ..
+                } => tree.files.push(FileJob {
                     local: PathBuf::from(child_components.join("/")),
                     remote: format!("{remote_dir}/{name}", name = name.as_str()),
-                    size_bytes: entry.size_bytes,
-                    content_ref: entry.content_ref,
+                    size_bytes: Some(size_bytes),
+                    content_ref: Some(content_ref),
                 }),
             }
         }

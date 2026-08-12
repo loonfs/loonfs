@@ -2853,122 +2853,153 @@
           "type": "string"
         }
       },
-      "AuthoritativePathEntry": {
+      "AuthoritativeAttributes": {
         "type": "object",
-        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. File entries include\nrevision and content summary fields; directory entries leave those empty.\n\nThe two attribute fields are projected together or not at all. A read that\nasked for attributes carries both — including an empty map with the\nrevision that map is at — and a read that did not carries neither, so\nabsence never has to be read as \"no attributes\".",
+        "description": "One inode's complete projected attribute state.",
         "required": [
-          "namespace_id",
-          "absolute_path",
-          "inode_id",
-          "inode_kind",
-          "head_seq"
+          "revision_no",
+          "attributes"
         ],
         "properties": {
-          "absolute_path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute path as rendered from stored display names."
-          },
           "attributes": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Attributes",
-                "description": "The inode's complete attribute map, when the read projected\nattributes. Present alongside `attributes_revision_no` or not at all."
-              }
-            ]
-          },
-          "attributes_revision_no": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AttributeRevisionNo",
-                "description": "The revision that attribute map is at, when the read projected\nattributes. An inode that has never had attributes written is at\nrevision 0 with an empty map."
-              }
-            ]
-          },
-          "committed_at_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Wall-clock stamp of the commit that created the current revision,\nfor files; directories carry no modification time in v0.\nObservational: `head_seq` and revision sequences are the order.",
-            "minimum": 0
-          },
-          "content_ref": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Current content reference, for files."
-              }
-            ]
-          },
-          "display_name": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Stored display name for this path component, absent for the nameless root."
-              }
-            ]
-          },
-          "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace head sequence this answer was read from."
-          },
-          "inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "Stable inode identity for this item."
-          },
-          "inode_kind": {
-            "$ref": "#/components/schemas/InodeKind",
-            "description": "Whether the item is a file or directory."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that was read."
-          },
-          "parent_inode_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Parent directory inode, or `None` for the root."
-              }
-            ]
+            "$ref": "#/components/schemas/Attributes",
+            "description": "The complete attribute map at `revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
           },
           "revision_no": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Current file revision number, for files."
-              }
-            ]
-          },
-          "size_bytes": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Current file size in bytes, for files.",
-            "minimum": 0
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "The attribute revision this projection represents."
           }
         }
+      },
+      "AuthoritativePathEntry": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AuthoritativePathEntryKind",
+            "description": "File-or-directory classification and its kind-specific payload."
+          },
+          {
+            "type": "object",
+            "required": [
+              "namespace_id",
+              "absolute_path",
+              "inode_id",
+              "head_seq"
+            ],
+            "properties": {
+              "absolute_path": {
+                "$ref": "#/components/schemas/AbsolutePath",
+                "description": "Absolute path as rendered from stored display names."
+              },
+              "attributes": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AuthoritativeAttributes",
+                    "description": "The inode's attribute projection, when requested."
+                  }
+                ]
+              },
+              "display_name": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DisplayName",
+                    "description": "Stored display name for this path component, absent for the nameless root."
+                  }
+                ]
+              },
+              "head_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Namespace head sequence this answer was read from."
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Stable inode identity for this item."
+              },
+              "namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace that was read."
+              },
+              "parent_inode_id": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InodeId",
+                    "description": "Parent directory inode, or `None` for the root."
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. The entry kind carries\nthe file-only revision and content summary, so a directory cannot carry a\npartial file payload. Attributes are likewise projected as one value or\nomitted as one value."
+      },
+      "AuthoritativePathEntryKind": {
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "AuthoritativePathEntryDirectory",
+            "description": "A directory, which has no revision payload in v0.",
+            "required": [
+              "inode_kind"
+            ],
+            "properties": {
+              "inode_kind": {
+                "type": "string",
+                "enum": [
+                  "directory"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "AuthoritativePathEntryFile",
+            "description": "A file and its current revision summary.",
+            "required": [
+              "revision_no",
+              "size_bytes",
+              "content_ref",
+              "committed_at_ms",
+              "inode_kind"
+            ],
+            "properties": {
+              "committed_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Wall-clock stamp of the commit that created the current revision.\nObservational: `head_seq` and revision sequences are the order.",
+                "minimum": 0
+              },
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Current content reference."
+              },
+              "inode_kind": {
+                "type": "string",
+                "enum": [
+                  "file"
+                ]
+              },
+              "revision_no": {
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "Current file revision number."
+              },
+              "size_bytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Current file size in bytes.\n\nThis remains explicit even though `content_ref` also carries the\nlength because callers sort directory listings by this field.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "Kind-specific metadata for an authoritative path entry."
       },
       "BeginDownloadRequest": {
         "type": "object",
@@ -3756,6 +3787,30 @@
           }
         }
       },
+      "DeletedDirentry": {
+        "type": "object",
+        "description": "Directory binding removed by a path deletion.\n\nTombstones retain this binding after the corresponding unbind row may be\ncollected. Undelete uses it to restore the original parent and name.",
+        "required": [
+          "parent_inode_id",
+          "name_key",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "User-facing spelling the binding carried."
+          },
+          "name_key": {
+            "$ref": "#/components/schemas/NameKey",
+            "description": "Canonical key the binding was reachable under."
+          },
+          "parent_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Directory that held the binding."
+          }
+        },
+        "additionalProperties": false
+      },
       "DestinationBehavior": {
         "type": "string",
         "description": "Destination-conflict behavior for path-oriented puts, moves, and copies.",
@@ -4279,6 +4334,17 @@
               "kind"
             ],
             "properties": {
+              "deleted_direntry": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DeletedDirentry",
+                    "description": "Directory binding removed by the deletion, when the delete\nrecorded one."
+                  }
+                ]
+              },
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId",
                 "description": "Inode at the root of the deleted subtree."
@@ -4287,28 +4353,6 @@
                 "type": "string",
                 "enum": [
                   "deleted"
-                ]
-              },
-              "name": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/DisplayName",
-                    "description": "Spelling of the deleted binding, when the delete recorded one."
-                  }
-                ]
-              },
-              "parent_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/InodeId",
-                    "description": "Directory that held the deleted binding, when the delete\nrecorded one."
-                  }
                 ]
               }
             }

@@ -38,8 +38,8 @@ use loonfs_api::v0::{
     UploadPartChecksumClaim, UploadSessionStatus, UploadStatusResponse,
 };
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, NamespaceState, UploadSessionEnvelope,
-    UploadSessionLifecycle, UploadSessionState, UploadSessionTransport,
+    encode_control_object, ControlObjectKind, NamespaceState, ProxiedStaging,
+    UploadSessionEnvelope, UploadSessionLifecycle, UploadSessionState, UploadSessionTransport,
 };
 use loonfs_api::{
     ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId, NamespaceId,
@@ -294,11 +294,10 @@ fn multipart_session_upload(session: &UploadSessionState) -> Result<&str> {
         UploadSessionTransport::DirectMultipart {
             provider_upload_id, ..
         } => Ok(provider_upload_id),
-        UploadSessionTransport::ServiceProxied {} | UploadSessionTransport::DirectPut { .. } => {
-            Err(CoreError::InvalidUploadContent(
-                "this upload session is not a direct_multipart upload".to_owned(),
-            ))
-        }
+        UploadSessionTransport::ServiceProxied { .. }
+        | UploadSessionTransport::DirectPut { .. } => Err(CoreError::InvalidUploadContent(
+            "this upload session is not a direct_multipart upload".to_owned(),
+        )),
     }
 }
 
@@ -410,7 +409,9 @@ impl NewUploadSession {
     fn service_proxied() -> Self {
         Self {
             content_id: ContentId::generate(),
-            transport: UploadSessionTransport::ServiceProxied {},
+            transport: UploadSessionTransport::ServiceProxied {
+                staging: ProxiedStaging::Idle,
+            },
         }
     }
 
@@ -455,8 +456,6 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         transport: session.transport,
         state: UploadSessionLifecycle::Open {
             expires_at_ms: context.now_ms.saturating_add(UPLOAD_SESSION_LEASE_MS),
-            staged_content: None,
-            staging_claimed_at_ms: None,
         },
     };
     let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
@@ -512,15 +511,6 @@ fn terminal_session_error(
     }
 }
 
-/// What an open session has already staged, or `None` for one that has
-/// staged nothing — or that is past staging entirely.
-fn staged_content(state: &UploadSessionLifecycle) -> Option<&ContentRef> {
-    match state {
-        UploadSessionLifecycle::Open { staged_content, .. } => staged_content.as_ref(),
-        UploadSessionLifecycle::Completed { .. } | UploadSessionLifecycle::Aborted { .. } => None,
-    }
-}
-
 /// What a staging request found when it asked for the right to write.
 enum StagingSlot {
     /// The request holds the claim and is the only one that may write.
@@ -560,29 +550,29 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
                 if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
                     return Err(error);
                 }
-                if let Some(staged) = staged_content(&state.state) {
-                    return Ok(UploadSessionUpdate::Noop(StagingSlot::AlreadyStaged(
-                        staged.clone(),
-                    )));
-                }
-                let UploadSessionLifecycle::Open {
-                    staging_claimed_at_ms,
-                    ..
-                } = &mut state.state
+                let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport
                 else {
-                    return Err(CoreError::UploadNotFound { upload_id });
+                    return Err(CoreError::Internal(
+                        "staging slot requested from a direct upload session".to_owned(),
+                    ));
                 };
-                // Another request is writing the object right now. Its bytes
-                // are not this request's to overwrite, and its digest is not
-                // this request's to displace.
-                if staging_claimed_at_ms.is_some() {
-                    return Err(CoreError::UploadContentConflict { upload_id });
+                match staging {
+                    ProxiedStaging::Idle => {
+                        *staging = ProxiedStaging::Claimed { at_ms: now_ms };
+                        Ok(UploadSessionUpdate::Replace {
+                            next: Box::new(state),
+                            outcome: StagingSlot::Claimed,
+                        })
+                    }
+                    // Another request is writing the object right now. Its
+                    // bytes and digest are not this request's to displace.
+                    ProxiedStaging::Claimed { .. } => {
+                        Err(CoreError::UploadContentConflict { upload_id })
+                    }
+                    ProxiedStaging::Staged(content_ref) => Ok(UploadSessionUpdate::Noop(
+                        StagingSlot::AlreadyStaged(content_ref.clone()),
+                    )),
                 }
-                *staging_claimed_at_ms = Some(now_ms);
-                Ok(UploadSessionUpdate::Replace {
-                    next: Box::new(state),
-                    outcome: StagingSlot::Claimed,
-                })
             }
         },
     )
@@ -606,16 +596,16 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
         upload_id,
         CONTENTION_RETRY_LIMIT,
         |mut state| async move {
-            let UploadSessionLifecycle::Open {
-                staging_claimed_at_ms,
-                ..
-            } = &mut state.state
-            else {
-                return Ok(UploadSessionUpdate::Noop(()));
-            };
-            if staging_claimed_at_ms.take().is_none() {
+            if !matches!(state.state, UploadSessionLifecycle::Open { .. }) {
                 return Ok(UploadSessionUpdate::Noop(()));
             }
+            let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport else {
+                return Ok(UploadSessionUpdate::Noop(()));
+            };
+            if !matches!(staging, ProxiedStaging::Claimed { .. }) {
+                return Ok(UploadSessionUpdate::Noop(()));
+            }
+            *staging = ProxiedStaging::Idle;
             Ok(UploadSessionUpdate::Replace {
                 next: Box::new(state),
                 outcome: (),
@@ -637,7 +627,7 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
 /// What one session's transport is called in a message to its client.
 fn transport_name(transport: &UploadSessionTransport) -> &'static str {
     match transport {
-        UploadSessionTransport::ServiceProxied {} => "service_proxied",
+        UploadSessionTransport::ServiceProxied { .. } => "service_proxied",
         UploadSessionTransport::DirectPut { .. } => "direct_put",
         UploadSessionTransport::DirectMultipart { .. } => "direct_multipart",
     }
@@ -660,7 +650,10 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     if let Some(error) = terminal_session_error(&loaded.state, upload_id.clone()) {
         return Err(error);
     }
-    if !matches!(loaded.transport, UploadSessionTransport::ServiceProxied {}) {
+    if !matches!(
+        loaded.transport,
+        UploadSessionTransport::ServiceProxied { .. }
+    ) {
         return Err(CoreError::InvalidUploadContent(format!(
             "{} sessions must be completed after using the presigned URLs",
             transport_name(&loaded.transport)
@@ -730,14 +723,10 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                 if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
                     return Err(error);
                 }
-                let UploadSessionLifecycle::Open {
-                    staged_content,
-                    staging_claimed_at_ms,
-                    ..
-                } = &mut state.state
+                let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport
                 else {
                     return Err(CoreError::Internal(
-                        "upload session changed after its terminal-state check".to_owned(),
+                        "staged content recorded for a direct upload session".to_owned(),
                     ));
                 };
                 let response = UploadContentResponse {
@@ -745,15 +734,19 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                     upload_id: upload_id.clone(),
                     content_ref: content_ref.clone(),
                 };
-                match staged_content {
-                    Some(existing) if existing == &content_ref => {
-                        Ok(UploadSessionUpdate::Noop(response))
+                if already_present && !matches!(staging, ProxiedStaging::Staged(_)) {
+                    return Err(CoreError::UploadContentConflict { upload_id });
+                }
+                match staging {
+                    ProxiedStaging::Staged(existing) => {
+                        if existing == &content_ref {
+                            Ok(UploadSessionUpdate::Noop(response))
+                        } else {
+                            Err(CoreError::UploadContentConflict { upload_id })
+                        }
                     }
-                    Some(_) => Err(CoreError::UploadContentConflict { upload_id }),
-                    None if already_present => Err(CoreError::UploadContentConflict { upload_id }),
-                    None => {
-                        *staging_claimed_at_ms = None;
-                        *staged_content = Some(content_ref);
+                    ProxiedStaging::Idle | ProxiedStaging::Claimed { .. } => {
+                        *staging = ProxiedStaging::Staged(content_ref);
                         Ok(UploadSessionUpdate::Replace {
                             next: Box::new(state),
                             outcome: response,
@@ -786,7 +779,10 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     if let Some(error) = terminal_session_error(&loaded.state, upload_id.clone()) {
         return Err(error);
     }
-    if !matches!(loaded.transport, UploadSessionTransport::ServiceProxied {}) {
+    if !matches!(
+        loaded.transport,
+        UploadSessionTransport::ServiceProxied { .. }
+    ) {
         return Err(CoreError::InvalidUploadContent(format!(
             "{} sessions must be completed after using the presigned URLs",
             transport_name(&loaded.transport)
@@ -1168,7 +1164,7 @@ impl AbandonedUpload {
             UploadSessionTransport::DirectMultipart {
                 provider_upload_id, ..
             } => Some(provider_upload_id.clone()),
-            UploadSessionTransport::ServiceProxied {}
+            UploadSessionTransport::ServiceProxied { .. }
             | UploadSessionTransport::DirectPut { .. } => None,
         };
         Self {
@@ -1407,11 +1403,14 @@ fn completion_plan<'a>(
 ) -> Result<CompletionPlan<'a>> {
     match (&session.transport, request) {
         (
-            UploadSessionTransport::ServiceProxied {},
+            UploadSessionTransport::ServiceProxied { staging },
             CompleteUploadRequest::ContentRef { content_ref },
         ) => Ok(CompletionPlan::Proxied {
             requested: content_ref.clone(),
-            staged: staged_content(&session.state),
+            staged: match staging {
+                ProxiedStaging::Staged(content_ref) => Some(content_ref),
+                ProxiedStaging::Idle | ProxiedStaging::Claimed { .. } => None,
+            },
         }),
         (
             UploadSessionTransport::DirectPut { promised_content },
@@ -1431,7 +1430,8 @@ fn completion_plan<'a>(
             parts,
         }),
         (
-            UploadSessionTransport::ServiceProxied {} | UploadSessionTransport::DirectPut { .. },
+            UploadSessionTransport::ServiceProxied { .. }
+            | UploadSessionTransport::DirectPut { .. },
             CompleteUploadRequest::Multipart { .. },
         ) => Err(CoreError::InvalidUploadContent(format!(
             "{} completion carries no multipart claim",

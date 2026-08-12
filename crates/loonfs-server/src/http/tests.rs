@@ -77,6 +77,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "degraded_retention",
     "degraded_roots",
     "deleted_at_seq",
+    "deleted_direntry",
     "destination_exists",
     "direct_multipart",
     "direct_put",
@@ -1259,7 +1260,7 @@ async fn runtime_created_state_is_readable_through_http() {
     let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
     let stat = harness.client.stat_path(&target).await.expect("stat file");
     assert_eq!(stat.absolute_path, "/notes/hello.txt");
-    assert_eq!(stat.size_bytes, Some(18));
+    assert_eq!(stat.size_bytes(), Some(18));
     let bytes = harness
         .client
         .get_file_bytes(&target)

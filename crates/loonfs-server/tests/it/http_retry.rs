@@ -765,7 +765,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .await
         .expect("copied stat");
     assert_ne!(source_entry.inode_id, copied_entry.inode_id);
-    assert_eq!(source_entry.content_ref, copied_entry.content_ref);
+    assert_eq!(source_entry.content_ref(), copied_entry.content_ref());
 
     let moved = NamespacePath::parse("demo", "/docs/moved.txt").expect("moved");
     let move_first = harness

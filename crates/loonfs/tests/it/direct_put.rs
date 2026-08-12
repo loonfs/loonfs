@@ -424,7 +424,8 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
             .stat_path(&namespace_id, "/docs/a.txt")
             .await
             .expect("stat the committed file")
-            .content_ref
+            .content_ref()
+            .cloned()
             .expect("a file revision carries a content ref");
         let replay = fs
             .put_file_content_ref(

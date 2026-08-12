@@ -217,7 +217,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         .await
         .expect("stat committed file");
     assert_eq!(stat.inode_id, InodeId(2));
-    assert_eq!(stat.content_ref.as_ref(), Some(&content_ref));
+    assert_eq!(stat.content_ref(), Some(&content_ref));
     let read_back = harness
         .client
         .get_file_bytes(&target)

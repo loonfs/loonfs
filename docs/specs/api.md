@@ -1345,8 +1345,10 @@ the durable naming rules (`format.md`, "Durable naming conventions").
     "whole_file_sha256": "42d..."
   },
   "committed_at_ms": 1752624000000,
-  "attributes": { "owner": { "kind": "string", "value": "platform" } },
-  "attributes_revision_no": 3
+  "attributes": {
+    "revision_no": 3,
+    "attributes": { "owner": { "kind": "string", "value": "platform" } }
+  }
 }
 ```
 
@@ -1355,18 +1357,17 @@ created the current revision, in Unix milliseconds. It is observational —
 sequences are the order, and no validity rule reads it. Directory entries
 carry no modification time in v0.
 
-`include_attributes` selects whether the entry carries the inode's attribute
-map. It accepts `true` or `false`; anything else is `invalid_request`. Stat
+`include_attributes` selects whether the entry carries the inode's grouped
+attribute projection. It accepts `true` or `false`; anything else is `invalid_request`. Stat
 defaults to `true`, because a stat answers for one path and a map is capped
 at 64 KiB.
 
-The two attribute fields are projected together or not at all. A read that
-included attributes carries both `attributes` and `attributes_revision_no`,
-including when the map is empty — `{}` at its current revision is a real
-answer, and an inode that has never had attributes written reads as `{}` at
-revision 0. A read that did not include them carries neither. Neither field
-is ever present without the other, so a client never has to read an absent
-map as "no attributes".
+The `attributes` value is present or absent as one group. When present, it
+carries `revision_no` and the complete `attributes` map. An empty map is a
+real projected answer at its current revision, and an inode that has never
+had attributes written reads as `{}` at revision 0. A read that did not
+include attributes omits the group, so an absent group never means "no
+attributes".
 
 The namespace root is nameless: its entry has `parent_inode_id: null` and
 omits `display_name` entirely. Every non-root entry carries a validated
@@ -1436,7 +1437,7 @@ stays `invalid_request`.)
       "namespace_id": "demo",
       "absolute_path": "/docs/slides",
       "inode_id": 43,
-      "inode_kind": "dir",
+      "inode_kind": "directory",
       "head_seq": 418,
       "parent_inode_id": 7,
       "display_name": "slides"
@@ -2069,7 +2070,7 @@ Event kinds:
 | `created` | A file or directory was created. | `inode_id`, `inode_kind`, `parent_inode_id`, `name`; file creations also carry `revision_no` and `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_name`, `to_parent_inode_id`, `to_name`. |
-| `deleted` | A file or directory subtree was deleted. The enclosing change's `seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus `parent_inode_id` and `name` when the delete recorded them. |
+| `deleted` | A file or directory subtree was deleted. The enclosing change's `seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `name`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 

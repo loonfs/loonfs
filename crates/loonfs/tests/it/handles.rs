@@ -501,7 +501,7 @@ fn standalone_reader_builds_without_writer_identity() {
             .stat_path(&namespace_id, "/docs/hello.txt")
             .await
             .expect("stat through standalone reader");
-        assert_eq!(stat.size_bytes, Some(5));
+        assert_eq!(stat.size_bytes(), Some(5));
         let entries = reader
             .list_path_entries_all(&namespace_id, "/docs")
             .await
@@ -642,12 +642,14 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
             .stat_path(&prepared_namespace, "/file.txt")
             .await
             .expect("stat prepared put");
-        assert_eq!(simple_stat.revision_no, prepared_stat.revision_no);
-        assert_eq!(simple_stat.size_bytes, prepared_stat.size_bytes);
+        assert_eq!(simple_stat.revision_no(), prepared_stat.revision_no());
+        assert_eq!(simple_stat.size_bytes(), prepared_stat.size_bytes());
         // The two paths staged their own content objects, so their
         // references name different objects and carry identical evidence.
-        let simple_ref = simple_stat.content_ref.expect("simple put content ref");
-        let prepared_ref = prepared_stat.content_ref.expect("prepared put content ref");
+        let simple_ref = simple_stat.content_ref().expect("simple put content ref");
+        let prepared_ref = prepared_stat
+            .content_ref()
+            .expect("prepared put content ref");
         assert_ne!(simple_ref.content_id, prepared_ref.content_id);
         assert_eq!(simple_ref.size_bytes, prepared_ref.size_bytes);
         assert_eq!(simple_ref.storage_checksum, prepared_ref.storage_checksum);

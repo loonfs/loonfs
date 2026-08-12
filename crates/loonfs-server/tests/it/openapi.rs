@@ -101,6 +101,13 @@ fn openapi_names_tagged_one_of_alternatives() {
 
     for (schema_name, expected_titles) in [
         (
+            "AuthoritativePathEntryKind",
+            &[
+                "AuthoritativePathEntryDirectory",
+                "AuthoritativePathEntryFile",
+            ][..],
+        ),
+        (
             "FilesystemChange",
             &[
                 "FilesystemChangeCreated",
