@@ -65,8 +65,9 @@ serde_bytes = "0.11"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 hmac = "0.12"
-# Published workspace crates need a registry version as well as a local path.
-# Keep these versions in lockstep with `workspace.package.version`.
+# Cargo requires published dependencies to include a registry version even
+# when they also have a local path. These versions must match
+# `workspace.package.version`.
 loonfs = { path = "crates/loonfs", version = "0.2.1" }
 loonfs-api = { path = "crates/loonfs-api", version = "0.2.1" }
 loonfs-client = { path = "crates/loonfs-client", version = "0.2.1" }
