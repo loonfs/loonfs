@@ -336,8 +336,9 @@ pub enum FilesystemOperation {
     },
 }
 
-/// One commit: an idempotency key, an optional annotation, and an ordered
-/// list of path operations that commit together (API spec, section 5.1).
+/// One commit: an idempotency key, its application-asserted actor, an
+/// optional annotation, and an ordered list of path operations that commit
+/// together (API spec, section 5.1).
 ///
 /// A one-operation request is the one-element case of this shape, not a
 /// different request: a convenience call and a batch produce the same commit
@@ -352,6 +353,8 @@ pub enum FilesystemOperation {
 pub struct CommitRequest {
     /// Caller-supplied idempotency key for the whole request.
     pub commit_id: CommitId,
+    /// Application-asserted identity that caused this logical commit.
+    pub actor: crate::ActorRef,
     /// Caller annotation recorded on the commit and reported by the change
     /// feed. Part of the commit's identity: reusing `commit_id` with a
     /// different message is a `commit_id_reuse_conflict`, exactly as it is
@@ -371,11 +374,13 @@ impl CommitRequest {
     /// A request carrying exactly one operation.
     pub fn single(
         commit_id: CommitId,
+        actor: crate::ActorRef,
         message: Option<String>,
         operation: FilesystemOperation,
     ) -> Self {
         Self {
             commit_id,
+            actor,
             message,
             content_tokens: Vec::new(),
             operations: vec![operation],
@@ -1455,6 +1460,7 @@ mod tests {
             operation[guard] = serde_json::json!(3);
             serde_json::json!({
                 "commit_id": "guarded-put",
+                "actor": crate::ActorRef::loonfs_system(),
                 "operations": [operation]
             })
         };
@@ -1484,6 +1490,7 @@ mod tests {
         let valid = || {
             serde_json::json!({
                 "commit_id": "strict-commit",
+                "actor": crate::ActorRef::loonfs_system(),
                 "content_tokens": [{
                     "content_ref": sample_content_ref(),
                     "token": "opaque-proof"

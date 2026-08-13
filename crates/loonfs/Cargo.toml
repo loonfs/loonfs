@@ -26,6 +26,7 @@ loonfs-core = { workspace = true, features = ["test-support"] }
 loonfs-test-support = { path = "../loonfs-test-support" }
 serde_json.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 
 [lints]

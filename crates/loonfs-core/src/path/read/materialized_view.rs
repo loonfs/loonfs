@@ -983,6 +983,7 @@ mod tests {
                 &namespace_id,
                 vec![CommitCandidate::new(CommitRequest::single(
                     CommitId::parse(commit_id).expect("commit id"),
+                    loonfs_test_support::test_actor(),
                     None,
                     operation,
                 ))],

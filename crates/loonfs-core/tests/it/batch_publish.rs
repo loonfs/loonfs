@@ -12,8 +12,8 @@ use loonfs_api::{
     v0::FilesystemChange,
     wire::control::{decode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope},
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-    InodeKind, NamespaceId,
+    AbsolutePath, ActorId, ActorRef, ChangeSeq, CommitId, DeleteDirectoryBehavior,
+    DestinationBehavior, InodeId, InodeKind, NamespaceId,
 };
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
@@ -60,6 +60,7 @@ async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
 fn commit_request(commit_id: &str, operation: FilesystemOperation) -> CommitRequest {
     CommitRequest::single(
         CommitId::parse(commit_id).expect("valid test commit id"),
+        loonfs_test_support::test_actor(),
         None,
         operation,
     )
@@ -1221,6 +1222,7 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
         .expect("bootstrap");
     let candidate = CommitCandidate::new(CommitRequest {
         commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         message: None,
         operations: (0..=loonfs_core::limits::MAX_COMMIT_OPERATIONS)
             .map(|index| FilesystemOperation::CreateDirectory {
@@ -1273,6 +1275,94 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
         .expect("writer b retry");
 
     assert_eq!(first, retry);
+}
+
+#[tokio::test]
+async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compacted() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let first_context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &first_context, false)
+        .await
+        .expect("bootstrap");
+
+    let actor = ActorRef::user(ActorId::parse("shared-id").expect("actor id"));
+    let request = |actor: ActorRef| {
+        CommitRequest::single(
+            CommitId::parse("attributed-receipt").expect("commit id"),
+            actor,
+            Some("receipt identity".to_owned()),
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/attributed").expect("path"),
+                parents: false,
+            },
+        )
+    };
+    let first = submit_commit(
+        &store,
+        &namespace_id,
+        request(actor.clone()),
+        &first_context,
+    )
+    .await
+    .expect("commit");
+    create_checkpoint(&store, &namespace_id, &first_context)
+        .await
+        .expect("compact commit into receipt row");
+
+    // Make the original WAL unusable: every result below must come from the
+    // checkpoint's receipt row, not by quietly replaying the commit segment.
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/segments/")
+        .await
+        .expect("list WAL");
+    assert_eq!(wal_keys.len(), 1);
+    store
+        .put_overwrite(
+            &wal_keys[0],
+            Bytes::from_static(b"compacted WAL must not be read"),
+        )
+        .await
+        .expect("poison compacted WAL");
+
+    let later_context = MutationContext {
+        writer_id: "writer-b".to_owned(),
+        now_ms: first_context.now_ms + 10_000,
+    };
+    let replay = submit_commit(
+        &store,
+        &namespace_id,
+        request(actor.clone()),
+        &later_context,
+    )
+    .await
+    .expect("same actor and request replay from receipt");
+    assert_eq!(replay, first, "committed_at_ms is outside identity");
+
+    for conflicting_actor in [
+        ActorRef::user(ActorId::parse("different-id").expect("actor id")),
+        ActorRef::service(ActorId::parse("shared-id").expect("actor id")),
+    ] {
+        let error = submit_commit(
+            &store,
+            &namespace_id,
+            request(conflicting_actor),
+            &later_context,
+        )
+        .await
+        .expect_err("a different actor cannot reuse the commit id");
+        assert!(matches!(
+            error,
+            CoreError::CommitIdReuseConflict {
+                commit_id,
+                committed_seq: Some(committed_seq),
+                committed_fingerprint: Some(fingerprint),
+            } if commit_id == "attributed-receipt"
+                && committed_seq == first.committed_seq
+                && fingerprint.starts_with("v1:sha256:")
+        ));
+    }
 }
 
 #[tokio::test]
@@ -1401,7 +1491,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             committed_fingerprint: Some(fingerprint),
         } if commit_id == "same-path-request"
             && committed_seq == Some(first.committed_seq)
-            && fingerprint.starts_with("v0:sha256:")
+            && fingerprint.starts_with("v1:sha256:")
     ));
 
     let wal_keys = store
@@ -1638,6 +1728,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                 &namespace_id("demo"),
                 CommitRequest::single(
                     commit_id.clone(),
+                    loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
@@ -1669,6 +1760,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
         &namespace_id("demo"),
         vec![CommitCandidate::new(CommitRequest::single(
             commit_id,
+            loonfs_test_support::test_actor(),
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),

@@ -71,7 +71,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
                     &namespace_id,
                     &format!("/docs/file-{file}.txt"),
                     b"body",
-                    PutFileOptions::default(),
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
                 )
                 .await
                 .expect("put file");

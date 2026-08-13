@@ -962,8 +962,8 @@ segment whose rows are out of order as malformed. Readers load the referenced
 runs, then replay only the visible WAL chain after the manifest's `head_seq`.
 
 The WAL preserves ordered history even when multiple logical commits are
-stored in one segment. Each logical commit records the commit identity, optional
-message, and normalized metadata deltas such as inode creation, direntry
+stored in one segment. Each logical commit records the commit identity, required
+actor, optional message, and normalized metadata deltas such as inode creation, direntry
 bind/unbind, file revision append, and subtree tombstone rows. Validation
 inputs and operation results are not persisted in the WAL. Checkpoints keep
 replay bounded as history grows.
@@ -1297,23 +1297,26 @@ already published under this `commit_id`?". That answer is the semantic commit
 fingerprint stored as `semantic_commit_fingerprint` in every WAL commit record
 and commit receipt.
 
-A fingerprint value is `v0:sha256:<64 lowercase hex>`. The `v0` tag names the
+A fingerprint value is `v1:sha256:<64 lowercase hex>`. The `v1` tag names the
 canonicalization rules below and `sha256` the digest algorithm, so either can
 change later without re-interpreting stored values.
 
-The `v0` preimage is the compact JSON encoding (no whitespace, object keys in
+The `v1` preimage is the compact JSON encoding (no whitespace, object keys in
 exactly the order shown) of:
 
 ```json
 {
-  "domain": "loonfs.commit.semantic.v0",
+  "domain": "loonfs.commit.semantic.v1",
   "namespace_id": "...",
+  "actor_kind": "user | service | system",
+  "actor_id": "...",
   "operations": [...],
   "message": "... or null"
 }
 ```
 
-where `operations` appear in request order, each as its canonical form
+where `actor_kind` and `actor_id` are distinct canonical fields and
+`operations` appear in request order, each as its canonical form
 (operation kind, canonical absolute paths, and the operation's semantic
 parameters including its caller-supplied race guards), and `message` is
 `null` when absent — so reusing a `commit_id` with a different message, a
@@ -1356,7 +1359,7 @@ committed response; an unequal fingerprint is rejected as
 `commit_id_reuse_conflict`, which reports the stored fingerprint so a client
 can prove its retry is the same request (API spec, section 5.2). Reference
 values are pinned by tests in `loonfs-api` (`commit_identity.rs`); those
-literals must never change within scheme `v0`.
+literals must never change within scheme `v1`.
 
 ### 3.4 Server authority
 
@@ -1993,7 +1996,7 @@ and grep maintenance does not collect core-owned objects.
 - **Digest strings are self-describing.** Durable digest values carry their
   algorithm as a prefix (`sha256:<hex>`) so a future algorithm can be
   introduced without re-interpreting old values. Commit fingerprints
-  additionally carry their canonicalization scheme (`v0:sha256:<hex>`, section
+  additionally carry their canonicalization scheme (`v1:sha256:<hex>`, section
   3.3.1) because their preimage rules can evolve independently of the
   algorithm.
 - **Unknown content-ref kinds round-trip.** A reader that does not understand

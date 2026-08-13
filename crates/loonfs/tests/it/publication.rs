@@ -86,7 +86,12 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             writer
-                .put_file_bytes(&namespace_id, "/a.txt", b"a", PutFileOptions::default())
+                .put_file_bytes(
+                    &namespace_id,
+                    "/a.txt",
+                    b"a",
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
                 .await
         })
     };
@@ -100,6 +105,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         let namespace_id = namespace_id.clone();
         let request = CommitRequest::single(
             CommitId::parse("parked-second").expect("valid commit id"),
+            loonfs_test_support::test_actor(),
             None,
             FilesystemOperation::PutFile {
                 path: parse_mutation_path("/b.txt").expect("mutation path"),

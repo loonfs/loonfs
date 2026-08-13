@@ -149,6 +149,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
             vec![CommitCandidate::prepared(
                 CommitRequest::single(
                     CommitId::parse(commit_id).expect("commit id"),
+                    loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(path).expect("path"),

@@ -3,8 +3,8 @@
 
 use super::context::{
     default_remote_put_path, destination_path_for_get, destination_user_path, directory_intent,
-    fail, namespace_path, parse_user_path, render_target, resolve_command_context, CommandContext,
-    UndeleteHint,
+    fail, namespace_path, parse_user_path, render_target, resolve_command_context,
+    resolve_mutation_context, CommandContext, UndeleteHint,
 };
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
@@ -26,12 +26,13 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
-    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId,
+    AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId,
     CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeId, InodeKind,
     ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use loonfs_client::{
-    CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions, UpdateAttributesOptions,
+    CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
+    UpdateAttributesOptions,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -48,6 +49,18 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
                 .map_err(|error| CliError::invalid_input(format!("invalid --commit-id: {error}")))
         })
         .transpose()
+}
+
+fn commit_options(
+    actor: &ActorRef,
+    commit_id: Option<CommitId>,
+    message: Option<String>,
+) -> CommitOptions {
+    CommitOptions {
+        actor: actor.clone(),
+        commit_id,
+        message,
+    }
 }
 
 struct FollowedPathEntryPages {
@@ -250,6 +263,7 @@ struct AttributeUpdateJson {
 
 fn update_attributes_options(
     args: &FilesystemAnnotateArgs,
+    actor: &ActorRef,
 ) -> Result<UpdateAttributesOptions, CliError> {
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())?;
     let (set, remove) = match args.attributes_json.as_deref() {
@@ -275,8 +289,7 @@ fn update_attributes_options(
     Ok(UpdateAttributesOptions {
         set,
         remove,
-        commit_id,
-        message: args.message.clone(),
+        commit: commit_options(actor, commit_id, args.message.clone()),
         expected_inode_id: args.expected_inode_id.map(InodeId),
         expected_attributes_revision_no: args.expected_attributes_revision.map(AttributeRevisionNo),
     })
@@ -287,11 +300,12 @@ pub(crate) async fn run_filesystem_annotate(
     config_path: &Path,
     args: FilesystemAnnotateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     let allow_root = true;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let options = update_attributes_options(&args).map_err(|error| context.fail(kind, error))?;
+    let options = update_attributes_options(&args, &context.actor)
+        .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
         .update_attributes(&spec, &options)
@@ -767,7 +781,7 @@ pub(crate) async fn run_filesystem_put(
     args: FilesystemPutArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     let local_path = PathBuf::from(&args.local_path);
     if local_path == Path::new(STDIN_PATH) {
         return run_filesystem_put_stdin(kind, args, context, runtime).await;
@@ -840,7 +854,8 @@ pub(crate) async fn run_filesystem_put(
     .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace.clone(), remote_path);
     let payload = LocalPayload::file(&local_path, metadata.len());
-    let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
+    let options =
+        put_file_options(&args, &context.actor).map_err(|error| context.fail(kind, error))?;
     commit_put(
         kind,
         &context,
@@ -882,7 +897,8 @@ async fn run_filesystem_put_stdin(
     let remote_path =
         parse_user_path(remote_path, false).map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace.clone(), remote_path);
-    let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
+    let options =
+        put_file_options(&args, &context.actor).map_err(|error| context.fail(kind, error))?;
     // A pipe cannot say how long it is, so there is a byte count but never a
     // total, a percentage, or an estimate.
     commit_put(
@@ -1060,7 +1076,10 @@ async fn commit_a_finished_upload(
     Ok(Some(result?))
 }
 
-fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError> {
+fn put_file_options(
+    args: &FilesystemPutArgs,
+    actor: &ActorRef,
+) -> Result<PutFileOptions, CliError> {
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())?;
     let expected_revision_no = args.expected_revision.map(RevisionNo);
     // The revision guard is a stronger replace statement, so it implies
@@ -1072,8 +1091,7 @@ fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError
     };
     Ok(PutFileOptions {
         behavior,
-        commit_id,
-        message: args.message.clone(),
+        commit: commit_options(actor, commit_id, args.message.clone()),
         expected_revision_no,
     })
 }
@@ -1083,7 +1101,7 @@ pub(crate) async fn run_filesystem_rm(
     location: &ConfigLocation,
     args: FilesystemRmArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &location.path, &args.target).await?;
+    let context = resolve_mutation_context(kind, &location.path, &args.target, &args.actor).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -1107,8 +1125,7 @@ pub(crate) async fn run_filesystem_rm(
     let options = DeleteOptions {
         behavior,
         expected_inode_id: Some(deleted_inode),
-        commit_id,
-        message: args.message.clone(),
+        commit: commit_options(&context.actor, commit_id, args.message.clone()),
     };
     let result = context
         .target
@@ -1146,7 +1163,7 @@ pub(crate) async fn run_filesystem_restore(
     config_path: &Path,
     args: FilesystemRestoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -1158,8 +1175,7 @@ pub(crate) async fn run_filesystem_restore(
             &spec,
             RevisionNo(args.revision),
             &loonfs_client::RestoreRevisionOptions {
-                commit_id,
-                message: args.message.clone(),
+                commit: commit_options(&context.actor, commit_id, args.message.clone()),
             },
         )
         .await
@@ -1184,7 +1200,7 @@ pub(crate) async fn run_filesystem_undelete(
     config_path: &Path,
     args: FilesystemUndeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     let allow_root = false;
     // An absent path restores in place; the destination is then the parent
     // and name the deletion recorded, which no path here could name better.
@@ -1204,8 +1220,7 @@ pub(crate) async fn run_filesystem_undelete(
             loonfs_api::InodeId(args.inode),
             loonfs_api::ChangeSeq(args.deleted_at),
             &loonfs_client::UndeleteOptions {
-                commit_id,
-                message: args.message.clone(),
+                commit: commit_options(&context.actor, commit_id, args.message.clone()),
             },
         )
         .await
@@ -1234,7 +1249,7 @@ pub(crate) async fn run_filesystem_mkdir(
     config_path: &Path,
     args: FilesystemMkdirArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -1242,8 +1257,7 @@ pub(crate) async fn run_filesystem_mkdir(
         .map_err(|error| context.fail(kind, error))?;
     let options = CreateDirectoryOptions {
         parents: args.parents,
-        commit_id,
-        message: args.message.clone(),
+        commit: commit_options(&context.actor, commit_id, args.message.clone()),
     };
     let result = match context.target.create_directory(&spec, &options).await {
         Ok(result) => result,
@@ -1355,7 +1369,7 @@ async fn run_filesystem_transfer(
     transfer_kind: TransferKind,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
     if args.recursive && transfer_kind == TransferKind::Move {
         return Err(context.fail(
             kind,
@@ -1447,8 +1461,7 @@ async fn run_filesystem_transfer(
                 &to,
                 &loonfs_client::CopyOptions {
                     behavior,
-                    commit_id,
-                    message: args.message.clone(),
+                    commit: commit_options(&context.actor, commit_id, args.message.clone()),
                 },
             )
             .await
@@ -1465,8 +1478,7 @@ async fn run_filesystem_transfer(
                 &to,
                 &loonfs_client::MoveOptions {
                     behavior,
-                    commit_id,
-                    message: args.message.clone(),
+                    commit: commit_options(&context.actor, commit_id, args.message.clone()),
                 },
             )
             .await

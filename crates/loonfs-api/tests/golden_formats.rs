@@ -36,11 +36,11 @@ use loonfs_api::wire::wal::{
     WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
-    CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
-    ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataCompactionId,
-    MetadataTableId, NameKey, NamespaceId, RevisionNo, StorageChecksum, UploadId, WalSegmentId,
-    WriterEpoch,
+    sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
+    Attributes, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
+    ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId,
+    MetadataCompactionId, MetadataTableId, NameKey, NamespaceId, RevisionNo, StorageChecksum,
+    UploadId, WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -56,6 +56,10 @@ fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(name)
+}
+
+fn actor() -> ActorRef {
+    ActorRef::service(ActorId::parse("loonfs-golden").expect("valid actor id"))
 }
 
 fn assert_matches_golden(name: &str, actual: &[u8]) {
@@ -312,8 +316,9 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
         records: vec![WalCommitPayload {
             seq: ChangeSeq(2),
             commit_id: commit_id(),
+            actor: actor(),
             semantic_commit_fingerprint:
-                "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
+                "v1:sha256:0000000000000000000000000000000000000000000000000000000000000042"
                     .to_owned(),
             committed_at_ms: 4_000,
             message: Some("golden commit".to_owned()),
@@ -1401,6 +1406,43 @@ fn wal_decode_tolerates_additive_payload_fields() {
 }
 
 #[test]
+fn wal_decode_rejects_a_version_one_commit_without_an_actor() {
+    let document = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
+    let document_value: ciborium::Value =
+        ciborium::de::from_reader(document.as_slice()).expect("decode document map");
+    let payload_bytes = document_value
+        .as_map()
+        .expect("document is a map")
+        .iter()
+        .find(|(key, _)| key.as_text() == Some("payload"))
+        .and_then(|(_, value)| value.as_bytes())
+        .expect("payload is a byte string");
+    let mut payload: ciborium::Value =
+        ciborium::de::from_reader(payload_bytes.as_slice()).expect("decode payload");
+    let records = cbor_entry(&mut payload, "records")
+        .as_array_mut()
+        .expect("records is an array");
+    cbor_map_of(records.first_mut().expect("one commit"))
+        .retain(|(key, _)| key.as_text() != Some("actor"));
+    let mut actorless_payload = Vec::new();
+    ciborium::ser::into_writer(&payload, &mut actorless_payload).expect("encode actorless payload");
+
+    let with_payload = with_cbor_document_entry(&document, "payload", |value| {
+        *value = ciborium::Value::Bytes(actorless_payload.clone());
+    });
+    let actorless_document = with_cbor_document_entry(&with_payload, "payload_checksum", |value| {
+        *value = ciborium::Value::from(sha256_digest(&actorless_payload));
+    });
+
+    let error = decode_wal_segment_envelope_zstd(&rezstd(&actorless_document))
+        .expect_err("version-one WAL commits require an actor");
+    assert!(
+        matches!(&error, EnvelopeCodecError::PayloadDecode(message) if message.contains("actor")),
+        "unexpected corruption error: {error}"
+    );
+}
+
+#[test]
 fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
     let envelope =
         ControlObjectEnvelope::from_state(ControlObjectKind::WalHead, sample_head_state())
@@ -1660,6 +1702,17 @@ fn sample_populated_attributes_row() -> MetadataRow {
     }
 }
 
+fn sample_commit_receipt_row() -> MetadataRow {
+    MetadataRow::CommitReceipt {
+        commit_id: commit_id(),
+        actor: actor(),
+        semantic_commit_fingerprint: "fp:golden".to_owned(),
+        committed_seq: ChangeSeq(9),
+        committed_at_ms: 9_000,
+        message: None,
+    }
+}
+
 fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
     use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
     // A tiny target block size forces several data blocks, so the fixture
@@ -1682,13 +1735,7 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         // two.
         sample_cleared_attributes_row(),
         sample_populated_attributes_row(),
-        MetadataRow::CommitReceipt {
-            commit_id: commit_id(),
-            semantic_commit_fingerprint: "fp:golden".to_owned(),
-            committed_seq: ChangeSeq(9),
-            committed_at_ms: 9_000,
-            message: None,
-        },
+        sample_commit_receipt_row(),
         MetadataRow::DirentryBind {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs"),
@@ -1909,6 +1956,35 @@ fn sst_block_data_attribute_golden_decodes_to_sample_rows() {
     );
 }
 
+#[test]
+fn sst_block_data_commit_receipt_rows_match_golden_bytes() {
+    let built = sample_segment_blocks();
+    let index = sample_segment_index(&built);
+    let position = family_block_position(&built, &index, "commit-receipt-");
+    let entry = &index[position];
+    let block = loonfs_api::wire::sst_blocks::decode_data_block(
+        segment_section(&built.bytes, &entry.block),
+        &entry.block,
+    )
+    .expect("decode commit receipt block");
+    assert_eq!(
+        rows_under_prefix(&block, "commit-receipt-"),
+        1,
+        "the attributed receipt belongs to the block this pins: {:?}",
+        block.row_keys
+    );
+    assert_matches_golden(
+        "sst_block_data_commit_receipts.v1.bin",
+        &unzstd(segment_section(&built.bytes, &entry.block)),
+    );
+}
+
+#[test]
+fn sst_block_data_commit_receipt_golden_decodes_to_sample_row() {
+    let block = decode_golden_data_block("sst_block_data_commit_receipts.v1.bin");
+    assert_eq!(block.rows, [sample_commit_receipt_row()]);
+}
+
 /// The tombstone family sorts last, so nothing pinned the rows that carry a
 /// deletion's binding and the generation a revoke names. This pins their block
 /// too.
@@ -1986,6 +2062,24 @@ fn assert_row_is_corrupt(row: &ciborium::Value, why: &str) -> String {
         Ok(decoded) => panic!("{why}, but the row decoded as {decoded:?}"),
         Err(error) => error.to_string(),
     }
+}
+
+#[test]
+fn commit_receipt_rows_without_an_actor_are_corrupt() {
+    let mut row = row_cbor(&MetadataRow::CommitReceipt {
+        commit_id: commit_id(),
+        actor: actor(),
+        semantic_commit_fingerprint: "v1:sha256:receipt".to_owned(),
+        committed_seq: ChangeSeq(9),
+        committed_at_ms: 9_000,
+        message: None,
+    });
+    cbor_map_of(&mut row).retain(|(key, _)| key.as_text() != Some("actor"));
+    let refusal = assert_row_is_corrupt(&row, "a receipt without attribution is corrupt");
+    assert!(
+        refusal.contains("missing field `actor`"),
+        "unexpected refusal: {refusal}"
+    );
 }
 
 /// The deleted binding is one value with three required parts. Two of the

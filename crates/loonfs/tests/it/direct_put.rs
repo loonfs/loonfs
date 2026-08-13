@@ -125,7 +125,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
         &namespace_id,
         "/docs/direct.txt",
         content_ref,
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect("publish direct put content");
     assert_eq!(
@@ -328,7 +328,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
         &namespace_id,
         "/docs/direct.txt",
         b"direct bytes",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file bytes");
 
@@ -346,8 +346,11 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
         b"replaced bytes",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit_id: None,
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: None,
+                message: None,
+            },
             expected_revision_no: None,
         },
     )
@@ -375,8 +378,11 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
         b"overlap survives",
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
-            commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
+                message: None,
+            },
             expected_revision_no: None,
         },
     )
@@ -405,9 +411,12 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 "/docs/a.txt",
                 b"alpha",
                 PutFileOptions {
-                    commit_id: Some(commit_id.clone()),
-                    message: None,
-                    ..PutFileOptions::default()
+                    commit: loonfs_api::options::CommitOptions {
+                        actor: loonfs_test_support::test_actor(),
+                        commit_id: Some(commit_id.clone()),
+                        message: None,
+                    },
+                    ..PutFileOptions::new(loonfs_test_support::test_actor())
                 },
             )
             .await
@@ -433,9 +442,12 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 "/docs/a.txt",
                 landed,
                 PutFileOptions {
-                    commit_id: Some(commit_id.clone()),
-                    message: None,
-                    ..PutFileOptions::default()
+                    commit: loonfs_api::options::CommitOptions {
+                        actor: loonfs_test_support::test_actor(),
+                        commit_id: Some(commit_id.clone()),
+                        message: None,
+                    },
+                    ..PutFileOptions::new(loonfs_test_support::test_actor())
                 },
             )
             .await
@@ -454,9 +466,12 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 "/docs/a.txt",
                 b"alpha",
                 PutFileOptions {
-                    commit_id: Some(commit_id.clone()),
-                    message: None,
-                    ..PutFileOptions::default()
+                    commit: loonfs_api::options::CommitOptions {
+                        actor: loonfs_test_support::test_actor(),
+                        commit_id: Some(commit_id.clone()),
+                        message: None,
+                    },
+                    ..PutFileOptions::new(loonfs_test_support::test_actor())
                 },
             )
             .await
@@ -470,9 +485,12 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 "/docs/a.txt",
                 b"omega",
                 PutFileOptions {
-                    commit_id: Some(commit_id.clone()),
-                    message: None,
-                    ..PutFileOptions::default()
+                    commit: loonfs_api::options::CommitOptions {
+                        actor: loonfs_test_support::test_actor(),
+                        commit_id: Some(commit_id.clone()),
+                        message: None,
+                    },
+                    ..PutFileOptions::new(loonfs_test_support::test_actor())
                 },
             )
             .await
@@ -486,7 +504,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
             .create_directory(
                 &namespace_id,
                 "/docs/sub",
-                CreateDirectoryOptions::default(),
+                CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("mkdir");
@@ -554,6 +572,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 (
                     CommitRequest::single(
                         CommitId::parse(commit_id).expect("valid commit id"),
+                        loonfs_test_support::test_actor(),
                         None,
                         FilesystemOperation::PutFile {
                             path: parse_mutation_path(path).expect("valid mutation path"),
@@ -629,9 +648,14 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
             ("/docs/b.txt", b"beta".as_slice()),
             ("/docs/c.txt", b"gamma".as_slice()),
         ] {
-            fs.put_file_bytes(&namespace_id, path, bytes, PutFileOptions::default())
-                .await
-                .expect("sequential put");
+            fs.put_file_bytes(
+                &namespace_id,
+                path,
+                bytes,
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("sequential put");
         }
 
         let segments_after = wal_segment_count(&object_store, &namespace_id).await;
@@ -659,13 +683,13 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
                 &namespace_id,
                 "/docs/a.txt",
                 b"alpha",
-                PutFileOptions::default()
+                PutFileOptions::new(loonfs_test_support::test_actor())
             ),
             fs.put_file_bytes(
                 &namespace_id,
                 "/docs/b.txt",
                 b"beta",
-                PutFileOptions::default()
+                PutFileOptions::new(loonfs_test_support::test_actor())
             ),
         );
 
@@ -698,7 +722,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
     fs.create_checkpoint_blocking(&namespace_id)
@@ -709,8 +733,11 @@ fn begin_upload_validates_controls_without_replay_reads() {
         b"updated",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit_id: None,
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: None,
+                message: None,
+            },
             expected_revision_no: None,
         },
     )
@@ -792,6 +819,7 @@ fn a_mutation_request_appears_in_change_feed() {
             &namespace_id,
             CommitRequest::single(
                 commit_id.clone(),
+                loonfs_test_support::test_actor(),
                 Some("create docs".to_owned()),
                 FilesystemOperation::CreateDirectory {
                     path: parse_mutation_path("/docs").expect("valid mutation path"),

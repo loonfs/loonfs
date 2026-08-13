@@ -131,6 +131,8 @@ pub struct CommittedChange {
     pub committed_seq: ChangeSeq,
     /// Client idempotency key for this logical commit.
     pub commit_id: CommitId,
+    /// Application-asserted identity that caused this logical commit.
+    pub actor: crate::ActorRef,
     /// Wall-clock stamp of the commit, in Unix milliseconds.
     /// Observational: `committed_seq` is the order.
     pub committed_at_ms: u64,

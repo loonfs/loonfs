@@ -1,11 +1,11 @@
 //! Builds and updates profile configurations from provider flags, with a
 //! table-driven check that each flag applies to the chosen store kind.
 
-use crate::args::{InitArgs, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior};
-use crate::config::{non_empty_env, ProfileConfig, StoreConfig};
+use crate::args::{ActorKindArg, InitArgs, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior};
+use crate::config::{non_empty_env, ProfileActorConfig, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
-use loonfs_api::SecretString;
+use loonfs_api::{ActorId, ActorKind, SecretString};
 use loonfs_objectstore::{
     ConfiguredObjectStoreKind, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV, SESSION_TOKEN_ENV,
 };
@@ -249,9 +249,11 @@ const PROVIDER_FLAGS: &[ProviderFlag] = &[
 ];
 
 pub(super) fn has_update_flags(args: &ProfileUpdateArgs) -> bool {
-    PROVIDER_FLAGS
-        .iter()
-        .any(|row| row.update_set.is_some_and(|is_set| is_set(args)))
+    args.actor_kind.is_some()
+        || args.actor_id.is_some()
+        || PROVIDER_FLAGS
+            .iter()
+            .any(|row| row.update_set.is_some_and(|is_set| is_set(args)))
 }
 
 /// Rejects every set create flag whose allowed targets do not intersect
@@ -316,6 +318,8 @@ pub(super) struct CreateProfileSpec {
     server_url: Option<String>,
     auth_token: Option<String>,
     ca_cert_path: Option<String>,
+    actor_kind: Option<ActorKindArg>,
+    actor_id: Option<String>,
 }
 
 pub(super) fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec {
@@ -339,6 +343,8 @@ pub(super) fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec
         server_url: args.server_url,
         auth_token: args.auth_token,
         ca_cert_path: args.ca_cert_path,
+        actor_kind: args.actor_kind,
+        actor_id: args.actor_id,
     }
 }
 
@@ -363,6 +369,8 @@ pub(super) fn create_profile_spec_from_create(args: ProfileCreateArgs) -> Create
         server_url: args.server_url,
         auth_token: args.auth_token,
         ca_cert_path: args.ca_cert_path,
+        actor_kind: args.actor_kind,
+        actor_id: args.actor_id,
     }
 }
 
@@ -508,8 +516,10 @@ fn build_embedded_profile(
         },
     };
 
+    let actor = profile_actor_config(spec.actor_kind, spec.actor_id.as_deref())?;
     Ok(ProfileConfig::Embedded {
         store,
+        actor,
         default_namespace: None,
         writer_id: None,
     })
@@ -522,8 +532,10 @@ fn build_remote_profile(
 ) -> Result<ProfileConfig, CliError> {
     reject_inapplicable_create_flags(&spec, &[FlagTarget::Remote], "remote")?;
 
+    let actor = profile_actor_config(spec.actor_kind, spec.actor_id.as_deref())?;
     Ok(ProfileConfig::Remote {
         server_url: require_or_prompt(spec.server_url.as_ref(), "server-url", runtime)?,
+        actor,
         default_namespace: None,
         // An explicitly-blank `--auth-token` clears the token rather than
         // falling through to the environment: the caller said "no token".
@@ -540,6 +552,34 @@ fn build_remote_profile(
 /// empty string, which would then fail profile validation.
 fn blank_to_none(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
+}
+
+fn profile_actor_config(
+    kind: Option<ActorKindArg>,
+    id: Option<&str>,
+) -> Result<ProfileActorConfig, CliError> {
+    match (kind, id) {
+        (None, None) => Ok(ProfileActorConfig::default()),
+        (Some(kind), Some(id)) => Ok(ProfileActorConfig {
+            actor_kind: Some(ActorKind::from(kind)),
+            actor_id: Some(ActorId::parse(id).map_err(|error| {
+                CliError::invalid_input(format!("invalid --actor-id: {error}"))
+            })?),
+        }),
+        (None, Some(_)) => Err(CliError::invalid_input("--actor-id requires --actor-kind")),
+        (Some(_), None) => Err(CliError::invalid_input("--actor-kind requires --actor-id")),
+    }
+}
+
+fn updated_actor(
+    current: ProfileActorConfig,
+    args: &ProfileUpdateArgs,
+) -> Result<ProfileActorConfig, CliError> {
+    if args.actor_kind.is_none() && args.actor_id.is_none() {
+        Ok(current)
+    } else {
+        profile_actor_config(args.actor_kind, args.actor_id.as_deref())
+    }
 }
 
 fn require_or_prompt(
@@ -602,6 +642,7 @@ pub(super) fn apply_update_flags(
     match existing {
         ProfileConfig::Embedded {
             store,
+            actor,
             default_namespace,
             writer_id,
         } => {
@@ -696,17 +737,20 @@ pub(super) fn apply_update_flags(
             };
             Ok(ProfileConfig::Embedded {
                 store,
+                actor: updated_actor(actor, args)?,
                 default_namespace,
                 writer_id,
             })
         }
         ProfileConfig::Remote {
             server_url,
+            actor,
             default_namespace,
             auth_token,
             ca_cert_path,
         } => Ok(ProfileConfig::Remote {
             server_url: args.server_url.clone().unwrap_or(server_url),
+            actor: updated_actor(actor, args)?,
             default_namespace,
             auth_token: args
                 .auth_token
@@ -722,6 +766,7 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
     match existing {
         ProfileConfig::Embedded {
             store,
+            actor,
             default_namespace,
             writer_id,
         } => {
@@ -820,17 +865,20 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
             };
             Ok(ProfileConfig::Embedded {
                 store,
+                actor,
                 default_namespace,
                 writer_id,
             })
         }
         ProfileConfig::Remote {
             server_url,
+            actor,
             default_namespace,
             auth_token,
             ca_cert_path,
         } => Ok(ProfileConfig::Remote {
             server_url: prompt::prompt_line_default("server-url", &server_url)?,
+            actor,
             default_namespace,
             auth_token: prompt::prompt_secret_optional(
                 "auth token",
@@ -1135,6 +1183,7 @@ mod tests {
                 root: "/tmp/store".to_owned(),
                 key_prefix: None,
             },
+            actor: crate::config::ProfileActorConfig::default(),
             default_namespace: None,
             writer_id: None,
         };
@@ -1170,6 +1219,7 @@ mod tests {
     fn update_applies_flags_to_matching_provider() {
         let remote = ProfileConfig::Remote {
             server_url: "http://127.0.0.1:9400".to_owned(),
+            actor: crate::config::ProfileActorConfig::default(),
             default_namespace: None,
             auth_token: None,
             ca_cert_path: None,
@@ -1216,6 +1266,8 @@ mod tests {
             server_url: None,
             auth_token: None,
             ca_cert_path: None,
+            actor_kind: None,
+            actor_id: None,
         }
     }
 
@@ -1238,6 +1290,8 @@ mod tests {
             server_url: None,
             auth_token: None,
             ca_cert_path: None,
+            actor_kind: None,
+            actor_id: None,
         }
     }
 

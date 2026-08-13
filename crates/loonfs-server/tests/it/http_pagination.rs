@@ -79,12 +79,18 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     let other = NamespacePath::parse("demo", "/other").expect("other path");
     harness
         .client
-        .create_directory(&docs, &CreateDirectoryOptions::default())
+        .create_directory(
+            &docs,
+            &CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create docs dir");
     harness
         .client
-        .create_directory(&other, &CreateDirectoryOptions::default())
+        .create_directory(
+            &other,
+            &CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create other dir");
     for name in ["a.txt", "b.txt", "c.txt"] {
@@ -179,7 +185,10 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
     let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
     harness
         .client
-        .create_directory(&docs, &CreateDirectoryOptions::default())
+        .create_directory(
+            &docs,
+            &CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create docs dir");
     for name in ["B.txt", "a.txt", "c.txt"] {
@@ -225,8 +234,13 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             &target,
             b"first bytes\n",
             &PutFileOptions {
-                commit_id: Some(CommitId::parse("req-restore-create").expect("valid commit id")),
-                ..PutFileOptions::default()
+                commit: loonfs_api::options::CommitOptions {
+                    commit_id: Some(
+                        CommitId::parse("req-restore-create").expect("valid commit id"),
+                    ),
+                    ..loonfs_api::options::CommitOptions::new(loonfs_test_support::test_actor())
+                },
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await
@@ -249,8 +263,13 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             b"second bytes\n",
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit_id: Some(CommitId::parse("req-restore-replace").expect("valid commit id")),
-                ..PutFileOptions::default()
+                commit: loonfs_api::options::CommitOptions {
+                    commit_id: Some(
+                        CommitId::parse("req-restore-replace").expect("valid commit id"),
+                    ),
+                    ..loonfs_api::options::CommitOptions::new(loonfs_test_support::test_actor())
+                },
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await
@@ -263,8 +282,13 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             &target,
             RevisionNo(1),
             &RestoreRevisionOptions {
-                commit_id: Some(CommitId::parse("req-restore-restore").expect("valid commit id")),
-                message: Some("restore revision".to_owned()),
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: Some(
+                        CommitId::parse("req-restore-restore").expect("valid commit id"),
+                    ),
+                    message: Some("restore revision".to_owned()),
+                },
             },
         )
         .await
@@ -362,7 +386,11 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     let target = NamespacePath::parse("demo", "/docs/rev.txt").expect("target");
     harness
         .client
-        .put_file_bytes(&target, b"one", &PutFileOptions::default())
+        .put_file_bytes(
+            &target,
+            b"one",
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create file");
     harness
@@ -401,8 +429,11 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
             &moved,
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit_id: None,
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
             },
         )
         .await
@@ -423,7 +454,11 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
 
     harness
         .client
-        .restore_file_revision(&moved, RevisionNo(1), &RestoreRevisionOptions::default())
+        .restore_file_revision(
+            &moved,
+            RevisionNo(1),
+            &RestoreRevisionOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("path restore");
     assert_eq!(
@@ -457,7 +492,11 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
     let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
     harness
         .client
-        .put_file_bytes(&target, b"first bytes\n", &PutFileOptions::default())
+        .put_file_bytes(
+            &target,
+            b"first bytes\n",
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create file");
 
@@ -467,10 +506,14 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
             &target,
             RevisionNo(99),
             &RestoreRevisionOptions {
-                commit_id: Some(
-                    CommitId::parse("req-restore-missing-source-restore").expect("valid commit id"),
-                ),
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: Some(
+                        CommitId::parse("req-restore-missing-source-restore")
+                            .expect("valid commit id"),
+                    ),
+                    message: None,
+                },
             },
         )
         .await

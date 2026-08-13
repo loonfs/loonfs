@@ -10,6 +10,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
     WalCommitPayload {
         seq: prepared.assigned_seq,
         commit_id: prepared.commit_id.clone(),
+        actor: prepared.actor.clone(),
         semantic_commit_fingerprint: prepared.semantic_identity.as_str().to_owned(),
         committed_at_ms: commit.committed_at_ms,
         message: prepared.message.clone(),
@@ -31,7 +32,7 @@ mod tests {
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WriterEpoch};
 
     fn test_fingerprint() -> CommitFingerprint {
-        CommitFingerprint::new_unchecked("v0:sha256:test".to_owned())
+        CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
     }
 
     #[test]
@@ -40,6 +41,7 @@ mod tests {
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             message: Some("create docs".to_owned()),
             semantic_identity: test_fingerprint(),

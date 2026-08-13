@@ -995,6 +995,7 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     // into the durable binding.
     let request = CommitRequest::single(
         CommitId::parse("typed-name-key").expect("valid commit id"),
+        loonfs_test_support::test_actor(),
         Some("typed boundary".to_owned()),
         FilesystemOperation::CreateDirectory {
             path: AbsolutePath::parse("/Caf\u{e9}").expect("path"),
@@ -1139,6 +1140,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                 &namespace_id,
                 CommitRequest::single(
                     CommitId::parse("put-batched-path").expect("valid commit id"),
+                    loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
@@ -1151,6 +1153,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
             .await,
             CommitCandidate::new(CommitRequest::single(
                 CommitId::parse("move-batched-path").expect("valid commit id"),
+                loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::MovePath {
                     from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),

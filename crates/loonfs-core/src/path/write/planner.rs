@@ -37,6 +37,7 @@ pub(crate) fn commit_fingerprint(
 ) -> Result<CommitFingerprint> {
     loonfs_api::semantic_commit_fingerprint(
         namespace_id,
+        &request.actor,
         request.message.as_deref(),
         &request.operations,
     )
@@ -230,6 +231,7 @@ mod tests {
     fn request(operation: FilesystemOperation) -> CommitRequest {
         CommitRequest::single(
             CommitId::parse("plan-request").expect("valid commit id"),
+            loonfs_test_support::test_actor(),
             None,
             operation,
         )
@@ -252,6 +254,7 @@ mod tests {
             &namespace_id,
             &CommitRequest::single(
                 CommitId::parse("mkdir-docs-a").expect("valid commit id"),
+                loonfs_test_support::test_actor(),
                 None,
                 create_dir("/docs/a"),
             ),
@@ -261,6 +264,7 @@ mod tests {
             &namespace_id,
             &CommitRequest::single(
                 CommitId::parse("mkdir-docs-b").expect("valid commit id"),
+                loonfs_test_support::test_actor(),
                 None,
                 create_dir("/docs/a"),
             ),
@@ -276,9 +280,15 @@ mod tests {
     fn one_operation_request_and_one_element_batch_share_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let commit_id = CommitId::parse("mkdir-docs").expect("valid commit id");
-        let convenience = CommitRequest::single(commit_id.clone(), None, create_dir("/docs"));
+        let convenience = CommitRequest::single(
+            commit_id.clone(),
+            loonfs_test_support::test_actor(),
+            None,
+            create_dir("/docs"),
+        );
         let batch = CommitRequest {
             commit_id,
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/docs")],
         };
@@ -350,6 +360,7 @@ mod tests {
             &CommitIr {
                 namespace_id: namespace_id.clone(),
                 commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 writer_epoch: view.head().writer_epoch,
                 ops: planned.commit.ops,
                 message: None,
@@ -371,6 +382,7 @@ mod tests {
     ) -> Result<loonfs_api::CommitResponse> {
         let candidate = CommitCandidate::new(CommitRequest::single(
             CommitId::parse(commit_id).expect("valid commit id"),
+            loonfs_test_support::test_actor(),
             None,
             operation,
         ));
@@ -691,6 +703,7 @@ mod tests {
             &namespace_id,
             &CommitRequest {
                 commit_id: CommitId::parse("batch-create-then-put").expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     create_dir("/reports"),
@@ -754,6 +767,7 @@ mod tests {
             &namespace_id,
             &CommitRequest {
                 commit_id: CommitId::parse("batch-delete-then-create").expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     FilesystemOperation::DeletePath {
@@ -791,6 +805,7 @@ mod tests {
             &namespace_id,
             &CommitRequest {
                 commit_id: CommitId::parse("batch-with-a-bad-op").expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     create_dir("/first"),
@@ -823,6 +838,7 @@ mod tests {
             &namespace_id,
             &CommitRequest {
                 commit_id: CommitId::parse("empty-request").expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 operations: Vec::new(),
             },

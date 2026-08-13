@@ -19,8 +19,8 @@ use loonfs_core::publish::WalTailPolicy;
 use std::num::NonZeroU64;
 
 pub use loonfs_api::options::{
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions,
+    MoveOptions, PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
     UpdateAttributesOptions,
 };
 

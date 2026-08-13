@@ -157,7 +157,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
             &namespace_id,
             "/note.txt",
             b"automatic needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write file");
@@ -258,7 +258,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
             &stale,
             "/indexed.txt",
             b"indexed before restart\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write indexed file");
@@ -268,7 +268,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
                 &backfill,
                 &format!("/backfill-{index}.txt"),
                 format!("mid-backfill needle {index}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write backfill file");
@@ -282,7 +282,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
             &stale,
             "/tail.txt",
             b"stale steady needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write unindexed tail");
@@ -405,7 +405,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
             &namespace_id,
             "/note.txt",
             b"external needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write file");
@@ -470,7 +470,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
             &namespace_id,
             "/note.txt",
             b"unserved needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write file");
@@ -515,7 +515,7 @@ async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
             &namespace_id,
             "/note.txt",
             b"unscheduled needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write file");

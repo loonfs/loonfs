@@ -81,6 +81,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     let move_request = |commit_id: &str, behavior: &str| {
         json!({
             "commit_id": commit_id,
+            "actor": loonfs_test_support::test_actor(),
             "operations": [{
                 "kind": "move_path",
                 "from_path": "/docs/source.txt",

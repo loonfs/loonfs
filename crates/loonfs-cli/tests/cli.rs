@@ -85,6 +85,67 @@ fn profile_create_list_show_delete_work() {
 }
 
 #[test]
+fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&[
+        "profile",
+        "update",
+        "default",
+        "--actor-kind",
+        "user",
+        "--actor-id",
+        "profile-user",
+    ]));
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("actor.txt");
+    fs::write(&payload, b"attributed").expect("payload");
+    let payload = payload.to_str().expect("utf-8 path");
+
+    assert_success(&harness.run(&["put", payload, "/profile.txt"]));
+    assert_success(&harness.run_with_env(
+        &[
+            ("LOONFS_ACTOR_KIND", "service"),
+            ("LOONFS_ACTOR_ID", "environment-service"),
+        ],
+        &["put", payload, "/environment.txt"],
+    ));
+    assert_success(&harness.run_with_env(
+        &[
+            ("LOONFS_ACTOR_KIND", "service"),
+            ("LOONFS_ACTOR_ID", "environment-service"),
+        ],
+        &[
+            "put",
+            payload,
+            "/flag.txt",
+            "--actor-kind",
+            "system",
+            "--actor-id",
+            "flag-system",
+        ],
+    ));
+
+    let changes = harness.run(&["--json", "changes"]);
+    assert_success(&changes);
+    let actors = json_data(&changes)["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|change| change["actor"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actors,
+        [
+            serde_json::json!({"kind":"user","id":"profile-user"}),
+            serde_json::json!({"kind":"service","id":"environment-service"}),
+            serde_json::json!({"kind":"system","id":"flag-system"}),
+        ]
+    );
+}
+
+#[test]
 fn broken_configs_stay_repairable_with_the_repair_commands() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
@@ -2003,6 +2064,10 @@ fn recursive_transfers_roundtrip_a_tree() {
         "-r",
         tree.to_str().expect("utf-8 path"),
         "/up",
+        "--actor-kind",
+        "user",
+        "--actor-id",
+        "tree-actor",
     ]);
     assert_success(&put);
     let put_data = json_data(&put);
@@ -2010,6 +2075,17 @@ fn recursive_transfers_roundtrip_a_tree() {
     assert_eq!(put_data["files"], 3);
     assert_eq!(put_data["directories"], 1);
     assert_eq!(put_data["failures"].as_array().expect("failures").len(), 0);
+    let changes = harness.run(&["--json", "changes"]);
+    assert_success(&changes);
+    for change in json_data(&changes)["changes"]
+        .as_array()
+        .expect("recursive put changes")
+    {
+        assert_eq!(
+            change["actor"],
+            serde_json::json!({"kind":"user","id":"tree-actor"})
+        );
+    }
     for path in ["/up/top.txt", "/up/docs/nested/b.txt", "/up/empty/inner"] {
         assert_success(&harness.run(&["--json", "stat", path]));
     }
@@ -5133,6 +5209,10 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .as_str()
             .expect("json string")
             .starts_with("c_"));
+        assert_eq!(
+            listed[0]["actor"],
+            serde_json::json!({"kind":"service","id":"loonfs-cli"})
+        );
         assert!(!listed[1]["events"]
             .as_array()
             .expect("json array")
@@ -5497,7 +5577,9 @@ impl Harness {
             .env("HOME", &self.home_dir)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("LOONFS_CONFIG")
-            .env_remove("LOONFS_NAMESPACE");
+            .env_remove("LOONFS_NAMESPACE")
+            .env_remove("LOONFS_ACTOR_KIND")
+            .env_remove("LOONFS_ACTOR_ID");
         command
     }
 
@@ -5517,6 +5599,8 @@ impl Harness {
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("LOONFS_CONFIG")
             .env_remove("LOONFS_NAMESPACE")
+            .env_remove("LOONFS_ACTOR_KIND")
+            .env_remove("LOONFS_ACTOR_ID")
             .output()
             .expect("replay the printed command")
     }

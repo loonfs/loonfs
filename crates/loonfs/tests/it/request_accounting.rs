@@ -175,6 +175,7 @@ async fn warm_phase_request_accounting() {
             candidates.push(loonfs::publish::CommitCandidate::prepared(
                 loonfs::publish::CommitRequest::single(
                     loonfs::CommitId::generate(),
+                    loonfs_test_support::test_actor(),
                     None,
                     loonfs::publish::FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
@@ -272,8 +273,11 @@ async fn warm_phase_request_accounting() {
             b"replaced",
             PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
-                commit_id: None,
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
                 expected_revision_no: None,
             },
         )
@@ -290,8 +294,11 @@ async fn warm_phase_request_accounting() {
             b"replaced again",
             PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
-                commit_id: None,
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
                 expected_revision_no: None,
             },
         )

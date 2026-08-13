@@ -162,6 +162,7 @@ mod tests {
         CommitCandidate::prepared(
             CommitRequest::single(
                 CommitId::parse(commit_id).expect("valid commit id"),
+                loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(absolute_path).expect("path"),
@@ -177,6 +178,7 @@ mod tests {
     fn create_directory_candidate(commit_id: &str, absolute_path: &str) -> CommitCandidate {
         CommitCandidate::new(CommitRequest::single(
             CommitId::parse(commit_id).expect("valid commit id"),
+            loonfs_test_support::test_actor(),
             None,
             FilesystemOperation::CreateDirectory {
                 path: AbsolutePath::parse(absolute_path).expect("path"),
@@ -188,6 +190,7 @@ mod tests {
     fn candidate_that_allocates_then_fails(commit_id: &str) -> CommitCandidate {
         CommitCandidate::new(CommitRequest {
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 FilesystemOperation::CreateDirectory {
@@ -253,6 +256,7 @@ mod tests {
 
         let first_request = CommitRequest::single(
             CommitId::parse("plan-a").expect("valid commit id"),
+            loonfs_test_support::test_actor(),
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
@@ -276,6 +280,7 @@ mod tests {
 
         let second_request = CommitRequest::single(
             CommitId::parse("plan-b").expect("valid commit id"),
+            loonfs_test_support::test_actor(),
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/b.txt").expect("path"),
@@ -467,6 +472,7 @@ mod tests {
                 ),
                 CommitCandidate::new(CommitRequest::single(
                     CommitId::parse("delete-doomed").expect("valid commit id"),
+                    loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::DeletePath {
                         path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),

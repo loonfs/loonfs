@@ -1,7 +1,7 @@
 //! The CLI config file: profiles, defaults, and strict TOML loading.
 
 use crate::error::CliError;
-use loonfs_api::{NamespaceId, SecretString};
+use loonfs_api::{ActorId, ActorKind, ActorRef, NamespaceId, SecretString};
 use loonfs_client::ClientConfig;
 use loonfs_objectstore::StoreConfigError;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,8 @@ pub(crate) const CONFIG_VERSION: u32 = 1;
 /// session reaches for when the default file is one the CLI will not read.
 pub(crate) const CONFIG_PATH_ENV: &str = "LOONFS_CONFIG";
 pub(crate) const NAMESPACE_ENV: &str = "LOONFS_NAMESPACE";
+pub(crate) const ACTOR_KIND_ENV: &str = "LOONFS_ACTOR_KIND";
+pub(crate) const ACTOR_ID_ENV: &str = "LOONFS_ACTOR_ID";
 
 /// A blank environment value carries no usable setting, so treat it as unset
 /// rather than passing it on to validation.
@@ -58,6 +60,8 @@ pub(crate) struct CliConfig {
 pub(crate) enum ProfileConfig {
     Embedded {
         store: StoreConfig,
+        #[serde(flatten)]
+        actor: ProfileActorConfig,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +69,8 @@ pub(crate) enum ProfileConfig {
     },
     Remote {
         server_url: String,
+        #[serde(flatten)]
+        actor: ProfileActorConfig,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +80,33 @@ pub(crate) enum ProfileConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ca_cert_path: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProfileActorConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) actor_kind: Option<ActorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) actor_id: Option<ActorId>,
+}
+
+impl ProfileActorConfig {
+    pub(crate) fn actor(&self) -> Option<ActorRef> {
+        Some(ActorRef {
+            kind: self.actor_kind?,
+            id: self.actor_id.clone()?,
+        })
+    }
+
+    fn validate(&self, name: &str) -> Result<(), CliError> {
+        if self.actor_kind.is_some() == self.actor_id.is_some() {
+            return Ok(());
+        }
+        Err(CliError::invalid_config(format!(
+            "`{name}.actor_kind` and `{name}.actor_id` must be configured together"
+        )))
+    }
 }
 
 impl CliConfig {
@@ -127,6 +160,12 @@ impl Default for CliConfig {
 }
 
 impl ProfileConfig {
+    pub(crate) fn actor(&self) -> Option<ActorRef> {
+        match self {
+            Self::Embedded { actor, .. } | Self::Remote { actor, .. } => actor.actor(),
+        }
+    }
+
     pub(crate) fn mode_str(&self) -> &'static str {
         match self {
             ProfileConfig::Embedded { .. } => "embedded",
@@ -145,9 +184,11 @@ impl ProfileConfig {
         match self {
             ProfileConfig::Embedded {
                 store,
+                actor,
                 default_namespace,
                 ..
             } => {
+                actor.validate(name)?;
                 if let Some(namespace) = default_namespace {
                     validate_default_namespace(
                         &profile_field(name, "default_namespace"),
@@ -160,10 +201,12 @@ impl ProfileConfig {
             }
             ProfileConfig::Remote {
                 server_url,
+                actor,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
             } => {
+                actor.validate(name)?;
                 if let Some(namespace) = default_namespace {
                     validate_default_namespace(
                         &profile_field(name, "default_namespace"),
@@ -186,20 +229,24 @@ impl ProfileConfig {
         match self {
             ProfileConfig::Embedded {
                 store,
+                actor,
                 default_namespace,
                 writer_id,
             } => ProfileConfig::Embedded {
                 store: store.redacted(),
+                actor: actor.clone(),
                 default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
             },
             ProfileConfig::Remote {
                 server_url,
+                actor,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
             } => ProfileConfig::Remote {
                 server_url: server_url.clone(),
+                actor: actor.clone(),
                 default_namespace: default_namespace.clone(),
                 auth_token: auth_token.as_ref().map(SecretString::masked),
                 ca_cert_path: ca_cert_path.clone(),
@@ -899,6 +946,7 @@ secret_access_key = "secret"
                                     server_url: format!(
                                         "https://agent-{thread_index}-{mutation_index}.example.com"
                                     ),
+                                    actor: super::ProfileActorConfig::default(),
                                     default_namespace: Some(namespace),
                                     auth_token: None,
                                     ca_cert_path: None,

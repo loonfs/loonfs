@@ -309,6 +309,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
         vec![
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
+                actor: loonfs_test_support::test_actor(),
                 semantic_commit_fingerprint: "old".to_owned(),
                 committed_seq: ChangeSeq(1),
                 committed_at_ms: 4_200,
@@ -316,6 +317,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
             },
             CommitReceiptRecord {
                 commit_id: CommitId::parse("other-commit").expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 semantic_commit_fingerprint: "other".to_owned(),
                 committed_seq: ChangeSeq(3),
                 committed_at_ms: 4_200,
@@ -323,6 +325,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
             },
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
+                actor: loonfs_test_support::test_actor(),
                 semantic_commit_fingerprint: "new".to_owned(),
                 committed_seq: ChangeSeq(2),
                 committed_at_ms: 4_200,
@@ -372,6 +375,7 @@ fn revisions_advance_watermark_and_receipt_index() {
     });
     builder.push_commit_receipt(CommitReceiptRecord {
         commit_id: commit_id.clone(),
+        actor: loonfs_test_support::test_actor(),
         semantic_commit_fingerprint: "fingerprint".to_owned(),
         committed_seq: ChangeSeq(3),
         committed_at_ms: 4_200,

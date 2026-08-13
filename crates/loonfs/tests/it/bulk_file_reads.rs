@@ -144,15 +144,20 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         ("/scratch/discarded.txt", &b"discarded"[..]),
         ("/notes/recovered.txt", &b"recovered"[..]),
     ] {
-        fs.put_file_bytes(namespace_id, path, bytes, PutFileOptions::default())
-            .await
-            .expect("put file");
+        fs.put_file_bytes(
+            namespace_id,
+            path,
+            bytes,
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("put file");
     }
     fs.writer
         .create_directory(
             namespace_id,
             "/empty",
-            loonfs::CreateDirectoryOptions::default(),
+            loonfs::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("create a directory holding no files");
@@ -164,7 +169,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         b"charlie again",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::default()
+            ..PutFileOptions::new(loonfs_test_support::test_actor())
         },
     )
     .await
@@ -178,7 +183,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
             "/scratch",
             DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
-                ..DeleteOptions::default()
+                ..DeleteOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await
@@ -195,7 +200,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .delete_path(
             namespace_id,
             "/notes/recovered.txt",
-            DeleteOptions::default(),
+            DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("delete file")
@@ -206,7 +211,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
             recovered_inode_id,
             deleted_at_seq,
             Some("/notes/restored.txt"),
-            UndeleteOptions::default(),
+            UndeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("undelete file");
@@ -233,7 +238,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         &namespace_id,
         "/docs/added-later.txt",
         b"added later",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .await
     .expect("create a file after the checkpoint");
@@ -243,7 +248,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         b"alpha again",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::default()
+            ..PutFileOptions::new(loonfs_test_support::test_actor())
         },
     )
     .await
@@ -252,7 +257,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         .delete_path(
             &namespace_id,
             "/docs/deep/bravo.txt",
-            DeleteOptions::default(),
+            DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("delete a file after the checkpoint");
@@ -261,7 +266,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
             &namespace_id,
             "/docs/deep/charlie.txt",
             "/docs/charlie.txt",
-            MoveOptions::default(),
+            MoveOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("move a file after the checkpoint");
@@ -350,7 +355,7 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
             &namespace_id,
             &format!("/docs/file-{index}.txt"),
             format!("body {index}").as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("put file");
@@ -436,9 +441,14 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
         ("/docs/alpha.txt", &b"alpha"[..]),
         ("/docs/deep/bravo.txt", &b"bravo"[..]),
     ] {
-        fs.put_file_bytes(&source, path, bytes, PutFileOptions::default())
-            .await
-            .expect("put file");
+        fs.put_file_bytes(
+            &source,
+            path,
+            bytes,
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("put file");
     }
     let at_fork = listed_files(&fs.reader, &source).await;
 
@@ -520,7 +530,7 @@ async fn a_released_checkpoint_refuses_enumeration_instead_of_answering_current_
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .await
     .expect("put file");
@@ -581,9 +591,14 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         ("/m/subtree/child.txt", &b"child"[..]),
         ("/m/recovered.txt", &b"recovered"[..]),
     ] {
-        fs.put_file_bytes(&namespace_id, path, bytes, PutFileOptions::default())
-            .await
-            .expect("put file");
+        fs.put_file_bytes(
+            &namespace_id,
+            path,
+            bytes,
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("put file");
     }
     let inode_of = |path: &'static str| {
         let fs = &fs;
@@ -610,7 +625,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         b"second",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::default()
+            ..PutFileOptions::new(loonfs_test_support::test_actor())
         },
     )
     .await
@@ -620,7 +635,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
             &namespace_id,
             "/m/moved.txt",
             "/m/moved-away.txt",
-            MoveOptions::default(),
+            MoveOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("move file");
@@ -629,12 +644,16 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
             &namespace_id,
             "/m/carried",
             "/m/carried-elsewhere",
-            MoveOptions::default(),
+            MoveOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("move directory");
     fs.writer
-        .delete_path(&namespace_id, "/m/deleted.txt", DeleteOptions::default())
+        .delete_path(
+            &namespace_id,
+            "/m/deleted.txt",
+            DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("delete file");
     fs.writer
@@ -643,14 +662,18 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
             "/m/subtree",
             DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
-                ..DeleteOptions::default()
+                ..DeleteOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await
         .expect("delete subtree");
     let recovered_deleted_at_seq = fs
         .writer
-        .delete_path(&namespace_id, "/m/recovered.txt", DeleteOptions::default())
+        .delete_path(
+            &namespace_id,
+            "/m/recovered.txt",
+            DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("delete file")
         .committed_seq;
@@ -660,7 +683,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
             recovered,
             recovered_deleted_at_seq,
             Some("/m/recovered-again.txt"),
-            UndeleteOptions::default(),
+            UndeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("undelete file");
@@ -744,7 +767,7 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .await
     .expect("put file");
@@ -796,7 +819,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha bytes",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .await
     .expect("put file");
@@ -848,7 +871,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha bytes",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .await
     .expect("put file");
@@ -902,7 +925,7 @@ async fn a_standalone_reader_serves_every_operation() {
             &namespace_id,
             "/docs/alpha.txt",
             "/docs/alpha-moved.txt",
-            MoveOptions::default(),
+            MoveOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("move a file after the checkpoint");

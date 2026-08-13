@@ -106,7 +106,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
             &namespace_id,
             "/alpha.txt",
             b"a needle in alpha\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write alpha");
@@ -115,7 +115,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
             &namespace_id,
             "/bravo.txt",
             b"nothing here\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write bravo");
@@ -170,7 +170,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
             &namespace_id,
             "/charlie.txt",
             b"another needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write charlie");
@@ -236,7 +236,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
             &namespace_id,
             "/delta.txt",
             b"a needle in delta\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write delta");
@@ -319,7 +319,7 @@ async fn a_worker_policy_bounds_each_build_step() {
                 &namespace_id,
                 &format!("/notes/needle-{index}.txt"),
                 format!("a needle numbered {index}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write file");
@@ -415,6 +415,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
             &namespace_id,
             CommitRequest {
                 commit_id: CommitId::parse("thousand-file-atomic").expect("commit id"),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 operations,
             },
@@ -625,7 +626,7 @@ async fn grep_answers_identically_across_tiered_folds() {
                 &namespace_id,
                 &path,
                 format!("a needle numbered {round}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write file");
@@ -701,7 +702,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
             &namespace_id,
             "/alpha.txt",
             b"a needle in alpha\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write alpha");
@@ -710,7 +711,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
             &namespace_id,
             "/bravo.txt",
             b"nothing here\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write bravo");
@@ -777,7 +778,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
             &namespace_id,
             "/alpha.txt",
             b"needle one\nneedle two\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write alpha");
@@ -787,7 +788,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
             &namespace_id,
             "/bravo.txt",
             b"needle three\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write bravo");
@@ -891,7 +892,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
             &namespace_id,
             "/alpha.txt",
             b"a needle in alpha\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write alpha");
@@ -910,7 +911,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
             &namespace_id,
             "/bravo.big",
             &oversized_bytes,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write bravo");
@@ -927,7 +928,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
             &namespace_id,
             "/charlie.txt",
             b"a needle in charlie\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write charlie");
@@ -1022,7 +1023,7 @@ async fn worker_and_service_share_decoded_index_blocks() {
                 &namespace_id,
                 &format!("/notes/needle-{round:02}.txt"),
                 format!("a needle numbered {round}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write file");
@@ -1131,7 +1132,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
                 &namespace_id,
                 &format!("/notes/needle-{rounds:02}.txt"),
                 format!("a needle numbered {rounds}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write file");

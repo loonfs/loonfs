@@ -5,8 +5,8 @@ use super::{CommitFingerprint, CommitIr};
 
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::{
-    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    NameKey, NamespaceId, RevisionNo, WriterEpoch,
+    ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName,
+    InodeId, NameKey, NamespaceId, RevisionNo, WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 pub struct CommitPlan {
     pub namespace_id: NamespaceId,
     pub commit_id: CommitId,
+    pub actor: ActorRef,
     pub writer_epoch: WriterEpoch,
     pub message: Option<String>,
     pub semantic_identity: CommitFingerprint,
@@ -58,6 +59,7 @@ impl ValidatedCommitPlan {
         let CommitIr {
             namespace_id,
             commit_id,
+            actor,
             writer_epoch,
             ops: _,
             message,
@@ -65,6 +67,7 @@ impl ValidatedCommitPlan {
         CommitPlan {
             namespace_id,
             commit_id,
+            actor,
             writer_epoch,
             message,
             semantic_identity,
@@ -178,6 +181,7 @@ mod tests {
         let request = CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(7),
             ops: vec![PlannedOp::unchecked(CommitOp::CreateDirectory {
                 child_inode_id: InodeId(2),
@@ -186,7 +190,7 @@ mod tests {
             })],
             message: Some("create docs".to_owned()),
         };
-        let semantic_identity = CommitFingerprint::new_unchecked("v0:sha256:test".to_owned());
+        let semantic_identity = CommitFingerprint::new_unchecked("v1:sha256:test".to_owned());
         let plan = ValidatedCommitPlan::new(ChangeSeq(3), ChangeSeq(4), Vec::new()).prepare(
             request,
             semantic_identity.clone(),

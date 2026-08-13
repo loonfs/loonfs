@@ -233,7 +233,10 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     let directory = NamespacePath::parse("demo", "/notes").expect("parse directory path");
     harness
         .client
-        .create_directory(&directory, &CreateDirectoryOptions::default())
+        .create_directory(
+            &directory,
+            &CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create directory");
     let directory_entry = harness
@@ -251,8 +254,11 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
             b"hello over http\n",
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit_id: Some(CommitId::parse("smoke-write-1").expect("valid commit id")),
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: Some(CommitId::parse("smoke-write-1").expect("valid commit id")),
+                    message: None,
+                },
                 expected_revision_no: None,
             },
         )

@@ -162,6 +162,7 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
         &namespace_id,
         vec![CommitCandidate::new(CommitRequest::single(
             commit_id("put-cold-content"),
+            loonfs_test_support::test_actor(),
             None,
             put_file("/docs/hello.txt", content.content_ref),
         ))],
@@ -200,11 +201,13 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
         vec![
             CommitCandidate::new(CommitRequest::single(
                 commit_id("put-shared-a"),
+                loonfs_test_support::test_actor(),
                 None,
                 put_file("/docs/a.txt", content.content_ref.clone()),
             )),
             CommitCandidate::new(CommitRequest::single(
                 commit_id("put-shared-b"),
+                loonfs_test_support::test_actor(),
                 None,
                 put_file("/docs/b.txt", content.content_ref),
             )),
@@ -280,6 +283,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         vec![CommitCandidate::prepared(
             CommitRequest::single(
                 commit_id("put-admitted-content"),
+                loonfs_test_support::test_actor(),
                 None,
                 put_file("/docs/admitted.txt", content_ref),
             ),
@@ -326,6 +330,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
         vec![
             CommitRequest::single(
                 commit_id("move-before-child-name-check"),
+                loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::MovePath {
                     from_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
@@ -335,6 +340,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
             ),
             CommitRequest::single(
                 commit_id("delete-with-stale-binding"),
+                loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::DeletePath {
                     path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
@@ -387,11 +393,13 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
         vec![
             CommitRequest::single(
                 commit_id("create-child-before-empty-check"),
+                loonfs_test_support::test_actor(),
                 None,
                 put_file("/docs/child.txt", content.content_ref),
             ),
             CommitRequest::single(
                 commit_id("delete-dir-with-stale-empty-check"),
+                loonfs_test_support::test_actor(),
                 None,
                 delete_path("/docs"),
             ),
@@ -546,6 +554,7 @@ async fn a_guarded_put_fails_unprepared_before_revision_validation_without_conte
         &namespace_id("demo"),
         vec![CommitCandidate::new(CommitRequest::single(
             commit_id("replace-stale-missing-content"),
+            loonfs_test_support::test_actor(),
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/replace.txt").expect("path"),
@@ -628,6 +637,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("reports-batch"),
+            actor: loonfs_test_support::test_actor(),
             message: Some("import reports".to_owned()),
             operations: vec![
                 create_dir("/reports"),
@@ -683,6 +693,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("half-good-batch"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 create_dir("/first"),
@@ -714,6 +725,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("half-good-batch"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/first"), create_dir("/third")],
         },
@@ -739,6 +751,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
 
     let batch = |commit: &str| CommitRequest {
         commit_id: commit_id(commit),
+        actor: loonfs_test_support::test_actor(),
         message: None,
         operations: vec![create_dir("/a"), create_dir("/b")],
     };
@@ -756,6 +769,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("replayed-batch"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/a"), create_dir("/c")],
         },
@@ -781,6 +795,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("one-operation"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/docs")],
         },
@@ -808,6 +823,7 @@ async fn operation_order_decides_the_outcome() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("create-then-delete"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/x"), delete_path("/x")],
         },
@@ -824,6 +840,7 @@ async fn operation_order_decides_the_outcome() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("seed-y"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/y")],
         },
@@ -836,6 +853,7 @@ async fn operation_order_decides_the_outcome() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("delete-then-create"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![delete_path("/y"), create_dir("/y")],
         },
@@ -892,6 +910,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("guarded-chain"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 replace(second.content_ref.clone(), 1),
@@ -910,6 +929,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
         &namespace_id,
         CommitRequest {
             commit_id: commit_id("stale-guarded-chain"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 replace(second.content_ref, 3),
@@ -1017,6 +1037,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         vec![CommitCandidate::prepared(
             CommitRequest::single(
                 commit_id("put-re-minted-content"),
+                loonfs_test_support::test_actor(),
                 None,
                 put_file("/docs/re-minted.txt", staged.content_ref),
             ),

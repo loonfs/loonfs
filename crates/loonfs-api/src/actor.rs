@@ -71,6 +71,17 @@ pub enum ActorKind {
     System,
 }
 
+impl ActorKind {
+    /// Returns the value used in serialized actor references.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Service => "service",
+            Self::System => "system",
+        }
+    }
+}
+
 /// A validated actor identifier supplied by the application.
 ///
 /// Actor IDs may use the syntax of the application's identity system. They

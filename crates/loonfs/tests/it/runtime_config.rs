@@ -79,7 +79,7 @@ fn filesystem_operations_match_core_semantics() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -106,8 +106,11 @@ fn filesystem_operations_match_core_semantics() {
         b"updated",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit_id: None,
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: None,
+                message: None,
+            },
             expected_revision_no: None,
         },
     )
@@ -121,14 +124,14 @@ fn filesystem_operations_match_core_semantics() {
         &namespace_id,
         "/docs/hello.txt",
         "/docs/copy.txt",
-        CopyOptions::default(),
+        CopyOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("copy file");
     fs.move_path_blocking(
         &namespace_id,
         "/docs/copy.txt",
         "/docs/moved.txt",
-        MoveOptions::default(),
+        MoveOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("move file");
     assert_eq!(
@@ -153,7 +156,7 @@ async fn async_runtime_methods_are_the_engine_boundary() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .await
     .expect("put file");
@@ -184,7 +187,7 @@ fn forked_namespace_shares_content_then_diverges() {
         &source,
         "/docs/shared.txt",
         b"source",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put source file");
     fs.fork_namespace_blocking(&source, &clone)
@@ -204,8 +207,11 @@ fn forked_namespace_shares_content_then_diverges() {
         b"clone",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit_id: None,
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: None,
+                message: None,
+            },
             expected_revision_no: None,
         },
     )

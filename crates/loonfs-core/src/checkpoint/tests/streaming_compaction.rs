@@ -449,7 +449,12 @@ async fn publish_one_operation<S: ObjectStore + ?Sized>(
         .publish_batch(
             store,
             vec![CommitCandidate::prepared(
-                CommitRequest::single(CommitId::generate(), None, operation),
+                CommitRequest::single(
+                    CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    operation,
+                ),
                 Vec::new(),
             )],
             context,

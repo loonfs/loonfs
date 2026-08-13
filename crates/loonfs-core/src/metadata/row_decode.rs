@@ -169,12 +169,14 @@ pub(crate) fn commit_receipt_from_manifest_row(
     match row {
         MetadataRow::CommitReceipt {
             commit_id,
+            actor,
             semantic_commit_fingerprint,
             committed_seq,
             committed_at_ms,
             message,
         } => Ok(CommitReceiptRecord {
             commit_id,
+            actor,
             semantic_commit_fingerprint,
             committed_seq,
             committed_at_ms,

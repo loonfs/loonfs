@@ -401,7 +401,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
                 })
                 .boxed(),
             ),
-            &PutFileOptions::default(),
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
             &journal,
             None,
         )
@@ -425,7 +425,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
         .put_file_stream_resumable(
             &spec(),
             source,
-            &PutFileOptions::default(),
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
             &resumed_journal,
             Some(&resume),
         )
@@ -457,7 +457,11 @@ async fn a_direct_multipart_put_holds_only_its_window() {
         test_transport::script(multipart_script(TEST_PAYLOAD_PARTS, content_ref(&payload)));
 
     client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("a scripted multipart put should land");
 
@@ -500,7 +504,11 @@ async fn a_proxied_put_streams_its_body() {
     ]);
 
     client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("a scripted proxied put should land");
 
@@ -542,7 +550,11 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
 
     let client = client();
     client
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("a small streamed put should land");
 
@@ -580,7 +592,11 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     ]);
 
     client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("a payload past the proxy cap should take the direct write");
 
@@ -625,7 +641,11 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     ]);
 
     client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("an unmeasured payload past the proxy cap should take the direct write");
 
@@ -676,7 +696,11 @@ async fn a_small_unknown_length_payload_still_proxies() {
     ]);
 
     client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("a small unmeasured payload should still proxy");
 
@@ -712,7 +736,11 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     ]);
 
     client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("a large streamed direct put should land");
 
@@ -749,7 +777,11 @@ async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy(
     let transport = test_transport::script([Outcome::Success(b"not json".to_vec())]);
 
     let error = client()
-        .put_file_bytes(&spec(), b"payload", &PutFileOptions::default())
+        .put_file_bytes(
+            &spec(),
+            b"payload",
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect_err("capability discovery failure must remain visible");
 
@@ -783,7 +815,11 @@ async fn a_file_backed_direct_put_re_reads_the_file_rather_than_spooling_it() {
     ]);
 
     client()
-        .put_file_stream(&spec(), source, &PutFileOptions::default())
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("a file-backed direct put should land");
 

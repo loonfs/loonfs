@@ -103,6 +103,7 @@ async fn publish_same_content_files(
             CommitCandidate::prepared(
                 CommitRequest::single(
                     CommitId::generate(),
+                    loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/{prefix}-{index:04}.txt"))
@@ -233,7 +234,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
             &fixture.namespace_id,
             "/materialized.txt",
             b"x materialized\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write materialized file");
@@ -260,7 +261,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
             &fixture.namespace_id,
             "/wal-only.txt",
             b"x wal\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write WAL-only file");
@@ -312,7 +313,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
             &fixture.namespace_id,
             "/overlap.txt",
             b"x materialized revision\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write materialized revision");
@@ -337,8 +338,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
             b"x WAL revision\n",
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit_id: None,
-                message: None,
+                commit: loonfs::CommitOptions::new(loonfs_test_support::test_actor()),
                 expected_revision_no: None,
             },
         )
@@ -397,7 +397,12 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     ];
     for (path, content) in folded_corpus {
         writer
-            .put_file_bytes(&namespace_id, path, content, PutFileOptions::default())
+            .put_file_bytes(
+                &namespace_id,
+                path,
+                content,
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("write folded corpus file");
         drive_worker_step(&worker, &namespace_id, policy).await;
@@ -411,7 +416,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
                 &namespace_id,
                 &format!("/fold/filler-{round:02}.txt"),
                 format!("fold filler {round}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write mid-run filler");
@@ -441,16 +446,24 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             &namespace_id,
             "/tail/tail-hit.txt",
             b"ab tail-only-token\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write unindexed tail hit");
     writer
-        .delete_path(&namespace_id, "/docs/deleted.txt", DeleteOptions::default())
+        .delete_path(
+            &namespace_id,
+            "/docs/deleted.txt",
+            DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("delete indexed file");
     writer
-        .create_directory(&namespace_id, "/archive", CreateDirectoryOptions::default())
+        .create_directory(
+            &namespace_id,
+            "/archive",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create move destination");
     writer
@@ -458,7 +471,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             &namespace_id,
             "/docs/moved-source.txt",
             "/archive/moved.txt",
-            MoveOptions::default(),
+            MoveOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("move indexed file");

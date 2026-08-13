@@ -7,7 +7,7 @@ use super::{
 };
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_api::{ChangeSeq, CommitId};
+use loonfs_api::ChangeSeq;
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
@@ -159,33 +159,30 @@ impl MetadataState {
 
     pub fn apply_committed_wal_record_mut(&mut self, record: &WalCommitPayload) {
         self.apply_committed_wal_record_parts_mut(
-            record.seq,
-            record.committed_at_ms,
-            &record.commit_id,
-            &record.semantic_commit_fingerprint,
-            record.message.as_deref(),
+            CommitReceiptRecord {
+                commit_id: record.commit_id.clone(),
+                actor: record.actor.clone(),
+                semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
+                committed_seq: record.seq,
+                committed_at_ms: record.committed_at_ms,
+                message: record.message.clone(),
+            },
             &record.deltas,
         )
     }
 
     pub(crate) fn apply_committed_wal_record_parts_mut(
         &mut self,
-        seq: ChangeSeq,
-        committed_at_ms: u64,
-        commit_id: &CommitId,
-        semantic_commit_fingerprint: &str,
-        message: Option<&str>,
+        receipt: CommitReceiptRecord,
         deltas: &[WalCommitDelta],
     ) {
         for delta in deltas {
-            self.apply_committed_wal_delta_mut(seq, committed_at_ms, &delta.delta);
+            self.apply_committed_wal_delta_mut(
+                receipt.committed_seq,
+                receipt.committed_at_ms,
+                &delta.delta,
+            );
         }
-        self.push_commit_receipt_record(CommitReceiptRecord {
-            commit_id: commit_id.clone(),
-            semantic_commit_fingerprint: semantic_commit_fingerprint.to_owned(),
-            committed_seq: seq,
-            committed_at_ms,
-            message: message.map(str::to_owned),
-        });
+        self.push_commit_receipt_record(receipt);
     }
 }

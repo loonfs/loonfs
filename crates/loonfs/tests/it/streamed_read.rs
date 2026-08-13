@@ -64,7 +64,7 @@ async fn written_file(
             bytes,
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::default()
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await

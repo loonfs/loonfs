@@ -133,7 +133,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
                 &namespace_id,
                 &format!("/before-{index}.txt"),
                 format!("checkpoint needle {index}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write preexisting file");
@@ -459,7 +459,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
             &namespace_id,
             "/gap.txt",
             b"retention gap needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write after watermark");
@@ -556,7 +556,7 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
             &namespace_id,
             "/expiring.txt",
             b"expiring needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write");
@@ -711,7 +711,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
                 &namespace_id,
                 &format!("/before-{index}.txt"),
                 format!("overlap needle before {index}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write preexisting file");
@@ -749,7 +749,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
             &namespace_id,
             "/during.txt",
             b"overlap needle during\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write during backfill");
@@ -760,7 +760,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
             b"overlap needle replaced\n",
             PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
-                ..PutFileOptions::default()
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await
@@ -822,7 +822,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
             &namespace_id,
             "/docs/note.txt",
             b"moved needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write file");
@@ -837,7 +837,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
             &namespace_id,
             "/docs/note.txt",
             "/docs/renamed.txt",
-            loonfs::MoveOptions::default(),
+            loonfs::MoveOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("move the indexed file");
@@ -886,7 +886,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
                 &namespace_id,
                 &format!("/docs/{name}.txt"),
                 format!("subtree needle {name}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write file");
@@ -915,7 +915,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
             "/docs",
             loonfs::DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-                ..loonfs::DeleteOptions::default()
+                ..loonfs::DeleteOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await
@@ -942,7 +942,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
             docs_inode_id,
             deleted.committed_seq,
             Some("/docs"),
-            loonfs::UndeleteOptions::default(),
+            loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("undelete the subtree");
@@ -1002,7 +1002,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
             &namespace_id,
             "/during-failure.txt",
             b"isolated needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         ),
     );
     let error = build.expect_err("an unreadable grep root fails the step");
@@ -1214,7 +1214,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
             &namespace_id,
             "/only-in-wal.txt",
             b"x\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write WAL-only file");
@@ -1329,7 +1329,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
                 &namespace_id,
                 &format!("/docs/file-{round}.txt"),
                 format!("shared needle {round}\nshared needle again {round}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write indexed file");
@@ -1349,7 +1349,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
             &namespace_id,
             "/tail.txt",
             b"tail-only needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write tail file");
@@ -1457,7 +1457,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
             &source,
             "/source.txt",
             b"fork needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write source");
@@ -1562,7 +1562,7 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
                     namespace_id,
                     &format!("/file-{index}.txt"),
                     format!("equivalence needle {index}\n").as_bytes(),
-                    PutFileOptions::default(),
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
                 )
                 .await
                 .expect("write file");
@@ -1630,7 +1630,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
             &namespace_id,
             "/needle.txt",
             b"publication race needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write indexed file");
@@ -1774,7 +1774,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
                 namespace_id,
                 "/needle.txt",
                 b"gc needle\n",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write file");
@@ -1994,7 +1994,7 @@ async fn seed_collectable_namespace(root: &Path, namespace_id: &NamespaceId) -> 
                 namespace_id,
                 &format!("/file-{index}.txt"),
                 format!("budget needle {index}\n").as_bytes(),
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("write file");
@@ -2302,7 +2302,7 @@ async fn a_backfilling_root_never_reports_a_built_through_sequence() {
             &namespace_id,
             "/note.txt",
             b"honest needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write file");

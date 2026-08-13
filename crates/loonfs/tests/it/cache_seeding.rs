@@ -32,7 +32,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
         &namespace_id,
         "/docs/file.txt",
         b"file",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -58,7 +58,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
         &namespace_id,
         "/other.txt",
         b"other",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put other");
     raw_store.reset_wal_get_count();
@@ -84,10 +84,18 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     setup
-        .create_directory_blocking(&namespace_id, "/seed-a", CreateDirectoryOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/seed-a",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("seed first WAL segment");
     setup
-        .create_directory_blocking(&namespace_id, "/seed-b", CreateDirectoryOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/seed-b",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("seed second WAL segment");
 
     raw_store.reset_wal_get_count();
@@ -95,7 +103,7 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
         .create_directory_blocking(
             &namespace_id,
             "/measured-a",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("first measured write loads existing tail");
     assert!(
@@ -108,7 +116,7 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
         .create_directory_blocking(
             &namespace_id,
             "/measured-b",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("second measured write advances cached publish tail");
     assert_eq!(
@@ -131,17 +139,25 @@ fn runtime_publish_allows_multi_segment_wal_tail() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     setup
-        .create_directory_blocking(&namespace_id, "/seed-a", CreateDirectoryOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/seed-a",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("seed first WAL segment");
     setup
-        .create_directory_blocking(&namespace_id, "/seed-b", CreateDirectoryOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/seed-b",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("seed second WAL segment");
 
     measured
         .create_directory_blocking(
             &namespace_id,
             "/should-succeed",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("publish projects the visible WAL tail without a segment limit");
 }
@@ -159,7 +175,11 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     writer
-        .create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/docs",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create docs");
 
     reader
@@ -170,7 +190,7 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
         .create_directory_blocking(
             &namespace_id,
             "/docs/new",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("advance head from another runtime");
 
@@ -199,7 +219,7 @@ fn runtime_cache_can_be_disabled() {
         &namespace_id,
         "/docs/file.txt",
         b"file",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -227,13 +247,23 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
         .create_namespace_blocking(&first, CreateNamespaceOptions::default())
         .expect("create first namespace");
     setup
-        .put_file_bytes_blocking(&first, "/file.txt", b"first", PutFileOptions::default())
+        .put_file_bytes_blocking(
+            &first,
+            "/file.txt",
+            b"first",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("put first file");
     setup
         .create_namespace_blocking(&second, CreateNamespaceOptions::default())
         .expect("create second namespace");
     setup
-        .put_file_bytes_blocking(&second, "/file.txt", b"second", PutFileOptions::default())
+        .put_file_bytes_blocking(
+            &second,
+            "/file.txt",
+            b"second",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("put second file");
 
     let fs = open_runtime_with(shared_store, "tail-count-budget", |builder| {
@@ -278,7 +308,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
         &namespace_id,
         "/file.txt",
         b"file",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -303,10 +333,18 @@ fn runtime_read_allows_multi_segment_wal_tail() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
-        .expect("create docs");
-    fs.create_directory_blocking(&namespace_id, "/more", CreateDirectoryOptions::default())
-        .expect("create another WAL segment");
+    fs.create_directory_blocking(
+        &namespace_id,
+        "/docs",
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create docs");
+    fs.create_directory_blocking(
+        &namespace_id,
+        "/more",
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create another WAL segment");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("read projects the visible WAL tail without a segment limit");
@@ -322,14 +360,22 @@ fn stale_head_write_error_recovers_and_reseeds_caches() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
-        .expect("create docs");
+    fs.create_directory_blocking(
+        &namespace_id,
+        "/docs",
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create docs");
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime read cache");
 
     raw_store.fail_head_cas();
     assert_core_error_kind(
-        fs.create_directory_blocking(&namespace_id, "/stale", CreateDirectoryOptions::default()),
+        fs.create_directory_blocking(
+            &namespace_id,
+            "/stale",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        ),
         ErrorCode::StaleHead,
     );
 
@@ -337,7 +383,7 @@ fn stale_head_write_error_recovers_and_reseeds_caches() {
     fs.create_directory_blocking(
         &namespace_id,
         "/after-stale",
-        CreateDirectoryOptions::default(),
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("write after stale head succeeds (the engine revalidates its projection by etag)");
 
@@ -359,8 +405,12 @@ fn stat_and_list_use_initial_manifest_without_checkpoint() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
-        .expect("create docs");
+    fs.create_directory_blocking(
+        &namespace_id,
+        "/docs",
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("stat docs");
@@ -388,7 +438,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
         &namespace_id,
         "/docs/file.txt",
         b"file",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
     fs.create_checkpoint_blocking(&namespace_id)
@@ -419,7 +469,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
         &namespace_id,
         "/docs/file.txt",
         b"file",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .await
     .expect("put file");
@@ -455,7 +505,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
         &namespace_id,
         "/docs/file.txt",
         b"file",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
     fs.create_checkpoint_blocking(&namespace_id)
@@ -467,7 +517,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
         &namespace_id,
         "/docs/second.txt",
         b"second",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put second file");
 
@@ -493,8 +543,12 @@ fn runtime_control_cache_reuses_head_for_materialization_validation() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
-        .expect("create docs");
+    fs.create_directory_blocking(
+        &namespace_id,
+        "/docs",
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime read cache");
@@ -524,12 +578,20 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
-        .expect("create docs");
+    fs.create_directory_blocking(
+        &namespace_id,
+        "/docs",
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create docs");
     fs.create_namespace_blocking(&other_namespace, CreateNamespaceOptions::default())
         .expect("create other namespace");
-    fs.create_directory_blocking(&other_namespace, "/docs", CreateDirectoryOptions::default())
-        .expect("create other docs");
+    fs.create_directory_blocking(
+        &other_namespace,
+        "/docs",
+        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create other docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime first namespace materialization");
@@ -558,7 +620,11 @@ fn runtime_control_cache_reloads_head_after_external_change() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     writer
-        .create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/docs",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create docs");
     reader
         .stat_path_blocking(&namespace_id, "/docs")
@@ -576,7 +642,7 @@ fn runtime_control_cache_reloads_head_after_external_change() {
         .create_directory_blocking(
             &namespace_id,
             "/docs/new",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("advance head");
     raw_store.reset_control_get_counts();
@@ -624,7 +690,7 @@ fn separate_runtime_instances_share_object_store_state() {
             &namespace_id,
             "/docs/shared.txt",
             b"shared",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
 
@@ -655,7 +721,7 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
         &namespace_id,
         "/docs/file.txt",
         b"file",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
     fs.create_checkpoint_blocking(&namespace_id)
@@ -666,7 +732,7 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
         &namespace_id,
         "/docs/second.txt",
         b"second",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put second file");
 
@@ -749,7 +815,7 @@ fn metadata_maintenance_offers_nothing_to_the_local_block_cache() {
             &namespace_id,
             &format!("/docs/file-{index:02}.txt"),
             b"file",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
         let calls_before = stored_blocks.call_count();

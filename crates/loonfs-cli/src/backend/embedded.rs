@@ -1009,7 +1009,7 @@ mod tests {
                     namespace_id,
                     &format!("/notes/note-{index}.txt"),
                     b"assigned needle\n",
-                    PutFileOptions::default(),
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("seed put {index} failed: {error}"));
@@ -1331,7 +1331,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/file.txt").expect("namespace path"),
                 b"hello",
-                &PutFileOptions::default(),
+                &PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file");
@@ -1406,7 +1406,7 @@ mod tests {
                     &NamespacePath::parse("demo", &format!("/files/f{index}.txt"))
                         .expect("namespace path"),
                     b"payload",
-                    &PutFileOptions::default(),
+                    &PutFileOptions::new(loonfs_test_support::test_actor()),
                 )
                 .await
                 .unwrap_or_else(|error| {
@@ -1444,19 +1444,21 @@ mod tests {
             .expect("create namespace");
         let mut stalled = false;
         for index in 0..200 {
-            let result = writer
-                .put_file_bytes(
-                    &namespace,
-                    &format!("/files/f{index}.txt"),
-                    b"payload",
-                    PutFileOptions {
-                        behavior: DestinationBehavior::NoReplace,
-                        commit_id: None,
-                        message: None,
-                        expected_revision_no: None,
-                    },
-                )
-                .await;
+            let result =
+                writer
+                    .put_file_bytes(
+                        &namespace,
+                        &format!("/files/f{index}.txt"),
+                        b"payload",
+                        PutFileOptions {
+                            behavior: DestinationBehavior::NoReplace,
+                            commit: loonfs_client::CommitOptions::new(
+                                loonfs_test_support::test_actor(),
+                            ),
+                            expected_revision_no: None,
+                        },
+                    )
+                    .await;
             match result {
                 Ok(_) => {}
                 Err(RuntimeError::Core(error))
@@ -1480,7 +1482,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/recovered.txt").expect("namespace path"),
                 b"payload",
-                &PutFileOptions::default(),
+                &PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .unwrap_or_else(|error| {
@@ -1510,7 +1512,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/one.txt").expect("namespace path"),
                 b"one",
-                &PutFileOptions::default(),
+                &PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("first put acquires the epoch");
@@ -1523,7 +1525,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/two.txt").expect("namespace path"),
                 b"two",
-                &PutFileOptions::default(),
+                &PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("rival put takes the epoch over");
@@ -1538,7 +1540,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/three.txt").expect("namespace path"),
                 b"three",
-                &PutFileOptions::default(),
+                &PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect_err("a fenced session is terminal");

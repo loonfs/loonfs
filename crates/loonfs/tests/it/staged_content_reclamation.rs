@@ -115,7 +115,7 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
             &namespace_id,
             "/docs/live.txt",
             b"live",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("published put");
@@ -168,7 +168,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
             &namespace_id,
             "/docs/kept.txt",
             b"kept",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("published put");
@@ -216,9 +216,11 @@ async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survi
     let store = store(temp_dir.path());
     let runtime = open_runtime_async(store.clone(), "retrying-writer").await;
     let namespace_id = namespace(&runtime).await;
-    let options = || PutFileOptions {
-        commit_id: Some(loonfs::CommitId::parse("cmt_reconciled").expect("valid commit id")),
-        ..PutFileOptions::default()
+    let options = || {
+        let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+        options.commit.commit_id =
+            Some(loonfs::CommitId::parse("cmt_reconciled").expect("valid commit id"));
+        options
     };
 
     let first = runtime
@@ -306,7 +308,7 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
             &namespace_id,
             "/docs/lost.txt",
             b"never lands",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect_err("the content write fails");
@@ -356,7 +358,7 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
             &namespace_id,
             "/docs/counted.txt",
             b"counted",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("put file");

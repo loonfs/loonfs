@@ -178,7 +178,7 @@ impl FsWriter {
         published: Result<CommitResponse>,
         staged: ContentEvidence<'_>,
     ) -> Result<CommitResponse> {
-        match (published, attempt.commit_id.as_ref()) {
+        match (published, attempt.commit.commit_id.as_ref()) {
             (Err(error), Some(commit_id)) if error.code() == ErrorCode::CommitIdReuseConflict => {
                 self.reconcile_commit_id_reuse(
                     namespace_id,
@@ -343,8 +343,13 @@ impl FsWriter {
         self.commit_prepared(
             namespace_id,
             CommitRequest::single(
-                options.commit_id.unwrap_or_else(CommitId::generate),
-                options.message.clone(),
+                options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
                 FilesystemOperation::PutFile {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     content_ref,
@@ -472,8 +477,13 @@ impl FsWriter {
         self.commit(
             namespace_id,
             CommitRequest::single(
-                options.commit_id.unwrap_or_else(CommitId::generate),
-                options.message.clone(),
+                options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
                 FilesystemOperation::CreateDirectory {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     parents: options.parents,
@@ -498,8 +508,13 @@ impl FsWriter {
         self.commit(
             namespace_id,
             CommitRequest::single(
-                options.commit_id.unwrap_or_else(CommitId::generate),
-                options.message.clone(),
+                options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
                 FilesystemOperation::DeletePath {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     behavior: options.behavior,
@@ -521,8 +536,13 @@ impl FsWriter {
         self.commit(
             namespace_id,
             CommitRequest::single(
-                options.commit_id.unwrap_or_else(CommitId::generate),
-                options.message.clone(),
+                options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
                 FilesystemOperation::MovePath {
                     from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                     to_path: loonfs_core::path::parse_mutation_path(to_path)?,
@@ -545,8 +565,13 @@ impl FsWriter {
         self.commit(
             namespace_id,
             CommitRequest::single(
-                options.commit_id.unwrap_or_else(CommitId::generate),
-                options.message.clone(),
+                options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
                 FilesystemOperation::CopyPath {
                     from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                     to_path: loonfs_core::path::parse_mutation_path(to_path)?,
@@ -568,8 +593,13 @@ impl FsWriter {
         self.commit(
             namespace_id,
             CommitRequest::single(
-                options.commit_id.unwrap_or_else(CommitId::generate),
-                options.message.clone(),
+                options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
                 FilesystemOperation::RestoreRevision {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     source_revision_no,
@@ -594,8 +624,13 @@ impl FsWriter {
         self.commit(
             namespace_id,
             CommitRequest::single(
-                options.commit_id.unwrap_or_else(CommitId::generate),
-                options.message,
+                options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
                 FilesystemOperation::UpdateAttributes {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     set: options.set,
@@ -627,8 +662,13 @@ impl FsWriter {
         self.commit(
             namespace_id,
             CommitRequest::single(
-                options.commit_id.unwrap_or_else(CommitId::generate),
-                options.message.clone(),
+                options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .unwrap_or_else(CommitId::generate),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
                 FilesystemOperation::Undelete {
                     inode_id,
                     deleted_at_seq,

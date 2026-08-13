@@ -102,18 +102,33 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         .await
         .expect("create namespace");
     writer_a
-        .put_file_bytes(&namespace_id, "/a1.txt", b"a", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/a1.txt",
+            b"a",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer a first put");
 
     let writer_b = writer(&store, "writer-b").await;
     writer_b
-        .put_file_bytes(&namespace_id, "/b1.txt", b"b", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/b1.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer b takes over the epoch");
 
     let fenced = writer_a
-        .put_file_bytes(&namespace_id, "/a2.txt", b"a", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/a2.txt",
+            b"a",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect_err("superseded writer surfaces fencing");
     assert!(
@@ -127,7 +142,12 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
     // The fenced session stays fenced on the next attempt too, and the live
     // writer keeps publishing undisturbed.
     let still_fenced = writer_a
-        .put_file_bytes(&namespace_id, "/a3.txt", b"a", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/a3.txt",
+            b"a",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect_err("fenced session never reacquires on its own");
     assert!(
@@ -138,7 +158,12 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         "unexpected error: {still_fenced:?}"
     );
     writer_b
-        .put_file_bytes(&namespace_id, "/b2.txt", b"b", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/b2.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("live writer is not fenced back");
 }
@@ -160,18 +185,33 @@ async fn fenced_session_cannot_delete_namespace() {
         .await
         .expect("create namespace");
     writer_a
-        .put_file_bytes(&namespace_id, "/a1.txt", b"a", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/a1.txt",
+            b"a",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer a first put");
 
     let writer_b = writer(&store, "writer-b").await;
     writer_b
-        .put_file_bytes(&namespace_id, "/b1.txt", b"b", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/b1.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer b takes over the epoch");
     expect_writer_fenced(
         writer_a
-            .put_file_bytes(&namespace_id, "/a2.txt", b"a", PutFileOptions::default())
+            .put_file_bytes(
+                &namespace_id,
+                "/a2.txt",
+                b"a",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
             .await,
         "superseded writer surfaces fencing",
     );
@@ -192,7 +232,12 @@ async fn fenced_session_cannot_delete_namespace() {
     assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
     assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
     writer_b
-        .put_file_bytes(&namespace_id, "/b2.txt", b"b", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/b2.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("live writer keeps publishing after the refused delete");
 }
@@ -238,7 +283,12 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         .await
         .expect("create other namespace");
     writer_a
-        .put_file_bytes(&ns_fence, "/a1.txt", b"a", PutFileOptions::default())
+        .put_file_bytes(
+            &ns_fence,
+            "/a1.txt",
+            b"a",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer a first put");
 
@@ -246,7 +296,12 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     // projection out of the budget. Its publisher, engine identity, and
     // writer session stay behind.
     writer_a
-        .put_file_bytes(&ns_other, "/spill.txt", b"s", PutFileOptions::default())
+        .put_file_bytes(
+            &ns_other,
+            "/spill.txt",
+            b"s",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer a publishes to the other namespace");
     assert_eq!(
@@ -257,7 +312,12 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
 
     let writer_b = writer(&store, "writer-b").await;
     writer_b
-        .put_file_bytes(&ns_fence, "/b1.txt", b"b", PutFileOptions::default())
+        .put_file_bytes(
+            &ns_fence,
+            "/b1.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer b takes over the epoch");
 
@@ -266,7 +326,12 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     // re-acquisition.
     let fence = expect_writer_fenced(
         writer_a
-            .put_file_bytes(&ns_fence, "/a2.txt", b"a", PutFileOptions::default())
+            .put_file_bytes(
+                &ns_fence,
+                "/a2.txt",
+                b"a",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
             .await,
         "superseded writer surfaces fencing",
     );
@@ -277,14 +342,24 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     // More budget pressure, now against a publisher whose session is fenced:
     // fencing is session state, so no eviction can reach it.
     writer_a
-        .put_file_bytes(&ns_other, "/spill2.txt", b"s", PutFileOptions::default())
+        .put_file_bytes(
+            &ns_other,
+            "/spill2.txt",
+            b"s",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer a keeps publishing to the other namespace");
 
     let head_cas_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
         writer_a
-            .put_file_bytes(&ns_fence, "/a3.txt", b"a", PutFileOptions::default())
+            .put_file_bytes(
+                &ns_fence,
+                "/a3.txt",
+                b"a",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
             .await,
         "fenced session stays fenced after eviction",
     );
@@ -297,7 +372,12 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     assert_eq!(head.state, NamespaceState::Active);
     assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
     writer_b
-        .put_file_bytes(&ns_fence, "/b2.txt", b"b", PutFileOptions::default())
+        .put_file_bytes(
+            &ns_fence,
+            "/b2.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("live writer is not fenced back");
 }
@@ -323,19 +403,34 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
         .await
         .expect("create namespace");
     writer_a
-        .put_file_bytes(&namespace_id, "/a1.txt", b"a", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/a1.txt",
+            b"a",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer a first put");
 
     let writer_b = writer(&store, "writer-b").await;
     writer_b
-        .put_file_bytes(&namespace_id, "/b1.txt", b"b", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/b1.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("writer b takes over the epoch");
 
     expect_writer_fenced(
         writer_a
-            .put_file_bytes(&namespace_id, "/a2.txt", b"a", PutFileOptions::default())
+            .put_file_bytes(
+                &namespace_id,
+                "/a2.txt",
+                b"a",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
             .await,
         "superseded writer surfaces fencing",
     );
@@ -343,7 +438,12 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
     let head_cas_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
         writer_a
-            .put_file_bytes(&namespace_id, "/a3.txt", b"a", PutFileOptions::default())
+            .put_file_bytes(
+                &namespace_id,
+                "/a3.txt",
+                b"a",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
             .await,
         "fenced session stays fenced with caches disabled",
     );
@@ -353,7 +453,12 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
         "a fenced session must not touch the namespace's head"
     );
     writer_b
-        .put_file_bytes(&namespace_id, "/b2.txt", b"b", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace_id,
+            "/b2.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("live writer is not fenced back");
 }
@@ -384,7 +489,7 @@ async fn read_after_write_is_served_from_seeded_caches() {
                 &namespace_id,
                 &format!("/docs/warm-{index}.txt"),
                 b"warm",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("warmup put");
@@ -400,7 +505,7 @@ async fn read_after_write_is_served_from_seeded_caches() {
             &namespace_id,
             "/docs/fresh.txt",
             b"fresh",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("steady-state put");

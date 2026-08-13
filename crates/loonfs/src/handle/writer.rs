@@ -538,7 +538,7 @@ mod tests {
                         &namespace_id,
                         "/parked.txt",
                         b"body",
-                        PutFileOptions::default(),
+                        PutFileOptions::new(loonfs_test_support::test_actor()),
                     )
                     .await
             }
@@ -569,7 +569,7 @@ mod tests {
                 &namespace_id,
                 "/late.txt",
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect_err("a mutation submitted during the drain must be refused");

@@ -21,7 +21,7 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::StreamExt;
 use loonfs_api::{AuthoritativePathEntryKind, DestinationBehavior};
-use loonfs_client::{CreateDirectoryOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -157,8 +157,11 @@ pub(crate) async fn run_put_tree(
             .create_directory(
                 &spec,
                 &CreateDirectoryOptions {
-                    commit_id: None,
-                    message: message.clone(),
+                    commit: CommitOptions {
+                        actor: context.actor.clone(),
+                        commit_id: None,
+                        message: message.clone(),
+                    },
                     parents: true,
                 },
             )
@@ -215,8 +218,11 @@ pub(crate) async fn run_put_tree(
                 &payload,
                 &PutFileOptions {
                     behavior,
-                    commit_id: None,
-                    message,
+                    commit: CommitOptions {
+                        actor: context.actor.clone(),
+                        commit_id: None,
+                        message,
+                    },
                     expected_revision_no: None,
                 },
                 &progress,
@@ -414,8 +420,11 @@ pub(crate) async fn run_copy_tree(
             .create_directory(
                 &spec,
                 &CreateDirectoryOptions {
-                    commit_id: None,
-                    message: message.clone(),
+                    commit: CommitOptions {
+                        actor: context.actor.clone(),
+                        commit_id: None,
+                        message: message.clone(),
+                    },
                     parents: components.is_empty(),
                 },
             )
@@ -462,8 +471,11 @@ pub(crate) async fn run_copy_tree(
                     &to,
                     &loonfs_client::CopyOptions {
                         behavior,
-                        commit_id: None,
-                        message: message.clone(),
+                        commit: CommitOptions {
+                            actor: context.actor.clone(),
+                            commit_id: None,
+                            message: message.clone(),
+                        },
                     },
                 )
                 .await
@@ -705,6 +717,7 @@ mod tests {
             profile_name: "default".to_owned(),
             mode: "embedded".to_owned(),
             namespace: namespace.clone(),
+            actor: loonfs_test_support::test_actor(),
             target: ResolvedTarget::Embedded(Box::new(target)),
         };
         context

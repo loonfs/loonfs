@@ -69,7 +69,7 @@ async fn a_streamed_put_holds_one_part_of_its_payload() {
             streamed(&payload),
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::default()
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await

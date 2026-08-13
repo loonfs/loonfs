@@ -12,9 +12,9 @@
 //! receipt.
 
 use crate::{
-    AbsolutePath, AttributeRevisionNo, ChangeSeq, CommitId, ContentEvidence, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
-    RevisionNo,
+    AbsolutePath, ActorKind, ActorRef, AttributeRevisionNo, ChangeSeq, CommitId, ContentEvidence,
+    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId,
+    NamespaceId, RevisionNo,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -24,14 +24,14 @@ use std::future::Future;
 use thiserror::Error;
 
 /// Domain separator included in every mutation fingerprint input.
-const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v0";
+const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v1";
 
 /// Scheme and hash algorithm included in every stored fingerprint.
 ///
-/// `v0` identifies the canonical encoding rules, and `sha256` identifies the
+/// `v1` identifies the canonical encoding rules, and `sha256` identifies the
 /// hash algorithm. Including both values allows future versions to change
 /// either rule without changing the meaning of existing fingerprints.
-const FINGERPRINT_SCHEME: &str = "v0:sha256";
+const FINGERPRINT_SCHEME: &str = "v1:sha256";
 
 /// Error returned when the canonical fingerprint input cannot be encoded.
 ///
@@ -41,7 +41,7 @@ const FINGERPRINT_SCHEME: &str = "v0:sha256";
 #[error("failed to encode the commit fingerprint preimage: {0}")]
 pub struct SemanticFingerprintError(#[from] serde_json::Error);
 
-/// Computes a stored fingerprint (`v0:sha256:<64 lowercase hex>`) from a
+/// Computes a stored fingerprint (`v1:sha256:<64 lowercase hex>`) from a
 /// canonical input.
 ///
 /// The compact JSON encoding is part of the durable format. The fixed-value
@@ -272,6 +272,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
 /// therefore the same fingerprint.
 pub fn semantic_commit_fingerprint(
     namespace_id: &NamespaceId,
+    actor: &ActorRef,
     message: Option<&str>,
     operations: &[FilesystemOperation],
 ) -> Result<String, SemanticFingerprintError> {
@@ -279,6 +280,8 @@ pub fn semantic_commit_fingerprint(
     struct CanonicalCommit<'a> {
         domain: &'static str,
         namespace_id: &'a str,
+        actor_kind: ActorKind,
+        actor_id: &'a str,
         operations: Vec<OperationFingerprintInput<'a>>,
         message: Option<&'a str>,
     }
@@ -286,6 +289,8 @@ pub fn semantic_commit_fingerprint(
     fingerprint_digest(&CanonicalCommit {
         domain: COMMIT_FINGERPRINT_DOMAIN,
         namespace_id: namespace_id.as_str(),
+        actor_kind: actor.kind,
+        actor_id: actor.id.as_str(),
         operations: operations.iter().map(operation_fingerprint_input).collect(),
         message,
     })
@@ -302,6 +307,7 @@ pub fn semantic_commit_fingerprint(
 /// contain the same bytes.
 pub fn put_retry_fingerprint(
     namespace_id: &NamespaceId,
+    actor: &ActorRef,
     path: &AbsolutePath,
     behavior: DestinationBehavior,
     expected_revision_no: Option<RevisionNo>,
@@ -314,7 +320,12 @@ pub fn put_retry_fingerprint(
         behavior,
         expected_revision_no,
     };
-    semantic_commit_fingerprint(namespace_id, message, std::slice::from_ref(&operation))
+    semantic_commit_fingerprint(
+        namespace_id,
+        actor,
+        message,
+        std::slice::from_ref(&operation),
+    )
 }
 
 /// Receipt data needed to verify a PUT that reused a commit ID.
@@ -404,10 +415,11 @@ where
     };
     let retried = put_retry_fingerprint(
         attempt.namespace_id,
+        &attempt.options.commit.actor,
         attempt.path,
         attempt.options.behavior,
         attempt.options.expected_revision_no,
-        attempt.options.message.as_deref(),
+        attempt.options.commit.message.as_deref(),
         content_ref,
     );
     if retried.ok().as_deref() != Some(receipt.committed_fingerprint.as_str())
@@ -437,7 +449,13 @@ fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AttributeKey, AttributeValue, ContentId, ContentRefKind, StorageChecksum};
+    use crate::{
+        ActorId, AttributeKey, AttributeValue, ContentId, ContentRefKind, StorageChecksum,
+    };
+
+    fn test_actor() -> ActorRef {
+        ActorRef::user(ActorId::parse("test-actor").expect("valid test actor id"))
+    }
 
     fn attribute_key(value: &str) -> AttributeKey {
         AttributeKey::parse(value).expect("valid attribute key")
@@ -475,6 +493,7 @@ mod tests {
 
         let fingerprint = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             None,
             &[update_attributes(
                 [("owner", text("ada")), ("tags", text("a,b"))],
@@ -487,7 +506,7 @@ mod tests {
 
         assert_eq!(
             fingerprint,
-            "v0:sha256:e6c4c43ab20756a664d004adf22f223aef6467e45f737fb3d89fc1b6e211e5a2"
+            "v1:sha256:bc41940773fa7df87aaeecf44b2fbd8205071e15fcb81705887ff1de0a9582bb"
         );
     }
 
@@ -508,8 +527,10 @@ mod tests {
         .expect("reversed operation");
 
         assert_eq!(
-            semantic_commit_fingerprint(&namespace_id, None, &[forward]).expect("forward"),
-            semantic_commit_fingerprint(&namespace_id, None, &[reversed]).expect("reversed")
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[forward])
+                .expect("forward"),
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[reversed])
+                .expect("reversed")
         );
     }
 
@@ -522,6 +543,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let baseline = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             None,
             &[update_attributes([], ["a", "b"], None, None)],
         )
@@ -531,6 +553,7 @@ mod tests {
             assert_eq!(
                 semantic_commit_fingerprint(
                     &namespace_id,
+                    &test_actor(),
                     None,
                     &[update_attributes([], spelling, None, None)]
                 )
@@ -546,6 +569,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let baseline = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             None,
             &[update_attributes(
                 [("owner", text("ada"))],
@@ -581,7 +605,7 @@ mod tests {
         ] {
             assert_ne!(
                 baseline,
-                semantic_commit_fingerprint(&namespace_id, None, &[variant])
+                semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[variant])
                     .expect("variant fingerprint"),
                 "a changed {label} must change the fingerprint"
             );
@@ -598,13 +622,35 @@ mod tests {
     fn commit_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 
-        let fingerprint = semantic_commit_fingerprint(&namespace_id, None, &[create_dir("/docs")])
-            .expect("fingerprint");
+        let fingerprint =
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[create_dir("/docs")])
+                .expect("fingerprint");
 
         assert_eq!(
             fingerprint,
-            "v0:sha256:85894f53a16c2c0be95afc39b245280101f3e2a414f044c87be8eb9f1980dbcd"
+            "v1:sha256:dc41318564ff5329c73ba2f1af338f24bd323be7a56305a2b9b94cb24b95ec5a"
         );
+    }
+
+    #[test]
+    fn actor_kind_and_id_are_distinct_canonical_identity_fields() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let operation = create_dir("/docs");
+        let user_x = ActorRef::user(ActorId::parse("x").expect("actor id"));
+        let user_y = ActorRef::user(ActorId::parse("y").expect("actor id"));
+        let service_x = ActorRef::service(ActorId::parse("x").expect("actor id"));
+
+        let fingerprint = |actor: &ActorRef| {
+            semantic_commit_fingerprint(
+                &namespace_id,
+                actor,
+                None,
+                std::slice::from_ref(&operation),
+            )
+            .expect("fingerprint")
+        };
+        assert_ne!(fingerprint(&user_x), fingerprint(&user_y));
+        assert_ne!(fingerprint(&user_x), fingerprint(&service_x));
     }
 
     /// Pins the exact stored fingerprint encoding for a guarded delete.
@@ -614,6 +660,7 @@ mod tests {
 
         let fingerprint = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             None,
             &[FilesystemOperation::DeletePath {
                 path: AbsolutePath::parse("/docs").expect("path"),
@@ -625,7 +672,7 @@ mod tests {
 
         assert_eq!(
             fingerprint,
-            "v0:sha256:edc8e06bd0a651e9470198875ec44c8fcd7d9b95f162fe1d7ca46011c27e2818"
+            "v1:sha256:bd1dc71c8b7e0b1e503dbf0925b801275088b6f2598888f893787688f1f01d0f"
         );
     }
 
@@ -641,6 +688,7 @@ mod tests {
 
         let fingerprint = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             None,
             &[FilesystemOperation::Undelete {
                 inode_id: InodeId(42),
@@ -659,7 +707,7 @@ mod tests {
         );
         assert_eq!(
             fingerprint,
-            "v0:sha256:1f4fa76d65aa64903a7d44cead91600a97c0bac9ec3a01ac51f0cd1130eff3d6"
+            "v1:sha256:9146c9e675a2e132bb16adb32d235f73080a3ef065cbd2f5c82ccb83aee02e57"
         );
     }
 
@@ -672,6 +720,7 @@ mod tests {
 
         let fingerprint = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             None,
             &[FilesystemOperation::Undelete {
                 inode_id: InodeId(42),
@@ -683,7 +732,7 @@ mod tests {
 
         assert_eq!(
             fingerprint,
-            "v0:sha256:4d7737cdc3888e3613dad0ec7d752e8daac089c8b528301cf0eba9307fa1cc4c"
+            "v1:sha256:52e0be7cc080b08b6efb7dcabf474e795be9066dc30b77dac0cc1acd09f43bdb"
         );
     }
 
@@ -700,6 +749,7 @@ mod tests {
 
         let fingerprint = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             None,
             &[FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/report.txt").expect("path"),
@@ -715,7 +765,7 @@ mod tests {
 
         assert_eq!(
             fingerprint,
-            "v0:sha256:3febc279ebb36c013f734095bebdba3c0a59bf8cbd82d205b53adbf00c112d59"
+            "v1:sha256:bc5ab43ea228015ee13ceb52bb074b3ec1f3026babeb007eec8f5512fb64a924"
         );
     }
 
@@ -755,6 +805,7 @@ mod tests {
             assert_eq!(
                 put_retry_fingerprint(
                     &namespace_id,
+                    &test_actor(),
                     &AbsolutePath::parse("/docs/report.txt").expect("path"),
                     DestinationBehavior::NoReplace,
                     None,
@@ -762,7 +813,7 @@ mod tests {
                     &content_ref,
                 )
                 .expect("retry fingerprint"),
-                "v0:sha256:3febc279ebb36c013f734095bebdba3c0a59bf8cbd82d205b53adbf00c112d59"
+                "v1:sha256:bc5ab43ea228015ee13ceb52bb074b3ec1f3026babeb007eec8f5512fb64a924"
             );
         }
     }
@@ -801,12 +852,14 @@ mod tests {
         assert_eq!(
             semantic_commit_fingerprint(
                 &namespace_id,
+                &test_actor(),
                 None,
                 &[put("/docs/report.txt", content_ref)]
             )
             .expect("fingerprint"),
             semantic_commit_fingerprint(
                 &namespace_id,
+                &test_actor(),
                 None,
                 &[put("/docs/report.txt", without_trusted_digest)]
             )
@@ -824,10 +877,20 @@ mod tests {
         let second = ContentRef::blob_v1(ContentId::generate(), bytes);
 
         assert_ne!(
-            semantic_commit_fingerprint(&namespace_id, None, &[put("/docs/report.txt", first)])
-                .expect("fingerprint"),
-            semantic_commit_fingerprint(&namespace_id, None, &[put("/docs/report.txt", second)])
-                .expect("fingerprint")
+            semantic_commit_fingerprint(
+                &namespace_id,
+                &test_actor(),
+                None,
+                &[put("/docs/report.txt", first)]
+            )
+            .expect("fingerprint"),
+            semantic_commit_fingerprint(
+                &namespace_id,
+                &test_actor(),
+                None,
+                &[put("/docs/report.txt", second)]
+            )
+            .expect("fingerprint")
         );
     }
 
@@ -837,10 +900,12 @@ mod tests {
         // commit id with a different message must conflict, so the message
         // joins the preimage.
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let without = semantic_commit_fingerprint(&namespace_id, None, &[create_dir("/docs")])
-            .expect("fingerprint");
+        let without =
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[create_dir("/docs")])
+                .expect("fingerprint");
         let with = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             Some("import batch"),
             &[create_dir("/docs")],
         )
@@ -852,10 +917,16 @@ mod tests {
     #[test]
     fn commit_fingerprint_changes_when_logical_inputs_change() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let baseline = semantic_commit_fingerprint(&namespace_id, None, &[create_dir("/docs")])
-            .expect("baseline");
-        let changed = semantic_commit_fingerprint(&namespace_id, None, &[create_dir("/drafts")])
-            .expect("changed");
+        let baseline =
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[create_dir("/docs")])
+                .expect("baseline");
+        let changed = semantic_commit_fingerprint(
+            &namespace_id,
+            &test_actor(),
+            None,
+            &[create_dir("/drafts")],
+        )
+        .expect("changed");
 
         assert_ne!(baseline, changed);
     }
@@ -867,10 +938,20 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 
         assert_ne!(
-            semantic_commit_fingerprint(&namespace_id, None, &[create_dir("/a"), create_dir("/b")])
-                .expect("forward fingerprint"),
-            semantic_commit_fingerprint(&namespace_id, None, &[create_dir("/b"), create_dir("/a")])
-                .expect("reversed fingerprint")
+            semantic_commit_fingerprint(
+                &namespace_id,
+                &test_actor(),
+                None,
+                &[create_dir("/a"), create_dir("/b")]
+            )
+            .expect("forward fingerprint"),
+            semantic_commit_fingerprint(
+                &namespace_id,
+                &test_actor(),
+                None,
+                &[create_dir("/b"), create_dir("/a")]
+            )
+            .expect("reversed fingerprint")
         );
     }
 
@@ -888,6 +969,7 @@ mod tests {
 
         let by_hand = semantic_commit_fingerprint(
             &namespace_id,
+            &test_actor(),
             Some("import batch"),
             &[FilesystemOperation::PutFile {
                 path: path.clone(),
@@ -901,6 +983,7 @@ mod tests {
         assert_eq!(
             put_retry_fingerprint(
                 &namespace_id,
+                &test_actor(),
                 &path,
                 DestinationBehavior::Replace,
                 Some(RevisionNo(4)),
@@ -922,6 +1005,7 @@ mod tests {
         let content_ref = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let baseline = put_retry_fingerprint(
             &namespace_id,
+            &test_actor(),
             &path,
             DestinationBehavior::Replace,
             None,
@@ -935,6 +1019,7 @@ mod tests {
                 "path",
                 put_retry_fingerprint(
                     &namespace_id,
+                    &test_actor(),
                     &AbsolutePath::parse("/b.txt").expect("path"),
                     DestinationBehavior::Replace,
                     None,
@@ -946,6 +1031,7 @@ mod tests {
                 "behavior",
                 put_retry_fingerprint(
                     &namespace_id,
+                    &test_actor(),
                     &path,
                     DestinationBehavior::NoReplace,
                     None,
@@ -957,6 +1043,7 @@ mod tests {
                 "expected revision",
                 put_retry_fingerprint(
                     &namespace_id,
+                    &test_actor(),
                     &path,
                     DestinationBehavior::Replace,
                     Some(RevisionNo(2)),
@@ -968,6 +1055,7 @@ mod tests {
                 "message",
                 put_retry_fingerprint(
                     &namespace_id,
+                    &test_actor(),
                     &path,
                     DestinationBehavior::Replace,
                     None,
@@ -979,6 +1067,7 @@ mod tests {
                 "namespace",
                 put_retry_fingerprint(
                     &NamespaceId::parse("other").expect("valid namespace id"),
+                    &test_actor(),
                     &path,
                     DestinationBehavior::Replace,
                     None,
@@ -1022,18 +1111,17 @@ mod tests {
         let committed_seq = ChangeSeq(7);
         let bytes = b"stable bytes";
         let content_ref = ContentRef::blob_v1(ContentId::generate(), bytes);
-        let options = crate::options::PutFileOptions {
-            commit_id: Some(commit_id.clone()),
-            ..crate::options::PutFileOptions::default()
-        };
+        let mut options = crate::options::PutFileOptions::new(test_actor());
+        options.commit.commit_id = Some(commit_id.clone());
         let receipt = PutRetryReceipt {
             committed_seq,
             committed_fingerprint: put_retry_fingerprint(
                 &namespace_id,
+                &test_actor(),
                 &path,
                 options.behavior,
                 options.expected_revision_no,
-                options.message.as_deref(),
+                options.commit.message.as_deref(),
                 &content_ref,
             )
             .expect("fingerprint"),
@@ -1046,6 +1134,7 @@ mod tests {
             changes: vec![crate::v0::CommittedChange {
                 committed_seq,
                 commit_id: commit_id.clone(),
+                actor: test_actor(),
                 committed_at_ms: 1,
                 message: None,
                 events: vec![crate::v0::FilesystemChange::ContentChanged {
