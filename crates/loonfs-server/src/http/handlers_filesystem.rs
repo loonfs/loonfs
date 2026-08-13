@@ -92,7 +92,7 @@ impl Stream for DownloadBodyStream {
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct ChangesQuery {
-    after_seq: u64,
+    after_seq: String,
     limit: Option<String>,
 }
 
@@ -487,7 +487,7 @@ pub(super) async fn apply_commit(
         description = "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
-            ("after_seq" = u64, Query, description = "Return committed changes after this sequence"),
+            ("after_seq" = String, Query, description = "Return committed changes after this sequence"),
             ("limit" = Option<String>, Query, description = "Maximum page size")
         ),
         responses(
@@ -509,7 +509,7 @@ pub(super) async fn list_changes(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
-    let after_seq = loonfs_api::ChangeSeq(query.after_seq);
+    let after_seq = parse_after_seq(&query.after_seq)?;
     let limit = resolve_page_limit(query.limit)?;
     let response = state
         .reader
@@ -521,6 +521,19 @@ pub(super) async fn list_changes(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
+}
+
+fn parse_after_seq(value: &str) -> Result<loonfs_api::ChangeSeq, ApiResponseError> {
+    value
+        .parse::<u64>()
+        .map(loonfs_api::ChangeSeq)
+        .map_err(|error| {
+            ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &format!("invalid after_seq `{value}`: {error}"),
+            )
+        })
 }
 
 fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {

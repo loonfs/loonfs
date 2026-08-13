@@ -29,6 +29,7 @@ pub struct AuthoritativePathEntry {
     /// Namespace head sequence this answer was read from.
     pub head_seq: ChangeSeq,
     /// Parent directory inode, or `None` for the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_inode_id: Option<InodeId>,
     /// Stored display name for this path component, absent for the nameless root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,6 +86,9 @@ impl AuthoritativePathEntry {
 #[serde(tag = "inode_kind", rename_all = "snake_case")]
 pub enum AuthoritativePathEntryKind {
     /// A directory, which has no revision payload in v0.
+    ///
+    /// The entry tag reuses [`InodeKind`]'s wire vocabulary.
+    #[serde(rename = "dir")]
     #[cfg_attr(feature = "openapi", schema(title = "AuthoritativePathEntryDirectory"))]
     Directory {},
     /// A file and its current revision summary.
@@ -192,7 +196,7 @@ mod tests {
                 "namespace_id": "demo",
                 "absolute_path": "/docs",
                 "inode_id": 2,
-                "inode_kind": "directory",
+                "inode_kind": "dir",
                 "head_seq": 3,
                 "parent_inode_id": 1,
                 "display_name": "docs"
@@ -216,7 +220,7 @@ mod tests {
                     "namespace_id": "demo",
                     "absolute_path": "/docs",
                     "inode_id": 2,
-                    "inode_kind": "directory",
+                    "inode_kind": "dir",
                     "head_seq": 3,
                     "parent_inode_id": 1,
                     "display_name": "docs"
@@ -255,13 +259,41 @@ mod tests {
     }
 
     #[test]
-    fn nameless_root_omits_display_name_while_named_entries_carry_it() {
+    fn nameless_root_omits_parent_inode_id_and_display_name() {
         let root_json = serde_json::to_value(entry("/", None, None)).expect("serialize root");
+        assert!(root_json.get("parent_inode_id").is_none());
         assert!(root_json.get("display_name").is_none());
+
+        let decoded: AuthoritativePathEntry =
+            serde_json::from_value(root_json).expect("decode root without optional fields");
+        assert_eq!(decoded.parent_inode_id, None);
+        assert_eq!(decoded.display_name, None);
 
         let named_json = serde_json::to_value(entry("/docs", Some(InodeId(1)), Some("docs")))
             .expect("serialize named entry");
+        assert_eq!(named_json["parent_inode_id"], 1);
         assert_eq!(named_json["display_name"], "docs");
+    }
+
+    #[test]
+    fn authoritative_entry_kinds_share_inode_kind_wire_values() {
+        let directory = AuthoritativePathEntryKind::Directory {};
+        assert_eq!(
+            serde_json::to_value(directory).expect("serialize directory entry kind")["inode_kind"],
+            serde_json::to_value(InodeKind::Directory).expect("serialize directory inode kind")
+        );
+
+        let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
+        let file = AuthoritativePathEntryKind::File {
+            revision_no: RevisionNo(1),
+            size_bytes: 5,
+            content_ref,
+            committed_at_ms: 1,
+        };
+        assert_eq!(
+            serde_json::to_value(file).expect("serialize file entry kind")["inode_kind"],
+            serde_json::to_value(InodeKind::File).expect("serialize file inode kind")
+        );
     }
 
     /// An unprojected entry omits attributes; a projected one carries the

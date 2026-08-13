@@ -658,7 +658,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
         .events
         .iter()
         .map(|event| match event {
-            FilesystemChange::Created { name, .. } => name.as_str().to_owned(),
+            FilesystemChange::Created { display_name, .. } => display_name.as_str().to_owned(),
             other => panic!("unexpected event: {other:?}"),
         })
         .collect::<Vec<_>>();

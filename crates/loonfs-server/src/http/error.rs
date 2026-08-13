@@ -18,7 +18,7 @@ pub(super) struct ApiResponseError {
 
 impl ApiResponseError {
     pub(super) fn new(status: StatusCode, code: ErrorCode, message: &str) -> Self {
-        Self {
+        let response = Self {
             status,
             body: ApiError {
                 code: code.as_str().to_owned(),
@@ -28,6 +28,11 @@ impl ApiResponseError {
                 details: None,
             },
             retry_after_seconds: None,
+        };
+        if code.retryable_without_operator_action() {
+            response.with_retry_after(1)
+        } else {
+            response
         }
     }
 
@@ -165,5 +170,25 @@ impl IntoResponse for ApiResponseError {
             }
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_immediately_retryable_code_answers_with_retry_after() {
+        for code in ErrorCode::ALL {
+            let response =
+                ApiResponseError::new(status_for_core_error_code(code), code, "test response")
+                    .into_response();
+            let retry_after = response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .map(|value| value.to_str().expect("Retry-After is ASCII"));
+            let expected = code.retryable_without_operator_action().then_some("1");
+            assert_eq!(retry_after, expected, "unexpected Retry-After for {code}");
+        }
     }
 }

@@ -502,11 +502,11 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         FilesystemChange::Created {
             inode_kind: InodeKind::Directory,
             parent_inode_id: InodeId(1),
-            name,
+            display_name,
             revision_no: None,
             content_ref: None,
             ..
-        } if name.as_str() == "alpha"
+        } if display_name.as_str() == "alpha"
     ));
 }
 

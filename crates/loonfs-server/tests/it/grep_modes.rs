@@ -216,7 +216,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
             &router,
             Method::POST,
             &format!("/v0/admin/namespaces/{namespace_id}/grep/index/gc"),
-            Some(b"{}".to_vec()),
+            None,
         )
         .await,
     )

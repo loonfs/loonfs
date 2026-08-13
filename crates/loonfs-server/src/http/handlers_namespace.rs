@@ -36,7 +36,7 @@ fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: 
 pub(super) struct DeleteNamespaceQuery {
     /// Delete only if the head is still at this sequence (`stale_head` on
     /// mismatch).
-    expected_head_seq: Option<u64>,
+    expected_head_seq: Option<String>,
 }
 
 #[cfg_attr(
@@ -236,7 +236,7 @@ pub(super) async fn namespace_status(
         description = "Marks a namespace as deleted.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
-            ("expected_head_seq" = Option<u64>, Query, description = "Delete only if the namespace head is still at this sequence")
+            ("expected_head_seq" = Option<String>, Query, description = "Delete only if the namespace head is still at this sequence")
         ),
         responses(
             (status = 200, description = "Namespace deleted", body = loonfs_api::DeleteNamespaceResponse),
@@ -259,7 +259,11 @@ pub(super) async fn delete_namespace(
     let namespace_id = namespace.into_id()?;
     let query = query.into_params()?;
     let options = DeleteNamespaceOptions {
-        expected_head_seq: query.expected_head_seq.map(ChangeSeq),
+        expected_head_seq: query
+            .expected_head_seq
+            .as_deref()
+            .map(parse_expected_head_seq)
+            .transpose()?,
     };
     let response = state
         .writer
@@ -268,6 +272,16 @@ pub(super) async fn delete_namespace(
         .await
         .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
+}
+
+fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
+    value.parse::<u64>().map(ChangeSeq).map_err(|error| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!("invalid expected_head_seq `{value}`: {error}"),
+        )
+    })
 }
 
 #[cfg_attr(

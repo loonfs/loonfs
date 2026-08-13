@@ -481,10 +481,10 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
                 }
                 loonfs::FilesystemChange::Undeleted {
                     inode_id: undeleted_inode_id,
-                    name,
+                    display_name,
                     ..
                 } if *undeleted_inode_id == inode_id => {
-                    undeleted = Some(name.as_str().to_owned());
+                    undeleted = Some(display_name.as_str().to_owned());
                 }
                 _ => {}
             }

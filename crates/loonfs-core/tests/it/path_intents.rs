@@ -194,12 +194,13 @@ async fn list_file_revisions<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
     let entry = resolve_path(store, namespace_id, absolute_path).await?;
-    list_file_revisions_for_inode(store, namespace_id, entry.inode_id).await
+    list_file_revisions_for_inode(store, namespace_id, absolute_path, entry.inode_id).await
 }
 
 async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    absolute_path: &str,
     inode_id: InodeId,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
     let context = read_context(store, namespace_id).await;
@@ -222,6 +223,8 @@ async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
         if cursor.is_none() {
             return Ok(loonfs_api::ListFileRevisionsResponse {
                 namespace_id: namespace_id.clone(),
+                absolute_path: loonfs_api::AbsolutePath::parse(absolute_path)
+                    .expect("valid test path"),
                 inode_id,
                 head_seq: context.head.seq,
                 revisions,
@@ -944,9 +947,10 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
             .code(),
         ErrorCode::PathNotFound
     );
-    let inode_revisions = list_file_revisions_for_inode(&store, &namespace_id, inode_id)
-        .await
-        .expect("inode revisions");
+    let inode_revisions =
+        list_file_revisions_for_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
+            .await
+            .expect("inode revisions");
     assert_eq!(inode_revisions.revisions.len(), 2);
 
     restore_file_revision(
@@ -963,9 +967,10 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         .await
         .expect("read restored");
     assert_eq!(restored.bytes, b"one");
-    let restored_revisions = list_file_revisions_for_inode(&store, &namespace_id, inode_id)
-        .await
-        .expect("restored revisions");
+    let restored_revisions =
+        list_file_revisions_for_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
+            .await
+            .expect("restored revisions");
     assert_eq!(
         restored_revisions
             .revisions

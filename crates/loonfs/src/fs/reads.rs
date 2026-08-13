@@ -355,10 +355,12 @@ impl FsReader {
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
+        let absolute_path = AbsolutePath::parse(absolute_path)
+            .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
         let page = engine
-            .list_file_revisions_page(absolute_path, request, &read_context)
+            .list_file_revisions_page(absolute_path.as_str(), request, &read_context)
             .await?;
         self.core
             .inner
@@ -366,6 +368,7 @@ impl FsReader {
             .record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
+            absolute_path,
             read_context.head.seq,
             page,
             fallback_inode_id,

@@ -149,7 +149,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             inode_id: *inode_id,
             inode_kind: *inode_kind,
             parent_inode_id: *parent_inode_id,
-            name: display_name.clone(),
+            display_name: display_name.clone(),
             revision_no: None,
             content_ref: None,
         },
@@ -173,7 +173,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
                 inode_id: *inode_id,
                 inode_kind: *inode_kind,
                 parent_inode_id: *parent_inode_id,
-                name: display_name.clone(),
+                display_name: display_name.clone(),
                 revision_no: Some(*revision_no),
                 content_ref: Some(content_ref.clone()),
             }
@@ -203,9 +203,9 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
         }] if child_inode_id == bound_inode_id => FilesystemChange::Moved {
             inode_id: *child_inode_id,
             from_parent_inode_id: *from_parent_inode_id,
-            from_name: from_name.clone(),
+            from_display_name: from_name.clone(),
             to_parent_inode_id: *to_parent_inode_id,
-            to_name: to_name.clone(),
+            to_display_name: to_name.clone(),
         },
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
         [WalDelta::UnbindDirentry { child_inode_id, .. }, WalDelta::TombstoneSubtree {
@@ -225,7 +225,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
         }] if root_inode_id == child_inode_id => FilesystemChange::Undeleted {
             inode_id: *root_inode_id,
             parent_inode_id: *parent_inode_id,
-            name: display_name.clone(),
+            display_name: display_name.clone(),
         },
         // UpdateAttributes, including the copy that carries a source's
         // attributes onto the inode it just created. The delta already holds

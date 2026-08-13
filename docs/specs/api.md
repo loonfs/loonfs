@@ -223,7 +223,7 @@ The codes that populate it:
 | Code | Detail fields |
 | --- | --- |
 | `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
-| `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
+| `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision) |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
@@ -288,6 +288,8 @@ caller or operator action. `checkpoint_unavailable`, `maintenance_required`,
 and `index_lagging` remain 503 status groupings but require maintenance before
 an unchanged request can succeed; `commit_outcome_unknown` and
 `deadline_exceeded` require reconciliation before retrying a mutation.
+Responses carrying any of those three immediately retryable codes include
+`Retry-After: 1`.
 
 Precondition failures surface as `409` resource-state conflicts
 (`stale_revision`, `stale_head`, `commit_id_reuse_conflict`) rather than
@@ -634,6 +636,7 @@ A representative v0 binding is shown below.
 | Apply a commit | `POST /v0/namespaces/{ns}/commits` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
+| Sign staged upload parts | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Read an upload session | `GET /v0/namespaces/{ns}/uploads/{upload_id}` (a completed session answers with a freshly minted `validated_content_token`) |
 | Abort an upload session | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
@@ -648,7 +651,7 @@ A representative v0 binding is shown below.
 | Read the grep index's lifecycle | `GET /v0/admin/namespaces/{ns}/grep/index` (feature `admin.grep.index`; one grep root read, no side effects) |
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (feature `admin.grep.index`; CAS-publishes the independent grep root into checkpointed backfill and nudges the deployment's maintenance runner; idempotent) |
 | Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (feature `admin.grep.index`; CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
-| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (feature `admin.grep.index`; one explicit pass over only that namespace's grep extension; `max_objects` bounds the reads it spends and defaults to 1024 when omitted, returning a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
+| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (feature `admin.grep.index`; one explicit pass over only that namespace's grep extension; the body may be absent for the default request; `max_objects` bounds the reads it spends and defaults to 1024 when omitted, returning a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
 | Probe the store contract | `POST /v0/admin/store/probe` (the one admin route whose subject is the store rather than a namespace; body carries no options today and `{}` is the request; see below) |
 | Scrape metrics | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
@@ -813,15 +816,16 @@ Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
 `core/v0`.
 
-Every GC response carries `next_reclamation_at_ms`, which is the soonest
-time still ahead of the pass at which something it retained becomes
-reclaimable: an open upload session's lease plus the grace window, an
-aborted session's grace, or a completed session's derived
-content-reclamation grace. A scheduler reads it to decide when to run the
-namespace again rather than tracking upload deadlines itself. It describes
-only what this pass examined — a pass that stopped on `next_cursor` saw part
-of the keyspace, and candidates that age out on their object timestamps
-carry no time here — so `null` is not a claim that nothing is owed.
+When a GC pass sees a future reclamation deadline, its response includes
+`next_reclamation_at_ms`, the soonest time still ahead of the pass at which
+something it retained becomes reclaimable: an open upload session's lease
+plus the grace window, an aborted session's grace, or a completed session's
+derived content-reclamation grace. A scheduler reads it to decide when to
+run the namespace again rather than tracking upload deadlines itself. It
+describes only what this pass examined — a pass that stopped on `next_cursor`
+saw part of the keyspace, and candidates that age out on their object
+timestamps carry no time here — so its absence is not a claim that nothing
+is owed.
 
 GC responses carry `next_cursor` only when more candidate enumeration remains.
 The token is opaque, tolerant of additive fields when decoded, and valid only
@@ -892,12 +896,12 @@ content nothing published — an abandoned upload, a completed session whose
 commit never arrived. An operator who deletes a large tree and watches the
 bucket should expect it to stay the size it is.
 
-Nothing has to be scheduled for the second horizon by hand. Every pass
-reports `next_reclamation_at_ms`, the soonest instant ahead of it at which
-something it kept becomes reclaimable, and the runtime's collection job
-hands that straight back as the earliest it will run the namespace again.
-A namespace that is being written to therefore reclaims its own staged
-content without a cron entry.
+Nothing has to be scheduled for the second horizon by hand. A pass that sees
+one reports `next_reclamation_at_ms`, the soonest instant ahead of it at
+which something it kept becomes reclaimable, and the runtime's collection
+job hands that straight back as the earliest it will run the namespace
+again. A namespace that is being written to therefore reclaims its own
+staged content without a cron entry.
 
 What that leaves is namespaces nobody is writing to. LoonFS has no operation
 that enumerates namespaces, so nothing can discover them: coverage is an
@@ -1268,6 +1272,7 @@ existed, could not be used, and needed an explicit repair.
 
 The examples below are representative, not exhaustive. Responses may gain
 fields within v0; clients must ignore JSON fields they do not recognize.
+Optional response fields are omitted when absent, never encoded as `null`.
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -1381,10 +1386,9 @@ had attributes written reads as `{}` at revision 0. A read that did not
 include attributes omits the group, so an absent group never means "no
 attributes".
 
-The namespace root is nameless: its entry has `parent_inode_id: null` and
-omits `display_name` entirely. Every non-root entry carries a validated
-`display_name`; the empty string is not a spelling for the root or for any
-named path component.
+The namespace root is nameless: its entry omits both `parent_inode_id` and
+`display_name`. Every non-root entry carries a validated `display_name`; the
+empty string is not a spelling for the root or for any named path component.
 
 ### 6.5 `GET /filesystem/list`
 
@@ -1454,7 +1458,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "namespace_id": "demo",
       "absolute_path": "/docs/slides",
       "inode_id": 43,
-      "inode_kind": "directory",
+      "inode_kind": "dir",
       "head_seq": 418,
       "parent_inode_id": 7,
       "display_name": "slides"
@@ -1493,14 +1497,15 @@ client create such a file offers it.
 
 Revision listing returns newest revisions first and uses the same
 `limit` / `cursor` pattern as directory listing, resolving the current path
-to its current inode. Responses include
-`next_cursor` only when another page is available. Revision history is never
-pruned — paging to the end always reaches revision 1, regardless of how far
-the retention floor has advanced.
+to its current inode. The response echoes that requested path as
+`absolute_path`. Responses include `next_cursor` only when another page is
+available. Revision history is never pruned — paging to the end always
+reaches revision 1, regardless of how far the retention floor has advanced.
 
 ```json
 {
   "namespace_id": "demo",
+  "absolute_path": "/docs/report.txt",
   "inode_id": 42,
   "head_seq": 418,
   "revisions": [
@@ -2056,9 +2061,9 @@ presign writes either, no file it holds can be larger than it will proxy.
 
 ### 6.11 `GET /changes`
 
-Each change is one commit carrying its identity (`seq`,
-`commit_id`, observational `committed_at_ms`, writer provenance, optional
-`message`) and `events`: the semantic filesystem operations the commit
+Each change is one commit carrying its identity (`seq`, `commit_id`,
+observational `committed_at_ms`, optional `message`) and `events`: the
+semantic filesystem operations the commit
 applied, in the order it applied them. One request operation may apply
 several — a put creates each missing parent directory, a replacing move
 deletes the file it moves over, a copy carries the source's attributes onto
@@ -2099,11 +2104,11 @@ Event kinds:
 
 | Kind | Meaning | Fields |
 | --- | --- | --- |
-| `created` | A file or directory was created. | `inode_id`, `inode_kind`, `parent_inode_id`, `name`; file creations also carry `revision_no` and `content_ref`. |
+| `created` | A file or directory was created. | `inode_id`, `inode_kind`, `parent_inode_id`, `display_name`; file creations also carry `revision_no` and `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
-| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_name`, `to_parent_inode_id`, `to_name`. |
+| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`. |
 | `deleted` | A file or directory subtree was deleted. The enclosing change's `seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
-| `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `name`. |
+| `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 
 Events name inodes and their parent-directory bindings rather than full

@@ -638,11 +638,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GrepGcRequest"
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GrepGcRequest"
+                  }
+                ]
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -1053,9 +1059,7 @@
             "description": "Delete only if the namespace head is still at this sequence",
             "required": false,
             "schema": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
+              "type": "string"
             }
           }
         ],
@@ -1150,9 +1154,7 @@
             "description": "Return committed changes after this sequence",
             "required": true,
             "schema": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
+              "type": "string"
             }
           },
           {
@@ -2982,7 +2984,7 @@
           {
             "type": "object",
             "title": "AuthoritativePathEntryDirectory",
-            "description": "A directory, which has no revision payload in v0.",
+            "description": "A directory, which has no revision payload in v0.\n\nThe entry tag reuses [`InodeKind`]'s wire vocabulary.",
             "required": [
               "inode_kind"
             ],
@@ -2990,7 +2992,7 @@
               "inode_kind": {
                 "type": "string",
                 "enum": [
-                  "directory"
+                  "dir"
                 ]
               }
             }
@@ -4056,7 +4058,7 @@
               }
             ]
           },
-          "actual_revision": {
+          "actual_revision_no": {
             "oneOf": [
               {
                 "type": "null"
@@ -4129,7 +4131,7 @@
               }
             ]
           },
-          "expected_revision": {
+          "expected_revision_no": {
             "oneOf": [
               {
                 "type": "null"
@@ -4240,7 +4242,7 @@
               "inode_id",
               "inode_kind",
               "parent_inode_id",
-              "name",
+              "display_name",
               "kind"
             ],
             "properties": {
@@ -4255,6 +4257,10 @@
                   }
                 ]
               },
+              "display_name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "User-facing spelling of the new entry."
+              },
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId",
                 "description": "Newly allocated namespace-scoped inode identity."
@@ -4268,10 +4274,6 @@
                 "enum": [
                   "created"
                 ]
-              },
-              "name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "User-facing spelling of the new entry."
               },
               "parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId",
@@ -4328,13 +4330,13 @@
             "required": [
               "inode_id",
               "from_parent_inode_id",
-              "from_name",
+              "from_display_name",
               "to_parent_inode_id",
-              "to_name",
+              "to_display_name",
               "kind"
             ],
             "properties": {
-              "from_name": {
+              "from_display_name": {
                 "$ref": "#/components/schemas/DisplayName",
                 "description": "Spelling of the old binding."
               },
@@ -4352,7 +4354,7 @@
                   "moved"
                 ]
               },
-              "to_name": {
+              "to_display_name": {
                 "$ref": "#/components/schemas/DisplayName",
                 "description": "Spelling of the new binding."
               },
@@ -4401,10 +4403,14 @@
             "required": [
               "inode_id",
               "parent_inode_id",
-              "name",
+              "display_name",
               "kind"
             ],
             "properties": {
+              "display_name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Spelling of the recovered binding."
+              },
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId",
                 "description": "Recovered inode."
@@ -4414,10 +4420,6 @@
                 "enum": [
                   "undeleted"
                 ]
-              },
-              "name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Spelling of the recovered binding."
               },
               "parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId",
@@ -4875,7 +4877,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "The soonest instant still ahead of this pass at which something it\nretained becomes reclaimable: an open session's lease plus the grace\nwindow, an aborted session's grace, or a completed session's derived\ncontent-reclamation grace. A scheduler reads this to decide when to\ncome back, so a namespace needs no other side channel to have its\nreclamation happen.\n\nIt reports what this pass saw and nothing more. A pass that stopped\non `next_cursor` examined only part of the keyspace, and candidates\nthat age out under a plain grace window on their object timestamps\ncarry no deadline here at all, so `None` is never a claim that\nnothing is owed.\n\nAlways serialized, `null` included, unlike `next_cursor` beside it:\na cursor's presence is what says the enumeration is unfinished,\nwhile this is an answer every pass has — and one whose absence\notherwise makes the response's shape depend on what happened to be\nin the namespace.",
+            "description": "The soonest instant still ahead of this pass at which something it\nretained becomes reclaimable: an open session's lease plus the grace\nwindow, an aborted session's grace, or a completed session's derived\ncontent-reclamation grace. A scheduler reads this to decide when to\ncome back, so a namespace needs no other side channel to have its\nreclamation happen.\n\nIt reports what this pass saw and nothing more. A pass that stopped\non `next_cursor` examined only part of the keyspace, and candidates\nthat age out under a plain grace window on their object timestamps\ncarry no deadline here at all, so absence is never a claim that\nnothing is owed.",
             "minimum": 0
           },
           "released_expired_checkpoints": {
@@ -5276,11 +5278,16 @@
         "description": "Response for listing file revisions.",
         "required": [
           "namespace_id",
+          "absolute_path",
           "inode_id",
           "head_seq",
           "revisions"
         ],
         "properties": {
+          "absolute_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute file path requested by the caller."
+          },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Namespace head sequence used for the read."

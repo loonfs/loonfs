@@ -548,8 +548,8 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             actual,
         } => Some(ErrorDetails {
             inode_id: Some(*inode_id),
-            expected_revision: Some(*expected),
-            actual_revision: *actual,
+            expected_revision_no: Some(*expected),
+            actual_revision_no: *actual,
             ..ErrorDetails::default()
         }),
         CommitValidationError::StaleWriterEpoch { active, requested } => Some(ErrorDetails {
@@ -998,8 +998,8 @@ mod tests {
             });
         let details = stale.details().expect("stale-revision details");
         assert_eq!(details.inode_id, Some(InodeId(7)));
-        assert_eq!(details.expected_revision, Some(RevisionNo(2)));
-        assert_eq!(details.actual_revision, Some(RevisionNo(5)));
+        assert_eq!(details.expected_revision_no, Some(RevisionNo(2)));
+        assert_eq!(details.actual_revision_no, Some(RevisionNo(5)));
         // The prose says the same thing in words, so neither revision
         // reaches a reader as Rust formatting.
         assert!(
@@ -1027,7 +1027,7 @@ mod tests {
             unversioned
                 .details()
                 .expect("stale-revision details")
-                .actual_revision,
+                .actual_revision_no,
             None
         );
 

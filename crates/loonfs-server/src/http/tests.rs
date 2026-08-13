@@ -36,13 +36,14 @@ use std::path::Path;
 
 const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "aborted_at_ms",
+    "absolute_path",
     "active_acquired_at_ms",
     "active_deletion_seq",
     "active_writer",
     "active_writer_epoch",
     "actual_attributes_revision_no",
     "actual_head_seq",
-    "actual_revision",
+    "actual_revision_no",
     "advance_retention",
     "after_seq",
     "allow_scan",
@@ -85,11 +86,10 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "expected_attributes_revision_no",
     "expected_head_seq",
     "expected_inode_id",
-    "expected_revision",
     "expected_revision_no",
     "expires_at_ms",
     "fenced_epoch",
-    "from_name",
+    "from_display_name",
     "from_parent_inode_id",
     "grace_window",
     "grace_window_ms",
@@ -135,7 +135,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "storage_checksum",
     "target_namespace_id",
     "target_seq",
-    "to_name",
+    "to_display_name",
     "to_parent_inode_id",
     "ttl_ms",
     "unrecognized_key",
@@ -1707,6 +1707,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         let body: serde_json::Value =
             serde_json::from_str(&body).unwrap_or_else(|_| panic!("json body, got: {body}"));
         assert_eq!(body["code"], code);
+        body
     };
 
     // A query value that fails its field type: enveloped invalid_request.
@@ -1716,7 +1717,13 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         .set("authorization", "Bearer test-token")
         .call()
         .expect_err("malformed after_seq should answer 400");
-    expect_enveloped(error, 400, "invalid_request");
+    let body = expect_enveloped(error, 400, "invalid_request");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("invalid after_seq `abc`:")),
+        "{body}"
+    );
 
     // The same malformed query without credentials: 401 wins.
     let error = raw_agent()
@@ -1724,6 +1731,23 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         .call()
         .expect_err("unauthorized should answer 401");
     expect_enveloped(error, 401, "unauthorized");
+
+    // Optional numeric query fields use the same hand-parse policy and name
+    // themselves in the rejection rather than leaking framework wording.
+    let error = raw_agent()
+        .delete(&format!(
+            "http://{addr}/v0/namespaces/demo?expected_head_seq=abc"
+        ))
+        .set("authorization", "Bearer test-token")
+        .call()
+        .expect_err("malformed expected_head_seq should answer 400");
+    let body = expect_enveloped(error, 400, "invalid_request");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("invalid expected_head_seq `abc`:")),
+        "{body}"
+    );
 
     // A missing required query parameter: enveloped invalid_request.
     let error = raw_agent()
@@ -2568,6 +2592,10 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     assert!(
         readiness.contains("\"code\":\"shutting_down\""),
         "readiness names the shutdown: {readiness}"
+    );
+    assert!(
+        readiness.contains("retry-after: 1\r\n"),
+        "readiness tells callers when to retry: {readiness}"
     );
     assert!(
         !slow.is_finished(),

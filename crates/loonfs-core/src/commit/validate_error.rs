@@ -286,7 +286,7 @@ pub enum CommitValidationError {
 /// The revision it found is absent when the file carries no revision at all,
 /// and that case reads as a sentence rather than printing the `Option` — a
 /// message is for a person, while the same pair rides the wire as typed
-/// `expected_revision` and `actual_revision` details for a program.
+/// `expected_revision_no` and `actual_revision_no` details for a program.
 fn revision_mismatch(expected: &RevisionNo, actual: &Option<RevisionNo>) -> String {
     match actual {
         Some(actual) => format!("expected revision {expected}, found revision {actual}"),

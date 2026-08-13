@@ -90,10 +90,10 @@ pub struct ErrorDetails {
     pub inode_id: Option<InodeId>,
     /// Revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<RevisionNo>,
+    pub expected_revision_no: Option<RevisionNo>,
     /// Revision that is actually current; absent when the inode has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actual_revision: Option<RevisionNo>,
+    pub actual_revision_no: Option<RevisionNo>,
     /// Attribute revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
@@ -406,6 +406,8 @@ pub struct FileRevision {
 pub struct ListFileRevisionsResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
+    /// Absolute file path requested by the caller.
+    pub absolute_path: AbsolutePath,
     /// File inode whose revisions were returned.
     pub inode_id: InodeId,
     /// Namespace head sequence used for the read.
@@ -444,6 +446,7 @@ pub struct CreateCheckpointResponse {
     /// Manifest pinned by the checkpoint.
     pub manifest_id: ManifestId,
     /// Manifest `metadata/root.json` references after the operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_manifest_id: Option<ManifestId>,
     /// Expiry recorded on the record, when the request carried a `ttl_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -729,15 +732,9 @@ pub struct GcResponse {
     /// It reports what this pass saw and nothing more. A pass that stopped
     /// on `next_cursor` examined only part of the keyspace, and candidates
     /// that age out under a plain grace window on their object timestamps
-    /// carry no deadline here at all, so `None` is never a claim that
+    /// carry no deadline here at all, so absence is never a claim that
     /// nothing is owed.
-    ///
-    /// Always serialized, `null` included, unlike `next_cursor` beside it:
-    /// a cursor's presence is what says the enumeration is unfinished,
-    /// while this is an answer every pass has — and one whose absence
-    /// otherwise makes the response's shape depend on what happened to be
-    /// in the namespace.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_reclamation_at_ms: Option<u64>,
 }
 
@@ -1525,6 +1522,32 @@ mod tests {
                 "an unknown field in {level} decoded instead of failing the request"
             );
         }
+    }
+
+    #[test]
+    fn optional_response_fields_are_omitted_and_default_when_absent() {
+        let checkpoint = CreateCheckpointResponse {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
+                .expect("checkpoint id"),
+            checkpoint_seq: ChangeSeq(3),
+            manifest_id: ManifestId(3),
+            current_manifest_id: None,
+            expires_at_ms: None,
+        };
+        let checkpoint_json =
+            serde_json::to_value(checkpoint).expect("serialize checkpoint response");
+        assert!(checkpoint_json.get("current_manifest_id").is_none());
+        let checkpoint: CreateCheckpointResponse = serde_json::from_value(checkpoint_json)
+            .expect("decode checkpoint response without optional fields");
+        assert_eq!(checkpoint.current_manifest_id, None);
+
+        let gc = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
+        let gc_json = serde_json::to_value(gc).expect("serialize gc response");
+        assert!(gc_json.get("next_reclamation_at_ms").is_none());
+        let gc: GcResponse =
+            serde_json::from_value(gc_json).expect("decode gc response without optional fields");
+        assert_eq!(gc.next_reclamation_at_ms, None);
     }
 
     /// The maintenance bodies are optional selectors and overrides all the
