@@ -209,20 +209,16 @@ fn attribute_key(value: &str) -> AttributeKey {
     AttributeKey::parse(value).expect("valid attribute key")
 }
 
-/// One attribute map exercising both value kinds.
+/// One attribute map exercising ordinary and caller-encoded list values.
 fn sample_attributes() -> Attributes {
     Attributes::new(std::collections::BTreeMap::from([
         (
             attribute_key("owner"),
-            AttributeValue::String {
-                value: "ada".to_owned(),
-            },
+            AttributeValue::parse("ada").expect("valid attribute value"),
         ),
         (
             attribute_key("tags"),
-            AttributeValue::StringList {
-                values: vec!["draft".to_owned(), "review".to_owned()],
-            },
+            AttributeValue::parse("draft,review").expect("valid attribute value"),
         ),
     ]))
     .expect("valid attribute map")
@@ -2087,14 +2083,13 @@ fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
 }
 
 // ---------------------------------------------------------------------------
-// Attribute rows: an unknown value kind is not a value
+// Attribute rows: the retired tagged value is not a value
 // ---------------------------------------------------------------------------
 
-/// A stored attribute value states its kind, and a kind this format does not
-/// have is corruption rather than a value to read past. A decoder that
-/// defaulted here would turn a list written by a newer writer into a string.
+/// Attribute values are strings in this format. The retired tagged object is
+/// corruption rather than a shape the reader translates.
 #[test]
-fn attribute_rows_reject_an_unknown_value_kind() {
+fn attribute_rows_reject_the_retired_tagged_value_shape() {
     let mut row = row_cbor(&MetadataRow::AttributesRevision {
         inode_id: InodeId(2),
         attributes_revision_no: AttributeRevisionNo(1),
@@ -2103,11 +2098,17 @@ fn attribute_rows_reject_an_unknown_value_kind() {
         attributes: sample_attributes(),
     });
     let owner = cbor_entry(cbor_entry(&mut row, "attributes"), "owner");
-    *cbor_entry(owner, "kind") = ciborium::Value::from("number");
+    *owner = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::from("kind"),
+            ciborium::Value::from("string"),
+        ),
+        (ciborium::Value::from("value"), ciborium::Value::from("ada")),
+    ]);
 
-    let refusal = assert_row_is_corrupt(&row, "a kind this format does not have is not a value");
+    let refusal = assert_row_is_corrupt(&row, "an attribute value is one string");
     assert!(
-        refusal.contains("number") || refusal.contains("variant"),
+        refusal.contains("string") || refusal.contains("map"),
         "unexpected refusal: {refusal}"
     );
 }
@@ -2124,8 +2125,7 @@ fn attribute_rows_reject_a_map_over_its_limits() {
         attributes: sample_attributes(),
     });
     let owner = cbor_entry(cbor_entry(&mut row, "attributes"), "owner");
-    *cbor_entry(owner, "value") =
-        ciborium::Value::from("v".repeat(loonfs_api::MAX_ATTRIBUTE_VALUE_BYTES + 1));
+    *owner = ciborium::Value::from("v".repeat(loonfs_api::MAX_ATTRIBUTE_VALUE_BYTES + 1));
 
     assert_row_is_corrupt(&row, "an oversized value is not a value this format stores");
 }

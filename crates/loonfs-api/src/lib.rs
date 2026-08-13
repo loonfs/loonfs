@@ -91,9 +91,10 @@ pub mod wire {
 }
 
 pub use attributes::{
-    AttributeKey, AttributeKeyValidationError, AttributeRevisionNo, AttributeValue, Attributes,
-    AttributesError, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES,
-    MAX_ATTRIBUTE_LIST_MEMBERS, MAX_ATTRIBUTE_VALUE_BYTES, RESERVED_ATTRIBUTE_KEY_PREFIX,
+    AttributeKey, AttributeKeyValidationError, AttributeRevisionNo, AttributeValue,
+    AttributeValueValidationError, Attributes, AttributesError, MAX_ATTRIBUTES_TOTAL_BYTES,
+    MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
+    RESERVED_ATTRIBUTE_KEY_PREFIX,
 };
 pub use capability::{
     direct_put_checksum_feature, CapabilityDocument, CapabilityDocumentError,

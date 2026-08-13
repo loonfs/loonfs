@@ -4468,25 +4468,24 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         // The key ends at the first `=`, so the rest is the value.
         assert!(text.contains("attr.note: has=equals"), "{text}");
 
-        // A list value needs --attributes-json, and it round-trips as a
-        // joined line.
+        // Scripts can pass the same plain string map through --attributes-json.
         assert_success(&harness.run(&[
             "annotate",
             "--profile",
             profile,
             "/docs/file.txt",
             "--attributes-json",
-            r#"{"set": {"tags": {"kind": "string_list", "values": ["red", "blue"]}}}"#,
+            r#"{"set": {"tags": "red,blue"}}"#,
         ]));
         let with_list = harness.run(&["stat", "--profile", profile, "/docs/file.txt"]);
         assert_success(&with_list);
-        assert!(stdout_string(&with_list).contains("attr.tags: red, blue"));
+        assert!(stdout_string(&with_list).contains("attr.tags: red,blue"));
         let with_list_json =
             harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
         assert_success(&with_list_json);
         assert_eq!(
             json_data(&with_list_json)["attributes"]["attributes"]["tags"],
-            serde_json::json!({ "kind": "string_list", "values": ["red", "blue"] })
+            serde_json::json!("red,blue")
         );
 
         assert_success(&harness.run(&[
@@ -4501,10 +4500,7 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         assert_success(&removed);
         let entry = json_data(&removed);
         assert!(entry["attributes"]["attributes"]["owner"].is_null());
-        assert_eq!(
-            entry["attributes"]["attributes"]["note"]["value"],
-            "has=equals"
-        );
+        assert_eq!(entry["attributes"]["attributes"]["note"], "has=equals");
         // Three effective updates, three revisions.
         assert_eq!(entry["attributes"]["revision_no"], 3);
 

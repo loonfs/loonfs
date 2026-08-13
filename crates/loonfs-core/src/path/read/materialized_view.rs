@@ -970,9 +970,7 @@ mod tests {
                     path: AbsolutePath::parse("/docs/annotated").expect("path"),
                     set: BTreeMap::from([(
                         attribute_key("owner"),
-                        AttributeValue::String {
-                            value: "ops".to_owned(),
-                        },
+                        AttributeValue::parse("ops").expect("valid attribute value"),
                     )]),
                     remove: Vec::new(),
                     expected_inode_id: None,
@@ -1026,9 +1024,7 @@ mod tests {
                 .as_ref()
                 .and_then(|projection| projection.attributes.get(&attribute_key("owner")))
                 .cloned(),
-            Some(AttributeValue::String {
-                value: "ops".to_owned()
-            })
+            Some(AttributeValue::parse("ops").expect("valid attribute value"))
         );
 
         let bare = view

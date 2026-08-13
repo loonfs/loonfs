@@ -36,9 +36,7 @@ fn test_attributes(entries: &[(&str, &str)]) -> Attributes {
             .map(|(key, value)| {
                 (
                     AttributeKey::parse(key).expect("valid attribute key"),
-                    AttributeValue::String {
-                        value: (*value).to_owned(),
-                    },
+                    AttributeValue::parse(value).expect("valid attribute value"),
                 )
             })
             .collect(),

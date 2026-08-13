@@ -1359,7 +1359,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "committed_at_ms": 1752624000000,
   "attributes": {
     "revision_no": 3,
-    "attributes": { "owner": { "kind": "string", "value": "platform" } }
+    "attributes": { "owner": "platform" }
   }
 }
 ```
@@ -1707,8 +1707,8 @@ path resolves to:
       "kind": "update_attributes",
       "path": "/docs/report.txt",
       "set": {
-        "owner": { "kind": "string", "value": "ada" },
-        "tags": { "kind": "string_list", "values": ["draft", "review"] }
+        "owner": "ada",
+        "tags": "draft,review"
       },
       "remove": ["stage"],
       "expected_attributes_revision_no": 3
@@ -1716,6 +1716,21 @@ path resolves to:
   ]
 }
 ```
+
+An attribute map is a map from validated keys to plain UTF-8 strings. Values
+have no kind envelope or built-in list shape; a caller that needs a list
+chooses its own string encoding. The empty string is a stored value, not a
+tombstone. Only naming a key in `remove` deletes it.
+
+Every size is counted in logical UTF-8 bytes, without JSON or durable-encoding
+framing:
+
+| Constant | Value | Bound |
+| --- | --- | --- |
+| `MAX_ATTRIBUTE_KEY_BYTES` | 128 | Longest attribute key. |
+| `MAX_ATTRIBUTE_VALUE_BYTES` | 4,096 | Longest attribute value. |
+| `MAX_ATTRIBUTE_ENTRIES` | 100 | Most entries in one map. |
+| `MAX_ATTRIBUTES_TOTAL_BYTES` | 65,536 | Largest map, counting every key's bytes plus every value's bytes. |
 
 `set` writes each key over whatever the inode currently holds under it, and
 leaves keys it does not name alone. `remove` drops each key it names. Both
@@ -2089,7 +2104,7 @@ Event kinds:
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_name`, `to_parent_inode_id`, `to_name`. |
 | `deleted` | A file or directory subtree was deleted. The enclosing change's `seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `name`. |
-| `attributes_changed` | An inode's attributes changed. `attributes` is the complete map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
+| `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 
 Events name inodes and their parent-directory bindings rather than full
 paths; a consumer that needs paths can stat the inode or maintain its own

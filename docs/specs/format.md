@@ -2521,24 +2521,21 @@ in any byte name two different attributes. Keys beginning with `loonfs.` are
 reserved for system-owned attributes. The durable format carries a reserved
 key like any other; a caller may not write one.
 
-An attribute value is one of two kinds:
+An attribute value is one UTF-8 string with no kind envelope. It is free text:
+control characters and the empty string are legal. Empty is a stored value,
+not a tombstone; only an explicit remove operation deletes an attribute. A
+caller that needs a list chooses its own string encoding.
 
-| Kind | Meaning |
-| --- | --- |
-| **string** | One UTF-8 text value. |
-| **string_list** | An ordered list of UTF-8 text values. The order is the order the writer supplied. |
-
-Five named format constants bound every map. Every size is counted in logical
+Four named format constants bound every map. Every size is counted in logical
 UTF-8 bytes — the bytes of the text itself — so no encoder's framing changes
 what a namespace may hold:
 
 | Constant | Value | Bound |
 | --- | --- | --- |
 | `MAX_ATTRIBUTE_KEY_BYTES` | 128 | Longest attribute key. |
-| `MAX_ATTRIBUTE_VALUE_BYTES` | 4,096 | Longest string, and longest member of a string list. |
-| `MAX_ATTRIBUTE_LIST_MEMBERS` | 256 | Most members in one string list. |
+| `MAX_ATTRIBUTE_VALUE_BYTES` | 4,096 | Longest attribute value. |
 | `MAX_ATTRIBUTE_ENTRIES` | 100 | Most entries in one map. |
-| `MAX_ATTRIBUTES_TOTAL_BYTES` | 65,536 | Largest map, counting every key's bytes plus every value's bytes, with each list member counted. |
+| `MAX_ATTRIBUTES_TOTAL_BYTES` | 65,536 | Largest map, counting every key's bytes plus every value's bytes. |
 
 Durable state that breaks any of these bounds fails to decode. Nothing is
 truncated, dropped, or defaulted on a reader's behalf.

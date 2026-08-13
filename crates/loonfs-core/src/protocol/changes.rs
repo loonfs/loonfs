@@ -261,9 +261,7 @@ mod tests {
     fn attributes() -> Attributes {
         Attributes::new(std::collections::BTreeMap::from([(
             AttributeKey::parse("owner").expect("valid attribute key"),
-            AttributeValue::String {
-                value: "ada".to_owned(),
-            },
+            AttributeValue::parse("ada").expect("valid attribute value"),
         )]))
         .expect("valid attribute map")
     }

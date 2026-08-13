@@ -15,11 +15,9 @@ pub fn attribute_key(value: &str) -> AttributeKey {
     AttributeKey::parse(value).expect("valid attribute key")
 }
 
-/// Builds a one-string attribute value.
+/// Builds an attribute value.
 pub fn attribute_text(value: &str) -> AttributeValue {
-    AttributeValue::String {
-        value: value.to_owned(),
-    }
+    AttributeValue::parse(value).expect("valid attribute value")
 }
 
 /// Parses a content id that is expected to be valid test data.

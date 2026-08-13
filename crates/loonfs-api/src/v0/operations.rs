@@ -1183,9 +1183,7 @@ mod tests {
             path: path("/docs/a.txt"),
             set: BTreeMap::from([(
                 attribute_key("owner"),
-                AttributeValue::String {
-                    value: "ada".to_owned(),
-                },
+                AttributeValue::parse("ada").expect("valid attribute value"),
             )]),
             remove: vec![attribute_key("draft")],
             expected_inode_id: Some(InodeId(7)),
@@ -1196,7 +1194,7 @@ mod tests {
             serde_json::json!({
                 "kind": "update_attributes",
                 "path": "/docs/a.txt",
-                "set": {"owner": {"kind": "string", "value": "ada"}},
+                "set": {"owner": "ada"},
                 "remove": ["draft"],
                 "expected_inode_id": 7,
                 "expected_attributes_revision_no": 3
@@ -1210,9 +1208,7 @@ mod tests {
             path: path("/docs/a.txt"),
             set: BTreeMap::from([(
                 attribute_key("owner"),
-                AttributeValue::StringList {
-                    values: vec!["ada".to_owned(), "grace".to_owned()],
-                },
+                AttributeValue::parse("ada,grace").expect("valid attribute value"),
             )]),
             remove: Vec::new(),
             expected_inode_id: None,
@@ -1223,7 +1219,7 @@ mod tests {
             serde_json::json!({
                 "kind": "update_attributes",
                 "path": "/docs/a.txt",
-                "set": {"owner": {"kind": "string_list", "values": ["ada", "grace"]}}
+                "set": {"owner": "ada,grace"}
             })
         );
 
@@ -1247,18 +1243,18 @@ mod tests {
 
     #[test]
     fn update_attributes_validates_keys_and_values_during_deserialization() {
-        // The key grammar and the value kinds are enforced on the way in, so
+        // The key grammar and the value shape are enforced on the way in, so
         // a malformed update never reaches planning.
         for encoded in [
             serde_json::json!({
                 "kind": "update_attributes",
                 "path": "/docs/a.txt",
-                "set": {"": {"kind": "string", "value": "ada"}}
+                "set": {"": "ada"}
             }),
             serde_json::json!({
                 "kind": "update_attributes",
                 "path": "/docs/a.txt",
-                "set": {"owner": {"kind": "number", "value": "1"}}
+                "set": {"owner": {"kind": "string", "value": "ada"}}
             }),
             serde_json::json!({
                 "kind": "update_attributes",
@@ -1498,7 +1494,7 @@ mod tests {
                 "operations": [{
                     "kind": "update_attributes",
                     "path": "/docs/a.txt",
-                    "set": {"owner": {"kind": "string", "value": "ada"}},
+                    "set": {"owner": "ada"},
                     "expected_inode_id": 7
                 }]
             })
@@ -1512,10 +1508,6 @@ mod tests {
         let mut in_operation = valid();
         in_operation["operations"][0]["expectedAttributesRevisionNo"] = serde_json::json!(3);
 
-        let mut in_attribute_value = valid();
-        in_attribute_value["operations"][0]["set"]["owner"]["values"] =
-            serde_json::json!(["ada", "grace"]);
-
         let mut in_content_token = valid();
         in_content_token["content_tokens"][0]["expires_at_ms"] = serde_json::json!(1);
 
@@ -1525,7 +1517,6 @@ mod tests {
         for (level, body) in [
             ("the request root", at_root),
             ("an operation variant", in_operation),
-            ("a nested attribute value", in_attribute_value),
             ("a nested content token", in_content_token),
             ("a content ref below that", in_content_ref),
         ] {
