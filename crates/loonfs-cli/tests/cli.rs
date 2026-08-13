@@ -422,7 +422,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 
     let docs = harness.run(&["--json", "stat", "/docs"]);
     assert_success(&docs);
-    assert_eq!(json_data(&docs)["inode_kind"], "directory");
+    assert_eq!(json_data(&docs)["inode_kind"], "dir");
 
     let put = harness.run(&[
         "--json",
@@ -570,8 +570,8 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
     // The embedded backend carries the same structured details a server's
     // envelope would, so `--json` consumers read one contract from both
     // profiles.
-    assert_eq!(stale_error["details"]["expected_revision"], 1);
-    assert_eq!(stale_error["details"]["actual_revision"], 2);
+    assert_eq!(stale_error["details"]["expected_revision_no"], 1);
+    assert_eq!(stale_error["details"]["actual_revision_no"], 2);
     let cat = harness.run(&["cat", "/doc.txt"]);
     assert_success(&cat);
     assert_eq!(cat.stdout, b"v2");
@@ -3592,7 +3592,7 @@ fn mkdir_parents_get_noclobber_and_version() {
     assert_eq!(json_data(&with_parents)["target"], "demo:/a/b/c");
     let created_ancestor = harness.run(&["--json", "stat", "/a/b"]);
     assert_success(&created_ancestor);
-    assert_eq!(json_data(&created_ancestor)["inode_kind"], "directory");
+    assert_eq!(json_data(&created_ancestor)["inode_kind"], "dir");
 
     // get refuses to clobber a local file unless forced.
     let payload = harness.temp_dir.path().join("f.txt");
@@ -4941,7 +4941,7 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
             "namespace_id": "demo",
             "absolute_path": "/docs",
             "inode_id": 2,
-            "inode_kind": "directory",
+            "inode_kind": "dir",
             "head_seq": 20,
             "parent_inode_id": 1,
             "display_name": "docs",
@@ -4954,7 +4954,7 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
                 "namespace_id": "demo",
                 "absolute_path": "/docs/sub",
                 "inode_id": 3,
-                "inode_kind": "directory",
+                "inode_kind": "dir",
                 "head_seq": 20,
                 "parent_inode_id": 2,
                 "display_name": "sub",

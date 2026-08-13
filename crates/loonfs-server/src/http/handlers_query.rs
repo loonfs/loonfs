@@ -1,7 +1,7 @@
 //! The `query/v0` plane: derived-index reads.
 
 use super::handlers_uploads::current_unix_ms;
-use super::{authorize, AppJson, AppState, NamespaceIdPath};
+use super::{authorize, AppJson, AppState, NamespaceIdPath, OptionalAppJson};
 use crate::http::error::{status_for_core_error_code, ApiResponseError};
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -277,7 +277,7 @@ pub(super) async fn disable_grep_index(
         summary = "Collect grep-index garbage",
         description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. `max_objects` bounds the reads the pass spends and returns a `next_cursor` when keys remain; resuming re-reads liveness and the grep root, so a cursor only skips enumeration. Requires this deployment to maintain the grep index.",
         params(("namespace" = String, Path, description = "Namespace id")),
-        request_body = GrepGcRequest,
+        request_body = Option<GrepGcRequest>,
         responses(
             (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
             (status = 400, description = "Invalid budget or cursor", body = ApiError),
@@ -292,10 +292,11 @@ pub(super) async fn gc_grep_index(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-    AppJson(request): AppJson<GrepGcRequest>,
+    OptionalAppJson(request): OptionalAppJson<GrepGcRequest>,
 ) -> Result<Json<GrepGcResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace.into_id()?;
+    let request = request.unwrap_or_default();
     let report = state
         .grep_worker
         .as_ref()

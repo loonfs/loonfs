@@ -205,15 +205,19 @@ pub(crate) fn format_utc_ms(unix_ms: u64) -> String {
 fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
     use loonfs_api::v0::FilesystemChange;
     match event {
-        FilesystemChange::Created { name, .. } => format!("create '{name}'"),
+        FilesystemChange::Created { display_name, .. } => {
+            format!("create '{display_name}'")
+        }
         FilesystemChange::ContentChanged {
             inode_id,
             revision_no,
             ..
         } => format!("write inode {inode_id} rev #{}", revision_no.0),
         FilesystemChange::Moved {
-            from_name, to_name, ..
-        } => format!("move '{from_name}' -> '{to_name}'"),
+            from_display_name,
+            to_display_name,
+            ..
+        } => format!("move '{from_display_name}' -> '{to_display_name}'"),
         FilesystemChange::Deleted {
             inode_id,
             deleted_direntry,
@@ -221,7 +225,9 @@ fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
             Some(direntry) => format!("delete '{}'", direntry.display_name),
             None => format!("delete inode {inode_id}"),
         },
-        FilesystemChange::Undeleted { name, .. } => format!("undelete '{name}'"),
+        FilesystemChange::Undeleted { display_name, .. } => {
+            format!("undelete '{display_name}'")
+        }
         FilesystemChange::AttributesChanged {
             inode_id,
             attributes_revision_no,

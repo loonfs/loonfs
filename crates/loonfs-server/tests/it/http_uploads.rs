@@ -248,10 +248,10 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             inode_id: InodeId(2),
             inode_kind: InodeKind::File,
             parent_inode_id: InodeId(1),
-            name,
+            display_name,
             revision_no: Some(RevisionNo(1)),
             content_ref: Some(created_ref),
-        } if name.as_str() == "uploaded.txt" && *created_ref == content_ref
+        } if display_name.as_str() == "uploaded.txt" && *created_ref == content_ref
     ));
 
     let empty = harness

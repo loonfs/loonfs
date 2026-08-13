@@ -51,7 +51,7 @@ pub enum FilesystemChange {
         /// Directory the new entry was bound under.
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
-        name: DisplayName,
+        display_name: DisplayName,
         /// First revision number, for file creations.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revision_no: Option<RevisionNo>,
@@ -78,11 +78,11 @@ pub enum FilesystemChange {
         /// Directory that held the old binding.
         from_parent_inode_id: InodeId,
         /// Spelling of the old binding.
-        from_name: DisplayName,
+        from_display_name: DisplayName,
         /// Directory holding the new binding.
         to_parent_inode_id: InodeId,
         /// Spelling of the new binding.
-        to_name: DisplayName,
+        to_display_name: DisplayName,
     },
     /// A file or directory subtree was deleted. The enclosing change's
     /// `seq` is the deletion generation an undelete request passes as
@@ -104,7 +104,7 @@ pub enum FilesystemChange {
         /// Directory the recovered entry was bound under.
         parent_inode_id: InodeId,
         /// Spelling of the recovered binding.
-        name: DisplayName,
+        display_name: DisplayName,
     },
     /// An inode's attributes changed.
     #[cfg_attr(
@@ -178,27 +178,27 @@ mod tests {
             inode_id: InodeId(2),
             inode_kind: InodeKind::Directory,
             parent_inode_id: InodeId(1),
-            name: crate::DisplayName::parse("Docs").expect("valid display name"),
+            display_name: crate::DisplayName::parse("Docs").expect("valid display name"),
             revision_no: None,
             content_ref: None,
         };
         assert_eq!(
             serde_json::to_string(&created).expect("serialize created event"),
-            r#"{"kind":"created","inode_id":2,"inode_kind":"dir","parent_inode_id":1,"name":"Docs"}"#
+            r#"{"kind":"created","inode_id":2,"inode_kind":"dir","parent_inode_id":1,"display_name":"Docs"}"#
         );
 
         let created_file = FilesystemChange::Created {
             inode_id: InodeId(2),
             inode_kind: InodeKind::File,
             parent_inode_id: InodeId(1),
-            name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
             revision_no: Some(crate::RevisionNo(1)),
             content_ref: Some(sample_content_ref.clone()),
         };
         assert_eq!(
             serde_json::to_string(&created_file).expect("serialize created file event"),
             format!(
-                r#"{{"kind":"created","inode_id":2,"inode_kind":"file","parent_inode_id":1,"name":"a.txt","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
+                r#"{{"kind":"created","inode_id":2,"inode_kind":"file","parent_inode_id":1,"display_name":"a.txt","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
             )
         );
 
@@ -217,13 +217,13 @@ mod tests {
         let moved = FilesystemChange::Moved {
             inode_id: InodeId(2),
             from_parent_inode_id: InodeId(1),
-            from_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            from_display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
             to_parent_inode_id: InodeId(3),
-            to_name: crate::DisplayName::parse("b.txt").expect("valid display name"),
+            to_display_name: crate::DisplayName::parse("b.txt").expect("valid display name"),
         };
         assert_eq!(
             serde_json::to_string(&moved).expect("serialize moved event"),
-            r#"{"kind":"moved","inode_id":2,"from_parent_inode_id":1,"from_name":"a.txt","to_parent_inode_id":3,"to_name":"b.txt"}"#
+            r#"{"kind":"moved","inode_id":2,"from_parent_inode_id":1,"from_display_name":"a.txt","to_parent_inode_id":3,"to_display_name":"b.txt"}"#
         );
 
         let deleted = FilesystemChange::Deleted {
@@ -242,11 +242,11 @@ mod tests {
         let undeleted = FilesystemChange::Undeleted {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
-            name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
         };
         assert_eq!(
             serde_json::to_string(&undeleted).expect("serialize undeleted event"),
-            r#"{"kind":"undeleted","inode_id":2,"parent_inode_id":1,"name":"a.txt"}"#
+            r#"{"kind":"undeleted","inode_id":2,"parent_inode_id":1,"display_name":"a.txt"}"#
         );
 
         let attributes_changed = FilesystemChange::AttributesChanged {
