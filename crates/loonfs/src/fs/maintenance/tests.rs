@@ -103,7 +103,12 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
         .await
         .expect("create namespace");
     writer
-        .put_file_bytes(&namespace, "/live.txt", b"live", PutFileOptions::default())
+        .put_file_bytes(
+            &namespace,
+            "/live.txt",
+            b"live",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("write a live GC candidate");
 
@@ -167,7 +172,7 @@ async fn write_and_flush(
             namespace_id,
             path,
             path.as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("put a file");
@@ -210,7 +215,7 @@ async fn namespace_with_a_frozen_base(
                 namespace_id,
                 &format!("/docs/file-{index}.txt"),
                 &format!("/docs/moved-{index}.txt"),
-                MoveOptions::default(),
+                MoveOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("rename a file");

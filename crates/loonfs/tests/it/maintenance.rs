@@ -52,7 +52,7 @@ fn namespace_status_reports_wal_tail_segments() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -86,7 +86,7 @@ fn namespace_status_counts_wal_tail_without_reading_segments() {
             &namespace_id,
             &format!("/docs/hello-{revision}.txt"),
             format!("rev {revision}").as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
     }
@@ -141,7 +141,7 @@ fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
             &namespace_id,
             &format!("/docs/hello-{revision}.txt"),
             format!("rev {revision}").as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
     }
@@ -177,7 +177,7 @@ fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
         &namespace_id,
         "/docs/after-the-flush.txt",
         b"after",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file after the flush");
     let status = fs
@@ -238,7 +238,7 @@ fn maintenance_step_below_threshold_is_not_needed() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -262,7 +262,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -308,7 +308,7 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -353,7 +353,7 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
         &namespace_id,
         "/docs/second.txt",
         b"second",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put second file");
     fs.maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
@@ -421,7 +421,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         &namespace_id,
         "/docs/first.txt",
         b"first",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put first file");
     let flushed = fs
@@ -445,7 +445,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         &namespace_id,
         "/docs/second.txt",
         b"second",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put second file");
     let longhand = fs
@@ -505,7 +505,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put first file");
     fs.maintenance_step_namespace_blocking(&namespace_id, metadata_plan(1))
@@ -515,7 +515,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         &namespace_id,
         "/docs/second.txt",
         b"second",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put second file");
     let step = fs
@@ -588,7 +588,7 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
             &namespace_id,
             &format!("/docs/file-{index}.txt"),
             format!("file {index}").as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put a file");
         fs.flush_wal_blocking(&namespace_id)
@@ -618,6 +618,7 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
 fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitRequest {
     CommitRequest::single(
         CommitId::parse(commit_id).expect("valid commit id"),
+        loonfs_test_support::test_actor(),
         None,
         FilesystemOperation::CreateDirectory {
             path: parse_mutation_path(absolute_path).expect("valid mutation path"),
@@ -684,7 +685,7 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -718,7 +719,7 @@ fn checkpoint_and_retention_hooks_are_available() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -745,7 +746,7 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() 
         &source,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put source file");
     fs.fork_namespace_blocking(&source, &target)

@@ -150,7 +150,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
 fn replace_file_options() -> PutFileOptions {
     PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        ..PutFileOptions::default()
+        ..PutFileOptions::new(loonfs_test_support::test_actor())
     }
 }
 
@@ -949,7 +949,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
                     &namespace_id,
                     "/parked.txt",
                     b"body",
-                    PutFileOptions::default(),
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
                 )
                 .await
         }
@@ -1037,7 +1037,7 @@ async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
             &namespace_id,
             "/note.txt",
             b"observer-driven needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish file");
@@ -1305,8 +1305,11 @@ async fn runtime_created_state_is_readable_through_http() {
         b"hello from runtime",
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
-            commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
+                message: None,
+            },
             expected_revision_no: None,
         },
     )
@@ -1383,7 +1386,10 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     assert_api_error(
         harness
             .client
-            .delete_path(&target, &DeleteOptions::default())
+            .delete_path(
+                &target,
+                &DeleteOptions::new(loonfs_test_support::test_actor()),
+            )
             .await,
         404,
         "namespace_not_found",
@@ -1398,8 +1404,11 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                 &destination,
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
-                    commit_id: None,
-                    message: None,
+                    commit: loonfs_api::options::CommitOptions {
+                        actor: loonfs_test_support::test_actor(),
+                        commit_id: None,
+                        message: None,
+                    },
                 },
             )
             .await,
@@ -1442,7 +1451,10 @@ async fn http_delete_missing_path_returns_path_not_found() {
     assert_api_error(
         harness
             .client
-            .delete_path(&target, &DeleteOptions::default())
+            .delete_path(
+                &target,
+                &DeleteOptions::new(loonfs_test_support::test_actor()),
+            )
             .await,
         404,
         "path_not_found",
@@ -1504,8 +1516,11 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                 &to,
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
-                    commit_id: None,
-                    message: None,
+                    commit: loonfs_api::options::CommitOptions {
+                        actor: loonfs_test_support::test_actor(),
+                        commit_id: None,
+                        message: None,
+                    },
                 },
             )
             .await,
@@ -1569,8 +1584,11 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             &to,
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit_id: None,
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
             },
         )
         .await
@@ -1780,6 +1798,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let commits_url = format!("http://{addr}/v0/namespaces/demo/commits");
     let invalid_operation = r#"{
         "commit_id":"invalid-path",
+        "actor":{"kind":"service","id":"test-service"},
         "operations":[{"kind":"create_directory","path":"relative"}]
     }"#;
     let error = raw_agent()
@@ -1795,6 +1814,31 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         .send_string(invalid_operation)
         .expect_err("authorization should precede operation path decoding");
     expect_enveloped(error, 401, "unauthorized");
+
+    for (body, description) in [
+        (
+            r#"{"commit_id":"missing-actor","operations":[{"kind":"create_directory","path":"/docs"}]}"#,
+            "missing actor",
+        ),
+        (
+            r#"{"commit_id":"malformed-actor","actor":{"kind":"robot","id":"x"},"operations":[{"kind":"create_directory","path":"/docs"}]}"#,
+            "malformed actor",
+        ),
+    ] {
+        let error = raw_agent()
+            .post(&commits_url)
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string(body)
+            .expect_err(description);
+        expect_enveloped(error, 400, "invalid_request");
+        let error = raw_agent()
+            .post(&commits_url)
+            .set("content-type", "application/json")
+            .send_string(body)
+            .expect_err(description);
+        expect_enveloped(error, 401, "unauthorized");
+    }
 
     // Grep scope paths make the same boundary move and retain the same
     // invalid_request code.
@@ -2647,7 +2691,7 @@ async fn seed_grep_error_namespace(
             namespace_id,
             "/core.txt",
             b"core remains readable",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write core isolation sentinel");
@@ -2886,8 +2930,11 @@ async fn write_file_bytes(
         bytes,
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+                message: None,
+            },
             expected_revision_no: None,
         },
     )
@@ -2906,8 +2953,11 @@ async fn delete_path_recursive(
         absolute_path,
         DeleteOptions {
             behavior: DeleteDirectoryBehavior::Recursive,
-            commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+                message: None,
+            },
             expected_inode_id: None,
         },
     )

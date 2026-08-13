@@ -385,6 +385,7 @@ pub(super) async fn list_file_revisions(
         )
     )
 )]
+/// The server stores the actor from the request; the shared token does not verify it.
 pub(super) async fn apply_commit(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
@@ -393,6 +394,7 @@ pub(super) async fn apply_commit(
     let namespace_id = namespace.into_id()?;
     let ApiCommitRequest {
         commit_id,
+        actor,
         message,
         content_tokens,
         operations,
@@ -433,6 +435,7 @@ pub(super) async fn apply_commit(
     };
     let request = CommitRequest {
         commit_id,
+        actor,
         message,
         operations,
     };

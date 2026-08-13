@@ -74,7 +74,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             &namespace_id,
             "/tree/dir-000000/seed.txt",
             b"seed",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("seed the first manifest");
@@ -114,6 +114,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             candidates.push(loonfs::publish::CommitCandidate::prepared(
                 loonfs::publish::CommitRequest::single(
                     loonfs::CommitId::generate(),
+                    loonfs_test_support::test_actor(),
                     None,
                     loonfs::publish::FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/tree/dir-000000/file-{index:09}.txt"))

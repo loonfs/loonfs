@@ -43,6 +43,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
             vec![CommitCandidate::prepared(
                 CommitRequest::single(
                     loonfs_api::CommitId::generate(),
+                    loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(absolute_path).expect("path"),

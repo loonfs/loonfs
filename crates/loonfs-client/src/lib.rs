@@ -96,8 +96,8 @@ pub use ClientError as Error;
 /// Per-operation options, defined once in `loonfs-api` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_api::options::{
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions,
+    MoveOptions, PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
     UpdateAttributesOptions,
 };
 
@@ -2164,13 +2164,18 @@ impl Client {
         options: &PutFileOptions,
         uploaded: ContentEvidence<'_>,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let commit_id = options
+            .commit
+            .commit_id
+            .clone()
+            .unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 spec.namespace(),
                 &CommitRequest {
                     commit_id: commit_id.clone(),
-                    message: options.message.clone(),
+                    actor: options.commit.actor.clone(),
+                    message: options.commit.message.clone(),
                     content_tokens: staged.validated_content_token.into_iter().collect(),
                     operations: vec![FilesystemOperation::PutFile {
                         path: spec.absolute_path().clone(),
@@ -2228,13 +2233,18 @@ impl Client {
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let commit_id = options
+            .commit
+            .commit_id
+            .clone()
+            .unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 spec.namespace(),
                 &CommitRequest::single(
                     commit_id,
-                    options.message.clone(),
+                    options.commit.actor.clone(),
+                    options.commit.message.clone(),
                     FilesystemOperation::CreateDirectory {
                         path: spec.absolute_path().clone(),
                         parents: options.parents,
@@ -2251,13 +2261,18 @@ impl Client {
         spec: &NamespacePath,
         options: &DeleteOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let commit_id = options
+            .commit
+            .commit_id
+            .clone()
+            .unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 spec.namespace(),
                 &CommitRequest::single(
                     commit_id,
-                    options.message.clone(),
+                    options.commit.actor.clone(),
+                    options.commit.message.clone(),
                     FilesystemOperation::DeletePath {
                         path: spec.absolute_path().clone(),
                         behavior: options.behavior,
@@ -2276,13 +2291,18 @@ impl Client {
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let commit_id = options
+            .commit
+            .commit_id
+            .clone()
+            .unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 spec.namespace(),
                 &CommitRequest::single(
                     commit_id,
-                    options.message.clone(),
+                    options.commit.actor.clone(),
+                    options.commit.message.clone(),
                     FilesystemOperation::UpdateAttributes {
                         path: spec.absolute_path().clone(),
                         set: options.set.clone(),
@@ -2310,13 +2330,18 @@ impl Client {
                 to.namespace()
             )));
         }
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let commit_id = options
+            .commit
+            .commit_id
+            .clone()
+            .unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 from.namespace(),
                 &CommitRequest::single(
                     commit_id,
-                    options.message.clone(),
+                    options.commit.actor.clone(),
+                    options.commit.message.clone(),
                     FilesystemOperation::MovePath {
                         from_path: from.absolute_path().clone(),
                         to_path: to.absolute_path().clone(),
@@ -2342,13 +2367,18 @@ impl Client {
                 to.namespace()
             )));
         }
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let commit_id = options
+            .commit
+            .commit_id
+            .clone()
+            .unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 from.namespace(),
                 &CommitRequest::single(
                     commit_id,
-                    options.message.clone(),
+                    options.commit.actor.clone(),
+                    options.commit.message.clone(),
                     FilesystemOperation::CopyPath {
                         from_path: from.absolute_path().clone(),
                         to_path: to.absolute_path().clone(),
@@ -2373,13 +2403,18 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         // An absent destination restores in place: the entry re-binds under
         // the parent and name its deletion recorded.
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let commit_id = options
+            .commit
+            .commit_id
+            .clone()
+            .unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 namespace,
                 &CommitRequest::single(
                     commit_id,
-                    options.message.clone(),
+                    options.commit.actor.clone(),
+                    options.commit.message.clone(),
                     FilesystemOperation::Undelete {
                         inode_id,
                         deleted_at_seq,
@@ -2398,13 +2433,18 @@ impl Client {
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
+        let commit_id = options
+            .commit
+            .commit_id
+            .clone()
+            .unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 spec.namespace(),
                 &CommitRequest::single(
                     commit_id,
-                    options.message.clone(),
+                    options.commit.actor.clone(),
+                    options.commit.message.clone(),
                     FilesystemOperation::RestoreRevision {
                         path: spec.absolute_path().clone(),
                         source_revision_no,
@@ -2742,14 +2782,11 @@ mod tests {
         let spec = NamespacePath::parse("demo", "/docs").expect("valid namespace path");
 
         let actual = client
-            .create_directory(
-                &spec,
-                &CreateDirectoryOptions {
-                    commit_id: Some(commit_id),
-                    message: None,
-                    ..CreateDirectoryOptions::default()
-                },
-            )
+            .create_directory(&spec, &{
+                let mut options = CreateDirectoryOptions::new(loonfs_test_support::test_actor());
+                options.commit.commit_id = Some(commit_id);
+                options
+            })
             .await
             .expect("commit-id mutation should retry");
         assert_eq!(actual, response);

@@ -17,11 +17,10 @@ use std::collections::BTreeMap;
 use tempfile::tempdir;
 
 fn owner_update() -> UpdateAttributesOptions {
-    UpdateAttributesOptions {
-        set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
-        commit_id: Some(CommitId::parse("annotate-report").expect("commit id")),
-        ..UpdateAttributesOptions::default()
-    }
+    let mut options = UpdateAttributesOptions::new(loonfs_test_support::test_actor());
+    options.set = BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]);
+    options.commit.commit_id = Some(CommitId::parse("annotate-report").expect("commit id"));
+    options
 }
 
 /// The convenience call and the hand-built one-operation commit are the same
@@ -37,14 +36,15 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
         &namespace_id,
         "/docs/report.txt",
         b"body",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
     let options = owner_update();
     let explicit = CommitRequest::single(
-        options.commit_id.clone().expect("commit id"),
-        options.message.clone(),
+        options.commit.commit_id.clone().expect("commit id"),
+        options.commit.actor.clone(),
+        options.commit.message.clone(),
         FilesystemOperation::UpdateAttributes {
             path: parse_mutation_path("/docs/report.txt").expect("path"),
             set: options.set.clone(),
@@ -55,6 +55,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     );
     let explicit_fingerprint = semantic_commit_fingerprint(
         &namespace_id,
+        &explicit.actor,
         explicit.message.as_deref(),
         &explicit.operations,
     )
@@ -81,6 +82,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     // the id alone.
     let different = CommitRequest::single(
         CommitId::parse("annotate-report").expect("commit id"),
+        loonfs_test_support::test_actor(),
         None,
         FilesystemOperation::UpdateAttributes {
             path: parse_mutation_path("/docs/report.txt").expect("path"),
@@ -93,6 +95,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     assert_ne!(
         semantic_commit_fingerprint(
             &namespace_id,
+            &different.actor,
             different.message.as_deref(),
             &different.operations
         )
@@ -121,7 +124,7 @@ fn a_write_is_visible_to_the_next_stat() {
         &namespace_id,
         "/docs/report.txt",
         b"body",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
@@ -157,7 +160,7 @@ fn a_write_is_visible_to_the_next_stat() {
         "/docs/report.txt",
         UpdateAttributesOptions {
             remove: vec![attribute_key("owner")],
-            ..UpdateAttributesOptions::default()
+            ..UpdateAttributesOptions::new(loonfs_test_support::test_actor())
         },
     ))
     .expect("clear");
@@ -182,8 +185,13 @@ fn read_options_project_grouped_attributes_or_none() {
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in ["/docs/report.txt", "/docs/notes.txt"] {
-        fs.put_file_bytes_blocking(&namespace_id, path, b"body", PutFileOptions::default())
-            .expect("put file");
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            b"body",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
     }
     block_on(
         fs.writer

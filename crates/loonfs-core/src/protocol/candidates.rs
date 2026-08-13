@@ -168,6 +168,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         request: CoreCommitRequest {
             namespace_id: namespace_id.clone(),
             commit_id: mutation.commit_id.clone(),
+            actor: mutation.actor.clone(),
             writer_epoch: view.acquired_writer.writer_epoch,
             ops: planned.ops,
             message: mutation.message.clone(),

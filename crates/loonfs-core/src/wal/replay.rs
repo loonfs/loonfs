@@ -2,7 +2,7 @@
 
 pub(crate) use super::frame::WalReplayError;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
-use crate::metadata::MetadataState;
+use crate::metadata::{CommitReceiptRecord, MetadataState};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, InodeId, NamespaceId, WriterEpoch};
@@ -45,11 +45,14 @@ where
         current_head.next_inode_id =
             replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
         current_metadata_state.apply_committed_wal_record_parts_mut(
-            record.seq,
-            record.committed_at_ms,
-            record.commit_id,
-            record.semantic_commit_fingerprint,
-            record.message,
+            CommitReceiptRecord {
+                commit_id: record.commit_id.clone(),
+                actor: record.actor.clone(),
+                semantic_commit_fingerprint: record.semantic_commit_fingerprint.to_owned(),
+                committed_seq: record.seq,
+                committed_at_ms: record.committed_at_ms,
+                message: record.message.map(str::to_owned),
+            },
             &record.deltas,
         );
     }

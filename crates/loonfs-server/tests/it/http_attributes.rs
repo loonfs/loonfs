@@ -30,7 +30,11 @@ async fn served_namespace(harness: &crate::common::TestServer) {
     for absolute_path in ["/docs/report.txt", "/docs/notes.txt"] {
         harness
             .client
-            .put_file_bytes(&path(absolute_path), b"body", &PutFileOptions::default())
+            .put_file_bytes(
+                &path(absolute_path),
+                b"body",
+                &PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("put file");
     }
@@ -40,7 +44,7 @@ async fn served_namespace(harness: &crate::common::TestServer) {
             &path("/docs/report.txt"),
             &UpdateAttributesOptions {
                 set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
-                ..UpdateAttributesOptions::default()
+                ..UpdateAttributesOptions::new(loonfs_test_support::test_actor())
             },
         )
         .await

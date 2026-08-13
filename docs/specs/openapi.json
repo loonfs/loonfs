@@ -2813,6 +2813,39 @@
         "description": "Validated complete absolute namespace path, serialized as a plain string.",
         "example": "/docs/report.txt"
       },
+      "ActorId": {
+        "type": "string",
+        "description": "Opaque hosting-platform actor id: non-empty, at most 256 UTF-8 bytes, without leading or trailing whitespace or control characters.",
+        "example": "usr_8f3c"
+      },
+      "ActorKind": {
+        "type": "string",
+        "description": "The type of actor responsible for a commit.",
+        "enum": [
+          "user",
+          "service",
+          "system"
+        ]
+      },
+      "ActorRef": {
+        "type": "object",
+        "description": "Identifies the user, service, or system responsible for a commit.\n\nLoonFS stores this value as provided. It does not authenticate the actor or\nlook up profile information.",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ActorId",
+            "description": "A stable identifier supplied by the application."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ActorKind",
+            "description": "The type of actor."
+          }
+        },
+        "additionalProperties": false
+      },
       "AdvanceRetentionResponse": {
         "type": "object",
         "description": "Result of advancing the retention floor.",
@@ -3468,12 +3501,17 @@
       },
       "CommitRequest": {
         "type": "object",
-        "description": "One commit: an idempotency key, an optional annotation, and an ordered\nlist of path operations that commit together (API spec, section 5.1).\n\nA one-operation request is the one-element case of this shape, not a\ndifferent request: a convenience call and a batch produce the same commit\nand the same fingerprint.\n\nUnknown fields are rejected here for the same reason they are on\n[`FilesystemOperation`]: the fields a typo can hide are the ones that\ndecide whether the commit is guarded at all.",
+        "description": "A request to commit one or more filesystem operations.\n\nOperations run in order and either all succeed or none are committed. A\nrequest with one operation uses the same fingerprint rules as a batch.\n\nUnknown fields are rejected here for the same reason they are on\n[`FilesystemOperation`]: the fields a typo can hide are the ones that\ndecide whether the commit is guarded at all.",
         "required": [
           "commit_id",
+          "actor",
           "operations"
         ],
         "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the commit, as supplied by the application."
+          },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Caller-supplied idempotency key for the whole request."
@@ -3531,10 +3569,15 @@
         "required": [
           "committed_seq",
           "commit_id",
+          "actor",
           "committed_at_ms",
           "events"
         ],
         "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the commit, as supplied by the application."
+          },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Client idempotency key for this logical commit."

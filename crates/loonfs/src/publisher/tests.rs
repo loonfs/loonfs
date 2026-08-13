@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
-use loonfs_api::{AbsolutePath, ChangeSeq, DestinationBehavior};
+use loonfs_api::{AbsolutePath, ActorId, ActorRef, ChangeSeq, DestinationBehavior};
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -445,6 +445,7 @@ fn create_directory_request(
 ) -> CommitRequest {
     CommitRequest::single(
         CommitId::parse(commit_id.into()).expect("valid commit id"),
+        loonfs_test_support::test_actor(),
         None,
         FilesystemOperation::CreateDirectory {
             path: AbsolutePath::parse(format!("/{}", directory_name.as_ref()))
@@ -1359,8 +1360,12 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     };
     store.wait_until_blocked().await;
 
-    let request_a = create_directory_request("req-a", "alpha");
-    let request_b = create_directory_request("req-b", "beta");
+    let actor_a = ActorRef::user(ActorId::parse("user-a").expect("actor id"));
+    let actor_b = ActorRef::service(ActorId::parse("service-b").expect("actor id"));
+    let mut request_a = create_directory_request("req-a", "alpha");
+    request_a.actor = actor_a.clone();
+    let mut request_b = create_directory_request("req-b", "beta");
+    request_b.actor = actor_b.clone();
     let response_a = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();
@@ -1404,6 +1409,40 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 2);
+
+    let mut batched_actors = std::collections::BTreeMap::new();
+    for key in &wal_keys {
+        let bytes = shared
+            .get(key, None)
+            .await
+            .expect("read WAL segment")
+            .expect("WAL segment exists");
+        let segment = decode_wal_segment_envelope_zstd(&bytes).expect("decode WAL segment");
+        if segment.payload.records.len() == 2 {
+            for record in segment.payload.records {
+                batched_actors.insert(record.commit_id.to_string(), record.actor);
+            }
+        }
+    }
+    assert_eq!(batched_actors.get("req-a"), Some(&actor_a));
+    assert_eq!(batched_actors.get("req-b"), Some(&actor_b));
+
+    let changes = writer
+        .reader()
+        .list_changes(
+            &namespace_id,
+            ChangeSeq(0),
+            crate::ListChangesOptions::default(),
+        )
+        .await
+        .expect("read change feed");
+    let feed_actors = changes
+        .changes
+        .into_iter()
+        .map(|change| (change.commit_id.to_string(), change.actor))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(feed_actors.get("req-a"), Some(&actor_a));
+    assert_eq!(feed_actors.get("req-b"), Some(&actor_b));
 }
 
 /// A content-free submission and a submission carrying prepared content
@@ -1453,6 +1492,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     let plain = create_directory_request("plain-mutation", "alpha");
     let prepared = CommitRequest::single(
         CommitId::parse("prepared-put").expect("valid commit id"),
+        loonfs_test_support::test_actor(),
         None,
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/file.txt").expect("path"),

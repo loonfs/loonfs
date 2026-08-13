@@ -1133,6 +1133,7 @@ mod tests {
                     root: "/tmp/store".to_owned(),
                     key_prefix: None,
                 },
+                actor: crate::config::ProfileActorConfig::default(),
                 default_namespace: Some("demo".to_owned()),
                 writer_id: None,
             }),

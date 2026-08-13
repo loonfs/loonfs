@@ -18,6 +18,7 @@ use loonfs::{
     ReorganizeStepOutcome, RevisionNo,
 };
 use loonfs_api::ErrorCode;
+use loonfs_api::{ActorId, ActorRef};
 use tempfile::tempdir;
 
 const PATH: &str = "/docs/retry.txt";
@@ -35,17 +36,19 @@ fn streamed(payload: &[u8], chunk_bytes: usize) -> ByteStream {
 fn options(commit_id: &CommitId) -> PutFileOptions {
     PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        commit_id: Some(commit_id.clone()),
-        message: None,
+        commit: loonfs_api::options::CommitOptions {
+            actor: loonfs_test_support::test_actor(),
+            commit_id: Some(commit_id.clone()),
+            message: None,
+        },
         expected_revision_no: None,
     }
 }
 
 fn options_with_message(commit_id: &CommitId, message: Option<&str>) -> PutFileOptions {
-    PutFileOptions {
-        message: message.map(ToOwned::to_owned),
-        ..options(commit_id)
-    }
+    let mut options = options(commit_id);
+    options.commit.message = message.map(ToOwned::to_owned);
+    options
 }
 
 /// What the feed says the commit at a sequence was annotated with.
@@ -73,6 +76,37 @@ async fn namespace(runtime: &TestRuntime) -> NamespaceId {
         .await
         .expect("create namespace");
     namespace_id
+}
+
+#[tokio::test]
+async fn restart_replays_the_commit_actor_from_the_wal() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let actor = ActorRef::system(ActorId::parse("replay-worker").expect("actor id"));
+    let committed = runtime
+        .writer
+        .create_directory(
+            &namespace_id,
+            "/replayed",
+            CreateDirectoryOptions::new(actor.clone()),
+        )
+        .await
+        .expect("commit attributed directory");
+    drop(runtime);
+
+    let reopened = open_runtime_async(store(temp_dir.path()), "writer-b").await;
+    let page = reopened
+        .reader
+        .list_changes(&namespace_id, ChangeSeq(0), ListChangesOptions::default())
+        .await
+        .expect("replay change feed after restart");
+    let change = page
+        .changes
+        .into_iter()
+        .find(|change| change.committed_seq == committed.committed_seq)
+        .expect("committed change");
+    assert_eq!(change.actor, actor);
 }
 
 /// The retry that motivates all of this: the same command run twice with
@@ -291,6 +325,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
             &namespace_id,
             CommitRequest {
                 commit_id: commit_id.clone(),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     FilesystemOperation::PutFile {
@@ -471,8 +506,11 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
     let namespace_id = namespace(&runtime).await;
     let commit_id = CommitId::parse("pinned-mkdir").expect("valid commit id");
     let options = |message: &str| CreateDirectoryOptions {
-        commit_id: Some(commit_id.clone()),
-        message: Some(message.to_owned()),
+        commit: loonfs_api::options::CommitOptions {
+            actor: loonfs_test_support::test_actor(),
+            commit_id: Some(commit_id.clone()),
+            message: Some(message.to_owned()),
+        },
         parents: true,
     };
 
@@ -508,6 +546,7 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
     let request = |message: &str| {
         CommitRequest::single(
             commit_id.clone(),
+            loonfs_test_support::test_actor(),
             Some(message.to_owned()),
             FilesystemOperation::CreateDirectory {
                 path: parse_mutation_path("/direct").expect("path"),

@@ -72,6 +72,7 @@ impl VisibilityHarness {
     ) -> Result<CommitResponse, CoreError> {
         self.publish(CommitCandidate::new(CommitRequest::single(
             CommitId::generate(),
+            loonfs_test_support::test_actor(),
             None,
             operation,
         )))
@@ -104,6 +105,7 @@ impl VisibilityHarness {
         self.publish(CommitCandidate::prepared(
             CommitRequest::single(
                 CommitId::generate(),
+                loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(path).expect("valid path"),
@@ -182,6 +184,7 @@ impl VisibilityHarness {
     ) -> Result<CommitResponse, CoreError> {
         self.publish(CommitCandidate::new(CommitRequest {
             commit_id: CommitId::generate(),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             operations,
         }))

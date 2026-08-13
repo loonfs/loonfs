@@ -78,7 +78,7 @@ fn reads_name_their_anchor_and_the_lookup_that_came_back_empty() {
                 &namespace_id,
                 "/docs/report.txt",
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file");

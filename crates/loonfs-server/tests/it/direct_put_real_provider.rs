@@ -222,6 +222,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         namespace,
         &CommitRequest {
             commit_id: CommitId::parse("direct-put-e2e").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             content_tokens: vec![ValidatedContentToken {
                 content_ref: content_ref.clone(),
@@ -1215,6 +1216,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         namespace,
         &CommitRequest {
             commit_id: CommitId::parse("direct-multipart-e2e").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             content_tokens: vec![ValidatedContentToken {
                 content_ref: content_ref.clone(),
@@ -1273,8 +1275,11 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             &payload,
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
+                    message: None,
+                },
                 expected_revision_no: None,
             },
         )
@@ -1287,8 +1292,11 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             &payload,
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
+                    message: None,
+                },
                 expected_revision_no: None,
             },
         )
@@ -1371,8 +1379,11 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
 fn put_options(commit_id: &str) -> loonfs_client::PutFileOptions {
     loonfs_client::PutFileOptions {
         behavior: DestinationBehavior::NoReplace,
-        commit_id: Some(CommitId::parse(commit_id).expect("valid commit id")),
-        message: None,
+        commit: loonfs_api::options::CommitOptions {
+            actor: loonfs_test_support::test_actor(),
+            commit_id: Some(CommitId::parse(commit_id).expect("valid commit id")),
+            message: None,
+        },
         expected_revision_no: None,
     }
 }

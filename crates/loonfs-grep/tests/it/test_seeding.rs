@@ -1,9 +1,7 @@
 //! Namespace seeding for this crate's integration tests, through the same
 //! public writer any embedded host uses.
 
-use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, FsWriter, PutFileOptions, SharedObjectStore,
-};
+use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions, SharedObjectStore};
 use loonfs_api::{CommitId, NamespaceId};
 
 pub(crate) async fn writer(
@@ -34,16 +32,11 @@ pub(crate) async fn put_file(
     commit_id: &str,
 ) {
     writer
-        .put_file_bytes(
-            namespace_id,
-            path,
-            bytes,
-            PutFileOptions {
-                commit_id: Some(CommitId::parse(commit_id).expect("commit id")),
-                behavior: DestinationBehavior::NoReplace,
-                ..PutFileOptions::default()
-            },
-        )
+        .put_file_bytes(namespace_id, path, bytes, {
+            let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+            options.commit.commit_id = Some(CommitId::parse(commit_id).expect("commit id"));
+            options
+        })
         .await
         .expect("publish file");
 }

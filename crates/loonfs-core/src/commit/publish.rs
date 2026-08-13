@@ -245,10 +245,11 @@ mod tests {
         CommitPlan {
             namespace_id,
             commit_id: CommitId::parse("publish-plan").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             message: None,
             semantic_identity: CommitFingerprint::new_unchecked(
-                "v0:sha256:publish-plan".to_owned(),
+                "v1:sha256:publish-plan".to_owned(),
             ),
             apply_after_seq: ChangeSeq(assigned_seq.0.saturating_sub(1)),
             assigned_seq,
@@ -272,6 +273,7 @@ mod tests {
                     seq,
                     commit_id: CommitId::parse(format!("publish-record-{index}"))
                         .expect("valid commit id"),
+                    actor: loonfs_test_support::test_actor(),
                     semantic_commit_fingerprint: format!("fingerprint-{index}"),
                     committed_at_ms: 4_200,
                     message: None,

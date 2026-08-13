@@ -25,12 +25,16 @@ fn delete_options_select_recursive_behavior() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
 
     let error = fs
-        .delete_path_blocking(&namespace_id, "/docs", DeleteOptions::default())
+        .delete_path_blocking(
+            &namespace_id,
+            "/docs",
+            DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect_err("non-recursive delete should reject non-empty directory");
     assert!(matches!(
         error,
@@ -42,8 +46,11 @@ fn delete_options_select_recursive_behavior() {
         "/docs",
         DeleteOptions {
             behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-            commit_id: None,
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: None,
+                message: None,
+            },
             expected_inode_id: None,
         },
     )
@@ -68,7 +75,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         &namespace_id,
         "/docs/report.txt",
         b"draft one",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put revision one");
     fs.put_file_bytes_blocking(
@@ -77,8 +84,11 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         b"draft two",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit_id: None,
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: None,
+                message: None,
+            },
             expected_revision_no: None,
         },
     )
@@ -89,7 +99,11 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         .inode_id;
 
     let first_deletion = fs
-        .delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+        .delete_path_blocking(
+            &namespace_id,
+            "/docs/report.txt",
+            DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("delete file")
         .committed_seq;
 
@@ -100,7 +114,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         inode_id,
         first_deletion,
         Some("/docs/recovered.txt"),
-        loonfs::UndeleteOptions::default(),
+        loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect("undelete");
     let recovered = fs
@@ -131,7 +145,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         inode_id,
         first_deletion,
         Some("/docs/again.txt"),
-        loonfs::UndeleteOptions::default(),
+        loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect_err("double undelete should conflict");
     assert!(matches!(
@@ -145,7 +159,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         .delete_path_blocking(
             &namespace_id,
             "/docs/recovered.txt",
-            DeleteOptions::default(),
+            DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("delete recovered file again")
         .committed_seq;
@@ -154,7 +168,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         inode_id,
         first_deletion,
         Some("/docs/stale.txt"),
-        loonfs::UndeleteOptions::default(),
+        loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect_err("stale generation handle must not clear the newer deletion");
     match &error {
@@ -175,7 +189,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         inode_id,
         second_deletion,
         Some("/docs/report.txt"),
-        loonfs::UndeleteOptions::default(),
+        loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect("undelete the active generation");
     assert_eq!(
@@ -197,7 +211,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         &namespace_id,
         "/docs/notes/a.txt",
         b"alpha",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put nested file");
     let directory_inode = fs
@@ -215,8 +229,11 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
             "/docs/notes",
             DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-                commit_id: None,
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
                 expected_inode_id: None,
             },
         )
@@ -230,7 +247,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         child_inode,
         deletion,
         Some("/docs/a-alone.txt"),
-        loonfs::UndeleteOptions::default(),
+        loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect_err("child of a deleted directory is not the deletion root");
     assert!(matches!(
@@ -243,7 +260,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         directory_inode,
         deletion,
         Some("/docs/notes"),
-        loonfs::UndeleteOptions::default(),
+        loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect("undelete the subtree root");
     assert_eq!(
@@ -265,14 +282,14 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
         &namespace_id,
         "/docs/notes/secret.txt",
         b"independently deleted",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put nested file");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/notes/kept.txt",
         b"kept",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put sibling file");
     let directory_inode = fs
@@ -284,7 +301,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
     fs.delete_path_blocking(
         &namespace_id,
         "/docs/notes/secret.txt",
-        DeleteOptions::default(),
+        DeleteOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("delete child independently");
     let ancestor_deletion = fs
@@ -293,8 +310,11 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
             "/docs/notes",
             DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-                commit_id: None,
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
                 expected_inode_id: None,
             },
         )
@@ -308,7 +328,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
         directory_inode,
         ancestor_deletion,
         Some("/docs/notes"),
-        loonfs::UndeleteOptions::default(),
+        loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect("undelete the ancestor");
     assert_eq!(
@@ -340,7 +360,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             &namespace_id,
             "/docs/report.txt",
             b"persisted",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
         let inode_id = fs
@@ -348,7 +368,11 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("stat")
             .inode_id;
         let deletion = fs
-            .delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+            .delete_path_blocking(
+                &namespace_id,
+                "/docs/report.txt",
+                DeleteOptions::new(loonfs_test_support::test_actor()),
+            )
             .expect("delete")
             .committed_seq;
         block_on(fs.writer.undelete(
@@ -356,7 +380,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             inode_id,
             deletion,
             Some("/docs/report.txt"),
-            loonfs::UndeleteOptions::default(),
+            loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
         ))
         .expect("undelete before checkpoint");
         // The default threshold (32 segments) would answer NotNeeded for
@@ -390,7 +414,11 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("stat")
             .inode_id;
         let second_deletion = fs
-            .delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+            .delete_path_blocking(
+                &namespace_id,
+                "/docs/report.txt",
+                DeleteOptions::new(loonfs_test_support::test_actor()),
+            )
             .expect("delete again")
             .committed_seq;
         assert!(second_deletion > deletion);
@@ -409,7 +437,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             inode_id,
             second_deletion,
             Some("/docs/report.txt"),
-            loonfs::UndeleteOptions::default(),
+            loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
         ))
         .expect("undelete a checkpointed deletion after reopen");
         let step = fs
@@ -442,7 +470,7 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
         &namespace_id,
         "/docs/report.txt",
         b"feed",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
     let inode_id = fs
@@ -450,7 +478,11 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
         .expect("stat")
         .inode_id;
     let deletion = fs
-        .delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+        .delete_path_blocking(
+            &namespace_id,
+            "/docs/report.txt",
+            DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("delete")
         .committed_seq;
     block_on(fs.writer.undelete(
@@ -458,7 +490,7 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
         inode_id,
         deletion,
         Some("/docs/report.txt"),
-        loonfs::UndeleteOptions::default(),
+        loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
     .expect("undelete");
 
@@ -508,13 +540,13 @@ fn the_feed_names_deleted_entries_and_their_writer() {
         &namespace_id,
         "/docs/Quarterly Report.PDF",
         b"body",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put");
     fs.delete_path_blocking(
         &namespace_id,
         "/docs/Quarterly Report.PDF",
-        DeleteOptions::default(),
+        DeleteOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("delete");
 
@@ -552,7 +584,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
         &namespace_id,
         "/docs/report.txt",
         b"cycled",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
     let entry = fs
@@ -569,6 +601,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
             &namespace_id,
             CommitRequest {
                 commit_id: CommitId::parse("same-commit-cycle").expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     FilesystemOperation::DeletePath {
@@ -611,7 +644,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
         &namespace_id,
         "/docs/report.txt",
         b"original",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
     let inode_id = fs
@@ -627,8 +660,11 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
             "/docs/report.txt",
             DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
-                commit_id: None,
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
                 expected_inode_id: Some(InodeId(inode_id.0 + 1)),
             },
         )
@@ -650,8 +686,11 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
         "/docs/report.txt",
         DeleteOptions {
             behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
-            commit_id: None,
-            message: None,
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: None,
+                message: None,
+            },
             expected_inode_id: Some(inode_id),
         },
     )

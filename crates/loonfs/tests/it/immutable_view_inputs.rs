@@ -40,7 +40,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
                 namespace_id,
                 &format!("/docs/file-{index}.txt"),
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("seed file");
@@ -119,7 +119,7 @@ async fn warm_writer_stops_fetching_immutable_view_inputs() {
             &namespace_id,
             "/docs/file-5.txt",
             b"body",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("first write");
@@ -134,7 +134,7 @@ async fn warm_writer_stops_fetching_immutable_view_inputs() {
             &namespace_id,
             "/docs/file-6.txt",
             b"body",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("second write");

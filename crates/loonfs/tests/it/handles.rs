@@ -63,7 +63,7 @@ async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &Namespac
                 namespace_id,
                 &format!("/docs/file-{round}.txt"),
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file");
@@ -82,7 +82,7 @@ async fn fill_wal_tail_to_write_stop(writer: &FsWriter, namespace_id: &Namespace
                 namespace_id,
                 &format!("/write-stop/file-{round}.txt"),
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file up to the write-stop boundary");
@@ -134,7 +134,7 @@ fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
                     &namespace_id,
                     &format!("/docs/held/file-{round}.txt"),
                     b"body",
-                    PutFileOptions::default(),
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
                 )
                 .await
                 .expect("put file during held step");
@@ -266,7 +266,7 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
                 &write_stopped_namespace,
                 "/write-stop/rejected.txt",
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect_err("writes against a tail at the hard limit must reject");
@@ -283,7 +283,7 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
                 &write_stopped_namespace,
                 "/write-stop/rejected.txt",
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("the queued step must unblock writes without another publish");
@@ -374,7 +374,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
                 &queued_namespace,
                 "/after-close.txt",
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect_err("a mutation after shutdown must be refused");
@@ -414,7 +414,7 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
                 &namespace_id,
                 "/docs/hello.txt",
                 b"hello",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file");
@@ -487,7 +487,7 @@ fn standalone_reader_builds_without_writer_identity() {
                 &namespace_id,
                 "/docs/hello.txt",
                 b"hello",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file");
@@ -578,7 +578,7 @@ fn admin_over_writer_core_invalidates_shared_caches() {
                 &namespace_id,
                 "/docs/after-maintenance.txt",
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("writes continue against the post-maintenance head");
@@ -615,9 +615,12 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         let bytes = b"equivalent content";
         let commit_id = CommitId::parse("equivalent-put").expect("valid commit id");
         let options = PutFileOptions {
-            commit_id: Some(commit_id.clone()),
-            message: None,
-            ..PutFileOptions::default()
+            commit: loonfs_api::options::CommitOptions {
+                actor: loonfs_test_support::test_actor(),
+                commit_id: Some(commit_id.clone()),
+                message: None,
+            },
+            ..PutFileOptions::new(loonfs_test_support::test_actor())
         };
 
         let simple = writer
@@ -836,7 +839,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
                 &namespace_id,
                 "/docs/hello.txt",
                 b"hello",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file before the shutdown");
@@ -859,7 +862,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
                 &namespace_id,
                 "/docs/after.txt",
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect_err("a mutation after shutdown must be refused");
@@ -958,7 +961,7 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
                 &namespace_id,
                 "/docs/hello.txt",
                 b"hello",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file");
@@ -1019,7 +1022,7 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
                         &namespace_id,
                         &format!("/docs/round-{round}/file-{file}.txt"),
                         b"body",
-                        PutFileOptions::default(),
+                        PutFileOptions::new(loonfs_test_support::test_actor()),
                     )
                     .await
                     .expect("put file");

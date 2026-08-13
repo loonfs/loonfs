@@ -1,11 +1,13 @@
 //! Shared per-command context: target resolution and common helpers.
 
 use super::output::CommandFailure;
-use crate::args::{CommandKind, TargetSelectorArgs};
+use crate::args::{ActorSelectorArgs, CommandKind, TargetSelectorArgs};
 use crate::config::{ConfigLocation, ConfigSource};
 use crate::error::CliError;
-use crate::resolve::{load_cli_config, resolve_namespace, resolve_target_profile_from_config};
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, NamespaceId};
+use crate::resolve::{
+    load_cli_config, resolve_actor, resolve_namespace, resolve_target_profile_from_config,
+};
+use loonfs_api::{AbsolutePath, ActorRef, ChangeSeq, InodeId, NamespaceId};
 use loonfs_client::NamespacePath;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +15,7 @@ pub(crate) struct CommandContext {
     pub(crate) profile_name: String,
     pub(crate) mode: String,
     pub(crate) namespace: NamespaceId,
+    pub(crate) actor: ActorRef,
     pub(crate) target: crate::resolve::ResolvedTarget,
 }
 
@@ -50,6 +53,24 @@ pub(crate) async fn resolve_command_context(
     config_path: &Path,
     target: &TargetSelectorArgs,
 ) -> Result<CommandContext, CommandFailure> {
+    resolve_command_context_with_actor(kind, config_path, target, None).await
+}
+
+pub(crate) async fn resolve_mutation_context(
+    kind: CommandKind,
+    config_path: &Path,
+    target: &TargetSelectorArgs,
+    actor: &ActorSelectorArgs,
+) -> Result<CommandContext, CommandFailure> {
+    resolve_command_context_with_actor(kind, config_path, target, Some(actor)).await
+}
+
+async fn resolve_command_context_with_actor(
+    kind: CommandKind,
+    config_path: &Path,
+    target: &TargetSelectorArgs,
+    actor: Option<&ActorSelectorArgs>,
+) -> Result<CommandContext, CommandFailure> {
     let explicit_profile = target.profile.profile.as_deref();
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
@@ -61,6 +82,28 @@ pub(crate) async fn resolve_command_context(
     .await
     .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
+    let (_, profile) =
+        crate::profiles::resolve_profile(&loaded.config, explicit_profile).map_err(|error| {
+            fail(
+                kind,
+                Some(resolved.profile_name.clone()),
+                Some(mode.clone()),
+                error,
+            )
+        })?;
+    let actor = resolve_actor(
+        profile,
+        actor.and_then(|actor| actor.actor_kind).map(Into::into),
+        actor.and_then(|actor| actor.actor_id.as_deref()),
+    )
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(resolved.profile_name.clone()),
+            Some(mode.clone()),
+            error,
+        )
+    })?;
     let namespace = resolve_namespace(
         &loaded.config,
         explicit_profile,
@@ -80,6 +123,7 @@ pub(crate) async fn resolve_command_context(
         profile_name: resolved.profile_name,
         mode,
         namespace,
+        actor,
         target: resolved.target,
     })
 }

@@ -167,6 +167,13 @@ pub(crate) struct InitArgs {
     /// https server URL, when a private CA issued the certificate.
     #[arg(long)]
     pub ca_cert_path: Option<String>,
+    /// Actor kind to save in the profile. Must be used with --actor-id.
+    /// Defaults to service/loonfs-cli when no actor is configured.
+    #[arg(long, value_enum)]
+    pub actor_kind: Option<ActorKindArg>,
+    /// Actor ID to save in the profile. Must be used with --actor-kind.
+    #[arg(long)]
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -247,6 +254,13 @@ pub(crate) struct ProfileCreateArgs {
     /// https server URL, when a private CA issued the certificate.
     #[arg(long)]
     pub ca_cert_path: Option<String>,
+    /// Actor kind to save in the profile. Must be used with --actor-id.
+    /// Defaults to service/loonfs-cli when no actor is configured.
+    #[arg(long, value_enum)]
+    pub actor_kind: Option<ActorKindArg>,
+    /// Actor ID to save in the profile. Must be used with --actor-kind.
+    #[arg(long)]
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -301,6 +315,12 @@ pub(crate) struct ProfileUpdateArgs {
     /// https server URL, when a private CA issued the certificate.
     #[arg(long)]
     pub ca_cert_path: Option<String>,
+    /// Sets the profile's actor kind. Must be used with --actor-id.
+    #[arg(long, value_enum)]
+    pub actor_kind: Option<ActorKindArg>,
+    /// Sets the profile's actor ID. Must be used with --actor-kind.
+    #[arg(long)]
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -322,6 +342,34 @@ pub(crate) struct TargetSelectorArgs {
     /// `LOONFS_NAMESPACE`, then the profile default.
     #[arg(long)]
     pub namespace: Option<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ActorSelectorArgs {
+    /// Actor kind for this mutation. Must be used with `--actor-id`.
+    #[arg(long, value_enum)]
+    pub actor_kind: Option<ActorKindArg>,
+    /// Actor ID for this mutation. Must be used with `--actor-kind`.
+    /// If no actor is configured, the CLI uses service/loonfs-cli.
+    #[arg(long)]
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum ActorKindArg {
+    User,
+    Service,
+    System,
+}
+
+impl From<ActorKindArg> for loonfs_api::ActorKind {
+    fn from(value: ActorKindArg) -> Self {
+        match value {
+            ActorKindArg::User => Self::User,
+            ActorKindArg::Service => Self::Service,
+            ActorKindArg::System => Self::System,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -405,6 +453,8 @@ pub(crate) struct FilesystemPathArgs {
 pub(crate) struct FilesystemAnnotateArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
     pub path: String,
     /// Attribute to write, as `key=value`. The key ends at the first `=`, so
     /// the value may contain more of them. Repeat the flag to write more.
@@ -442,6 +492,8 @@ pub(crate) struct FilesystemAnnotateArgs {
 pub(crate) struct FilesystemRmArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
     pub path: String,
     /// Delete a directory and everything under it, as one commit. The whole
     /// subtree stays recoverable through the printed undelete handle.
@@ -462,6 +514,8 @@ pub(crate) struct FilesystemRmArgs {
 pub(crate) struct FilesystemMkdirArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
     pub path: String,
     /// Create missing parent directories as well.
     #[arg(short = 'p', long)]
@@ -561,6 +615,8 @@ pub(crate) struct FilesystemGetArgs {
 pub(crate) struct FilesystemPutArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
     /// Local file to upload, or `-` to read standard input. A large file
     /// and a pipe are both read once and never held whole, so what a put
     /// costs in memory does not follow what it uploads. Reading `-` needs
@@ -594,6 +650,8 @@ pub(crate) struct FilesystemPutArgs {
 pub(crate) struct FilesystemTransferArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
     pub source_path: String,
     pub destination_path: String,
     /// Copy the directory tree rooted at `source_path` (cp only; mv moves
@@ -618,6 +676,8 @@ pub(crate) struct FilesystemTransferArgs {
 pub(crate) struct FilesystemRestoreArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
     pub path: String,
     #[arg(long)]
     pub revision: u64,
@@ -636,6 +696,8 @@ pub(crate) struct FilesystemRestoreArgs {
 pub(crate) struct FilesystemUndeleteArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
     /// Destination path for the recovered file or directory. Omit to
     /// restore in place: the entry re-binds under the parent and name its
     /// deletion recorded, which lands correctly even when the enclosing

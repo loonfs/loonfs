@@ -16,10 +16,32 @@
 //! options reach the wire as query parameters the surface builds from them.
 
 use crate::{
-    AttributeKey, AttributeRevisionNo, AttributeValue, CommitId, DeleteDirectoryBehavior,
+    ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, CommitId, DeleteDirectoryBehavior,
     DestinationBehavior, InodeId, RevisionNo,
 };
 use std::collections::BTreeMap;
+
+/// Commit settings shared by every filesystem mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitOptions {
+    /// Actor responsible for the commit, as supplied by the application.
+    pub actor: ActorRef,
+    /// Optional idempotency key. LoonFS generates one when this is `None`.
+    pub commit_id: Option<CommitId>,
+    /// Optional commit message. Changing it changes the commit identity.
+    pub message: Option<String>,
+}
+
+impl CommitOptions {
+    /// Creates settings with no commit ID or message.
+    pub fn new(actor: ActorRef) -> Self {
+        Self {
+            actor,
+            commit_id: None,
+            message: None,
+        }
+    }
+}
 
 /// Options for stating one path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,17 +76,15 @@ pub struct ListPathEntriesOptions {
 }
 
 /// Options for writing and removing an inode's attributes.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAttributesOptions {
     /// Attributes to write. Each key replaces whatever the inode holds under
     /// it; keys the inode holds and this map does not name are left alone.
     pub set: BTreeMap<AttributeKey, AttributeValue>,
     /// Keys to remove.
     pub remove: Vec<AttributeKey>,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
     /// When set, the update applies only while the path still resolves to
     /// this inode, so a raced rebinding fails instead of writing attributes
     /// onto the wrong inode.
@@ -75,45 +95,60 @@ pub struct UpdateAttributesOptions {
     pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
 }
 
+impl UpdateAttributesOptions {
+    /// Creates an empty attribute update for this actor.
+    pub fn new(actor: ActorRef) -> Self {
+        Self {
+            set: BTreeMap::new(),
+            remove: Vec::new(),
+            commit: CommitOptions::new(actor),
+            expected_inode_id: None,
+            expected_attributes_revision_no: None,
+        }
+    }
+}
+
 /// Options for writing a file path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutFileOptions {
     /// Create-only or replace-existing behavior.
     pub behavior: DestinationBehavior,
-    /// Idempotency key for the commit; retrying with the same id replays the
-    /// landed commit instead of double-committing. A fresh id is
-    /// generated when absent.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity, so
-    /// the same `commit_id` with a different message is a
-    /// `commit_id_reuse_conflict`.
-    pub message: Option<String>,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
     /// Replace only while the file's current revision is still this one.
     /// Requires `Replace` behavior; a raced write fails instead of stacking a
     /// revision on state the caller never saw.
     pub expected_revision_no: Option<RevisionNo>,
 }
 
-impl Default for PutFileOptions {
-    fn default() -> Self {
+impl PutFileOptions {
+    /// Creates options that refuse to replace an existing file.
+    pub fn new(actor: ActorRef) -> Self {
         Self {
             behavior: DestinationBehavior::NoReplace,
-            commit_id: None,
-            message: None,
+            commit: CommitOptions::new(actor),
             expected_revision_no: None,
         }
     }
 }
 
 /// Options for creating a directory.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDirectoryOptions {
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
     /// Also create missing ancestor directories, like `put_file` does.
     pub parents: bool,
+}
+
+impl CreateDirectoryOptions {
+    /// Creates options that do not create missing parent directories.
+    pub fn new(actor: ActorRef) -> Self {
+        Self {
+            commit: CommitOptions::new(actor),
+            parents: false,
+        }
+    }
 }
 
 /// Options for deleting a path.
@@ -121,63 +156,91 @@ pub struct CreateDirectoryOptions {
 pub struct DeleteOptions {
     /// Directory delete behavior.
     pub behavior: DeleteDirectoryBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
     /// When set, the delete applies only while the path still resolves to
     /// this inode, so a raced rebinding fails instead of deleting the wrong
     /// inode.
     pub expected_inode_id: Option<InodeId>,
 }
 
-impl Default for DeleteOptions {
-    fn default() -> Self {
+impl DeleteOptions {
+    /// Creates options for a non-recursive delete.
+    pub fn new(actor: ActorRef) -> Self {
         Self {
             behavior: DeleteDirectoryBehavior::NonRecursive,
-            commit_id: None,
-            message: None,
+            commit: CommitOptions::new(actor),
             expected_inode_id: None,
         }
     }
 }
 
 /// Options for moving a path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveOptions {
     /// Create-only or replace-existing behavior for the destination.
     pub behavior: DestinationBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
+}
+
+impl MoveOptions {
+    /// Creates options that refuse to replace the destination.
+    pub fn new(actor: ActorRef) -> Self {
+        Self {
+            behavior: DestinationBehavior::NoReplace,
+            commit: CommitOptions::new(actor),
+        }
+    }
 }
 
 /// Options for copying a file path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyOptions {
     /// Create-only or replace-existing behavior for the destination.
     pub behavior: DestinationBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
+}
+
+impl CopyOptions {
+    /// Creates options that refuse to replace the destination.
+    pub fn new(actor: ActorRef) -> Self {
+        Self {
+            behavior: DestinationBehavior::NoReplace,
+            commit: CommitOptions::new(actor),
+        }
+    }
 }
 
 /// Options for restoring a file revision by path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreRevisionOptions {
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
+}
+
+impl RestoreRevisionOptions {
+    /// Creates restore options for this actor.
+    pub fn new(actor: ActorRef) -> Self {
+        Self {
+            commit: CommitOptions::new(actor),
+        }
+    }
 }
 
 /// Options for recovering a deleted file or subtree.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndeleteOptions {
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
+}
+
+impl UndeleteOptions {
+    /// Creates undelete options for this actor.
+    pub fn new(actor: ActorRef) -> Self {
+        Self {
+            commit: CommitOptions::new(actor),
+        }
+    }
 }

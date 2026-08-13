@@ -156,7 +156,7 @@ async fn build_initialized_writer(
         .create_directory(
             namespace_id,
             "/catalog-warmup",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("warm namespace catalog");
@@ -204,6 +204,7 @@ async fn prepare_content(
 fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> CommitRequest {
     CommitRequest::single(
         CommitId::parse(commit_id).expect("valid commit id"),
+        loonfs_test_support::test_actor(),
         None,
         FilesystemOperation::PutFile {
             path: parse_mutation_path(path).expect("valid mutation path"),
@@ -256,7 +257,7 @@ async fn put_file_content_ref_validates_content_before_publication() {
             &harness.namespace_id,
             "/file.txt",
             content_ref,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish content ref");
@@ -306,7 +307,7 @@ async fn put_file_prepared_performs_no_content_io() {
             &harness.namespace_id,
             "/file.txt",
             prepared,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish prepared file");
@@ -330,7 +331,7 @@ async fn prepared_content_for_another_store_is_rejected_without_content_io() {
         .create_directory(
             &target,
             "/catalog-warmup",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("warm target catalog");
@@ -342,7 +343,12 @@ async fn prepared_content_for_another_store_is_rejected_without_content_io() {
     recording.reset();
 
     let error = writer
-        .put_file_prepared(&target, "/file.txt", prepared, PutFileOptions::default())
+        .put_file_prepared(
+            &target,
+            "/file.txt",
+            prepared,
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect_err("another store must reject the admission");
     assert!(
@@ -378,7 +384,7 @@ async fn independent_namespaces_sharing_a_store_share_prepared_content() {
         .create_directory(
             &target,
             "/catalog-warmup",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("warm shared target catalog");
@@ -389,7 +395,12 @@ async fn independent_namespaces_sharing_a_store_share_prepared_content() {
     recording.reset();
 
     writer
-        .put_file_prepared(&target, "/shared.txt", prepared, PutFileOptions::default())
+        .put_file_prepared(
+            &target,
+            "/shared.txt",
+            prepared,
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("shared-store target accepts source proof");
 
@@ -416,7 +427,7 @@ async fn fork_and_source_share_prepared_content_in_both_directions() {
         .create_directory(
             &fork,
             "/fork-catalog-warmup",
-            CreateDirectoryOptions::default(),
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("warm fork catalog");
@@ -427,7 +438,7 @@ async fn fork_and_source_share_prepared_content_in_both_directions() {
             &fork,
             "/from-source.txt",
             prepared_for_fork,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("fork accepts source proof");
@@ -443,7 +454,7 @@ async fn fork_and_source_share_prepared_content_in_both_directions() {
             &source,
             "/from-fork.txt",
             prepared_for_source,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("source accepts fork proof");
@@ -472,7 +483,7 @@ async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing()
             &harness.namespace_id,
             "/file.txt",
             prepared,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish prepared content ref");
@@ -529,7 +540,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
             &harness.namespace_id,
             "/uploaded.txt",
             prepared,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish uploaded content");
@@ -595,7 +606,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
             &harness.namespace_id,
             "/direct.txt",
             prepared,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish direct uploaded content");
@@ -661,7 +672,7 @@ async fn replacing_put_fails_unprepared_without_content_io() {
             &harness.namespace_id,
             "/file.txt",
             b"first revision",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("seed file");
@@ -679,6 +690,7 @@ async fn replacing_put_fails_unprepared_without_content_io() {
             harness.namespace_id.clone(),
             CommitRequest::single(
                 CommitId::parse("unprepared-replace").expect("valid commit id"),
+                loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::PutFile {
                     path: parse_mutation_path("/file.txt").expect("valid mutation path"),
@@ -738,6 +750,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
             &harness.namespace_id,
             CommitRequest {
                 commit_id: CommitId::parse("prepared-many-puts").expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     put("/first.txt", first.clone()),
@@ -764,7 +777,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
             &harness.namespace_id,
             "/file.txt",
             first,
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("put first revision");
@@ -776,8 +789,11 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
             b"second revision",
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit_id: None,
-                message: None,
+                commit: loonfs_api::options::CommitOptions {
+                    actor: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
                 expected_revision_no: None,
             },
         )
@@ -793,6 +809,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
             &harness.namespace_id,
             CommitRequest::single(
                 CommitId::parse("restore-first-revision").expect("valid commit id"),
+                loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::RestoreRevision {
                     path: parse_mutation_path("/file.txt").expect("valid mutation path"),
@@ -817,7 +834,7 @@ async fn put_file_bytes_publishes_without_reading_content() {
             &harness.namespace_id,
             "/file.txt",
             b"admitted content",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("put admitted bytes");
@@ -900,6 +917,7 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
     harness.recording.reset();
     let intent = CommitRequest::single(
         CommitId::parse("new-rejected").expect("valid commit id"),
+        loonfs_test_support::test_actor(),
         None,
         FilesystemOperation::CreateDirectory {
             path: parse_mutation_path("/missing/child").expect("valid mutation path"),
@@ -1070,6 +1088,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
                     namespace_id,
                     CommitRequest::single(
                         CommitId::parse("mixed-blocker").expect("valid commit id"),
+                        loonfs_test_support::test_actor(),
                         None,
                         FilesystemOperation::CreateDirectory {
                             path: parse_mutation_path("/hold").expect("valid mutation path"),

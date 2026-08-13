@@ -401,6 +401,7 @@ mod tests {
     ) -> crate::path::write::CommitRequest {
         crate::path::write::CommitRequest::single(
             CommitId::parse(commit_id).expect("valid commit id"),
+            loonfs_test_support::test_actor(),
             None,
             crate::path::write::FilesystemOperation::CreateDirectory {
                 path: loonfs_api::AbsolutePath::parse(format!("/{display_name}"))

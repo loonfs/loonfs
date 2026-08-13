@@ -27,15 +27,17 @@
 //! applications do not need a separate `loonfs-api` dependency:
 //!
 //! ```
-//! use loonfs::{AttributeKey, AttributeValue, UpdateAttributesOptions};
+//! use loonfs::{ActorId, ActorRef, AttributeKey, AttributeValue, UpdateAttributesOptions};
 //!
 //! let key = AttributeKey::parse("owner").expect("valid attribute key");
-//! let options = UpdateAttributesOptions {
-//!     set: [(key, AttributeValue::parse("platform").expect("valid attribute value"))]
-//!         .into_iter()
-//!         .collect(),
-//!     ..UpdateAttributesOptions::default()
-//! };
+//! let mut options = UpdateAttributesOptions::new(ActorRef::user(
+//!     ActorId::parse("example-user").expect("valid actor id"),
+//! ));
+//! options.set = [
+//!     (key, AttributeValue::parse("platform").expect("valid attribute value")),
+//! ]
+//! .into_iter()
+//! .collect();
 //! assert_eq!(options.set.len(), 1);
 //! ```
 //!
@@ -65,14 +67,14 @@ pub use loonfs_api::v0::{
     FilesystemChange, ObjectTransferAccess, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
-    AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
-    AuthoritativeAttributes, AuthoritativeFileBytes, AuthoritativePathEntry,
-    AuthoritativePathEntryKind, CapabilityDocument, ChangeSeq, CheckpointId,
-    CheckpointOwnerSummary, CheckpointSummary, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
-    ContentRefKind, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DestinationBehavior, DirectoryPageCursor, EffectiveLimit,
-    FileRevision, FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest,
-    GcResponse, InodeId, InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ActorId, ActorKind, ActorRef, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo,
+    AttributeValue, Attributes, AuthoritativeAttributes, AuthoritativeFileBytes,
+    AuthoritativePathEntry, AuthoritativePathEntryKind, CapabilityDocument, ChangeSeq,
+    CheckpointId, CheckpointOwnerSummary, CheckpointSummary, ChecksumAlgorithm, CommitId,
+    ContentId, ContentRef, ContentRefKind, CreateCheckpointRequest, CreateCheckpointResponse,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, DirectoryPageCursor,
+    EffectiveLimit, FileRevision, FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse,
+    GcRequest, GcResponse, InodeId, InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, MaintenanceStepRequest, MaintenanceStepResponse, ManifestId,
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, NameKey, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
@@ -173,11 +175,11 @@ pub use maintenance_runner::{
     MaintenanceStepConclusion, MaintenanceStepResult,
 };
 pub use options::{
-    gc_config_from_request, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, ListPathEntriesOptions,
-    MaintenancePlan, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
-    ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    gc_config_from_request, CommitOptions, CopyOptions, CreateCheckpointOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
+    ListPathEntriesOptions, MaintenancePlan, MetadataMaintenanceOptions, MoveOptions,
+    PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions,
+    UndeleteOptions, UpdateAttributesOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

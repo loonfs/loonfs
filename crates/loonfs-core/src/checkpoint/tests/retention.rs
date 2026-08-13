@@ -168,12 +168,14 @@ fn metadata_states_equivalent_ignoring_content_identity(
                         },
                         MetadataRow::CommitReceipt {
                             commit_id,
+                            actor,
                             semantic_commit_fingerprint: _,
                             committed_seq,
                             committed_at_ms,
                             message,
                         } => MetadataRow::CommitReceipt {
                             commit_id,
+                            actor,
                             semantic_commit_fingerprint: "<normalized>".to_owned(),
                             committed_seq,
                             committed_at_ms,

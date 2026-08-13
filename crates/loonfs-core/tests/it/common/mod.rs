@@ -222,7 +222,12 @@ pub(crate) mod commit_split_support {
         submit_commit(
             store,
             namespace_id,
-            CommitRequest::single(commit_id, None, operation),
+            CommitRequest::single(
+                commit_id,
+                loonfs_test_support::test_actor(),
+                None,
+                operation,
+            ),
             context,
         )
         .await

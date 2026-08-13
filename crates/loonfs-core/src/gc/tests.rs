@@ -1002,6 +1002,7 @@ async fn publish_completed_content<S: ObjectStore>(
             vec![CommitCandidate::prepared(
                 CommitRequest::single(
                     loonfs_api::CommitId::parse("publish-completed-content").expect("commit id"),
+                    loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::PutFile {
                         path: loonfs_api::AbsolutePath::parse(path).expect("path"),

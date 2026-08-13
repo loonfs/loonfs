@@ -5,8 +5,8 @@
 use super::indexes::MetadataIndexes;
 use loonfs_api::wire::manifest::{lookup_keys, DeletedDirentry, TombstoneGeneration};
 use loonfs_api::{
-    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    InodeKind, NameKey, RevisionNo,
+    ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName,
+    InodeId, InodeKind, NameKey, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use std::mem::{size_of, size_of_val};
@@ -241,6 +241,7 @@ pub(crate) struct RecoverableDeletion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitReceiptRecord {
     pub commit_id: CommitId,
+    pub actor: ActorRef,
     pub semantic_commit_fingerprint: String,
     pub committed_seq: ChangeSeq,
     /// Observational wall-clock stamp of the commit; never a validity
@@ -510,6 +511,8 @@ fn revision_decoded_bytes(record: &RevisionRecord) -> usize {
 fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
     size_of::<CommitReceiptRecord>()
         + record.commit_id.as_str().len()
+        + record.actor.kind.as_str().len()
+        + record.actor.id.as_str().len()
         + record.semantic_commit_fingerprint.len()
         + record.message.as_ref().map_or(0, String::len)
 }

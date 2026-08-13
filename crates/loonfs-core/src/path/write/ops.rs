@@ -25,7 +25,12 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
     prepared_content: Vec<PreparedContent>,
     context: &MutationContext,
 ) -> Result<CommitResponse> {
-    let request = CommitRequest::single(commit_id, None, operation);
+    let request = CommitRequest::single(
+        commit_id,
+        loonfs_test_support::test_actor(),
+        None,
+        operation,
+    );
     let candidate = if prepared_content.is_empty() {
         CommitCandidate::new(request)
     } else {

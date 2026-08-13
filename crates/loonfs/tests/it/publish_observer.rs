@@ -42,7 +42,7 @@ async fn registered_observer_sees_namespace_and_sequence_after_publish() {
             &namespace_id,
             "/note.txt",
             b"observer needle\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish file");
@@ -75,7 +75,7 @@ async fn unregistered_writer_publishes_with_the_existing_result_shape() {
             &namespace_id,
             "/note.txt",
             b"plain publish\n",
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish without observer");

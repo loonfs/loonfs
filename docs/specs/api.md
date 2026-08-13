@@ -360,8 +360,9 @@ prepared content is for publishing now rather than for keeping.
 ### 5.1 Commit identity and race guards
 
 A commit is one request: a `commit_id` — a client-generated stable
-idempotency key that must be reused verbatim for safe retries — an optional
-`message` (a human-readable annotation that is part of the commit's
+idempotency key that must be reused verbatim for safe retries — a required
+application-asserted `actor` with a `kind` (`user`, `service`, or `system`)
+and opaque `id`, an optional `message` (a human-readable annotation that is part of the commit's
 identity), and an ordered, non-empty list of path operations. A request with
 one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same commit and fingerprint alike.
@@ -1215,6 +1216,7 @@ ignored.
 ```json
 {
   "commit_id": "commit-a",
+  "actor": { "kind": "service", "id": "document-importer" },
   "content_tokens": [
     {
       "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
@@ -1546,6 +1548,7 @@ Representative request:
 ```json
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+  "actor": { "kind": "user", "id": "usr_8f3c" },
   "operations": [
     {
       "kind": "move_path",
@@ -1570,6 +1573,7 @@ create a directory and write into it:
 ```json
 {
   "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",
+  "actor": { "kind": "user", "id": "usr_8f3c" },
   "message": "import the January report",
   "content_tokens": [
     {
@@ -1646,6 +1650,7 @@ The same endpoint also accepts path directory creation:
 ```json
 {
   "commit_id": "c_8b7d4ef098ec4c1fbde15edbe02f9a64",
+  "actor": { "kind": "user", "id": "usr_8f3c" },
   "operations": [{ "kind": "create_directory", "path": "/docs" }]
 }
 ```
@@ -1655,6 +1660,7 @@ and path revision restore:
 ```json
 {
   "commit_id": "c_8f9a1b2c3d4e4f50a6b7c8d9e0f12345",
+  "actor": { "kind": "user", "id": "usr_8f3c" },
   "operations": [
     {
       "kind": "restore_revision",
@@ -1674,6 +1680,7 @@ deletion's committed sequence.
 ```json
 {
   "commit_id": "c_5d6e7f8091a2b3c4d5e6f70812345678",
+  "actor": { "kind": "user", "id": "usr_8f3c" },
   "operations": [
     {
       "kind": "undelete",
@@ -1707,6 +1714,7 @@ path resolves to:
 ```json
 {
   "commit_id": "c_6e7f8091a2b3c4d5e6f7081234567890",
+  "actor": { "kind": "user", "id": "usr_8f3c" },
   "operations": [
     {
       "kind": "update_attributes",
@@ -2079,6 +2087,7 @@ more than three events. The events stay in request order.
     {
       "committed_seq": 419,
       "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+      "actor": { "kind": "user", "id": "usr_8f3c" },
       "committed_at_ms": 1752624000000,
       "message": "replace report bytes",
       "events": [

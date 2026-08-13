@@ -23,7 +23,7 @@ use std::borrow::Cow;
 use tempfile::tempdir;
 
 fn test_fingerprint() -> CommitFingerprint {
-    CommitFingerprint::new_unchecked("v0:sha256:test".to_owned())
+    CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
 }
 
 #[tokio::test]
@@ -32,6 +32,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
     let plan = CommitPlan {
         namespace_id: namespace_id.clone(),
         commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         message: Some("create docs".to_owned()),
         semantic_identity: test_fingerprint(),
@@ -187,6 +188,7 @@ fn canonical_replay_advances_head_and_applies_metadata_rows() {
             seq: record.seq,
             writer_epoch: segment.envelope.payload.writer_epoch,
             commit_id: &record.commit_id,
+            actor: &record.actor,
             committed_at_ms: record.committed_at_ms,
             semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
             message: record.message.as_deref(),
@@ -246,6 +248,7 @@ fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
             seq: record.seq,
             writer_epoch: segment.envelope.payload.writer_epoch,
             commit_id: &record.commit_id,
+            actor: &record.actor,
             committed_at_ms: record.committed_at_ms,
             semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
             message: record.message.as_deref(),
@@ -419,6 +422,7 @@ fn materialized_create_directory(
     let plan = CommitPlan {
         namespace_id: namespace_id.clone(),
         commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         message: None,
         semantic_identity: test_fingerprint(),

@@ -186,6 +186,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     // uploaded ref with its validated content token.
     let put_request = CommitRequest {
         commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         message: Some("upload over http".to_owned()),
         content_tokens: vec![validated_content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
@@ -340,6 +341,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         &namespace,
         &CommitRequest {
             commit_id: CommitId::parse("re-minted-receipt-put").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             message: None,
             content_tokens: vec![loonfs_api::v0::ValidatedContentToken {
                 content_ref: content_ref.clone(),
@@ -417,6 +419,7 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
             &namespace,
             &CommitRequest {
                 commit_id: CommitId::parse("client-read-back-put").expect("valid commit id"),
+                actor: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: vec![loonfs_api::v0::ValidatedContentToken {
                     content_ref: content_ref.clone(),

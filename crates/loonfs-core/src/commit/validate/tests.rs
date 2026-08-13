@@ -65,7 +65,7 @@ fn planned(ops: Vec<CommitOp>) -> Vec<PlannedOp> {
 }
 
 fn test_fingerprint() -> CommitFingerprint {
-    CommitFingerprint::new_unchecked("v0:sha256:test".to_owned())
+    CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
 }
 
 fn wal_create_directory(
@@ -253,6 +253,7 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() 
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("stale-attributes").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         // The op alone, with no explicit precondition: the guard rides the
         // operation itself.
@@ -299,6 +300,7 @@ async fn a_first_attribute_write_states_revision_zero() {
     let request = |base: u64| CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("first-attributes").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![CommitOp::UpdateAttributes {
             inode_id: InodeId(2),
@@ -336,6 +338,7 @@ async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("missing-attributes").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![CommitOp::UpdateAttributes {
             inode_id: InodeId(9),
@@ -376,6 +379,7 @@ async fn stale_revision_precondition_is_rejected() {
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("stale-revision").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
@@ -405,6 +409,7 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("preview-rollback").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![
             CommitOp::CreateDirectory {
@@ -470,6 +475,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
         &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("create-under-tombstone").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             ops: planned(vec![CommitOp::CreateFile {
                 child_inode_id: InodeId(4),
@@ -500,6 +506,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
         &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("replace-under-tombstone").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             ops: planned(vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
@@ -538,6 +545,7 @@ async fn restore_revision_validation_rejects_missing_inode() {
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-missing-inode").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![CommitOp::RestoreRevision {
             inode_id: InodeId(99),
@@ -570,6 +578,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-non-file").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
@@ -610,6 +619,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("restore-stale-base").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             ops: planned(vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
@@ -636,6 +646,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             ops: planned(vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
@@ -678,6 +689,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![
             CommitOp::ReplaceFile {
@@ -727,6 +739,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-after-restore-same-request").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![
             CommitOp::RestoreRevision {
@@ -784,6 +797,7 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
         &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("restore-under-tombstone").expect("valid commit id"),
+            actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             ops: planned(vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
@@ -837,6 +851,7 @@ async fn restore_revision_overflow_is_rejected() {
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-overflow").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),

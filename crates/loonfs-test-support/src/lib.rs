@@ -10,3 +10,5 @@ pub mod block_on;
 pub mod http;
 pub mod ids;
 pub mod stores;
+
+pub use ids::test_actor;

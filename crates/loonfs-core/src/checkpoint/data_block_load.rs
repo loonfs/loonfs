@@ -317,12 +317,15 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
         },
         MetadataRow::CommitReceipt {
             commit_id,
+            actor,
             semantic_commit_fingerprint,
             message,
             ..
         } => {
             ALLOCATED_ROW_OVERHEAD
                 + commit_id.as_str().len()
+                + actor.kind.as_str().len()
+                + actor.id.as_str().len()
                 + semantic_commit_fingerprint.len()
                 + message.as_ref().map_or(0, String::len)
         }

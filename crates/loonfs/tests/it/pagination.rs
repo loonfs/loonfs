@@ -42,7 +42,7 @@ fn directory_pages_use_canonical_name_key_order() {
             &namespace_id,
             path,
             path.as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
     }
@@ -91,12 +91,20 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
 
     let replace = PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        commit_id: None,
-        message: None,
+        commit: loonfs_api::options::CommitOptions {
+            actor: loonfs_test_support::test_actor(),
+            commit_id: None,
+            message: None,
+        },
         expected_revision_no: None,
     };
-    fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v1", PutFileOptions::default())
-        .expect("put v1");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/doc.txt",
+        b"v1",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("put v1");
     fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v2", replace.clone())
         .expect("put v2");
     fs.create_checkpoint_blocking(&namespace_id)
@@ -161,7 +169,7 @@ fn directory_cursor_resumes_after_later_writes() {
             &namespace_id,
             path,
             path.as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
     }
@@ -183,7 +191,7 @@ fn directory_cursor_resumes_after_later_writes() {
         &namespace_id,
         "/docs/z.txt",
         b"newer",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put later file");
 
@@ -215,7 +223,7 @@ fn directory_cursor_from_the_future_is_rejected() {
             &namespace_id,
             path,
             path.as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
     }
@@ -258,7 +266,7 @@ fn directory_cursor_resumes_across_a_wal_flush() {
             &namespace_id,
             path,
             path.as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
     }
@@ -278,7 +286,7 @@ fn directory_cursor_resumes_across_a_wal_flush() {
         &namespace_id,
         "/docs/z.txt",
         b"newer",
-        PutFileOptions::default(),
+        PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put later file");
     fs.create_checkpoint_blocking(&namespace_id)
@@ -313,7 +321,7 @@ fn revisions_cursor_resumes_after_later_writes() {
             body.as_bytes(),
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::default()
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
             },
         )
         .expect("put revision");
@@ -346,7 +354,7 @@ fn revisions_cursor_resumes_after_later_writes() {
         b"four",
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::default()
+            ..PutFileOptions::new(loonfs_test_support::test_actor())
         },
     )
     .expect("put fourth revision");
@@ -387,7 +395,7 @@ fn directory_cursor_rejects_path_inode_mismatch() {
             &namespace_id,
             path,
             path.as_bytes(),
-            PutFileOptions::default(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
     }

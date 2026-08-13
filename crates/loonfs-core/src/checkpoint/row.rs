@@ -126,6 +126,7 @@ pub(super) fn manifest_rows_for_family(
             .iter()
             .map(|record| MetadataRow::CommitReceipt {
                 commit_id: record.commit_id.clone(),
+                actor: record.actor.clone(),
                 semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
                 committed_seq: record.committed_seq,
                 committed_at_ms: record.committed_at_ms,

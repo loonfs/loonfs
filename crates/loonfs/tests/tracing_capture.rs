@@ -58,7 +58,7 @@ async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &Namespac
                 namespace_id,
                 &format!("/docs/file-{round}.txt"),
                 b"body",
-                PutFileOptions::default(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("put file");

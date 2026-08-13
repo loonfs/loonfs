@@ -25,6 +25,7 @@ tracing.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]
+loonfs-test-support = { path = "../loonfs-test-support" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]

@@ -211,6 +211,8 @@ pub enum MetadataRow {
     CommitReceipt {
         /// Caller idempotency key whose later reuse is checked against this row.
         commit_id: CommitId,
+        /// Actor responsible for the commit, as supplied by the application.
+        actor: crate::ActorRef,
         /// Digest used to distinguish a safe retry from conflicting id reuse.
         semantic_commit_fingerprint: String,
         /// Namespace sequence assigned to the accepted commit.
@@ -1282,6 +1284,7 @@ mod tests {
                 super::MetadataRow::CommitReceipt {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
+                    actor: crate::ActorRef::loonfs_system(),
                     semantic_commit_fingerprint: "sha256:unused".to_owned(),
                     committed_seq: ChangeSeq(12),
                     committed_at_ms: 12_000,

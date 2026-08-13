@@ -4,12 +4,13 @@
 use crate::backend::EmbeddedBackend;
 use crate::backend_error::map_runtime_error;
 use crate::config::{
-    load_config, non_empty_env, CliConfig, ProfileConfig, StoreConfig, NAMESPACE_ENV,
+    load_config, non_empty_env, CliConfig, ProfileConfig, StoreConfig, ACTOR_ID_ENV,
+    ACTOR_KIND_ENV, NAMESPACE_ENV,
 };
 use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
-use loonfs_api::{ErrorCode, NamespaceId, SecretString};
+use loonfs_api::{ActorId, ActorKind, ActorRef, ErrorCode, NamespaceId, SecretString};
 use loonfs_client::{Client, ClientConfig};
 use loonfs_grep::{GrepBlockCache, GrepService, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
 use std::sync::Arc;
@@ -79,6 +80,65 @@ pub(crate) fn resolve_namespace(
     Ok(ResolvedNamespace {
         namespace: parse_namespace_id(namespace)?,
     })
+}
+
+pub(crate) fn resolve_actor(
+    profile: &ProfileConfig,
+    explicit_kind: Option<ActorKind>,
+    explicit_id: Option<&str>,
+) -> Result<ActorRef, CliError> {
+    if explicit_kind.is_some() || explicit_id.is_some() {
+        return actor_from_pair("--actor-kind", explicit_kind, "--actor-id", explicit_id);
+    }
+
+    let environment_kind = non_empty_env(ACTOR_KIND_ENV)
+        .map(|value| parse_actor_kind(ACTOR_KIND_ENV, &value))
+        .transpose()?;
+    let environment_id = non_empty_env(ACTOR_ID_ENV);
+    if environment_kind.is_some() || environment_id.is_some() {
+        return actor_from_pair(
+            ACTOR_KIND_ENV,
+            environment_kind,
+            ACTOR_ID_ENV,
+            environment_id.as_deref(),
+        );
+    }
+
+    Ok(profile.actor().unwrap_or_else(|| {
+        ActorRef::service(ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid"))
+    }))
+}
+
+fn actor_from_pair(
+    kind_name: &str,
+    kind: Option<ActorKind>,
+    id_name: &str,
+    id: Option<&str>,
+) -> Result<ActorRef, CliError> {
+    let kind = kind.ok_or_else(|| {
+        CliError::invalid_input(format!(
+            "{kind_name} and {id_name} must be supplied together"
+        ))
+    })?;
+    let id = id.ok_or_else(|| {
+        CliError::invalid_input(format!(
+            "{kind_name} and {id_name} must be supplied together"
+        ))
+    })?;
+    let id = ActorId::parse(id)
+        .map_err(|error| CliError::invalid_input(format!("invalid {id_name}: {error}")))?;
+    Ok(ActorRef { kind, id })
+}
+
+fn parse_actor_kind(name: &str, value: &str) -> Result<ActorKind, CliError> {
+    match value {
+        "user" => Ok(ActorKind::User),
+        "service" => Ok(ActorKind::Service),
+        "system" => Ok(ActorKind::System),
+        _ => Err(CliError::invalid_input(format!(
+            "invalid {name}: expected user, service, or system"
+        ))),
+    }
 }
 
 /// Parses a namespace argument once at the CLI boundary. A malformed id
