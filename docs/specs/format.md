@@ -1536,8 +1536,12 @@ deleter.
 LoonFS does not promise that every historical move or rename remains queryable
 forever. A partner that needs an all-time activity record must consume the
 change feed into its own store before the retention floor passes the commit.
-That store keys changes by `(namespace_id, commit_id)` and keys event targets
-by `inode_id`, not by path.
+That store keys changes by `(namespace_id, committed_seq)` and keys event
+targets by `inode_id`, not by path. `committed_seq` is never reused within a
+namespace. `commit_id` is not a unique key over all time: its uniqueness is
+enforced only while the commit's receipt is retained (the receipt horizon),
+so a caller-supplied id can legally recur after the retention floor passes
+its receipt. Sinks store `commit_id` as a correlation field, not as the key.
 
 The retention floor may advance only after the system has enough verified
 material to keep replay safe at or after that point: advancement derives its
