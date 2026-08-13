@@ -72,13 +72,9 @@ The script uses the release checksums to update the formula in the tap checkout
 (`../homebrew-tap` by default). Review the printed diff, then commit and push
 the tap change as `chore: update to vX.Y.Z`.
 
-## 5. Update the site
+## 5. Update the website
 
-In `loonfs_www`, re-vendor the spec the site renders and open a PR:
-
-```sh
-npm run sync:openapi
-```
+Update the API reference website through its private release process.
 
 ## 6. Verify the release
 
