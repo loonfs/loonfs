@@ -1093,7 +1093,7 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
         .expect("read the change feed")
         .changes
         .into_iter()
-        .find(|change| change.seq == response.committed_seq)
+        .find(|change| change.committed_seq == response.committed_seq)
         .expect("the copy's commit")
         .events
         .iter()

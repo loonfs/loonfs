@@ -44,7 +44,7 @@ fn change_identity(change: &CommittedChange) -> (ChangeSeq, String, Option<Strin
         }
     }
     (
-        change.seq,
+        change.committed_seq,
         change.commit_id.to_string(),
         change.message.clone(),
         events.to_string(),

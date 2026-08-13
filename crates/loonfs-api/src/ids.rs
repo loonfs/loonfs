@@ -73,6 +73,10 @@ validation_error!(
 ///   server-generated shape `xyz_<32 lowercase hex>` and adds a
 ///   `generate()` constructor.
 ///
+/// Either form may end with `schema(...)` metadata. Its optional `pattern`
+/// and `example` are added to the OpenAPI string schema when that feature is
+/// enabled.
+///
 /// Type-specific constructors that the macro cannot express (for example
 /// `CommitId::generate` or `NameKey::for_display_name`) live in a separate
 /// `impl` block next to the invocation.
@@ -82,11 +86,16 @@ macro_rules! string_id {
         $name:ident,
         error = $error:ty,
         validate = $validate:expr
+        $(, schema($($schema:tt)+))?
+        $(,)?
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-        #[cfg_attr(feature = "openapi", schema(value_type = String))]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(value_type = String $(, $($schema)+)?)
+        )]
         pub struct $name(String);
 
         impl $name {
@@ -168,12 +177,15 @@ macro_rules! string_id {
         $(#[$meta:meta])*
         $name:ident,
         prefix = $prefix:literal
+        $(, schema($($schema:tt)+))?
+        $(,)?
     ) => {
         string_id! {
             $(#[$meta])*
             $name,
             error = GeneratedIdValidationError,
             validate = |value: &str| validate_generated_id($prefix, value)
+            $(, schema($($schema)+))?
         }
 
         impl $name {
@@ -428,10 +440,19 @@ string_id! {
     /// Durable id for one namespace.
     ///
     /// A namespace is one filesystem history. This id is not a display name and
-    /// should not be reused after destruction.
+    /// should not be reused after destruction. Its serialized form is 1 to 128
+    /// lowercase ASCII letters, digits, dots, underscores, or hyphens, starting
+    /// with a letter or digit; the `loonfs-` prefix is reserved for system use.
     NamespaceId,
     error = NamespaceIdValidationError,
-    validate = validate_namespace_id
+    validate = validate_namespace_id,
+    schema(
+        // The `loonfs-` reservation stays in the description: a lookahead
+        // would state it, but portable pattern dialects (RE2, most SDK
+        // generators) reject lookaheads, so the pattern is the grammar only.
+        pattern = r"^[a-z0-9][a-z0-9._-]{0,127}$",
+        example = "demo"
+    )
 }
 
 string_id! {
@@ -445,10 +466,17 @@ string_id! {
 string_id! {
     /// Client-supplied idempotency key for one logical commit.
     ///
-    /// Reuse the same `CommitId` when retrying the same request.
+    /// Reuse the same `CommitId` when retrying the same request. The accepted
+    /// grammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,
+    /// or hyphens, starting with a letter or digit. [`CommitId::generate`] mints
+    /// `c_<32 lowercase hex>`, but callers may supply any value in that grammar.
     CommitId,
     error = CommitIdValidationError,
-    validate = validate_commit_id
+    validate = validate_commit_id,
+    schema(
+        pattern = r"^[a-z0-9][a-z0-9._-]{0,127}$",
+        example = "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0"
+    )
 }
 
 impl CommitId {
@@ -463,13 +491,21 @@ string_id! {
     ///
     /// A checkpoint is a durable bookmark to a namespace manifest version.
     CheckpointId,
-    prefix = "chk"
+    prefix = "chk",
+    schema(
+        pattern = r"^chk_[0-9a-f]{32}$",
+        example = "chk_00000000000000000000000000000002"
+    )
 }
 
 string_id! {
     /// Durable id for one upload session.
     UploadId,
-    prefix = "upl"
+    prefix = "upl",
+    schema(
+        pattern = r"^upl_[0-9a-f]{32}$",
+        example = "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c"
+    )
 }
 
 string_id! {
@@ -482,7 +518,11 @@ string_id! {
     /// rides [`crate::ContentRef`] beside it.
     ContentId,
     error = GeneratedIdValidationError,
-    validate = |value: &str| validate_generated_id("con", value)
+    validate = |value: &str| validate_generated_id("con", value),
+    schema(
+        pattern = r"^con_[0-9a-f]{32}$",
+        example = "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41"
+    )
 }
 
 impl ContentId {
@@ -611,7 +651,8 @@ string_id! {
     /// `DisplayName`.
     NameKey,
     error = NameKeyValidationError,
-    validate = validate_name_key
+    validate = validate_name_key,
+    schema(example = "report.txt")
 }
 
 impl NameKey {

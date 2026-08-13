@@ -115,7 +115,6 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::DirectMultipartContentClaim,
         loonfs_api::v0::DirectMultipartUploadOptions,
         loonfs_api::NamespaceId,
-        loonfs_api::ContentStoreId,
         loonfs_api::CommitId,
         InodeId,
         RevisionNo,

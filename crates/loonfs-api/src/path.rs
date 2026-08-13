@@ -27,7 +27,8 @@ string_id! {
     /// User-facing spelling of one path component.
     DisplayName,
     error = PathError,
-    validate = validate_display_name
+    validate = validate_display_name,
+    schema(example = "report.txt")
 }
 
 /// Maximum stored display-name length in UTF-8 bytes: the 255-byte
@@ -271,12 +272,17 @@ impl fmt::Display for AbsolutePath {
 
 #[cfg(feature = "openapi")]
 impl utoipa::PartialSchema for AbsolutePath {
+    #[allow(
+        deprecated,
+        reason = "the published schema uses the requested singular example field"
+    )]
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         utoipa::openapi::schema::Object::builder()
             .schema_type(utoipa::openapi::schema::Type::String)
             .description(Some(
                 "Validated complete absolute namespace path, serialized as a plain string.",
             ))
+            .example(Some(serde_json::json!("/docs/report.txt")))
             .into()
     }
 }

@@ -439,7 +439,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);
-    assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
+    assert_eq!(clone_changes.changes[0].committed_seq, ChangeSeq(2));
 
     harness.server.abort();
 }

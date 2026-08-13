@@ -315,7 +315,7 @@ async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
 
     assert_eq!(changes.through_seq, ChangeSeq(2));
     assert_eq!(changes.changes.len(), 1);
-    assert_eq!(changes.changes[0].seq, ChangeSeq(2));
+    assert_eq!(changes.changes[0].committed_seq, ChangeSeq(2));
 }
 
 #[tokio::test]

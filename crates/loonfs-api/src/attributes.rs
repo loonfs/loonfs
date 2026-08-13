@@ -46,7 +46,8 @@ string_id! {
     /// attempt to write a reserved key is rejected.
     AttributeKey,
     error = AttributeKeyValidationError,
-    validate = validate_attribute_key
+    validate = validate_attribute_key,
+    schema(example = "owner")
 }
 
 impl AttributeKey {
@@ -100,7 +101,8 @@ string_id! {
     /// operation deletes an attribute.
     AttributeValue,
     error = AttributeValueValidationError,
-    validate = validate_attribute_value
+    validate = validate_attribute_value,
+    schema(example = "platform")
 }
 
 fn validate_attribute_value(value: &str) -> Result<(), AttributeValueValidationError> {

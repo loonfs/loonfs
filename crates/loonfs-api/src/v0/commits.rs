@@ -85,8 +85,8 @@ pub enum FilesystemChange {
         to_display_name: DisplayName,
     },
     /// A file or directory subtree was deleted. The enclosing change's
-    /// `seq` is the deletion generation an undelete request passes as
-    /// `deleted_at_seq`.
+    /// `committed_seq` is the deletion generation an undelete request passes
+    /// as `deleted_at_seq`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
     Deleted {
         /// Inode at the root of the deleted subtree.
@@ -128,11 +128,11 @@ pub enum FilesystemChange {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CommittedChange {
     /// Namespace sequence for this logical commit.
-    pub seq: ChangeSeq,
+    pub committed_seq: ChangeSeq,
     /// Client idempotency key for this logical commit.
     pub commit_id: CommitId,
     /// Wall-clock stamp of the commit, in Unix milliseconds.
-    /// Observational: `seq` is the order.
+    /// Observational: `committed_seq` is the order.
     pub committed_at_ms: u64,
     /// Caller annotation, omitted when absent and carrying no filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]

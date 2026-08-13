@@ -562,7 +562,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             for change in &response.changes {
                 lines.push(format!(
                     "{}\t{}\t{}\t{}",
-                    change.seq.0,
+                    change.committed_seq.0,
                     format_utc_ms(change.committed_at_ms),
                     event_summary(&change.events),
                     change.message.as_deref().unwrap_or("-")

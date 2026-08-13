@@ -61,7 +61,7 @@ async fn feed_message(
         .expect("list changes");
     page.changes
         .into_iter()
-        .find(|change| change.seq == seq)
+        .find(|change| change.committed_seq == seq)
         .expect("the committed change is on the feed")
         .message
 }

@@ -2061,7 +2061,7 @@ presign writes either, no file it holds can be larger than it will proxy.
 
 ### 6.11 `GET /changes`
 
-Each change is one commit carrying its identity (`seq`, `commit_id`,
+Each change is one commit carrying its identity (`committed_seq`, `commit_id`,
 observational `committed_at_ms`, optional `message`) and `events`: the
 semantic filesystem operations the commit
 applied, in the order it applied them. One request operation may apply
@@ -2077,7 +2077,7 @@ more than three events. The events stay in request order.
   "through_seq": 419,
   "changes": [
     {
-      "seq": 419,
+      "committed_seq": 419,
       "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
       "committed_at_ms": 1752624000000,
       "message": "replace report bytes",
@@ -2107,7 +2107,7 @@ Event kinds:
 | `created` | A file or directory was created. | `inode_id`, `inode_kind`, `parent_inode_id`, `display_name`; file creations also carry `revision_no` and `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`. |
-| `deleted` | A file or directory subtree was deleted. The enclosing change's `seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
+| `deleted` | A file or directory subtree was deleted. The enclosing change's `committed_seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 
@@ -2117,8 +2117,8 @@ binding projection from this feed. Clients must ignore unknown event kinds
 and unknown fields.
 
 If `limit` truncates the page before the namespace head, the response includes
-`next_after_seq` set to the last returned change seq. The client resumes with
-`after_seq={next_after_seq}`.
+`next_after_seq` set to the last returned change's `committed_seq`. The client
+resumes with `after_seq={next_after_seq}`.
 
 ### 6.12 `POST /forks`
 
