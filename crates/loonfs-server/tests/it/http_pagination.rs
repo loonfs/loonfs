@@ -335,7 +335,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         second_page
             .changes
             .iter()
-            .map(|change| change.seq)
+            .map(|change| change.committed_seq)
             .collect::<Vec<_>>(),
         vec![ChangeSeq(3)]
     );

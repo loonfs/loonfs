@@ -5127,8 +5127,8 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(changes_data["next_after_seq"].is_null());
         let listed = changes_data["changes"].as_array().expect("json array");
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0]["seq"], 1);
-        assert_eq!(listed[1]["seq"], 2);
+        assert_eq!(listed[0]["committed_seq"], 1);
+        assert_eq!(listed[1]["committed_seq"], 2);
         assert!(listed[0]["commit_id"]
             .as_str()
             .expect("json string")
@@ -5145,7 +5145,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             paged_data["changes"].as_array().expect("json array").len(),
             1
         );
-        assert_eq!(paged_data["changes"][0]["seq"], 1);
+        assert_eq!(paged_data["changes"][0]["committed_seq"], 1);
         assert_eq!(paged_data["next_after_seq"], 1);
 
         let resumed = harness.run(&["--json", "changes", "--profile", profile, "--after", "1"]);
@@ -5159,7 +5159,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
                 .len(),
             1
         );
-        assert_eq!(resumed_data["changes"][0]["seq"], 2);
+        assert_eq!(resumed_data["changes"][0]["committed_seq"], 2);
 
         let checkpoint = harness.run(&[
             "--json",

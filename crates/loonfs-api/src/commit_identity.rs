@@ -395,7 +395,7 @@ where
         Err(error) => return Err(error),
     };
     let Some(committed) = page.changes.into_iter().find(|change| {
-        change.seq == receipt.committed_seq && &change.commit_id == attempt.commit_id
+        change.committed_seq == receipt.committed_seq && &change.commit_id == attempt.commit_id
     }) else {
         return Err(conflict);
     };
@@ -418,7 +418,7 @@ where
     Ok(crate::v0::CommitResponse {
         namespace_id: attempt.namespace_id.clone(),
         commit_id: committed.commit_id,
-        committed_seq: committed.seq,
+        committed_seq: committed.committed_seq,
     })
 }
 
@@ -1044,7 +1044,7 @@ mod tests {
             through_seq: committed_seq,
             next_after_seq: None,
             changes: vec![crate::v0::CommittedChange {
-                seq: committed_seq,
+                committed_seq,
                 commit_id: commit_id.clone(),
                 committed_at_ms: 1,
                 message: None,

@@ -475,7 +475,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);
-    assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
+    assert_eq!(clone_changes.changes[0].committed_seq, ChangeSeq(2));
 
     // The target's own first flush inherits the source's tables by
     // reference and adds only its own delta run.

@@ -477,7 +477,7 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
                     inode_id: deleted_inode_id,
                     ..
                 } if *deleted_inode_id == inode_id => {
-                    deleted_seq = Some(change.seq);
+                    deleted_seq = Some(change.committed_seq);
                 }
                 loonfs::FilesystemChange::Undeleted {
                     inode_id: undeleted_inode_id,

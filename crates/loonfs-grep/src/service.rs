@@ -455,15 +455,18 @@ async fn tail_revisions(reads: &NamespaceReads<'_>, resume: ChangeFeedResume) ->
             .list_changes_after(after_seq, TAIL_FEED_PAGE_COMMITS)
             .await?;
         for change in &feed.changes {
-            let start_event_index = resume.start_event_index(change.seq).map_err(|_| {
-                CoreError::Internal("grep event cursor does not fit in memory".to_owned())
-            })?;
+            let start_event_index =
+                resume
+                    .start_event_index(change.committed_seq)
+                    .map_err(|_| {
+                        CoreError::Internal("grep event cursor does not fit in memory".to_owned())
+                    })?;
             if start_event_index > change.events.len() {
                 let next_event_index = resume.next_event_index();
                 return Err(GrepError::CorruptIndex {
                     message: format!(
                         "grep event cursor `{next_event_index}` exceeds commit `{}` length `{}`",
-                        change.seq,
+                        change.committed_seq,
                         change.events.len()
                     ),
                 });

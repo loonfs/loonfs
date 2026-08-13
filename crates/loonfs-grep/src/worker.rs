@@ -863,15 +863,17 @@ async fn collect_incremental_unit(
     let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
     'changes: for change in feed.changes {
-        let start_event_index = resume.start_event_index(change.seq).map_err(|_| {
-            CoreError::Internal("grep event cursor does not fit in memory".to_owned())
-        })?;
+        let start_event_index = resume
+            .start_event_index(change.committed_seq)
+            .map_err(|_| {
+                CoreError::Internal("grep event cursor does not fit in memory".to_owned())
+            })?;
         if start_event_index > change.events.len() {
             return Err(GrepError::CorruptIndex {
                 message: format!(
                     "grep event cursor `{}` exceeds commit `{}` length `{}`",
                     resume.next_event_index(),
-                    change.seq,
+                    change.committed_seq,
                     change.events.len()
                 ),
             });
@@ -885,8 +887,8 @@ async fn collect_incremental_unit(
                     > policy.max_content_bytes_per_step.get();
             if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
                 if event_index > 0 {
-                    collected_through_seq = change.seq;
-                    run_seq = change.seq;
+                    collected_through_seq = change.committed_seq;
+                    run_seq = change.committed_seq;
                     collected_next_event_index = u32::try_from(event_index).map_err(|_| {
                         CoreError::Internal("grep event cursor overflow".to_owned())
                     })?;
@@ -907,8 +909,8 @@ async fn collect_incremental_unit(
             if examined_files >= policy.max_files_per_step.get()
                 || planned_content_bytes >= policy.max_content_bytes_per_step.get()
             {
-                collected_through_seq = change.seq;
-                run_seq = change.seq;
+                collected_through_seq = change.committed_seq;
+                run_seq = change.committed_seq;
                 let next_event_index = event_index
                     .checked_add(1)
                     .ok_or_else(|| CoreError::Internal("grep event cursor overflow".to_owned()))?;
@@ -922,8 +924,8 @@ async fn collect_incremental_unit(
                 break 'changes;
             }
         }
-        collected_through_seq = change.seq;
-        run_seq = change.seq;
+        collected_through_seq = change.committed_seq;
+        run_seq = change.committed_seq;
         collected_next_event_index = 0;
     }
     if collected_through_seq == built_through_seq && collected_next_event_index == next_event_index

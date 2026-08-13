@@ -283,7 +283,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     let committed = changes
         .changes
         .iter()
-        .find(|change| change.seq == first.committed_seq)
+        .find(|change| change.committed_seq == first.committed_seq)
         .expect("the committed change is on the feed");
     assert_eq!(
         committed.message.as_deref(),

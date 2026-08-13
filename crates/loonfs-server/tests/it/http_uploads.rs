@@ -235,7 +235,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     assert_eq!(changes.through_seq, commit.committed_seq);
     assert_eq!(changes.changes.len(), 1);
     let change = &changes.changes[0];
-    assert_eq!(change.seq, commit.committed_seq);
+    assert_eq!(change.committed_seq, commit.committed_seq);
     assert_eq!(change.commit_id, commit.commit_id);
     assert_eq!(change.commit_id, put_request.commit_id);
     assert_eq!(change.message.as_deref(), Some("upload over http"));

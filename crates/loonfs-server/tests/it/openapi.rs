@@ -149,6 +149,30 @@ fn openapi_names_tagged_one_of_alternatives() {
 }
 
 #[test]
+fn openapi_documents_string_id_contracts_without_dead_schemas() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let schemas = spec
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+    let content_id = schemas.get("ContentId").expect("ContentId schema");
+
+    assert_eq!(
+        content_id.get("pattern").and_then(Value::as_str),
+        Some(r"^con_[0-9a-f]{32}$")
+    );
+    assert_eq!(
+        content_id.get("example").and_then(Value::as_str),
+        Some("con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41")
+    );
+    assert!(!schemas.contains_key("ContentStoreId"));
+}
+
+#[test]
 fn openapi_documents_delete_path_behavior() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),

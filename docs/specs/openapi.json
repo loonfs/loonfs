@@ -2810,7 +2810,8 @@
       },
       "AbsolutePath": {
         "type": "string",
-        "description": "Validated complete absolute namespace path, serialized as a plain string."
+        "description": "Validated complete absolute namespace path, serialized as a plain string.",
+        "example": "/docs/report.txt"
       },
       "AdvanceRetentionResponse": {
         "type": "object",
@@ -2870,7 +2871,8 @@
       },
       "AttributeKey": {
         "type": "string",
-        "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected."
+        "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected.",
+        "example": "owner"
       },
       "AttributeRevisionNo": {
         "type": "integer",
@@ -2880,7 +2882,8 @@
       },
       "AttributeValue": {
         "type": "string",
-        "description": "One validated attribute value.\n\nA value is at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes. It is\notherwise free text: control characters and the empty string are legal.\nEmpty is a stored value, not a tombstone; only an explicit remove\noperation deletes an attribute."
+        "description": "One validated attribute value.\n\nA value is at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes. It is\notherwise free text: control characters and the empty string are legal.\nEmpty is a stored value, not a tombstone; only an explicit remove\noperation deletes an attribute.",
+        "example": "platform"
       },
       "Attributes": {
         "type": "object",
@@ -3353,7 +3356,9 @@
       },
       "CheckpointId": {
         "type": "string",
-        "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version."
+        "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version.",
+        "example": "chk_00000000000000000000000000000002",
+        "pattern": "^chk_[0-9a-f]{32}$"
       },
       "CheckpointOwnerSummary": {
         "oneOf": [
@@ -3457,7 +3462,9 @@
       },
       "CommitId": {
         "type": "string",
-        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request."
+        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] mints\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
+        "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
       },
       "CommitRequest": {
         "type": "object",
@@ -3522,7 +3529,7 @@
         "type": "object",
         "description": "One committed change in namespace order.",
         "required": [
-          "seq",
+          "committed_seq",
           "commit_id",
           "committed_at_ms",
           "events"
@@ -3535,8 +3542,12 @@
           "committed_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `seq` is the order.",
+            "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `committed_seq` is the order.",
             "minimum": 0
+          },
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence for this logical commit."
           },
           "events": {
             "type": "array",
@@ -3551,10 +3562,6 @@
               "null"
             ],
             "description": "Caller annotation, omitted when absent and carrying no filesystem semantics."
-          },
-          "seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace sequence for this logical commit."
           }
         }
       },
@@ -3671,7 +3678,9 @@
       },
       "ContentId": {
         "type": "string",
-        "description": "Durable identity of one immutable content object.\n\nThe body is 128 fully random bits, with no time component: content\nobject keys shard on the id's leading characters, and a clock-derived\nprefix would put every upload in one window into one shard. The id\nnames *which object*, never what it contains — integrity evidence\nrides [`crate::ContentRef`] beside it."
+        "description": "Durable identity of one immutable content object.\n\nThe body is 128 fully random bits, with no time component: content\nobject keys shard on the id's leading characters, and a clock-derived\nprefix would put every upload in one window into one shard. The id\nnames *which object*, never what it contains — integrity evidence\nrides [`crate::ContentRef`] beside it.",
+        "example": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+        "pattern": "^con_[0-9a-f]{32}$"
       },
       "ContentRef": {
         "type": "object",
@@ -3710,10 +3719,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "ContentStoreId": {
-        "type": "string",
-        "description": "Durable id for an immutable content store.\n\nContent stores own file bytes. Namespaces point at content stores."
       },
       "CreateCheckpointRequest": {
         "type": "object",
@@ -3969,7 +3974,8 @@
       },
       "DisplayName": {
         "type": "string",
-        "description": "User-facing spelling of one path component."
+        "description": "User-facing spelling of one path component.",
+        "example": "report.txt"
       },
       "EnableGrepIndexResponse": {
         "type": "object",
@@ -4367,7 +4373,7 @@
           {
             "type": "object",
             "title": "FilesystemChangeDeleted",
-            "description": "A file or directory subtree was deleted. The enclosing change's\n`seq` is the deletion generation an undelete request passes as\n`deleted_at_seq`.",
+            "description": "A file or directory subtree was deleted. The enclosing change's\n`committed_seq` is the deletion generation an undelete request passes\nas `deleted_at_seq`.",
             "required": [
               "inode_id",
               "kind"
@@ -4744,7 +4750,8 @@
                 },
                 "propertyNames": {
                   "type": "string",
-                  "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected."
+                  "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected.",
+                  "example": "owner"
                 }
               }
             }
@@ -5513,11 +5520,14 @@
       },
       "NameKey": {
         "type": "string",
-        "description": "Name-policy-derived directory entry key.\n\nUse this for exact name preconditions. Keep user-facing spelling in\n`DisplayName`."
+        "description": "Name-policy-derived directory entry key.\n\nUse this for exact name preconditions. Keep user-facing spelling in\n`DisplayName`.",
+        "example": "report.txt"
       },
       "NamespaceId": {
         "type": "string",
-        "description": "Durable id for one namespace.\n\nA namespace is one filesystem history. This id is not a display name and\nshould not be reused after destruction."
+        "description": "Durable id for one namespace.\n\nA namespace is one filesystem history. This id is not a display name and\nshould not be reused after destruction. Its serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
+        "example": "demo",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
       },
       "NamespaceStatusResponse": {
         "type": "object",
@@ -6056,7 +6066,9 @@
       },
       "UploadId": {
         "type": "string",
-        "description": "Durable id for one upload session."
+        "description": "Durable id for one upload session.",
+        "example": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
+        "pattern": "^upl_[0-9a-f]{32}$"
       },
       "UploadPartChecksumClaim": {
         "type": "object",
