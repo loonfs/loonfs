@@ -1,6 +1,6 @@
 # Releasing LoonFS
 
-One release ships, under one version:
+Each release uses one version for these artifacts:
 
 - four CLI archives and their `SHA256SUMS` on the GitHub release
 - the server image `ghcr.io/loonfs/loonfs-server:vX.Y.Z` (linux/amd64 and linux/arm64)
@@ -9,48 +9,47 @@ One release ships, under one version:
 - the Homebrew formula `loonfs/tap/loonfs`
 - the API reference on [loonfs.com](https://loonfs.com)
 
-The GitHub release is the trigger. Publishing it runs
-`.github/workflows/release-loonfs.yml`, which refuses a tag that disagrees
-with the workspace or chart version, then builds and publishes everything
-above except crates.io, the tap, and the site — those are the manual steps
-that follow.
+Publishing a GitHub release starts `.github/workflows/release-loonfs.yml`.
+The workflow verifies that the tag matches the workspace and chart versions,
+then builds and publishes the CLI archives, server image, and Helm chart.
+Publishing crates, updating the Homebrew tap, and updating the website are
+manual steps.
 
 ## 1. Prepare the version
 
-From a branch cut off a clean, green main:
+Start from a clean branch based on `main` after CI passes:
 
 ```sh
 scripts/prepare-release.sh --version X.Y.Z
 ```
 
-The script rewrites every file that names the version — `Cargo.toml`
-(`workspace.package.version` and the pinned registry versions of the
-published crates), the server chart, and the regenerated OpenAPI spec —
-refreshes `Cargo.lock`, and then verifies the checkout with the same checks
-the release workflow runs against the tag, including the spec-lock test.
+The script updates `workspace.package.version` and the pinned registry
+versions in `Cargo.toml`, updates the server chart, regenerates the OpenAPI
+specification, and refreshes `Cargo.lock`. It then runs the version checks and
+OpenAPI specification test that the release workflow runs for the tag.
 
-Commit the result as `chore(release): prepare vX.Y.Z`, open a PR, and merge
-it. CI on the PR is the real gate; the script only catches drift early.
+Commit the result as `chore(release): prepare vX.Y.Z` and open a PR. Merge it
+only after the normal PR checks pass.
 
 ## 2. Publish the GitHub release
 
-Draft the notes first: a few curated highlights up top, then the generated
-PR list for the long tail:
+Write the release notes before publishing. Start with a short summary of the
+important changes, followed by the generated PR list:
 
 ```sh
 gh api repos/loonfs/loonfs/releases/generate-notes -f tag_name=vX.Y.Z --jq .body
 ```
 
-Then create the release on the merged main. Creating it publishes it, and
-publishing is what starts the workflow:
+Create the release from the updated `main` branch. This command publishes the
+release and starts the release workflow:
 
 ```sh
 gh release create vX.Y.Z --target main --title "LoonFS vX.Y.Z" --notes-file notes.md
 ```
 
-Watch the run with `gh run watch`, then confirm the release page carries the
-four archives, `SHA256SUMS`, and `ARTIFACTS.txt`. `ARTIFACTS.txt` records
-the image and chart digests the release published.
+Watch the workflow with `gh run watch`. After it completes, confirm that the
+release contains the four archives, `SHA256SUMS`, and `ARTIFACTS.txt`. The
+`ARTIFACTS.txt` file contains the published image and chart digests.
 
 ## 3. Publish the crates
 
@@ -69,9 +68,9 @@ is: `loonfs-api`, `loonfs-objectstore`, `loonfs-client`, `loonfs-core`,
 scripts/bump-homebrew-tap.sh --version X.Y.Z
 ```
 
-The script rewrites the formula in the tap checkout (`../homebrew-tap` by
-default) from the release's published checksums. Review the diff it prints,
-then commit and push in the tap as `chore: update to vX.Y.Z`.
+The script uses the release checksums to update the formula in the tap checkout
+(`../homebrew-tap` by default). Review the printed diff, then commit and push
+the tap change as `chore: update to vX.Y.Z`.
 
 ## 5. Update the site
 
@@ -81,10 +80,11 @@ In `loonfs_www`, re-vendor the spec the site renders and open a PR:
 npm run sync:openapi
 ```
 
-## 6. Prove the release
+## 6. Verify the release
 
-- `curl -fsSL https://install.loonfs.com | sh` installs a binary that
-  reports `X.Y.Z` — the installer resolves the latest release on its own.
-- `brew install loonfs/tap/loonfs` (or `brew upgrade loonfs`) lands `X.Y.Z`.
-- `docker pull ghcr.io/loonfs/loonfs-server:vX.Y.Z` resolves to the digest
-  `ARTIFACTS.txt` records.
+- `curl -fsSL https://install.loonfs.com | sh` installs a binary that reports
+  `X.Y.Z`. The installer selects the latest release automatically.
+- `brew install loonfs/tap/loonfs` (or `brew upgrade loonfs`) installs
+  `X.Y.Z`.
+- `docker pull ghcr.io/loonfs/loonfs-server:vX.Y.Z` downloads the digest
+  recorded in `ARTIFACTS.txt`.

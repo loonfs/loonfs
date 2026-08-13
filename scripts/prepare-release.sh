@@ -6,9 +6,9 @@ usage() {
     cat <<'EOF'
 Usage: prepare-release.sh --version <version>
 
-Rewrites every file that names the workspace version, regenerates the
-OpenAPI spec, and refreshes Cargo.lock, then verifies the checkout the
-same way the release workflow will verify the tag:
+Updates the workspace version references, regenerates the OpenAPI
+specification, and refreshes Cargo.lock. It then runs the version and
+OpenAPI checks used by the release workflow:
 
   Cargo.toml               workspace.package.version and the pinned
                            versions of the published workspace crates
@@ -16,8 +16,8 @@ same way the release workflow will verify the tag:
   docs/specs/openapi.json  regenerated from the server
   Cargo.lock               refreshed by the regeneration build
 
-Run it on a branch cut from a clean, green main, commit the result as
-"chore(release): prepare v<version>", and follow RELEASING.md from there.
+Run it on a clean branch based on main after CI passes. Commit the result
+as "chore(release): prepare v<version>", then follow RELEASING.md.
 EOF
 }
 
@@ -79,8 +79,8 @@ current=$(awk '
 
 echo "bumping $current -> $version"
 
-# workspace.package.version, then the pinned registry versions of the
-# published workspace crates. RELEASING.md explains why both exist.
+# Update the workspace version and the pinned registry versions of the
+# published workspace crates. RELEASING.md explains why both are required.
 sed "/^\[workspace\.package\]$/,/^\[/ s/^version = \"$current\"\$/version = \"$version\"/
      s/\(^loonfs[a-z-]* = { path = \"crates\/[a-z-]*\", version = \"\)$current\(\" }\)\$/\1$version\2/" \
     Cargo.toml > Cargo.toml.tmp
@@ -96,11 +96,11 @@ sed "s/^version: .*\$/version: $version/
     "$chart" > "$chart.tmp"
 mv "$chart.tmp" "$chart"
 
-# The spec carries the version, so regenerate it rather than editing it.
-# This build also refreshes Cargo.lock for the bumped workspace crates.
+# Regenerate the specification because it includes the release version.
+# Cargo also refreshes Cargo.lock while building the OpenAPI generator.
 cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- "$spec"
 
-# The same checks the release workflow's prepare job runs against the tag.
+# Run the version checks used by the release workflow.
 resolved=$(cargo pkgid -p loonfs-cli | sed 's/.*#//')
 [ "$resolved" = "$version" ] \
     || die "cargo resolves loonfs-cli to $resolved, expected $version"
@@ -115,7 +115,7 @@ app_version=$(sed -n 's/^appVersion: *//p' "$chart" | tr -d '"')
 grep -q "\"version\": \"$version\"" "$spec" \
     || die "regenerated spec does not carry version $version"
 
-# The spec-lock test, exactly as CI runs it.
+# Run the OpenAPI specification test with the same options used in CI.
 cargo test -p loonfs-server --features openapi --locked openapi
 
 echo

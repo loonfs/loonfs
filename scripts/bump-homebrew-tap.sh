@@ -6,10 +6,10 @@ usage() {
     cat <<'EOF'
 Usage: bump-homebrew-tap.sh --version <version> [--tap-dir <path>]
 
-Points the loonfs formula in the Homebrew tap at an already-published
-GitHub release: downloads the release's SHA256SUMS, rewrites the two
-macOS URLs, their checksums, and the explicit Intel version, and leaves
-the tap checkout for you to review, commit, and push.
+Updates the LoonFS formula in the Homebrew tap for an existing GitHub
+release. The script downloads SHA256SUMS and updates the two macOS URLs,
+their checksums, and the explicit Intel version. It does not commit or
+push the changes.
 
 The tap checkout defaults to ../homebrew-tap next to this repository.
 EOF
@@ -93,9 +93,8 @@ echo "$arm_sha" | grep -Eq '^[0-9a-f]{64}$' \
 echo "$intel_sha" | grep -Eq '^[0-9a-f]{64}$' \
     || die "release v$version lists no checksum for the x86_64 macOS archive"
 
-# The formula names each archive once, with its checksum on the next
-# sha256 line, and pins the Intel version explicitly. Rewrite exactly
-# those lines and leave the rest of the formula alone.
+# Each archive URL is followed by its sha256 value. The Intel block also has
+# an explicit version. Update only these values.
 awk -v version="$version" -v arm_sha="$arm_sha" -v intel_sha="$intel_sha" '
     function indent_of(line) {
         match(line, /^ */)
