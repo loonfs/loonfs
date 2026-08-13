@@ -468,6 +468,8 @@ where
             absolute_path: "/".to_owned(),
             inode_id: root_inode_id,
             inode_kind: root.inode_kind,
+            created_by: root.created_by,
+            created_at_ms: root.created_at_ms,
             parent_inode_id: None,
             display_name: String::new(),
         });
@@ -521,6 +523,8 @@ where
         absolute_path: current_absolute_path,
         inode_id: current_inode_id,
         inode_kind: inode.inode_kind,
+        created_by: inode.created_by,
+        created_at_ms: inode.created_at_ms,
         parent_inode_id: current_parent_inode_id,
         display_name: current_display_name,
     })

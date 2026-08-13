@@ -38,9 +38,11 @@ fn active_deletion_row(tombstone: &crate::metadata::SubtreeTombstoneRecord) -> M
         action: match record.action {
             ActiveDeletionAction::Listed {
                 deleted_at_ms,
+                deleted_by,
                 deleted_direntry,
             } => ActiveDeletionRowAction::Listed {
                 deleted_at_ms,
+                deleted_by,
                 deleted_direntry,
             },
             ActiveDeletionAction::Removed { revoked_at_seq } => {
@@ -62,6 +64,8 @@ pub(super) fn manifest_rows_for_family(
                 inode_id: inode.inode_id,
                 inode_kind: inode.inode_kind,
                 created_seq: inode.created_seq,
+                created_by: inode.created_by.clone(),
+                created_at_ms: inode.created_at_ms,
             })
             .collect::<Vec<_>>(),
         MetadataTableFamily::DirentryBinds | MetadataTableFamily::DirentryChildBinds => {
@@ -101,6 +105,7 @@ pub(super) fn manifest_rows_for_family(
                     revision_no: revision.revision_no,
                     committed_seq: revision.committed_seq,
                     committed_at_ms: revision.committed_at_ms,
+                    actor: revision.actor.clone(),
                     revision_delta_index: revision.revision_delta_index,
                     content_ref: revision.content_ref.clone(),
                 })
@@ -114,6 +119,7 @@ pub(super) fn manifest_rows_for_family(
                 generation: tombstone.generation,
                 action: tombstone_row_action(&tombstone.action),
                 deleted_at_ms: tombstone.deleted_at_ms,
+                actor: tombstone.actor.clone(),
             })
             .collect::<Vec<_>>(),
         MetadataTableFamily::ActiveDeletions => metadata_state
@@ -141,6 +147,8 @@ pub(super) fn manifest_rows_for_family(
                 attributes_revision_no: record.attributes_revision_no,
                 committed_seq: record.committed_seq,
                 delta_index: record.delta_index,
+                actor: record.actor.clone(),
+                updated_at_ms: record.updated_at_ms,
                 attributes: record.attributes.clone(),
             })
             .collect::<Vec<_>>(),

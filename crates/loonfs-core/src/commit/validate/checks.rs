@@ -10,7 +10,7 @@ use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::{
-    AttributeRevisionNo, Attributes, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey,
+    ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey,
     RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
@@ -40,6 +40,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     metadata_state: &mut PublishValidationView<'_, S>,
     cursor: &mut OpValidationCursor,
     committed_seq: ChangeSeq,
+    actor: &ActorRef,
     committed_at_ms: u64,
 ) -> Result<Vec<ValidatedOp>, CoreError> {
     let mut validated_ops = Vec::with_capacity(ops.len());
@@ -338,7 +339,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 }
             }
         };
-        metadata_state.apply_validated_op_mut(committed_seq, committed_at_ms, &validated_op);
+        metadata_state.apply_validated_op_mut(committed_seq, actor, committed_at_ms, &validated_op);
         validated_ops.push(validated_op);
     }
 

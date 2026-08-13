@@ -7,7 +7,9 @@ use crate::metadata::{
     DirentryBindRecord, InodeRecord, MetadataState, MetadataView, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-use loonfs_api::{AttributeRevisionNo, Attributes, ChangeSeq, InodeId, NameKey, RevisionNo};
+use loonfs_api::{
+    ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, InodeId, NameKey, RevisionNo,
+};
 use loonfs_objectstore::ObjectStore;
 
 /// The publish view: it holds the loaded [`MetadataView`] plus the
@@ -131,10 +133,11 @@ impl<S: ObjectStore + ?Sized> PublishValidationView<'_, S> {
     pub(crate) fn apply_validated_op_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        actor: &ActorRef,
         committed_at_ms: u64,
         op: &ValidatedOp,
     ) {
         self.overlay
-            .apply_validated_op_mut(committed_seq, committed_at_ms, op);
+            .apply_validated_op_mut(committed_seq, actor, committed_at_ms, op);
     }
 }

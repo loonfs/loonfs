@@ -183,7 +183,7 @@ mod tests {
     }
 
     fn encoded_head(namespace_id: &NamespaceId) -> (HeadState, Vec<u8>) {
-        let state = HeadState::initial(namespace_id.clone(), ContentStoreId::generate());
+        let state = HeadState::initial(namespace_id.clone(), ContentStoreId::generate(), 1_000);
         let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, state.clone())
             .expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");

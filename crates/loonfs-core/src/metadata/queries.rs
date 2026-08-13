@@ -9,7 +9,7 @@
 
 use super::visibility::{self, resolve_in_memory_read, unbind_matches_binding};
 use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey};
+use loonfs_api::{AbsolutePath, ActorRef, ChangeSeq, InodeId, InodeKind, NameKey};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
@@ -19,6 +19,8 @@ pub struct ResolvedVisiblePath {
     pub absolute_path: String,
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
+    pub created_by: ActorRef,
+    pub created_at_ms: u64,
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
 }

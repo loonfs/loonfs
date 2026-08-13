@@ -234,6 +234,7 @@ mod tests {
         VerifiedNamespaceCatalogEntry::from_head(&HeadState::initial(
             namespace_id,
             ContentStoreId::parse(content_store).expect("content store id"),
+            1_000,
         ))
     }
 

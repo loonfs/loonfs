@@ -8,6 +8,7 @@ mod direct_put_real_provider;
 mod grep_modes;
 mod http_admin;
 mod http_attributes;
+mod http_attribution;
 mod http_auth;
 mod http_commits;
 mod http_limits;

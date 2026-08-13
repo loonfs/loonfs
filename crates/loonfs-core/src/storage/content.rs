@@ -1095,10 +1095,13 @@ mod tests {
             namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             absolute_path: loonfs_api::AbsolutePath::parse("/file.bin").expect("absolute path"),
             inode_id: loonfs_api::InodeId(1),
+            created_by: loonfs_api::ActorRef::loonfs_system(),
+            created_at_ms: 1,
             kind: loonfs_api::AuthoritativePathEntryKind::File {
                 revision_no: loonfs_api::RevisionNo(1),
                 size_bytes: 0,
                 content_ref: ContentRef::blob_v1(loonfs_api::ContentId::generate(), b""),
+                revision_actor: loonfs_api::ActorRef::loonfs_system(),
                 committed_at_ms: 1,
             },
             head_seq: loonfs_api::ChangeSeq(1),

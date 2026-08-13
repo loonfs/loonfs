@@ -3,8 +3,8 @@
 //! The mutating operation shapes live in [`super::operations`].
 
 use crate::{
-    AbsolutePath, AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName, InodeId,
-    InodeKind, NameKey, NamespaceId, RevisionNo,
+    AbsolutePath, ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName,
+    InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,11 @@ pub struct AuthoritativePathEntry {
     pub absolute_path: AbsolutePath,
     /// Stable inode identity for this item.
     pub inode_id: InodeId,
+    /// Actor that created this inode, as supplied by the application.
+    pub created_by: ActorRef,
+    /// Time the inode was created, in Unix milliseconds. Sequence numbers
+    /// determine order.
+    pub created_at_ms: u64,
     /// File-or-directory classification and its kind-specific payload.
     #[serde(flatten)]
     pub kind: AuthoritativePathEntryKind,
@@ -103,8 +108,10 @@ pub enum AuthoritativePathEntryKind {
         size_bytes: u64,
         /// Current content reference.
         content_ref: ContentRef,
-        /// Wall-clock stamp of the commit that created the current revision.
-        /// Observational: `head_seq` and revision sequences are the order.
+        /// Actor responsible for the current revision.
+        revision_actor: ActorRef,
+        /// Time of the current revision, in Unix milliseconds. Revision
+        /// sequences determine order.
         committed_at_ms: u64,
     },
 }
@@ -117,6 +124,15 @@ impl AuthoritativePathEntryKind {
             Self::File { .. } => InodeKind::File,
         }
     }
+
+    /// Returns the actor responsible for the current file revision.
+    /// Directories return `None`.
+    pub const fn revision_actor(&self) -> Option<&ActorRef> {
+        match self {
+            Self::Directory {} => None,
+            Self::File { revision_actor, .. } => Some(revision_actor),
+        }
+    }
 }
 
 /// One inode's complete projected attribute state.
@@ -125,6 +141,14 @@ impl AuthoritativePathEntryKind {
 pub struct AuthoritativeAttributes {
     /// The attribute revision this projection represents.
     pub revision_no: AttributeRevisionNo,
+    /// Actor responsible for the latest attribute update. This is `None` for
+    /// the initial empty state at revision 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<ActorRef>,
+    /// Time of the latest attribute update, in Unix milliseconds. This is
+    /// `None` for the initial empty state at revision 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
     /// The complete attribute map at `revision_no`.
     ///
     /// An inode that has never had attributes written is at revision 0 with
@@ -179,6 +203,8 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             absolute_path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if parent_inode_id.is_some() { 2 } else { 1 }),
+            created_by: ActorRef::loonfs_system(),
+            created_at_ms: 1_752_624_000_000,
             kind: AuthoritativePathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
             parent_inode_id,
@@ -196,6 +222,8 @@ mod tests {
                 "namespace_id": "demo",
                 "absolute_path": "/docs",
                 "inode_id": 2,
+                "created_by": { "kind": "system", "id": "loonfs" },
+                "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "dir",
                 "head_seq": 3,
                 "parent_inode_id": 1,
@@ -220,6 +248,8 @@ mod tests {
                     "namespace_id": "demo",
                     "absolute_path": "/docs",
                     "inode_id": 2,
+                    "created_by": { "kind": "system", "id": "loonfs" },
+                    "created_at_ms": 1_752_624_000_000_u64,
                     "inode_kind": "dir",
                     "head_seq": 3,
                     "parent_inode_id": 1,
@@ -237,6 +267,7 @@ mod tests {
             revision_no: RevisionNo(7),
             size_bytes: 5,
             content_ref: content_ref.clone(),
+            revision_actor: ActorRef::loonfs_system(),
             committed_at_ms: 1_752_624_000_000,
         };
 
@@ -246,10 +277,13 @@ mod tests {
                 "namespace_id": "demo",
                 "absolute_path": "/report.txt",
                 "inode_id": 2,
+                "created_by": { "kind": "system", "id": "loonfs" },
+                "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "file",
                 "revision_no": 7,
                 "size_bytes": 5,
                 "content_ref": content_ref,
+                "revision_actor": { "kind": "system", "id": "loonfs" },
                 "committed_at_ms": 1_752_624_000_000_u64,
                 "head_seq": 3,
                 "parent_inode_id": 1,
@@ -288,6 +322,7 @@ mod tests {
             revision_no: RevisionNo(1),
             size_bytes: 5,
             content_ref,
+            revision_actor: ActorRef::loonfs_system(),
             committed_at_ms: 1,
         };
         assert_eq!(
@@ -308,6 +343,8 @@ mod tests {
         let mut projected = unprojected;
         projected.attributes = Some(AuthoritativeAttributes {
             revision_no: crate::AttributeRevisionNo(0),
+            updated_by: None,
+            updated_at_ms: None,
             attributes: crate::Attributes::default(),
         });
         let projected_json = serde_json::to_value(&projected).expect("serialize projected entry");
@@ -329,8 +366,10 @@ pub struct TrashEntry {
     pub root_inode_id: InodeId,
     /// Commit sequence of the deletion; the other half of the handle.
     pub deleted_at_seq: ChangeSeq,
-    /// Wall-clock stamp of the deleting commit. Observational.
+    /// Time of the deletion, in Unix milliseconds.
     pub deleted_at_ms: u64,
+    /// Actor responsible for the deletion.
+    pub deleted_by: ActorRef,
     /// Directory that held the deleted binding, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_inode_id: Option<InodeId>,

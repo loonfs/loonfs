@@ -580,7 +580,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     "trash for {} (head seq {})",
                     response.namespace_id, response.head_seq.0
                 ),
-                "DELETED\tNAME\tINODE\tSEQ\tRECOVER".to_owned(),
+                "DELETED\tDELETED_BY\tNAME\tINODE\tSEQ\tRECOVER".to_owned(),
             ];
             // The commands were built one per entry, in this order.
             for (entry, recovery_command) in response.entries.iter().zip(&listing.recovery_commands)
@@ -591,8 +591,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     .map(|name| name.as_str().to_owned())
                     .unwrap_or_else(|| "-".to_owned());
                 lines.push(format!(
-                    "{}\t{}\t{}\t{}\t{recovery_command}",
+                    "{}\t{}\t{}\t{}\t{}\t{recovery_command}",
                     format_utc_ms(entry.deleted_at_ms),
+                    render_actor(&entry.deleted_by),
                     name,
                     entry.root_inode_id,
                     entry.deleted_at_seq.0,
@@ -770,16 +771,20 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 format!("inode: {}", entry.inode_id),
                 format!("kind: {}", entry.inode_kind()),
                 format!("seq: {}", entry.head_seq.0),
+                format!("created_by: {}", render_actor(&entry.created_by)),
+                format!("created: {}", format_utc_ms(entry.created_at_ms)),
             ]);
             if let loonfs_api::AuthoritativePathEntryKind::File {
                 revision_no,
                 size_bytes,
                 content_ref,
+                revision_actor,
                 committed_at_ms,
             } = &entry.kind
             {
                 lines.push(format!("size: {size_bytes}"));
                 lines.push(format!("revision: {}", revision_no.0));
+                lines.push(format!("revision_actor: {}", render_actor(revision_actor)));
                 lines.push(format!("modified: {}", format_utc_ms(*committed_at_ms)));
                 lines.push(format!("content_id: {}", content_ref.content_id));
                 lines.push(format!("content_kind: {}", content_ref.kind));
@@ -788,6 +793,18 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             // is. An inode holding no attributes prints nothing extra: the
             // header already answered the question that was asked.
             if let Some(attributes) = &entry.attributes {
+                if let Some(updated_by) = &attributes.updated_by {
+                    lines.push(format!(
+                        "attributes_updated_by: {}",
+                        render_actor(updated_by)
+                    ));
+                }
+                if let Some(updated_at_ms) = attributes.updated_at_ms {
+                    lines.push(format!(
+                        "attributes_updated: {}",
+                        format_utc_ms(updated_at_ms)
+                    ));
+                }
                 for (key, value) in attributes.attributes.iter() {
                     lines.push(format!("attr.{key}: {}", render_attribute_value(value)));
                 }
@@ -801,13 +818,14 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         } => {
             let mut lines = vec![
                 format!("revisions for {target}"),
-                "REVISION\tDATE\tSEQ\tSIZE\tDIGEST".to_owned(),
+                "REVISION\tDATE\tACTOR\tSEQ\tSIZE\tDIGEST".to_owned(),
             ];
             for revision in revisions {
                 lines.push(format!(
-                    "{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}",
                     revision.revision_no.0,
                     format_utc_ms(revision.committed_at_ms),
+                    render_actor(&revision.actor),
                     revision.committed_seq.0,
                     revision.content_ref.size_bytes,
                     revision.content_ref.content_id
@@ -930,7 +948,18 @@ pub(crate) fn human_path_entry(entry: &loonfs_api::AuthoritativePathEntry) -> St
         .size_bytes()
         .map(|value: u64| value.to_string())
         .unwrap_or_else(|| "-".to_owned());
-    format!("{}\t{}\t{}", entry.inode_kind(), size, entry.absolute_path)
+    format!(
+        "{}\t{}\t{}\t{}\t{}",
+        entry.inode_kind(),
+        size,
+        format_utc_ms(entry.created_at_ms),
+        render_actor(&entry.created_by),
+        entry.absolute_path
+    )
+}
+
+fn render_actor(actor: &loonfs_api::ActorRef) -> String {
+    format!("{}:{}", actor.kind.as_str(), actor.id)
 }
 
 /// One attribute value on one line.
@@ -982,6 +1011,8 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             absolute_path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if display_name.is_some() { 2 } else { 1 }),
+            created_by: loonfs_api::ActorRef::loonfs_system(),
+            created_at_ms: 1_752_624_000_000,
             kind: AuthoritativePathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
             parent_inode_id: display_name.map(|_| InodeId(1)),
@@ -1002,12 +1033,15 @@ mod tests {
     #[test]
     fn human_stat_omits_the_absent_root_name() {
         let root = stat_output(path_entry("/", None));
-        assert_eq!(human_success(&root), "path: /\ninode: 1\nkind: dir\nseq: 3");
+        assert_eq!(
+            human_success(&root),
+            "path: /\ninode: 1\nkind: dir\nseq: 3\ncreated_by: system:loonfs\ncreated: 2025-07-16 00:00:00Z"
+        );
 
         let named = stat_output(path_entry("/docs", Some("docs")));
         assert_eq!(
             human_success(&named),
-            "path: /docs\nname: docs\ninode: 2\nkind: dir\nseq: 3"
+            "path: /docs\nname: docs\ninode: 2\nkind: dir\nseq: 3\ncreated_by: system:loonfs\ncreated: 2025-07-16 00:00:00Z"
         );
     }
 
@@ -1017,6 +1051,8 @@ mod tests {
         let mut entry = path_entry("/docs", Some("docs"));
         entry.attributes = Some(AuthoritativeAttributes {
             revision_no: loonfs_api::AttributeRevisionNo(1),
+            updated_by: Some(loonfs_api::ActorRef::loonfs_system()),
+            updated_at_ms: Some(1_752_624_000_000),
             attributes: loonfs_api::Attributes::new(std::collections::BTreeMap::from([(
                 loonfs_api::AttributeKey::parse("note").expect("attribute key"),
                 value,
@@ -1049,8 +1085,8 @@ mod tests {
         );
         assert_eq!(
             rendered.lines().count(),
-            6,
-            "path, name, inode, kind, seq, and one attribute line: {rendered}"
+            10,
+            "the base entry, attribution, attribute update, and one attribute line: {rendered}"
         );
 
         let escape =

@@ -2943,6 +2943,26 @@
           "revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
             "description": "The attribute revision this projection represents."
+          },
+          "updated_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
+            "minimum": 0
+          },
+          "updated_by": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ActorRef",
+                "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
+              }
+            ]
           }
         }
       },
@@ -2958,6 +2978,8 @@
               "namespace_id",
               "absolute_path",
               "inode_id",
+              "created_by",
+              "created_at_ms",
               "head_seq"
             ],
             "properties": {
@@ -2975,6 +2997,16 @@
                     "description": "The inode's attribute projection, when requested."
                   }
                 ]
+              },
+              "created_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
+                "minimum": 0
+              },
+              "created_by": {
+                "$ref": "#/components/schemas/ActorRef",
+                "description": "Actor that created this inode, as supplied by the application."
               },
               "display_name": {
                 "oneOf": [
@@ -3041,6 +3073,7 @@
               "revision_no",
               "size_bytes",
               "content_ref",
+              "revision_actor",
               "committed_at_ms",
               "inode_kind"
             ],
@@ -3048,7 +3081,7 @@
               "committed_at_ms": {
                 "type": "integer",
                 "format": "int64",
-                "description": "Wall-clock stamp of the commit that created the current revision.\nObservational: `head_seq` and revision sequences are the order.",
+                "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
                 "minimum": 0
               },
               "content_ref": {
@@ -3060,6 +3093,10 @@
                 "enum": [
                   "file"
                 ]
+              },
+              "revision_actor": {
+                "$ref": "#/components/schemas/ActorRef",
+                "description": "Actor responsible for the current revision."
               },
               "revision_no": {
                 "$ref": "#/components/schemas/RevisionNo",
@@ -4254,9 +4291,14 @@
           "revision_no",
           "committed_seq",
           "committed_at_ms",
+          "actor",
           "content_ref"
         ],
         "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for this revision, as supplied by the application."
+          },
           "committed_at_ms": {
             "type": "integer",
             "format": "int64",
@@ -6032,18 +6074,23 @@
         "required": [
           "root_inode_id",
           "deleted_at_seq",
-          "deleted_at_ms"
+          "deleted_at_ms",
+          "deleted_by"
         ],
         "properties": {
           "deleted_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Wall-clock stamp of the deleting commit. Observational.",
+            "description": "Time of the deletion, in Unix milliseconds.",
             "minimum": 0
           },
           "deleted_at_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Commit sequence of the deletion; the other half of the handle."
+          },
+          "deleted_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the deletion."
           },
           "display_name": {
             "oneOf": [

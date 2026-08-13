@@ -650,6 +650,8 @@ mod tests {
             inode_id: InodeId(inode_id),
             inode_kind: InodeKind::File,
             created_seq: ChangeSeq(inode_id),
+            created_by: crate::ActorRef::loonfs_system(),
+            created_at_ms: inode_id,
         };
         let key = row.row_key();
         (key.clone(), key, row)

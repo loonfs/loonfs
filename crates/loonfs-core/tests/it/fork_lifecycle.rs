@@ -837,7 +837,11 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     let context = mutation_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     // Another writer's complete head for the same id, already durable.
-    let foreign = HeadState::initial(namespace_id.clone(), loonfs_api::ContentStoreId::generate());
+    let foreign = HeadState::initial(
+        namespace_id.clone(),
+        loonfs_api::ContentStoreId::generate(),
+        1_000,
+    );
     let foreign_bytes = encode_control_object(
         &HeadStateEnvelope::from_state(ControlObjectKind::WalHead, foreign)
             .expect("foreign head envelope"),

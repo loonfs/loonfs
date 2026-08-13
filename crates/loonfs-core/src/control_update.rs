@@ -235,7 +235,11 @@ mod tests {
     async fn write_initial_head(store: &LocalFsStore, namespace_id: &NamespaceId) {
         let envelope = HeadStateEnvelope::from_state(
             ControlObjectKind::WalHead,
-            HeadState::initial(namespace_id.clone(), loonfs_api::ContentStoreId::generate()),
+            HeadState::initial(
+                namespace_id.clone(),
+                loonfs_api::ContentStoreId::generate(),
+                1_000,
+            ),
         )
         .expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");

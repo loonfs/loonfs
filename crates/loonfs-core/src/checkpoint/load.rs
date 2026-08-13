@@ -116,6 +116,7 @@ pub(crate) async fn load_basis_metadata_tables<'a, S: ObjectStore + ?Sized>(
     table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
     basis: &MetadataBasis,
+    genesis_created_at_ms: u64,
 ) -> crate::error::Result<LoadedMetadataBasis<'a, S>> {
     let Some(manifest) = basis.manifest() else {
         let tables =
@@ -126,7 +127,7 @@ pub(crate) async fn load_basis_metadata_tables<'a, S: ObjectStore + ?Sized>(
                 tables.manifest().payload.head_seq,
             ),
             tables,
-            base_state: bootstrap_metadata_state(),
+            base_state: bootstrap_metadata_state(genesis_created_at_ms),
         });
     };
     let tables = load_verified_manifest_tables_with_cache(
@@ -283,6 +284,7 @@ pub(crate) fn head_from_manifest(
     HeadState {
         namespace_id: current_head.namespace_id.clone(),
         content_store_id: current_head.content_store_id.clone(),
+        created_at_ms: current_head.created_at_ms,
         fork_basis: current_head.fork_basis.clone(),
         seq: manifest.payload.head_seq,
         head_commit_id: manifest.payload.head_commit_id.clone(),

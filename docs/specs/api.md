@@ -1350,11 +1350,14 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "namespace_id": "demo",
   "absolute_path": "/docs/report.txt",
   "inode_id": 42,
+  "created_by": { "kind": "user", "id": "usr_8f3c" },
+  "created_at_ms": 1752623000000,
   "inode_kind": "file",
   "head_seq": 418,
   "parent_inode_id": 7,
   "display_name": "report.txt",
   "revision_no": 7,
+  "revision_actor": { "kind": "service", "id": "render-worker" },
   "size_bytes": 19482,
   "content_ref": {
     "kind": "blob_v1",
@@ -1366,15 +1369,18 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "committed_at_ms": 1752624000000,
   "attributes": {
     "revision_no": 3,
+    "updated_by": { "kind": "user", "id": "metadata-editor" },
+    "updated_at_ms": 1752623500000,
     "attributes": { "owner": "platform" }
   }
 }
 ```
 
-File entries carry `committed_at_ms`: the wall-clock stamp of the commit that
-created the current revision, in Unix milliseconds. It is observational —
-sequences are the order, and no validity rule reads it. Directory entries
-carry no modification time in v0.
+Every entry carries `created_by` and `created_at_ms` from its inode row. File
+entries additionally carry `revision_actor` and `committed_at_ms` from their
+current revision row. These stamps are observational — sequences are the
+order, and no validity rule reads them. Directories have creation time but no
+modified time in v0; rename and move change neither attribution nor time.
 
 `include_attributes` selects whether the entry carries the inode's grouped
 attribute projection. It accepts `true` or `false`; anything else is `invalid_request`. Stat
@@ -1382,9 +1388,11 @@ defaults to `true`, because a stat answers for one path and a map is capped
 at 64 KiB.
 
 The `attributes` value is present or absent as one group. When present, it
-carries `revision_no` and the complete `attributes` map. An empty map is a
+carries `revision_no`, the complete `attributes` map, and `updated_by` plus
+`updated_at_ms` when a persisted attributes revision exists. An empty map is a
 real projected answer at its current revision, and an inode that has never
-had attributes written reads as `{}` at revision 0. A read that did not
+had attributes written reads as `{}` at revision 0 with no `updated_by` or
+`updated_at_ms`. A read that did not
 include attributes omits the group, so an absent group never means "no
 attributes".
 
@@ -1442,11 +1450,15 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "namespace_id": "demo",
       "absolute_path": "/docs/report.txt",
       "inode_id": 42,
+      "created_by": { "kind": "user", "id": "usr_8f3c" },
+      "created_at_ms": 1752623000000,
       "inode_kind": "file",
       "head_seq": 418,
       "parent_inode_id": 7,
       "display_name": "report.txt",
       "revision_no": 7,
+      "revision_actor": { "kind": "service", "id": "render-worker" },
+      "committed_at_ms": 1752624000000,
       "size_bytes": 19482,
       "content_ref": {
         "kind": "blob_v1",
@@ -1460,6 +1472,8 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "namespace_id": "demo",
       "absolute_path": "/docs/slides",
       "inode_id": 43,
+      "created_by": { "kind": "user", "id": "usr_8f3c" },
+      "created_at_ms": 1752623000000,
       "inode_kind": "dir",
       "head_seq": 418,
       "parent_inode_id": 7,
@@ -1479,12 +1493,31 @@ range scan over the derived active-deletions family (format spec, section
 2.5), so a page costs the page rather than the namespace's deletion history.
 Those rows are current state and are never dropped at the retention floor, so
 entries never age out of this listing however far the floor advances. Each
-entry carries the inode id and deletion sequence that `undelete` requires, the
-deletion's wall-clock stamp, and the deleted binding's name when the delete
+entry carries the inode id and deletion sequence that `undelete` requires,
+`deleted_by` and the deletion's wall-clock stamp from that exact deletion
+generation, and the deleted binding's name when the delete
 recorded one; entries written before names were recorded still carry a
 complete recovery handle. Deletions nest: a path deleted inside an
 already-deleted subtree keeps its own entry, and recovering the outer deletion
 leaves the inner one listed.
+
+```json
+{
+  "namespace_id": "demo",
+  "head_seq": 418,
+  "entries": [
+    {
+      "root_inode_id": 42,
+      "deleted_at_seq": 417,
+      "deleted_at_ms": 1752625000000,
+      "deleted_by": { "kind": "user", "id": "usr_8f3c" },
+      "parent_inode_id": 7,
+      "name_key": "report.txt",
+      "display_name": "report.txt"
+    }
+  ]
+}
+```
 
 ### 6.7 `GET /filesystem/content`
 
@@ -1516,6 +1549,7 @@ reaches revision 1, regardless of how far the retention floor has advanced.
       "revision_no": 7,
       "committed_seq": 418,
       "committed_at_ms": 1752624000000,
+      "actor": { "kind": "service", "id": "render-worker" },
       "content_ref": {
         "kind": "blob_v1",
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",

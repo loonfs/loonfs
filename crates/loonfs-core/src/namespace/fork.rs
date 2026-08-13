@@ -76,6 +76,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let head = HeadState {
         namespace_id: new_namespace_id.clone(),
         content_store_id: source_head.content_store_id.clone(),
+        created_at_ms: context.now_ms,
         fork_basis: Some(ForkBasis {
             source_namespace_id: source_namespace_id.clone(),
             source_manifest_object_id: source_record.manifest_object_id.clone(),

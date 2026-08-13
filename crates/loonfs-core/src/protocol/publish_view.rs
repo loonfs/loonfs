@@ -155,8 +155,14 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     }
     ensure_publish_head_matches_acquired_writer(&head, &acquired_writer)?;
     let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
-    let loaded_basis =
-        load_basis_metadata_tables(store, table_cache, namespace_id, &loaded.basis).await?;
+    let loaded_basis = load_basis_metadata_tables(
+        store,
+        table_cache,
+        namespace_id,
+        &loaded.basis,
+        head.created_at_ms,
+    )
+    .await?;
     let key = PublishProjectionKey {
         namespace_id: namespace_id.clone(),
         head: HeadAnchor {
@@ -374,7 +380,7 @@ mod tests {
         PublishTailProjection {
             key,
             wal_tail_segments: 3,
-            tail_state: bootstrap_metadata_state(),
+            tail_state: bootstrap_metadata_state(1_000),
         }
     }
 

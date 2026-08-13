@@ -88,7 +88,11 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     // A fresh content-store id per namespace. Nothing claims it durably:
     // uniqueness rests on the generated id's randomness, exactly as it does
     // for every other generated id in the format.
-    let mut head = HeadState::initial(namespace_id.clone(), ContentStoreId::generate());
+    let mut head = HeadState::initial(
+        namespace_id.clone(),
+        ContentStoreId::generate(),
+        context.now_ms,
+    );
     head.writer = Some(WriterBlock {
         writer_id: context.writer_id.clone(),
         acquired_at_ms: context.now_ms,
@@ -176,12 +180,14 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
 ///
 /// A created namespace materializes no manifest, so this is synthesized at
 /// read time as its basis until the first flush publishes one.
-pub(crate) fn bootstrap_metadata_state() -> MetadataState {
+pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
     MetadataState::from_rows(
         vec![InodeRecord {
             inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(0),
+            created_by: loonfs_api::ActorRef::loonfs_system(),
+            created_at_ms,
         }],
         Vec::new(),
         Vec::new(),

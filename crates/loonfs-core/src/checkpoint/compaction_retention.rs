@@ -65,9 +65,7 @@ impl RetentionRule {
             Self::ActiveDeletions => {
                 RetentionOperator::ActiveDeletions(ActiveDeletionRetention::default())
             }
-            Self::ForwardBindings => {
-                RetentionOperator::ForwardBindings(BindingRetention::default())
-            }
+            Self::ForwardBindings => RetentionOperator::ForwardBindings(Box::default()),
             // The reverse index is decided one row at a time by the merge,
             // which is the only thing that can read the snapshot, so this
             // rule has no state of its own to run. The merge still opens and
@@ -84,7 +82,7 @@ pub(super) enum RetentionOperator {
     Receipts,
     Attributes(AttributeRetention),
     ActiveDeletions(ActiveDeletionRetention),
-    ForwardBindings(BindingRetention),
+    ForwardBindings(Box<BindingRetention>),
 }
 
 impl RetentionOperator {
@@ -381,6 +379,8 @@ mod tests {
             attributes_revision_no: AttributeRevisionNo(revision),
             committed_seq: ChangeSeq(committed_seq),
             delta_index: 0,
+            actor: loonfs_api::ActorRef::loonfs_system(),
+            updated_at_ms: 1_000 + committed_seq,
             attributes: Default::default(),
         }
     }
@@ -485,6 +485,7 @@ mod tests {
             deleted_at_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Listed {
                 deleted_at_ms: 1_000,
+                deleted_by: loonfs_api::ActorRef::loonfs_system(),
                 deleted_direntry: None,
             },
         };

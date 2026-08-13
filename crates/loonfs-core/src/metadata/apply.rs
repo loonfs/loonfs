@@ -7,28 +7,35 @@ use super::{
 };
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_api::ChangeSeq;
+use loonfs_api::{ActorRef, ChangeSeq};
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
+        actor: &ActorRef,
         committed_at_ms: u64,
         deltas: &[WalDelta],
     ) -> MetadataState {
         let mut metadata_state = self.clone();
-        metadata_state.apply_committed_wal_deltas_mut(committed_seq, committed_at_ms, deltas);
+        metadata_state.apply_committed_wal_deltas_mut(
+            committed_seq,
+            actor,
+            committed_at_ms,
+            deltas,
+        );
         metadata_state
     }
 
     pub fn apply_committed_wal_deltas_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        actor: &ActorRef,
         committed_at_ms: u64,
         deltas: &[WalDelta],
     ) {
         for delta in deltas {
-            self.apply_committed_wal_delta_mut(committed_seq, committed_at_ms, delta);
+            self.apply_committed_wal_delta_mut(committed_seq, actor, committed_at_ms, delta);
         }
     }
 
@@ -42,6 +49,7 @@ impl MetadataState {
     pub(crate) fn apply_committed_wal_delta_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        actor: &ActorRef,
         committed_at_ms: u64,
         delta: &WalDelta,
     ) {
@@ -55,6 +63,8 @@ impl MetadataState {
                     inode_id: *inode_id,
                     inode_kind: *inode_kind,
                     created_seq: committed_seq,
+                    created_by: actor.clone(),
+                    created_at_ms: committed_at_ms,
                 });
             }
             WalDelta::BindDirentry {
@@ -104,6 +114,7 @@ impl MetadataState {
                     revision_no: *revision_no,
                     committed_seq,
                     committed_at_ms,
+                    actor: actor.clone(),
                     revision_delta_index: *delta_index,
                     content_ref: content_ref.clone(),
                 });
@@ -120,6 +131,7 @@ impl MetadataState {
                         delta_index: *delta_index,
                     },
                     deleted_at_ms: committed_at_ms,
+                    actor: actor.clone(),
                     action: SubtreeTombstoneAction::Set {
                         deleted_direntry: deleted_direntry.clone(),
                     },
@@ -137,6 +149,7 @@ impl MetadataState {
                         delta_index: *delta_index,
                     },
                     deleted_at_ms: committed_at_ms,
+                    actor: actor.clone(),
                     action: SubtreeTombstoneAction::Revoke { target: *target },
                 });
             }
@@ -151,6 +164,8 @@ impl MetadataState {
                     attributes_revision_no: *attributes_revision_no,
                     committed_seq,
                     delta_index: *delta_index,
+                    actor: actor.clone(),
+                    updated_at_ms: committed_at_ms,
                     attributes: attributes.clone(),
                 });
             }
@@ -179,6 +194,7 @@ impl MetadataState {
         for delta in deltas {
             self.apply_committed_wal_delta_mut(
                 receipt.committed_seq,
+                &receipt.actor,
                 receipt.committed_at_ms,
                 &delta.delta,
             );
