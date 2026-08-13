@@ -20,6 +20,25 @@
 //!     .background_work(loonfs::FsBackgroundWork::Enabled)
 //!     .build()
 //!     .await?;
+//! let namespace_id = loonfs::NamespaceId::parse("demo").expect("valid namespace id");
+//! writer
+//!     .create_namespace(&namespace_id, loonfs::CreateNamespaceOptions::default())
+//!     .await?;
+//! let commit = loonfs::CommitOptions::new(loonfs::ActorRef::service(
+//!     loonfs::ActorId::parse("document-worker").expect("valid actor id"),
+//! ));
+//! writer
+//!     .put_file_bytes(
+//!         &namespace_id,
+//!         "/report.txt",
+//!         b"report",
+//!         loonfs::PutFileOptions {
+//!             behavior: loonfs::DestinationBehavior::Replace,
+//!             commit,
+//!             expected_revision_no: None,
+//!         },
+//!     )
+//!     .await?;
 //! # Ok(()) }
 //! ```
 //!

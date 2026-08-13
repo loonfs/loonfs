@@ -567,11 +567,11 @@ The metadata rows store attribution as follows:
   initial empty state at revision 0 is not persisted and has neither value.
 - Directory bind and unbind rows store neither an actor nor a timestamp.
 
-`created_at_ms` is the wall-clock time reported by the commit that created the
-inode. It is informational only. Renaming or moving an item does not change
-any timestamp, and directories do not have a modification time. Sequence
-numbers determine ordering. The format does not define a rename time or a
-directory modification time.
+Each timestamp comes from the commit that created or updated the corresponding
+metadata row. It is informational only. Renaming or moving an item does not
+change any timestamp, and directories do not have a modification time.
+Sequence numbers determine ordering. The format does not define a rename time
+or a directory modification time.
 
 ### 2.2 Inode kinds
 
@@ -998,11 +998,13 @@ segment whose rows are out of order as malformed. Readers load the referenced
 runs, then replay only the visible WAL chain after the manifest's `head_seq`.
 
 The WAL preserves ordered history even when multiple logical commits are
-stored in one segment. Each logical commit records the commit identity, required
-actor, optional message, and normalized metadata deltas such as inode creation, direntry
-bind/unbind, file revision append, and subtree tombstone rows. Validation
-inputs and operation results are not persisted in the WAL. Checkpoints keep
-replay bounded as history grows.
+stored in one segment. Each logical commit envelope records `commit_id`,
+`semantic_commit_fingerprint`, required `actor`, `committed_at_ms`, optional
+`message`, and normalized metadata deltas such as inode creation, direntry
+bind/unbind, file revision append, and subtree tombstone rows. The `actor`
+object contains `kind` (`user`, `service`, or `system`) and `id`, and it is
+recorded once per commit. Validation inputs and operation results are not
+persisted in the WAL. Checkpoints keep replay bounded as history grows.
 
 #### 2.9.1 Resolving the metadata basis
 
@@ -1397,6 +1399,10 @@ can prove its retry is the same request (API spec, section 5.2). Reference
 values are pinned by tests in `loonfs-api` (`commit_identity.rs`); those
 literals must never change within scheme `v1`.
 
+Actor references use stable opaque application-owned ids such as `usr_8f3c`.
+Do not use email addresses or display names because profile changes and
+deletions never rewrite filesystem history.
+
 ### 3.4 Server authority
 
 The server is authoritative for commit validation.
@@ -1519,6 +1525,19 @@ A namespace may advance a retention floor to say:
 
 Clients older than the retention floor must re-bootstrap from a fresh
 checkpoint instead of replaying from an obsolete cursor.
+
+#### 3.8.1 Attribution retention contract
+
+For every retained commit, LoonFS promises an attributed change-feed entry.
+LoonFS also promises attributed retained projections for the inode creator,
+each file revision actor, the current attribute updater, and the active
+deleter.
+
+LoonFS does not promise that every historical move or rename remains queryable
+forever. A partner that needs an all-time activity record must consume the
+change feed into its own store before the retention floor passes the commit.
+That store keys changes by `(namespace_id, commit_id)` and keys event targets
+by `inode_id`, not by path.
 
 The retention floor may advance only after the system has enough verified
 material to keep replay safe at or after that point: advancement derives its

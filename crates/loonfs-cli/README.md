@@ -171,14 +171,20 @@ Reading
     exceeds the scan budget
 
 Writing
-  loonfs put <local-path|-> [remote-path] [-r] [--force] [--expected-revision <n>]
+  Every writing command accepts --actor-kind <user|service|system> together
+  with --actor-id <stable-id>. Flags override LOONFS_ACTOR_KIND and
+  LOONFS_ACTOR_ID, then the profile actor. Without any of them,
+  service/loonfs-cli identifies the tool, not the human running it.
+
+  loonfs put <local-path|-> [remote-path] [-r] [--force]
+             [--expected-revision <n>] [--actor-kind <kind> --actor-id <id>]
     Upload a local file, standard input when the local path is `-`, or with
     -r the directory tree rooted at the local path; --force replaces an
     existing destination, and --expected-revision replaces only while the
     file is still at that revision, so a raced write fails instead of
     stacking on it
 
-  loonfs mkdir <path> [-p]
+  loonfs mkdir <path> [-p] [--actor-kind <kind> --actor-id <id>]
     Create a directory; -p creates missing parents as well and succeeds when
     the directory is already there
 
@@ -186,6 +192,7 @@ Writing
                          [--attributes-json '<update>']
                          [--expected-inode-id <n>]
                          [--expected-attributes-revision <n>]
+                         [--actor-kind <kind> --actor-id <id>]
     Write and remove attributes on a file or directory. --set takes
     key=value and splits on the first `=`, --remove takes a key, and both
     repeat. A list value needs --attributes-json, which takes the whole
@@ -194,15 +201,17 @@ Writing
     refuse the update when the path has been rebound or the attributes have
     moved on
 
-  loonfs rm <path> [-r]
+  loonfs rm <path> [-r] [--actor-kind <kind> --actor-id <id>]
     Delete a file, or with -r a directory and everything under it as one
     commit; the output carries the handle `loonfs undelete` needs
 
   loonfs mv <source> <dest> [--force]
+            [--actor-kind <kind> --actor-id <id>]
     Move or rename a path, a directory included, in one commit; --force
     replaces an existing destination
 
   loonfs cp <source> <dest> [-r] [--force]
+            [--actor-kind <kind> --actor-id <id>]
     Copy a file, or with -r the directory tree rooted at the source;
     --force replaces an existing destination
 
@@ -211,6 +220,7 @@ History and recovery
     List a file's revision history newest first, one page at a time
 
   loonfs restore <path> --revision <n>
+                 [--actor-kind <kind> --actor-id <id>]
     Write a prior revision's content as the file's next revision
 
   loonfs trash [--limit <n>] [--cursor <cursor>]
@@ -218,6 +228,7 @@ History and recovery
     `loonfs undelete` command that recovers each one
 
   loonfs undelete [<path>] --inode <id> --deleted-at <seq>
+                  [--actor-kind <kind> --actor-id <id>]
     Recover a deleted file or directory; --inode and --deleted-at come from
     `loonfs trash` or the `rm` output and name one exact deletion, so a
     stale command cannot cancel a later delete. Omit <path> to restore in
@@ -359,6 +370,11 @@ Profile options
                                        certificate authorities to trust for
                                        an https server url
 
+  Mutation actor:
+    --actor-kind <user|service|system> optional, requires --actor-id
+    --actor-id <stable-id>             optional, requires --actor-kind
+    The default service/loonfs-cli identifies the tool, not the human.
+
 Update options
   Used by:
     loonfs profile update <name>
@@ -402,6 +418,10 @@ Update options
     --server-url <url>
     --auth-token <token>
     --ca-cert-path <path>
+
+  Mutation actor updates:
+    --actor-kind <user|service|system> requires --actor-id
+    --actor-id <stable-id>             requires --actor-kind
 
 Interrupted transfers
   A transfer killed part way is picked up by rerunning the same command.

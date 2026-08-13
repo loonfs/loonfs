@@ -347,6 +347,7 @@ pub(crate) struct TargetSelectorArgs {
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ActorSelectorArgs {
     /// Actor kind for this mutation. Must be used with `--actor-id`.
+    /// Takes priority over the environment and profile values.
     #[arg(long, value_enum)]
     pub actor_kind: Option<ActorKindArg>,
     /// Actor ID for this mutation. Must be used with `--actor-kind`.

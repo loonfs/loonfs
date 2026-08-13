@@ -36,6 +36,14 @@ only after the normal PR checks pass.
 Write the release notes before publishing. Start with a short summary of the
 important changes, followed by the generated PR list:
 
+The next release must include this breaking-change entry:
+
+### Breaking changes
+
+- Every mutating request now requires `actor`. Durable formats changed in
+  place, with regenerated golden fixtures. Existing pre-release namespaces
+  must be recreated, not migrated.
+
 ```sh
 gh api repos/loonfs/loonfs/releases/generate-notes -f tag_name=vX.Y.Z --jq .body
 ```
