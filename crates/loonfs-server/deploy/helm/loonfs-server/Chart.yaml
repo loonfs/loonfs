@@ -4,5 +4,5 @@ description: The LoonFS server, one active process behind the v0 HTTP API.
 type: application
 # Both track the workspace version. The chart ships with the server it runs,
 # so a chart version names the server version it defaults to.
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.2.1
+appVersion: "0.2.1"
