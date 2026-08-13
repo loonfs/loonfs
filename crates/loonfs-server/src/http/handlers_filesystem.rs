@@ -385,7 +385,7 @@ pub(super) async fn list_file_revisions(
         )
     )
 )]
-/// The actor is application-asserted under the shared-token authorization model.
+/// The server stores the actor from the request; the shared token does not verify it.
 pub(super) async fn apply_commit(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,

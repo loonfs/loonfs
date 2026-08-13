@@ -1311,8 +1311,8 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
         .await
         .expect("compact commit into receipt row");
 
-    // Make the original WAL unusable: every result below must come from the
-    // checkpoint's receipt row, not by quietly replaying the commit segment.
+    // Corrupt the original WAL so the checks below can only use the commit
+    // receipt stored in the checkpoint.
     let wal_keys = store
         .list_prefix("namespaces/demo/wal/segments/")
         .await

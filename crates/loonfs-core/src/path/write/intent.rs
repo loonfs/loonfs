@@ -13,14 +13,11 @@ use loonfs_api::{ActorRef, CommitId};
 /// into it.
 pub use loonfs_api::FilesystemOperation;
 
-/// One logical filesystem commit: an idempotency key, its application-asserted
-/// actor, an optional caller annotation, and an ordered, non-empty list of
-/// operations.
+/// A request to commit one or more filesystem operations.
 ///
-/// The whole request is one commit. Operations resolve in order, each seeing
-/// the effects of the ones before it, and either all of them commit or none
-/// of them do. A convenience one-operation request is this same type with a
-/// single-element list, so it plans, fingerprints, and replays identically.
+/// Operations run in order, and each operation sees the changes made by the
+/// previous ones. Either all operations are committed or none are. Requests
+/// with one operation use the same planning, fingerprint, and retry logic.
 ///
 /// This is the wire [`CommitRequest`](loonfs_api::CommitRequest) minus the
 /// content tokens: proofs are checked at the surface that accepts them, and
@@ -35,7 +32,7 @@ pub use loonfs_api::FilesystemOperation;
 pub struct CommitRequest {
     /// Client idempotency key for the whole request.
     pub commit_id: CommitId,
-    /// Application-asserted identity that caused this logical commit.
+    /// Actor responsible for the commit, as supplied by the application.
     pub actor: ActorRef,
     /// Caller annotation recorded on the commit. Part of the request's
     /// identity: reusing a commit id with a different message conflicts.

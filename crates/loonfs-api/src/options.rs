@@ -21,19 +21,19 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
-/// Attribution and idempotency settings shared by every filesystem mutation.
+/// Commit settings shared by every filesystem mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitOptions {
-    /// Application-asserted identity that caused the logical commit.
+    /// Actor responsible for the commit, as supplied by the application.
     pub actor: ActorRef,
-    /// Optional idempotency key; a fresh id is generated when absent.
+    /// Optional idempotency key. LoonFS generates one when this is `None`.
     pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit and included in its identity.
+    /// Optional commit message. Changing it changes the commit identity.
     pub message: Option<String>,
 }
 
 impl CommitOptions {
-    /// Creates commit settings for the required actor.
+    /// Creates settings with no commit ID or message.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             actor,
@@ -83,7 +83,7 @@ pub struct UpdateAttributesOptions {
     pub set: BTreeMap<AttributeKey, AttributeValue>,
     /// Keys to remove.
     pub remove: Vec<AttributeKey>,
-    /// Attribution, idempotency, and annotation for the commit.
+    /// Actor, commit ID, and message.
     pub commit: CommitOptions,
     /// When set, the update applies only while the path still resolves to
     /// this inode, so a raced rebinding fails instead of writing attributes
@@ -96,7 +96,7 @@ pub struct UpdateAttributesOptions {
 }
 
 impl UpdateAttributesOptions {
-    /// Creates an empty attribute update for the required actor.
+    /// Creates an empty attribute update for this actor.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             set: BTreeMap::new(),
@@ -113,7 +113,7 @@ impl UpdateAttributesOptions {
 pub struct PutFileOptions {
     /// Create-only or replace-existing behavior.
     pub behavior: DestinationBehavior,
-    /// Attribution, idempotency, and annotation for the commit.
+    /// Actor, commit ID, and message.
     pub commit: CommitOptions,
     /// Replace only while the file's current revision is still this one.
     /// Requires `Replace` behavior; a raced write fails instead of stacking a
@@ -122,7 +122,7 @@ pub struct PutFileOptions {
 }
 
 impl PutFileOptions {
-    /// Creates put options with create-only behavior for the required actor.
+    /// Creates options that refuse to replace an existing file.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             behavior: DestinationBehavior::NoReplace,
@@ -135,14 +135,14 @@ impl PutFileOptions {
 /// Options for creating a directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDirectoryOptions {
-    /// Attribution, idempotency, and annotation for the commit.
+    /// Actor, commit ID, and message.
     pub commit: CommitOptions,
     /// Also create missing ancestor directories, like `put_file` does.
     pub parents: bool,
 }
 
 impl CreateDirectoryOptions {
-    /// Creates directory options without parent creation for the required actor.
+    /// Creates options that do not create missing parent directories.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             commit: CommitOptions::new(actor),
@@ -156,7 +156,7 @@ impl CreateDirectoryOptions {
 pub struct DeleteOptions {
     /// Directory delete behavior.
     pub behavior: DeleteDirectoryBehavior,
-    /// Attribution, idempotency, and annotation for the commit.
+    /// Actor, commit ID, and message.
     pub commit: CommitOptions,
     /// When set, the delete applies only while the path still resolves to
     /// this inode, so a raced rebinding fails instead of deleting the wrong
@@ -165,7 +165,7 @@ pub struct DeleteOptions {
 }
 
 impl DeleteOptions {
-    /// Creates non-recursive delete options for the required actor.
+    /// Creates options for a non-recursive delete.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             behavior: DeleteDirectoryBehavior::NonRecursive,
@@ -180,12 +180,12 @@ impl DeleteOptions {
 pub struct MoveOptions {
     /// Create-only or replace-existing behavior for the destination.
     pub behavior: DestinationBehavior,
-    /// Attribution, idempotency, and annotation for the commit.
+    /// Actor, commit ID, and message.
     pub commit: CommitOptions,
 }
 
 impl MoveOptions {
-    /// Creates create-only move options for the required actor.
+    /// Creates options that refuse to replace the destination.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             behavior: DestinationBehavior::NoReplace,
@@ -199,12 +199,12 @@ impl MoveOptions {
 pub struct CopyOptions {
     /// Create-only or replace-existing behavior for the destination.
     pub behavior: DestinationBehavior,
-    /// Attribution, idempotency, and annotation for the commit.
+    /// Actor, commit ID, and message.
     pub commit: CommitOptions,
 }
 
 impl CopyOptions {
-    /// Creates create-only copy options for the required actor.
+    /// Creates options that refuse to replace the destination.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             behavior: DestinationBehavior::NoReplace,
@@ -216,12 +216,12 @@ impl CopyOptions {
 /// Options for restoring a file revision by path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreRevisionOptions {
-    /// Attribution, idempotency, and annotation for the commit.
+    /// Actor, commit ID, and message.
     pub commit: CommitOptions,
 }
 
 impl RestoreRevisionOptions {
-    /// Creates restore options for the required actor.
+    /// Creates restore options for this actor.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             commit: CommitOptions::new(actor),
@@ -232,12 +232,12 @@ impl RestoreRevisionOptions {
 /// Options for recovering a deleted file or subtree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndeleteOptions {
-    /// Attribution, idempotency, and annotation for the commit.
+    /// Actor, commit ID, and message.
     pub commit: CommitOptions,
 }
 
 impl UndeleteOptions {
-    /// Creates undelete options for the required actor.
+    /// Creates undelete options for this actor.
     pub fn new(actor: ActorRef) -> Self {
         Self {
             commit: CommitOptions::new(actor),

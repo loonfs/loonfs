@@ -336,13 +336,10 @@ pub enum FilesystemOperation {
     },
 }
 
-/// One commit: an idempotency key, its application-asserted actor, an
-/// optional annotation, and an ordered list of path operations that commit
-/// together (API spec, section 5.1).
+/// A request to commit one or more filesystem operations.
 ///
-/// A one-operation request is the one-element case of this shape, not a
-/// different request: a convenience call and a batch produce the same commit
-/// and the same fingerprint.
+/// Operations run in order and either all succeed or none are committed. A
+/// request with one operation uses the same fingerprint rules as a batch.
 ///
 /// Unknown fields are rejected here for the same reason they are on
 /// [`FilesystemOperation`]: the fields a typo can hide are the ones that
@@ -353,7 +350,7 @@ pub enum FilesystemOperation {
 pub struct CommitRequest {
     /// Caller-supplied idempotency key for the whole request.
     pub commit_id: CommitId,
-    /// Application-asserted identity that caused this logical commit.
+    /// Actor responsible for the commit, as supplied by the application.
     pub actor: crate::ActorRef,
     /// Caller annotation recorded on the commit and reported by the change
     /// feed. Part of the commit's identity: reusing `commit_id` with a

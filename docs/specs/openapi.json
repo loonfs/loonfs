@@ -2820,7 +2820,7 @@
       },
       "ActorKind": {
         "type": "string",
-        "description": "Closed classification of identities that can cause a logical filesystem commit.",
+        "description": "The type of actor responsible for a commit.",
         "enum": [
           "user",
           "service",
@@ -2829,7 +2829,7 @@
       },
       "ActorRef": {
         "type": "object",
-        "description": "An application-asserted reference to the identity that caused a logical filesystem commit.\n\nLoonFS records exactly one actor reference per commit and never authenticates or resolves it.",
+        "description": "Identifies the user, service, or system responsible for a commit.\n\nLoonFS stores this value as provided. It does not authenticate the actor or\nlook up profile information.",
         "required": [
           "kind",
           "id"
@@ -2837,11 +2837,11 @@
         "properties": {
           "id": {
             "$ref": "#/components/schemas/ActorId",
-            "description": "Hosting-platform identity within the selected actor kind."
+            "description": "A stable identifier supplied by the application."
           },
           "kind": {
             "$ref": "#/components/schemas/ActorKind",
-            "description": "Classification of the referenced identity."
+            "description": "The type of actor."
           }
         },
         "additionalProperties": false
@@ -3501,7 +3501,7 @@
       },
       "CommitRequest": {
         "type": "object",
-        "description": "One commit: an idempotency key, its application-asserted actor, an\noptional annotation, and an ordered list of path operations that commit\ntogether (API spec, section 5.1).\n\nA one-operation request is the one-element case of this shape, not a\ndifferent request: a convenience call and a batch produce the same commit\nand the same fingerprint.\n\nUnknown fields are rejected here for the same reason they are on\n[`FilesystemOperation`]: the fields a typo can hide are the ones that\ndecide whether the commit is guarded at all.",
+        "description": "A request to commit one or more filesystem operations.\n\nOperations run in order and either all succeed or none are committed. A\nrequest with one operation uses the same fingerprint rules as a batch.\n\nUnknown fields are rejected here for the same reason they are on\n[`FilesystemOperation`]: the fields a typo can hide are the ones that\ndecide whether the commit is guarded at all.",
         "required": [
           "commit_id",
           "actor",
@@ -3510,7 +3510,7 @@
         "properties": {
           "actor": {
             "$ref": "#/components/schemas/ActorRef",
-            "description": "Application-asserted identity that caused this logical commit."
+            "description": "Actor responsible for the commit, as supplied by the application."
           },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
@@ -3576,7 +3576,7 @@
         "properties": {
           "actor": {
             "$ref": "#/components/schemas/ActorRef",
-            "description": "Application-asserted identity that caused this logical commit."
+            "description": "Actor responsible for the commit, as supplied by the application."
           },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",

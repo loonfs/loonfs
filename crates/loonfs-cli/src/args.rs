@@ -167,12 +167,11 @@ pub(crate) struct InitArgs {
     /// https server URL, when a private CA issued the certificate.
     #[arg(long)]
     pub ca_cert_path: Option<String>,
-    /// Actor classification stored in the profile for mutations. Pair with
-    /// --actor-id; when omitted the CLI defaults to service/loonfs-cli,
-    /// identifying the tool rather than the human running it.
+    /// Actor kind to save in the profile. Must be used with --actor-id.
+    /// Defaults to service/loonfs-cli when no actor is configured.
     #[arg(long, value_enum)]
     pub actor_kind: Option<ActorKindArg>,
-    /// Actor id stored in the profile for mutations. Pair with --actor-kind.
+    /// Actor ID to save in the profile. Must be used with --actor-kind.
     #[arg(long)]
     pub actor_id: Option<String>,
 }
@@ -255,11 +254,11 @@ pub(crate) struct ProfileCreateArgs {
     /// https server URL, when a private CA issued the certificate.
     #[arg(long)]
     pub ca_cert_path: Option<String>,
-    /// Actor classification stored in the profile for mutations. Pair with
-    /// --actor-id; the unconfigured default identifies the CLI tool.
+    /// Actor kind to save in the profile. Must be used with --actor-id.
+    /// Defaults to service/loonfs-cli when no actor is configured.
     #[arg(long, value_enum)]
     pub actor_kind: Option<ActorKindArg>,
-    /// Actor id stored in the profile for mutations. Pair with --actor-kind.
+    /// Actor ID to save in the profile. Must be used with --actor-kind.
     #[arg(long)]
     pub actor_id: Option<String>,
 }
@@ -316,10 +315,10 @@ pub(crate) struct ProfileUpdateArgs {
     /// https server URL, when a private CA issued the certificate.
     #[arg(long)]
     pub ca_cert_path: Option<String>,
-    /// Replace the profile's mutation actor classification. Pair with --actor-id.
+    /// Sets the profile's actor kind. Must be used with --actor-id.
     #[arg(long, value_enum)]
     pub actor_kind: Option<ActorKindArg>,
-    /// Replace the profile's mutation actor id. Pair with --actor-kind.
+    /// Sets the profile's actor ID. Must be used with --actor-kind.
     #[arg(long)]
     pub actor_id: Option<String>,
 }
@@ -347,13 +346,11 @@ pub(crate) struct TargetSelectorArgs {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ActorSelectorArgs {
-    /// Actor classification asserted on mutations. Must be paired with
-    /// `--actor-id`; otherwise `LOONFS_ACTOR_KIND`, the profile, or the
-    /// `service` default is used.
+    /// Actor kind for this mutation. Must be used with `--actor-id`.
     #[arg(long, value_enum)]
     pub actor_kind: Option<ActorKindArg>,
-    /// Actor id asserted on mutations. Must be paired with `--actor-kind`.
-    /// The default `loonfs-cli` identifies this tool, not the human running it.
+    /// Actor ID for this mutation. Must be used with `--actor-kind`.
+    /// If no actor is configured, the CLI uses service/loonfs-cli.
     #[arg(long)]
     pub actor_id: Option<String>,
 }

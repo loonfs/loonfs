@@ -26,11 +26,10 @@ use thiserror::Error;
 /// Domain separator included in every mutation fingerprint input.
 const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v1";
 
-/// Scheme and hash algorithm included in every stored fingerprint.
+/// Format version and hash algorithm stored with each fingerprint.
 ///
-/// `v1` identifies the canonical encoding rules, and `sha256` identifies the
-/// hash algorithm. Including both values allows future versions to change
-/// either rule without changing the meaning of existing fingerprints.
+/// Storing both values lets a later format use different encoding rules or a
+/// different hash without changing existing fingerprints.
 const FINGERPRINT_SCHEME: &str = "v1:sha256";
 
 /// Error returned when the canonical fingerprint input cannot be encoded.
@@ -41,11 +40,10 @@ const FINGERPRINT_SCHEME: &str = "v1:sha256";
 #[error("failed to encode the commit fingerprint preimage: {0}")]
 pub struct SemanticFingerprintError(#[from] serde_json::Error);
 
-/// Computes a stored fingerprint (`v1:sha256:<64 lowercase hex>`) from a
-/// canonical input.
+/// Encodes a canonical input and returns its stored fingerprint.
 ///
-/// The compact JSON encoding is part of the durable format. The fixed-value
-/// tests detect changes to that encoding.
+/// The result has the form `v1:sha256:<64 lowercase hex>`. Compact JSON is
+/// part of the durable format, so fixed-value tests detect encoding changes.
 fn fingerprint_digest<T>(preimage: &T) -> Result<String, SemanticFingerprintError>
 where
     T: Serialize,

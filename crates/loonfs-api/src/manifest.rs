@@ -211,7 +211,7 @@ pub enum MetadataRow {
     CommitReceipt {
         /// Caller idempotency key whose later reuse is checked against this row.
         commit_id: CommitId,
-        /// Application-asserted identity that caused this logical commit.
+        /// Actor responsible for the commit, as supplied by the application.
         actor: crate::ActorRef,
         /// Digest used to distinguish a safe retry from conflicting id reuse.
         semantic_commit_fingerprint: String,

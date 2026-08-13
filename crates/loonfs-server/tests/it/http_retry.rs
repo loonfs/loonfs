@@ -190,9 +190,8 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .expect("read file");
     assert_eq!(bytes, b"stable bytes\n");
 
-    // Uploaded-content retry reconciliation recomputes the attributed
-    // fingerprint too. Matching bytes cannot turn a different actor into a
-    // replay of the original commit.
+    // Retry reconciliation includes the actor in the fingerprint. Identical
+    // content submitted by a different actor must still conflict.
     let different_actor = ActorRef::service(ActorId::parse("retry-worker").expect("actor id"));
     match harness
         .client

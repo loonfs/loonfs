@@ -11,7 +11,7 @@ pub fn namespace_id(value: &str) -> NamespaceId {
     NamespaceId::parse(value).expect("valid namespace id")
 }
 
-/// Returns the obvious application actor shared by mutation tests.
+/// Returns the actor shared by mutation tests.
 pub fn test_actor() -> ActorRef {
     ActorRef::user(ActorId::parse("test-actor").expect("valid test actor id"))
 }
