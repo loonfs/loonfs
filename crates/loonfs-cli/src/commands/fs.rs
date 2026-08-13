@@ -227,9 +227,8 @@ fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, Attribute
     };
     Ok((
         parse_attribute_key_arg("--set", key)?,
-        AttributeValue::String {
-            value: value.to_owned(),
-        },
+        AttributeValue::parse(value)
+            .map_err(|error| CliError::invalid_input(format!("invalid --set value: {error}")))?,
     ))
 }
 

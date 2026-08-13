@@ -12,9 +12,9 @@
 //! receipt.
 
 use crate::{
-    AbsolutePath, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId, ContentEvidence,
-    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId,
-    NamespaceId, RevisionNo,
+    AbsolutePath, AttributeRevisionNo, ChangeSeq, CommitId, ContentEvidence, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
+    RevisionNo,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -136,33 +136,11 @@ enum OperationFingerprintInput<'a> {
     // one removal set reach the same preimage.
     UpdateAttrs {
         absolute_path: &'a str,
-        set: BTreeMap<&'a str, AttributeValueFingerprintInput<'a>>,
+        set: BTreeMap<&'a str, &'a str>,
         remove: Vec<&'a str>,
         expected_inode_id: Option<InodeId>,
         expected_attributes_revision_no: Option<AttributeRevisionNo>,
     },
-}
-
-/// Stable fingerprint input for one attribute value.
-///
-/// This private representation keeps commit fingerprints independent of the
-/// wire encoding for [`AttributeValue`]. The variant remains part of the
-/// fingerprint, so a string and a one-item string list produce different
-/// fingerprints.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum AttributeValueFingerprintInput<'a> {
-    Text { text: &'a str },
-    TextList { texts: &'a [String] },
-}
-
-fn attribute_value_fingerprint_input(value: &AttributeValue) -> AttributeValueFingerprintInput<'_> {
-    match value {
-        AttributeValue::String { value } => AttributeValueFingerprintInput::Text { text: value },
-        AttributeValue::StringList { values } => {
-            AttributeValueFingerprintInput::TextList { texts: values }
-        }
-    }
 }
 
 /// Canonical preimage for the content a put attaches.
@@ -278,7 +256,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
                 absolute_path: path.as_str(),
                 set: set
                     .iter()
-                    .map(|(key, value)| (key.as_str(), attribute_value_fingerprint_input(value)))
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
                     .collect(),
                 remove,
                 expected_inode_id: *expected_inode_id,
@@ -459,16 +437,14 @@ fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AttributeKey, ContentId, ContentRefKind, StorageChecksum};
+    use crate::{AttributeKey, AttributeValue, ContentId, ContentRefKind, StorageChecksum};
 
     fn attribute_key(value: &str) -> AttributeKey {
         AttributeKey::parse(value).expect("valid attribute key")
     }
 
     fn text(value: &str) -> AttributeValue {
-        AttributeValue::String {
-            value: value.to_owned(),
-        }
+        AttributeValue::parse(value).expect("valid attribute value")
     }
 
     fn update_attributes(
@@ -501,15 +477,7 @@ mod tests {
             &namespace_id,
             None,
             &[update_attributes(
-                [
-                    ("owner", text("ada")),
-                    (
-                        "tags",
-                        AttributeValue::StringList {
-                            values: vec!["a".to_owned(), "b".to_owned()],
-                        },
-                    ),
-                ],
+                [("owner", text("ada")), ("tags", text("a,b"))],
                 ["draft"],
                 Some(InodeId(42)),
                 Some(AttributeRevisionNo(3)),
@@ -519,7 +487,7 @@ mod tests {
 
         assert_eq!(
             fingerprint,
-            "v0:sha256:84786d985326762f31b84a313a9dda928f995474bef6b3b4edd9a4731734a5c5"
+            "v0:sha256:e6c4c43ab20756a664d004adf22f223aef6467e45f737fb3d89fc1b6e211e5a2"
         );
     }
 
@@ -530,12 +498,12 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let forward: FilesystemOperation = serde_json::from_str(
             r#"{"kind":"update_attributes","path":"/docs/report.txt",
-                "set":{"a":{"kind":"string","value":"1"},"b":{"kind":"string","value":"2"}}}"#,
+                "set":{"a":"1","b":"2"}}"#,
         )
         .expect("forward operation");
         let reversed: FilesystemOperation = serde_json::from_str(
             r#"{"kind":"update_attributes","path":"/docs/report.txt",
-                "set":{"b":{"kind":"string","value":"2"},"a":{"kind":"string","value":"1"}}}"#,
+                "set":{"b":"2","a":"1"}}"#,
         )
         .expect("reversed operation");
 
@@ -592,20 +560,6 @@ mod tests {
             (
                 "set value",
                 update_attributes([("owner", text("grace"))], ["draft"], None, None),
-            ),
-            (
-                "value kind",
-                update_attributes(
-                    [(
-                        "owner",
-                        AttributeValue::StringList {
-                            values: vec!["ada".to_owned()],
-                        },
-                    )],
-                    ["draft"],
-                    None,
-                    None,
-                ),
             ),
             (
                 "removed key",

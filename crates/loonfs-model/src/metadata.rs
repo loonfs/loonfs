@@ -93,15 +93,7 @@ pub struct AttributeRevisionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttributeEntry {
     pub key: String,
-    pub value: AttributeContent,
-}
-
-/// What one attribute holds. The kind is part of the value: one text and a
-/// one-member text list are different values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AttributeContent {
-    Text(String),
-    TextList(Vec<String>),
+    pub value: String,
 }
 
 /// Commit position of a deletion event. A revoke uses this value to identify
@@ -265,14 +257,7 @@ impl MetadataState {
                                 .iter()
                                 .map(|(key, value)| AttributeEntry {
                                     key: key.as_str().to_owned(),
-                                    value: match value {
-                                        loonfs_api::AttributeValue::String { value } => {
-                                            AttributeContent::Text(value.clone())
-                                        }
-                                        loonfs_api::AttributeValue::StringList { values } => {
-                                            AttributeContent::TextList(values.clone())
-                                        }
-                                    },
+                                    value: value.as_str().to_owned(),
                                 })
                                 .collect(),
                         });

@@ -94,10 +94,7 @@ async fn http_reads_project_the_grouped_attributes_value() {
     // bare one carries the cleared state at revision 0 rather than nothing.
     let annotated = get_json(&harness, "/filesystem/stat?path=%2Fdocs%2Freport.txt");
     assert_projection(&annotated, true);
-    assert_eq!(
-        annotated["attributes"]["attributes"]["owner"]["value"],
-        "platform"
-    );
+    assert_eq!(annotated["attributes"]["attributes"]["owner"], "platform");
     assert_eq!(annotated["attributes"]["revision_no"], 1);
 
     let bare = get_json(&harness, "/filesystem/stat?path=%2Fdocs%2Fnotes.txt");
@@ -129,10 +126,7 @@ async fn http_reads_project_the_grouped_attributes_value() {
         assert_projection(entry, true);
         match entry["absolute_path"].as_str().expect("path") {
             "/docs/report.txt" => {
-                assert_eq!(
-                    entry["attributes"]["attributes"]["owner"]["value"],
-                    "platform"
-                );
+                assert_eq!(entry["attributes"]["attributes"]["owner"], "platform");
                 assert_eq!(entry["attributes"]["revision_no"], 1);
             }
             _ => {

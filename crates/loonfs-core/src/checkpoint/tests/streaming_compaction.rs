@@ -387,9 +387,7 @@ async fn update_attributes<S: ObjectStore + ?Sized>(
             path: AbsolutePath::parse(path).expect("path"),
             set: [(
                 loonfs_api::AttributeKey::parse(key).expect("attribute key"),
-                loonfs_api::AttributeValue::String {
-                    value: value.to_owned(),
-                },
+                loonfs_api::AttributeValue::parse(value).expect("attribute value"),
             )]
             .into_iter()
             .collect(),

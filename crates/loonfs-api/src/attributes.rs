@@ -14,17 +14,14 @@ use thiserror::Error;
 
 /// Maximum attribute key length in UTF-8 bytes.
 pub const MAX_ATTRIBUTE_KEY_BYTES: usize = 128;
-/// Maximum length of one attribute string in UTF-8 bytes. Each member of a
-/// string list obeys the same limit.
+/// Maximum length of one attribute value in UTF-8 bytes.
 pub const MAX_ATTRIBUTE_VALUE_BYTES: usize = 4096;
-/// Maximum number of members in one string-list value.
-pub const MAX_ATTRIBUTE_LIST_MEMBERS: usize = 256;
 /// Maximum number of entries in one attribute map.
 pub const MAX_ATTRIBUTE_ENTRIES: usize = 100;
 /// Maximum total size of one attribute map in logical UTF-8 bytes. The total
-/// counts every key's bytes plus every value's bytes, with each list member
-/// counted. It excludes encoder framing, so the limit does not move when the
-/// map is written as JSON instead of CBOR.
+/// counts every key's bytes plus every value's bytes. It excludes encoder
+/// framing, so the limit does not move when the map is written as JSON instead
+/// of CBOR.
 pub const MAX_ATTRIBUTES_TOTAL_BYTES: usize = 65_536;
 
 /// Key prefix reserved for system-owned attributes.
@@ -89,47 +86,49 @@ fn attribute_key_error(value: &str, reason: impl Into<String>) -> AttributeKeyVa
     }
 }
 
-/// One attribute value.
-///
-/// The kind is part of the value's identity. A string and a one-member string
-/// list are different values, and reading one never yields the other.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AttributeValue {
-    /// One text value.
-    String {
-        /// The stored text, at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes.
-        value: String,
-    },
-    /// An ordered list of text values.
-    StringList {
-        /// The stored members in written order, at most
-        /// [`MAX_ATTRIBUTE_LIST_MEMBERS`] of them, each at most
-        /// [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes.
-        values: Vec<String>,
-    },
+validation_error!(
+    AttributeValueValidationError,
+    "invalid attribute value: {reason}"
+);
+
+string_id! {
+    /// One validated attribute value.
+    ///
+    /// A value is at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes. It is
+    /// otherwise free text: control characters and the empty string are legal.
+    /// Empty is a stored value, not a tombstone; only an explicit remove
+    /// operation deletes an attribute.
+    AttributeValue,
+    error = AttributeValueValidationError,
+    validate = validate_attribute_value
+}
+
+fn validate_attribute_value(value: &str) -> Result<(), AttributeValueValidationError> {
+    if value.len() > MAX_ATTRIBUTE_VALUE_BYTES {
+        return Err(AttributeValueValidationError {
+            value: String::new(),
+            reason: format!(
+                "exceeds the maximum attribute value length of {MAX_ATTRIBUTE_VALUE_BYTES} bytes"
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl AttributeValue {
     /// Returns this value's logical size in UTF-8 bytes.
     ///
-    /// A string counts its own bytes and a string list counts the bytes of
-    /// every member. Neither counts encoder framing.
+    /// The value counts its own bytes and no encoder framing.
     pub fn logical_bytes(&self) -> usize {
-        match self {
-            Self::String { value } => value.len(),
-            Self::StringList { values } => values.iter().map(String::len).sum(),
-        }
+        self.as_str().len()
     }
 }
 
 /// A validated attribute map for one inode.
 ///
 /// Construction and decoding both enforce the same limits: a map holds at
-/// most [`MAX_ATTRIBUTE_ENTRIES`] entries, each string and each list member
-/// is at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes, each list holds at
-/// most [`MAX_ATTRIBUTE_LIST_MEMBERS`] members, and the whole map is at most
+/// most [`MAX_ATTRIBUTE_ENTRIES`] entries, each value is at most
+/// [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes, and the whole map is at most
 /// [`MAX_ATTRIBUTES_TOTAL_BYTES`] logical UTF-8 bytes. The total counts key
 /// bytes and value bytes and nothing else, so it does not depend on the
 /// encoding the map is written in. Durable state that breaks a limit fails to
@@ -153,24 +152,6 @@ impl Attributes {
             return Err(AttributesError::TooManyEntries {
                 entries: entries.len(),
             });
-        }
-        for (key, value) in &entries {
-            match value {
-                AttributeValue::String { value } => {
-                    check_value_bytes(key, value)?;
-                }
-                AttributeValue::StringList { values } => {
-                    if values.len() > MAX_ATTRIBUTE_LIST_MEMBERS {
-                        return Err(AttributesError::TooManyListMembers {
-                            key: key.as_str().to_owned(),
-                            members: values.len(),
-                        });
-                    }
-                    for member in values {
-                        check_value_bytes(key, member)?;
-                    }
-                }
-            }
         }
         let total_bytes = logical_bytes_of(&entries);
         if total_bytes > MAX_ATTRIBUTES_TOTAL_BYTES {
@@ -234,16 +215,6 @@ impl<'de> Deserialize<'de> for Attributes {
     }
 }
 
-fn check_value_bytes(key: &AttributeKey, value: &str) -> Result<(), AttributesError> {
-    if value.len() > MAX_ATTRIBUTE_VALUE_BYTES {
-        return Err(AttributesError::ValueTooLarge {
-            key: key.as_str().to_owned(),
-            value_bytes: value.len(),
-        });
-    }
-    Ok(())
-}
-
 fn logical_bytes_of(entries: &BTreeMap<AttributeKey, AttributeValue>) -> usize {
     entries
         .iter()
@@ -252,11 +223,6 @@ fn logical_bytes_of(entries: &BTreeMap<AttributeKey, AttributeValue>) -> usize {
 }
 
 /// Describes which attribute-map limit an input broke.
-///
-/// The variants that name a key echo a value that is already validated: a
-/// key is at most [`MAX_ATTRIBUTE_KEY_BYTES`] bytes and holds no control
-/// characters, so naming it in a message that reaches the wire is bounded and
-/// safe.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AttributesError {
     /// The map holds more entries than the limit allows.
@@ -264,22 +230,6 @@ pub enum AttributesError {
     TooManyEntries {
         /// Number of entries the rejected map held.
         entries: usize,
-    },
-    /// One string, or one member of one string list, is too long.
-    #[error("attribute `{key}` holds a {value_bytes} byte string, which exceeds the maximum of {MAX_ATTRIBUTE_VALUE_BYTES} bytes")]
-    ValueTooLarge {
-        /// Key whose value was rejected.
-        key: String,
-        /// Length in UTF-8 bytes of the rejected string.
-        value_bytes: usize,
-    },
-    /// One string list holds more members than the limit allows.
-    #[error("attribute `{key}` holds {members} list members, which exceeds the maximum of {MAX_ATTRIBUTE_LIST_MEMBERS}")]
-    TooManyListMembers {
-        /// Key whose list was rejected.
-        key: String,
-        /// Number of members the rejected list held.
-        members: usize,
     },
     /// The whole map is larger than the limit allows.
     #[error("attribute map holds {total_bytes} logical bytes, which exceeds the maximum of {MAX_ATTRIBUTES_TOTAL_BYTES} bytes")]
@@ -307,7 +257,7 @@ mod tests {
     use super::{
         AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, AttributesError,
         MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES,
-        MAX_ATTRIBUTE_LIST_MEMBERS, MAX_ATTRIBUTE_VALUE_BYTES,
+        MAX_ATTRIBUTE_VALUE_BYTES,
     };
     use crate::RevisionNo;
     use std::collections::BTreeMap;
@@ -317,9 +267,11 @@ mod tests {
     }
 
     fn string_value(bytes: usize) -> AttributeValue {
-        AttributeValue::String {
-            value: "v".repeat(bytes),
-        }
+        AttributeValue::parse("v".repeat(bytes)).expect("valid attribute value")
+    }
+
+    fn value(value: &str) -> AttributeValue {
+        AttributeValue::parse(value).expect("valid attribute value")
     }
 
     fn map(entries: impl IntoIterator<Item = (AttributeKey, AttributeValue)>) -> Attributes {
@@ -398,51 +350,51 @@ mod tests {
     }
 
     #[test]
-    fn attribute_value_serializes_with_a_kind_tag() {
-        let string = AttributeValue::String {
-            value: "hello".to_owned(),
-        };
-        let list = AttributeValue::StringList {
-            values: vec!["a".to_owned(), "b".to_owned()],
-        };
+    fn attribute_value_serializes_as_a_bare_string() {
+        let value = value("hello");
 
         assert_eq!(
-            serde_json::to_string(&string).expect("serialize string value"),
-            r#"{"kind":"string","value":"hello"}"#
+            serde_json::to_string(&value).expect("serialize attribute value"),
+            r#""hello""#
         );
         assert_eq!(
-            serde_json::to_string(&list).expect("serialize string list value"),
-            r#"{"kind":"string_list","values":["a","b"]}"#
-        );
-        assert_eq!(
-            serde_json::from_str::<AttributeValue>(r#"{"kind":"string","value":"hello"}"#)
-                .expect("deserialize string value"),
-            string
-        );
-        assert_eq!(
-            serde_json::from_str::<AttributeValue>(r#"{"kind":"string_list","values":["a","b"]}"#)
-                .expect("deserialize string list value"),
-            list
+            serde_json::from_str::<AttributeValue>(r#""hello""#)
+                .expect("deserialize attribute value"),
+            value
         );
     }
 
     #[test]
-    fn attribute_value_rejects_unknown_kinds_and_unknown_fields() {
+    fn attribute_value_rejects_the_old_tagged_shape() {
         assert!(
-            serde_json::from_str::<AttributeValue>(r#"{"kind":"number","value":"1"}"#).is_err()
+            serde_json::from_str::<AttributeValue>(r#"{"kind":"string","value":"hello"}"#).is_err()
         );
         assert!(serde_json::from_str::<AttributeValue>(
-            r#"{"kind":"string","value":"a","extra":1}"#
+            r#"{"kind":"string_list","values":["a","b"]}"#
         )
         .is_err());
-        assert!(serde_json::from_str::<AttributeValue>(
-            r#"{"kind":"string_list","values":[],"extra":1}"#
-        )
-        .is_err());
-        // The wrong variant's field is an unknown field too.
-        assert!(
-            serde_json::from_str::<AttributeValue>(r#"{"kind":"string","values":[]}"#).is_err()
+    }
+
+    #[test]
+    fn attribute_value_accepts_empty_and_free_text() {
+        for text in ["", "a\n\u{0}b", "draft,review", "café ☃ 日本語 🙂"] {
+            assert_eq!(value(text).as_str(), text);
+        }
+    }
+
+    #[test]
+    fn attribute_value_enforces_the_utf8_byte_cap_with_a_named_error() {
+        let at_cap = "🐧".repeat(MAX_ATTRIBUTE_VALUE_BYTES / 4);
+        assert_eq!(value(&at_cap).logical_bytes(), MAX_ATTRIBUTE_VALUE_BYTES);
+
+        let oversized = format!("{at_cap}🐧");
+        let error = AttributeValue::parse(&oversized).expect_err("over cap");
+        assert_eq!(error.value(), "");
+        assert_eq!(
+            error.reason(),
+            "exceeds the maximum attribute value length of 4096 bytes"
         );
+        assert!(!error.to_string().contains(&oversized));
     }
 
     #[test]
@@ -459,59 +411,6 @@ mod tests {
             map_error(over_cap),
             AttributesError::TooManyEntries {
                 entries: MAX_ATTRIBUTE_ENTRIES + 1
-            }
-        );
-    }
-
-    #[test]
-    fn attribute_map_enforces_the_string_length() {
-        assert_eq!(
-            map([(key("a"), string_value(MAX_ATTRIBUTE_VALUE_BYTES))]).len(),
-            1
-        );
-        assert_eq!(
-            map_error([(key("a"), string_value(MAX_ATTRIBUTE_VALUE_BYTES + 1))]),
-            AttributesError::ValueTooLarge {
-                key: "a".to_owned(),
-                value_bytes: MAX_ATTRIBUTE_VALUE_BYTES + 1
-            }
-        );
-    }
-
-    #[test]
-    fn attribute_map_enforces_the_list_member_count() {
-        let at_cap = AttributeValue::StringList {
-            values: vec!["m".to_owned(); MAX_ATTRIBUTE_LIST_MEMBERS],
-        };
-        let over_cap = AttributeValue::StringList {
-            values: vec!["m".to_owned(); MAX_ATTRIBUTE_LIST_MEMBERS + 1],
-        };
-
-        assert_eq!(map([(key("a"), at_cap)]).len(), 1);
-        assert_eq!(
-            map_error([(key("a"), over_cap)]),
-            AttributesError::TooManyListMembers {
-                key: "a".to_owned(),
-                members: MAX_ATTRIBUTE_LIST_MEMBERS + 1
-            }
-        );
-    }
-
-    #[test]
-    fn attribute_map_enforces_the_list_member_length() {
-        let at_cap = AttributeValue::StringList {
-            values: vec!["m".repeat(MAX_ATTRIBUTE_VALUE_BYTES)],
-        };
-        let over_cap = AttributeValue::StringList {
-            values: vec!["m".to_owned(), "m".repeat(MAX_ATTRIBUTE_VALUE_BYTES + 1)],
-        };
-
-        assert_eq!(map([(key("a"), at_cap)]).len(), 1);
-        assert_eq!(
-            map_error([(key("a"), over_cap)]),
-            AttributesError::ValueTooLarge {
-                key: "a".to_owned(),
-                value_bytes: MAX_ATTRIBUTE_VALUE_BYTES + 1
             }
         );
     }
@@ -579,54 +478,38 @@ mod tests {
                 .collect::<BTreeMap<_, _>>(),
         )
         .expect("serialize oversized map");
-        let over_value = serde_json::to_string(&BTreeMap::from([(
-            "a".to_owned(),
-            string_value(MAX_ATTRIBUTE_VALUE_BYTES + 1),
-        )]))
-        .expect("serialize oversized value");
-        let over_members = serde_json::to_string(&BTreeMap::from([(
-            "a".to_owned(),
-            AttributeValue::StringList {
-                values: vec!["m".to_owned(); MAX_ATTRIBUTE_LIST_MEMBERS + 1],
-            },
-        )]))
-        .expect("serialize oversized list");
+        let over_value = format!(
+            r#"{{"a":{}}}"#,
+            serde_json::to_string(&"v".repeat(MAX_ATTRIBUTE_VALUE_BYTES + 1))
+                .expect("serialize oversized value")
+        );
 
         assert!(serde_json::from_str::<Attributes>(&over_entries).is_err());
         assert!(serde_json::from_str::<Attributes>(&over_value).is_err());
-        assert!(serde_json::from_str::<Attributes>(&over_members).is_err());
         // The key grammar is enforced on the way in as well.
-        assert!(
-            serde_json::from_str::<Attributes>(r#"{"":{"kind":"string","value":"a"}}"#).is_err()
-        );
+        assert!(serde_json::from_str::<Attributes>(r#"{"":"a"}"#).is_err());
     }
 
     #[test]
     fn attribute_map_round_trips_and_reads_back() {
         let attributes = map([
             (key("a"), string_value(3)),
-            (
-                key("b"),
-                AttributeValue::StringList {
-                    values: vec!["x".to_owned()],
-                },
-            ),
+            (key("b"), value("draft,review")),
+            (key("empty"), value("")),
         ]);
 
         let json = serde_json::to_string(&attributes).expect("serialize attributes");
-        assert_eq!(
-            json,
-            r#"{"a":{"kind":"string","value":"vvv"},"b":{"kind":"string_list","values":["x"]}}"#
-        );
+        assert_eq!(json, r#"{"a":"vvv","b":"draft,review","empty":""}"#);
         assert_eq!(
             serde_json::from_str::<Attributes>(&json).expect("deserialize attributes"),
             attributes
         );
         assert_eq!(attributes.get(&key("a")), Some(&string_value(3)));
         assert_eq!(attributes.get(&key("missing")), None);
-        assert_eq!(attributes.iter().count(), 2);
-        assert_eq!(attributes.as_map().len(), 2);
-        assert_eq!(attributes.logical_bytes(), 1 + 3 + 1 + 1);
+        assert_eq!(attributes.get(&key("empty")), Some(&value("")));
+        assert_eq!(attributes.iter().count(), 3);
+        assert_eq!(attributes.as_map().len(), 3);
+        assert_eq!(attributes.logical_bytes(), 1 + 3 + 1 + 12 + 5);
         assert_eq!(
             BTreeMap::from(attributes.clone()),
             attributes.as_map().clone()

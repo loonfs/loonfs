@@ -10,8 +10,7 @@ use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, SubtreeTombstoneAction as CoreTombstoneAction,
 };
 use loonfs_model::metadata::{
-    AttributeContent as ModelAttributeContent, MetadataState as ModelMetadataState,
-    SubtreeTombstoneAction as ModelTombstoneAction,
+    MetadataState as ModelMetadataState, SubtreeTombstoneAction as ModelTombstoneAction,
 };
 
 type NormalizedInodes = Vec<(u64, &'static str, u64)>;
@@ -37,13 +36,7 @@ struct NormalizedAttributeRevision {
     revision: u64,
     committed_seq: u64,
     delta_index: u32,
-    entries: Vec<(String, NormalizedAttributeValue)>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum NormalizedAttributeValue {
-    Text(String),
-    TextList(Vec<String>),
+    entries: Vec<(String, String)>,
 }
 
 /// One tombstone event, whole: the generation, what the event did, and the
@@ -192,22 +185,13 @@ fn tombstone_without_binding(delta_index: u32, root_inode_id: InodeId) -> Vec<Wa
     }]
 }
 
-fn attribute_map(entries: &[(&str, &[&str])]) -> Attributes {
+fn attribute_map(entries: &[(&str, &str)]) -> Attributes {
     Attributes::new(
         entries
             .iter()
-            .map(|(key, values)| {
+            .map(|(key, value)| {
                 let key = AttributeKey::parse(key).expect("valid attribute key");
-                // A one-member list stays a list: the kind is part of the
-                // value, so the two sides must not collapse them.
-                let value = match values {
-                    [single] if !single.starts_with('[') => AttributeValue::String {
-                        value: (*single).to_owned(),
-                    },
-                    values => AttributeValue::StringList {
-                        values: values.iter().map(|value| (*value).to_owned()).collect(),
-                    },
-                };
+                let value = AttributeValue::parse(value).expect("valid attribute value");
                 (key, value)
             })
             .collect(),
@@ -400,26 +384,26 @@ fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
             0,
             InodeId(3),
             1,
-            attribute_map(&[("owner", &["ada"]), ("tags", &["draft", "review"])]),
+            attribute_map(&[("owner", "ada"), ("tags", "draft,review")]),
         ),
         update_attributes(
             0,
             InodeId(3),
             2,
             attribute_map(&[
-                ("owner", &["grace"]),
-                ("tags", &["draft", "review"]),
-                ("stage", &["final"]),
+                ("owner", "grace"),
+                ("tags", "draft,review"),
+                ("stage", "final"),
             ]),
         ),
         update_attributes(
             0,
             InodeId(3),
             3,
-            attribute_map(&[("owner", &["grace"]), ("stage", &["final"])]),
+            attribute_map(&[("owner", "grace"), ("stage", "final")]),
         ),
         // A directory carries attributes too.
-        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", &["hopper"])])),
+        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "hopper")])),
     ]);
 }
 
@@ -429,7 +413,7 @@ fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
 fn metadata_apply_matches_model_for_a_cleared_attribute_map() {
     assert_states_match(&[
         create_directory(0, InodeId(2), InodeId(1), "docs"),
-        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", &["ada"])])),
+        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
         update_attributes(0, InodeId(2), 2, Attributes::default()),
     ]);
 }
@@ -447,7 +431,7 @@ fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
             "source.txt",
             content_ref("content-1"),
         ),
-        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", &["ada"])])),
+        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
         {
             let mut deltas = create_file(
                 0,
@@ -460,7 +444,7 @@ fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
                 3,
                 InodeId(3),
                 1,
-                attribute_map(&[("owner", &["ada"])]),
+                attribute_map(&[("owner", "ada")]),
             ));
             deltas
         },
@@ -479,7 +463,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
             "Readme.TXT",
             content_ref("content-1"),
         ),
-        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", &["ada"])])),
+        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
         tombstone(1, InodeId(2), InodeId(1), "Readme.TXT"),
         undelete(
             0,
@@ -593,19 +577,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 entries: record
                     .attributes
                     .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.as_str().to_owned(),
-                            match value {
-                                AttributeValue::String { value } => {
-                                    NormalizedAttributeValue::Text(value.clone())
-                                }
-                                AttributeValue::StringList { values } => {
-                                    NormalizedAttributeValue::TextList(values.clone())
-                                }
-                            },
-                        )
-                    })
+                    .map(|(key, value)| (key.as_str().to_owned(), value.as_str().to_owned()))
                     .collect(),
             })
             .collect(),
@@ -685,19 +657,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 entries: record
                     .entries
                     .iter()
-                    .map(|entry| {
-                        (
-                            entry.key.clone(),
-                            match &entry.value {
-                                ModelAttributeContent::Text(text) => {
-                                    NormalizedAttributeValue::Text(text.clone())
-                                }
-                                ModelAttributeContent::TextList(texts) => {
-                                    NormalizedAttributeValue::TextList(texts.clone())
-                                }
-                            },
-                        )
-                    })
+                    .map(|entry| (entry.key.clone(), entry.value.clone()))
                     .collect(),
             })
             .collect(),

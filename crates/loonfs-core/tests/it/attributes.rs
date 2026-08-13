@@ -43,9 +43,7 @@ fn key(value: &str) -> AttributeKey {
 }
 
 fn text(value: &str) -> AttributeValue {
-    AttributeValue::String {
-        value: value.to_owned(),
-    }
+    AttributeValue::parse(value).expect("valid attribute value")
 }
 
 fn map(entries: &[(&str, &str)]) -> Attributes {
@@ -209,6 +207,51 @@ async fn an_update_writes_attributes_on_a_file_and_on_a_directory() {
     assert_eq!(
         attributes_of(&store, &namespace_id, directory_inode).await,
         Some((AttributeRevisionNo(1), map(&[("owner", "grace")])))
+    );
+}
+
+#[tokio::test]
+async fn an_empty_string_is_stored_until_the_key_is_removed() {
+    let (_temp_dir, store, namespace_id, context) = setup().await;
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"hello",
+        DestinationBehavior::NoReplace,
+        &context,
+        Some("seed"),
+    )
+    .await
+    .expect("seed file");
+    let file_inode = inode_of(&store, &namespace_id, "/docs/a.txt").await;
+
+    update(
+        &store,
+        &namespace_id,
+        "set-empty",
+        set_attributes("/docs/a.txt", &[("owner", "")]),
+        &context,
+    )
+    .await
+    .expect("store the empty string");
+    assert_eq!(
+        attributes_of(&store, &namespace_id, file_inode).await,
+        Some((AttributeRevisionNo(1), map(&[("owner", "")])))
+    );
+
+    update(
+        &store,
+        &namespace_id,
+        "remove-empty",
+        remove_attributes("/docs/a.txt", &["owner"]),
+        &context,
+    )
+    .await
+    .expect("remove the key explicitly");
+    assert_eq!(
+        attributes_of(&store, &namespace_id, file_inode).await,
+        Some((AttributeRevisionNo(2), Attributes::default()))
     );
 }
 

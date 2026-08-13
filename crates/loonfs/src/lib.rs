@@ -31,7 +31,7 @@
 //!
 //! let key = AttributeKey::parse("owner").expect("valid attribute key");
 //! let options = UpdateAttributesOptions {
-//!     set: [(key, AttributeValue::String { value: "platform".into() })]
+//!     set: [(key, AttributeValue::parse("platform").expect("valid attribute value"))]
 //!         .into_iter()
 //!         .collect(),
 //!     ..UpdateAttributesOptions::default()

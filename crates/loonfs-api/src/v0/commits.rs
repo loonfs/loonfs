@@ -254,15 +254,13 @@ mod tests {
             attributes_revision_no: crate::AttributeRevisionNo(4),
             attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
                 crate::AttributeKey::parse("owner").expect("valid attribute key"),
-                crate::AttributeValue::String {
-                    value: "ada".to_owned(),
-                },
+                crate::AttributeValue::parse("ada").expect("valid attribute value"),
             )]))
             .expect("valid attribute map"),
         };
         assert_eq!(
             serde_json::to_string(&attributes_changed).expect("serialize attributes event"),
-            r#"{"kind":"attributes_changed","inode_id":2,"attributes_revision_no":4,"attributes":{"owner":{"kind":"string","value":"ada"}}}"#
+            r#"{"kind":"attributes_changed","inode_id":2,"attributes_revision_no":4,"attributes":{"owner":"ada"}}"#
         );
 
         // A clear is a real event carrying the empty map, not an absence.

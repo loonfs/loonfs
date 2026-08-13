@@ -927,18 +927,9 @@ pub(crate) fn human_path_entry(entry: &loonfs_api::AuthoritativePathEntry) -> St
     format!("{}\t{}\t{}", entry.inode_kind(), size, entry.absolute_path)
 }
 
-/// One attribute value on one line. A list joins on `, `, which is a display
-/// of the value rather than a spelling that round-trips; `--json` is what a
-/// script reads.
+/// One attribute value on one line.
 fn render_attribute_value(value: &AttributeValue) -> String {
-    match value {
-        AttributeValue::String { value } => escape_control_characters(value),
-        AttributeValue::StringList { values } => values
-            .iter()
-            .map(|member| escape_control_characters(member))
-            .collect::<Vec<_>>()
-            .join(", "),
-    }
+    escape_control_characters(value.as_str())
 }
 
 /// Escapes control characters and leaves every other character alone.
@@ -1042,9 +1033,9 @@ mod tests {
     /// must not reach the terminal as a command.
     #[test]
     fn human_stat_escapes_control_characters_in_attribute_values() {
-        let newline = stat_with_attribute(AttributeValue::String {
-            value: "first\nattr.inode: 99".to_owned(),
-        });
+        let newline = stat_with_attribute(
+            AttributeValue::parse("first\nattr.inode: 99").expect("attribute value"),
+        );
         let rendered = human_success(&newline);
         assert!(
             rendered.ends_with("attr.note: first\\nattr.inode: 99"),
@@ -1056,14 +1047,12 @@ mod tests {
             "path, name, inode, kind, seq, and one attribute line: {rendered}"
         );
 
-        let escape = stat_with_attribute(AttributeValue::String {
-            value: "\u{1b}[31mred".to_owned(),
-        });
+        let escape =
+            stat_with_attribute(AttributeValue::parse("\u{1b}[31mred").expect("attribute value"));
         assert_eq!(attribute_line(&escape), "attr.note: \\u{1b}[31mred");
 
-        let tabbed = stat_with_attribute(AttributeValue::String {
-            value: "a\tb\rc".to_owned(),
-        });
+        let tabbed =
+            stat_with_attribute(AttributeValue::parse("a\tb\rc").expect("attribute value"));
         assert_eq!(attribute_line(&tabbed), "attr.note: a\\tb\\rc");
     }
 
@@ -1071,34 +1060,23 @@ mod tests {
     /// itself.
     #[test]
     fn human_stat_leaves_ordinary_unicode_alone() {
-        let unicode = stat_with_attribute(AttributeValue::String {
-            value: "café ☃ 日本語 🙂".to_owned(),
-        });
+        let unicode = stat_with_attribute(
+            AttributeValue::parse("café ☃ 日本語 🙂").expect("attribute value"),
+        );
         assert_eq!(attribute_line(&unicode), "attr.note: café ☃ 日本語 🙂");
-    }
-
-    /// Each list member is escaped on its own, so one hostile member does not
-    /// change how its siblings print.
-    #[test]
-    fn human_stat_escapes_list_members_individually() {
-        let list = stat_with_attribute(AttributeValue::StringList {
-            values: vec!["red".to_owned(), "gr\nen".to_owned(), "blue".to_owned()],
-        });
-        assert_eq!(attribute_line(&list), "attr.note: red, gr\\nen, blue");
     }
 
     /// JSON output needs no escaping of its own: serde emits an escaped
     /// string, and the value round-trips through a decode unchanged.
     #[test]
     fn json_stat_carries_attribute_values_verbatim() {
-        let newline = stat_with_attribute(AttributeValue::String {
-            value: "first\nsecond".to_owned(),
-        });
+        let newline =
+            stat_with_attribute(AttributeValue::parse("first\nsecond").expect("attribute value"));
         let json: serde_json::Value =
             serde_json::from_str(&json_success(&newline).expect("JSON stat should render"))
                 .expect("rendered stat is JSON");
         assert_eq!(
-            json["data"]["attributes"]["attributes"]["note"]["value"],
+            json["data"]["attributes"]["attributes"]["note"],
             "first\nsecond"
         );
     }

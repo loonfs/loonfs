@@ -408,19 +408,16 @@ pub(crate) struct FilesystemAnnotateArgs {
     pub path: String,
     /// Attribute to write, as `key=value`. The key ends at the first `=`, so
     /// the value may contain more of them. Repeat the flag to write more.
-    /// This flag writes text values only; a list value needs
-    /// --attributes-json.
     #[arg(long = "set", conflicts_with = "attributes_json")]
     pub sets: Vec<String>,
     /// Attribute key to remove. Repeat the flag to remove more.
     #[arg(long = "remove", conflicts_with = "attributes_json")]
     pub removes: Vec<String>,
     /// The whole update as one JSON object, `{"set": {...}, "remove": [...]}`,
-    /// with values in the wire encoding: `{"kind": "string", "value": "x"}` or
-    /// `{"kind": "string_list", "values": ["x", "y"]}`. This is how a list
-    /// value is written, and how a script passes an update it built. Cannot be
-    /// combined with --set or --remove. Named for what it carries because
-    /// --json is already the global output-format flag.
+    /// with values as strings, for example `{"set": {"owner": "ada"}}`.
+    /// This is how a script passes an update it built. Cannot be combined with
+    /// --set or --remove. Named for what it carries because --json is already
+    /// the global output-format flag.
     #[arg(long)]
     pub attributes_json: Option<String>,
     /// Update only while the path still resolves to this inode; a raced

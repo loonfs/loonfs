@@ -550,9 +550,7 @@ mod tests {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 set: std::collections::BTreeMap::from([(
                     loonfs_api::AttributeKey::parse("owner").expect("valid attribute key"),
-                    loonfs_api::AttributeValue::String {
-                        value: "ada".to_owned(),
-                    },
+                    loonfs_api::AttributeValue::parse("ada").expect("valid attribute value"),
                 )]),
                 remove: Vec::new(),
                 expected_inode_id: None,
@@ -568,9 +566,7 @@ mod tests {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 set: std::collections::BTreeMap::from([(
                     loonfs_api::AttributeKey::parse("owner").expect("valid attribute key"),
-                    loonfs_api::AttributeValue::String {
-                        value: "grace".to_owned(),
-                    },
+                    loonfs_api::AttributeValue::parse("grace").expect("valid attribute value"),
                 )]),
                 remove: Vec::new(),
                 expected_inode_id: None,

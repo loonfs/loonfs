@@ -2877,56 +2877,12 @@
         "minimum": 0
       },
       "AttributeValue": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "One text value.",
-            "required": [
-              "value",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "string"
-                ]
-              },
-              "value": {
-                "type": "string",
-                "description": "The stored text, at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "An ordered list of text values.",
-            "required": [
-              "values",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "string_list"
-                ]
-              },
-              "values": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "The stored members in written order, at most\n[`MAX_ATTRIBUTE_LIST_MEMBERS`] of them, each at most\n[`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes."
-              }
-            }
-          }
-        ],
-        "description": "One attribute value.\n\nThe kind is part of the value's identity. A string and a one-member string\nlist are different values, and reading one never yields the other."
+        "type": "string",
+        "description": "One validated attribute value.\n\nA value is at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes. It is\notherwise free text: control characters and the empty string are legal.\nEmpty is a stored value, not a tombstone; only an explicit remove\noperation deletes an attribute."
       },
       "Attributes": {
         "type": "object",
-        "description": "A validated attribute map for one inode.\n\nConstruction and decoding both enforce the same limits: a map holds at\nmost [`MAX_ATTRIBUTE_ENTRIES`] entries, each string and each list member\nis at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes, each list holds at\nmost [`MAX_ATTRIBUTE_LIST_MEMBERS`] members, and the whole map is at most\n[`MAX_ATTRIBUTES_TOTAL_BYTES`] logical UTF-8 bytes. The total counts key\nbytes and value bytes and nothing else, so it does not depend on the\nencoding the map is written in. Durable state that breaks a limit fails to\ndecode rather than decoding to something smaller.\n\nAn empty map is valid. It is the cleared state, and clearing an inode's\nattributes is a real update with its own revision.",
+        "description": "A validated attribute map for one inode.\n\nConstruction and decoding both enforce the same limits: a map holds at\nmost [`MAX_ATTRIBUTE_ENTRIES`] entries, each value is at most\n[`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes, and the whole map is at most\n[`MAX_ATTRIBUTES_TOTAL_BYTES`] logical UTF-8 bytes. The total counts key\nbytes and value bytes and nothing else, so it does not depend on the\nencoding the map is written in. Durable state that breaks a limit fails to\ndecode rather than decoding to something smaller.\n\nAn empty map is valid. It is the cleared state, and clearing an inode's\nattributes is a real update with its own revision.",
         "additionalProperties": {
           "$ref": "#/components/schemas/AttributeValue"
         },
