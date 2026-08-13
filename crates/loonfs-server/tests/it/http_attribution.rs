@@ -1,4 +1,4 @@
-//! Row-backed attribution and observational timestamps over the HTTP surface.
+//! HTTP integration tests for actor and timestamp fields.
 
 #![allow(clippy::panic)]
 
@@ -21,9 +21,8 @@ fn path(absolute_path: &str) -> NamespacePath {
     NamespacePath::parse("demo", absolute_path).expect("namespace path")
 }
 
-/// Returns the one feed entry at `seq`, which is the timestamp oracle for the
-/// row projections. Sequence is still the order; the clock is compared only
-/// for equality with the commit that stamped the row.
+/// Returns the change at `seq` so tests can compare its timestamp with the
+/// corresponding metadata rows.
 async fn change_at(
     harness: &crate::common::TestServer,
     seq: ChangeSeq,

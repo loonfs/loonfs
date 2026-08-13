@@ -5,15 +5,11 @@
 //! commits through both implementations and compare their results. Merging
 //! the implementations would remove the independence those tests require.
 //!
-//! The model derives row attribution independently from each WAL commit's
-//! envelope: every inode, including every implicit parent, retains that
-//! commit's actor as `created_by` and its stamp as `created_at_ms`; every file
-//! revision retains the commit actor and `committed_at_ms`; every tombstone
-//! event retains the commit actor and `deleted_at_ms`; and every persisted
-//! attribute revision retains the commit actor and `updated_at_ms`. Bind and
-//! unbind rows retain neither. Genesis is the one root inode, attributed to
-//! `ActorRef::loonfs_system()` at the bootstrap timestamp. Attribute revision
-//! 0 is synthetic and therefore has no persisted actor or timestamp.
+//! Inodes, file revisions, tombstones, and stored attribute revisions copy
+//! their actor and timestamp from the WAL commit. Directory bindings do not
+//! store attribution. The initial root inode uses
+//! `ActorRef::loonfs_system()`, and the initial empty attribute state has no
+//! actor or timestamp because it is not stored as a revision.
 
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{ActorRef, ChangeSeq, ContentRef, InodeId, InodeKind, RevisionNo};

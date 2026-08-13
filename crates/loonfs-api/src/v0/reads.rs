@@ -23,10 +23,10 @@ pub struct AuthoritativePathEntry {
     pub absolute_path: AbsolutePath,
     /// Stable inode identity for this item.
     pub inode_id: InodeId,
-    /// Application-asserted identity that created this inode.
+    /// Actor that created this inode, as supplied by the application.
     pub created_by: ActorRef,
-    /// Wall-clock stamp of the commit that created this inode. Observational:
-    /// `head_seq` and row sequence numbers remain the ordering authority.
+    /// Time the inode was created, in Unix milliseconds. Sequence numbers
+    /// determine order.
     pub created_at_ms: u64,
     /// File-or-directory classification and its kind-specific payload.
     #[serde(flatten)]
@@ -108,10 +108,10 @@ pub enum AuthoritativePathEntryKind {
         size_bytes: u64,
         /// Current content reference.
         content_ref: ContentRef,
-        /// Application-asserted identity that created the current revision.
+        /// Actor responsible for the current revision.
         revision_actor: ActorRef,
-        /// Wall-clock stamp of the commit that created the current revision.
-        /// Observational: `head_seq` and revision sequences are the order.
+        /// Time of the current revision, in Unix milliseconds. Revision
+        /// sequences determine order.
         committed_at_ms: u64,
     },
 }
@@ -125,8 +125,8 @@ impl AuthoritativePathEntryKind {
         }
     }
 
-    /// Returns the application-asserted identity that created the current
-    /// file revision, or `None` for a directory.
+    /// Returns the actor responsible for the current file revision.
+    /// Directories return `None`.
     pub const fn revision_actor(&self) -> Option<&ActorRef> {
         match self {
             Self::Directory {} => None,
@@ -141,12 +141,12 @@ impl AuthoritativePathEntryKind {
 pub struct AuthoritativeAttributes {
     /// The attribute revision this projection represents.
     pub revision_no: AttributeRevisionNo,
-    /// Application-asserted identity that published this state, absent
-    /// exactly for the synthetic revision-0 state.
+    /// Actor responsible for the latest attribute update. This is `None` for
+    /// the initial empty state at revision 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_by: Option<ActorRef>,
-    /// Wall-clock stamp of the publishing commit, absent exactly for the
-    /// synthetic revision-0 state.
+    /// Time of the latest attribute update, in Unix milliseconds. This is
+    /// `None` for the initial empty state at revision 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at_ms: Option<u64>,
     /// The complete attribute map at `revision_no`.
@@ -366,9 +366,9 @@ pub struct TrashEntry {
     pub root_inode_id: InodeId,
     /// Commit sequence of the deletion; the other half of the handle.
     pub deleted_at_seq: ChangeSeq,
-    /// Wall-clock stamp of the deleting commit. Observational.
+    /// Time of the deletion, in Unix milliseconds.
     pub deleted_at_ms: u64,
-    /// Application-asserted identity that recorded this deletion generation.
+    /// Actor responsible for the deletion.
     pub deleted_by: ActorRef,
     /// Directory that held the deleted binding, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]

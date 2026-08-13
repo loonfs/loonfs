@@ -1999,10 +1999,8 @@ fn sst_block_data_commit_receipt_golden_decodes_to_sample_row() {
     assert_eq!(block.rows, [sample_commit_receipt_row()]);
 }
 
-/// Pins the rows that carry a deletion's binding and the generation a revoke
-/// names. Keep this fixture family-specific: attributed tombstones are large
-/// enough that changing the mixed sample's deliberately tiny split target can
-/// otherwise put the pair in adjacent blocks.
+/// Checks the stable encoding of a tombstone and its matching revoke. A
+/// separate fixture keeps block splitting from separating the pair.
 #[test]
 fn sst_block_data_tombstone_rows_match_golden_bytes() {
     use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
@@ -2194,9 +2192,8 @@ fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
     );
 }
 
-/// Attribution and observational time are required row values in the
-/// version-one encoding. A reader must not silently fabricate either half
-/// when it encounters bytes written without this row cut.
+/// Actors and timestamps are required in version-one metadata rows. Decoding
+/// must fail when either field is missing.
 #[test]
 fn attributed_rows_reject_every_missing_required_actor_or_timestamp() {
     let cases = [

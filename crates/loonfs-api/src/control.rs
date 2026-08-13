@@ -447,8 +447,8 @@ pub struct HeadState {
     /// Minted at creation; a fork target carries its source's, sharing the
     /// content keyspace copy-on-write.
     pub content_store_id: ContentStoreId,
-    /// Namespace creation wall-clock stamp. Immutable and observational;
-    /// sequence numbers remain the ordering authority.
+    /// Time the namespace was created, in Unix milliseconds. Sequence numbers
+    /// determine order; this value is for display.
     pub created_at_ms: u64,
     /// Provenance and pre-first-flush basis of a fork target; absent for a
     /// created namespace. Immutable for the namespace's life.

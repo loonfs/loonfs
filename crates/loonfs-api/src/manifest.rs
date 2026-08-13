@@ -124,9 +124,9 @@ pub enum MetadataRow {
         inode_kind: InodeKind,
         /// Commit sequence from which the inode can become visible.
         created_seq: ChangeSeq,
-        /// Application-asserted identity that created the inode.
+        /// Actor that created the inode, as supplied by the application.
         created_by: crate::ActorRef,
-        /// Observational wall-clock stamp of the creating commit.
+        /// Time the inode was created, in Unix milliseconds.
         created_at_ms: u64,
     },
     /// Records one generation of a directory name binding.
@@ -175,7 +175,7 @@ pub enum MetadataRow {
         /// onto the row so revision reads answer times without a receipt
         /// join. Never a validity input; `committed_seq` is the order.
         committed_at_ms: u64,
-        /// Application-asserted identity that created this revision.
+        /// Actor responsible for this revision, as supplied by the application.
         actor: crate::ActorRef,
         /// Delta position that disambiguates the revision within `committed_seq`.
         revision_delta_index: u32,
@@ -195,7 +195,7 @@ pub enum MetadataRow {
         /// Wall-clock stamp of the recording commit. Observational, like
         /// every `committed_at_ms`.
         deleted_at_ms: u64,
-        /// Application-asserted identity that recorded this event.
+        /// Actor responsible for this tombstone event.
         actor: crate::ActorRef,
     },
     /// Derived row used to list currently recoverable deletions.
@@ -249,9 +249,9 @@ pub enum MetadataRow {
         committed_seq: ChangeSeq,
         /// Delta position that disambiguates the revision within `committed_seq`.
         delta_index: u32,
-        /// Application-asserted identity that published this attribute state.
+        /// Actor responsible for this attribute update.
         actor: crate::ActorRef,
-        /// Observational wall-clock stamp of the publishing commit.
+        /// Time of the attribute update, in Unix milliseconds.
         updated_at_ms: u64,
         /// The inode's complete attribute map at this revision. An empty map
         /// is the cleared state.
@@ -342,7 +342,7 @@ pub enum ActiveDeletionRowAction {
         /// Wall-clock stamp of the deleting commit. Observational, like every
         /// `committed_at_ms`.
         deleted_at_ms: u64,
-        /// Application-asserted identity that recorded the deletion.
+        /// Actor responsible for the deletion.
         deleted_by: crate::ActorRef,
         /// The binding the deletion removed, copied from the tombstone event
         /// this row derives from, or `null` when it recorded none. Stated

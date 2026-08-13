@@ -437,10 +437,11 @@ store id by random generation; a forked namespace copies the source
 namespace's id while starting an independent namespace metadata history,
 which is what makes forks copy-on-write over the same bytes.
 
-The head also carries the namespace's immutable observational
-`created_at_ms`. A created namespace stamps it from the bootstrap context; a
-fork stamps the target's own creation. It is the durable source of the
-synthesized root inode's creation time before the first manifest exists.
+The head stores the namespace's creation time in `created_at_ms`. This value
+never changes. A new namespace uses its bootstrap timestamp. A fork uses the
+time the target namespace was created, not the source namespace's creation
+time. Before the first manifest exists, readers also use this value as the
+root inode's creation time.
 
 Two consequences follow:
 
@@ -545,24 +546,32 @@ Together, the inode, bind, and revision rows mean:
 If the file is renamed, the direntry changes but the inode stays `42`. If the
 file contents are replaced, the revision row changes but the inode stays `42`.
 
-In v0, the root inode is created as `inode_id = 1` at `seq = 0`, with
-`ActorRef::loonfs_system()` and the namespace bootstrap timestamp.
+In v0, every namespace root has `inode_id = 1` and `created_seq = 0`. Its
+`created_by` value is `ActorRef::loonfs_system()`, and its `created_at_ms`
+value is the namespace's bootstrap timestamp.
 
-Actor references and wall-clock stamps are row values, never components of a
-row key, index key, filter key, or cache key. The WAL commit envelope supplies
-both properties to the single delta-to-row application path; `WalDelta` does
-not carry them. Every inode created by a commit, including implicit parent
-directories, retains `created_by` and `created_at_ms`. Every revision retains
-`actor` and its existing `committed_at_ms`. Every tombstone event retains
-`actor` and its existing `deleted_at_ms`; its derived active-deletion listing
-row carries the same value as `deleted_by` with the same timestamp. Every
-persisted attributes revision retains `actor` and `updated_at_ms`; revision 0
-is synthetic and has neither. Directory bind and unbind rows retain neither.
+Actor references and timestamps are metadata. They are not part of row keys,
+indexes, filters, or cache keys. The WAL commit envelope provides the actor and
+timestamp when a commit is applied. Individual `WalDelta` values do not repeat
+them.
 
-`created_at_ms` is the creating commit's observational wall-clock stamp.
-Rename and move update no time anywhere, directories have no modified time,
-and sequence numbers remain the ordering authority. Rename-mtime and
-directory-mtime remain explicit future product decisions.
+The metadata rows store attribution as follows:
+
+- Each new inode stores `created_by` and `created_at_ms`. This includes parent
+  directories created automatically by a commit.
+- Each file revision stores `actor` and `committed_at_ms`.
+- Each tombstone event stores `actor` and `deleted_at_ms`. The corresponding
+  active-deletion row copies these values into `deleted_by` and
+  `deleted_at_ms`.
+- Each persisted attribute revision stores `actor` and `updated_at_ms`. The
+  initial empty state at revision 0 is not persisted and has neither value.
+- Directory bind and unbind rows store neither an actor nor a timestamp.
+
+`created_at_ms` is the wall-clock time reported by the commit that created the
+inode. It is informational only. Renaming or moving an item does not change
+any timestamp, and directories do not have a modification time. Sequence
+numbers determine ordering. The format does not define a rename time or a
+directory modification time.
 
 ### 2.2 Inode kinds
 
@@ -853,8 +862,8 @@ Readers reconstruct authoritative state from:
 The head records the namespace's immutable identity:
 
 - `content_store_id`, required: where the namespace's file bytes live
-- `created_at_ms`, required: the namespace's immutable observational creation
-  stamp and the synthesized root inode's creation stamp
+- `created_at_ms`, required: when the namespace was created; readers also use
+  it as the root inode's creation time
 - `fork_basis`, optional: present in every head of a fork target, absent in
   every head of a created namespace
 
@@ -871,11 +880,10 @@ or where it came from. A publisher that builds a successor differing in any of
 them has a construction bug, and the difference is caught before the
 compare-and-swap rather than persisted.
 
-Decoding is strict. A head whose `content_store_id` or `created_at_ms` is missing is malformed
-and is hard-rejected, never defaulted: nothing else records that fact, so a
-default would silently invent a namespace's content store. A head carrying an
-unknown field is rejected the same way, under the mutable control-object rules
-(section 1.7).
+Head decoding is strict. Readers reject a head that is missing
+`content_store_id` or `created_at_ms`. They do not supply defaults because
+neither value is stored anywhere else. Readers also reject unknown fields as
+required by the mutable control-object rules in section 1.7.
 
 The head also summarizes the current visible boundary and replay hints,
 including at minimum:
@@ -2583,10 +2591,12 @@ and this number, and offers no queryable record of earlier maps. An empty map
 is a state and not an absence: clearing an inode's attributes advances the
 counter to a revision whose map has no entries.
 
-Every WAL commit record and commit receipt row carries a required
-`committed_at_ms`: the wall-clock stamp of the publishing writer's request
-context, in Unix milliseconds. The row families above denormalize that stamp
-under their semantic names so reads need no receipt join. All stamps are
-observational and non-semantic — sequences are the only ordering and validity
-inputs, the fingerprint preimage excludes wall-clock time, and correctness
-never depends on clocks being aligned.
+Every WAL commit record and commit receipt row stores a required
+`committed_at_ms`: the request timestamp in Unix milliseconds. The metadata
+rows described above copy this timestamp into fields such as `created_at_ms`,
+`updated_at_ms`, and `deleted_at_ms`. This lets readers return the timestamp
+without also loading the commit receipt.
+
+These timestamps are informational. Sequence numbers determine ordering and
+validity. Commit fingerprints do not include timestamps, and the format does
+not require clocks to be synchronized.

@@ -1,4 +1,4 @@
-//! End-to-end attribution and observational timestamp semantics on embedded reads.
+//! Embedded integration tests for actor and timestamp fields.
 
 #![allow(clippy::panic)]
 

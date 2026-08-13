@@ -2950,7 +2950,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Wall-clock stamp of the publishing commit, absent exactly for the\nsynthetic revision-0 state.",
+            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
             "minimum": 0
           },
           "updated_by": {
@@ -2960,7 +2960,7 @@
               },
               {
                 "$ref": "#/components/schemas/ActorRef",
-                "description": "Application-asserted identity that published this state, absent\nexactly for the synthetic revision-0 state."
+                "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
               }
             ]
           }
@@ -3001,12 +3001,12 @@
               "created_at_ms": {
                 "type": "integer",
                 "format": "int64",
-                "description": "Wall-clock stamp of the commit that created this inode. Observational:\n`head_seq` and row sequence numbers remain the ordering authority.",
+                "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
                 "minimum": 0
               },
               "created_by": {
                 "$ref": "#/components/schemas/ActorRef",
-                "description": "Application-asserted identity that created this inode."
+                "description": "Actor that created this inode, as supplied by the application."
               },
               "display_name": {
                 "oneOf": [
@@ -3081,7 +3081,7 @@
               "committed_at_ms": {
                 "type": "integer",
                 "format": "int64",
-                "description": "Wall-clock stamp of the commit that created the current revision.\nObservational: `head_seq` and revision sequences are the order.",
+                "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
                 "minimum": 0
               },
               "content_ref": {
@@ -3096,7 +3096,7 @@
               },
               "revision_actor": {
                 "$ref": "#/components/schemas/ActorRef",
-                "description": "Application-asserted identity that created the current revision."
+                "description": "Actor responsible for the current revision."
               },
               "revision_no": {
                 "$ref": "#/components/schemas/RevisionNo",
@@ -4297,7 +4297,7 @@
         "properties": {
           "actor": {
             "$ref": "#/components/schemas/ActorRef",
-            "description": "Application-asserted identity that created this revision."
+            "description": "Actor responsible for this revision, as supplied by the application."
           },
           "committed_at_ms": {
             "type": "integer",
@@ -6081,7 +6081,7 @@
           "deleted_at_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Wall-clock stamp of the deleting commit. Observational.",
+            "description": "Time of the deletion, in Unix milliseconds.",
             "minimum": 0
           },
           "deleted_at_seq": {
@@ -6090,7 +6090,7 @@
           },
           "deleted_by": {
             "$ref": "#/components/schemas/ActorRef",
-            "description": "Application-asserted identity that recorded this deletion generation."
+            "description": "Actor responsible for the deletion."
           },
           "display_name": {
             "oneOf": [

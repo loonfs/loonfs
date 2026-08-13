@@ -45,8 +45,8 @@ pub struct InodeRecord {
     pub inode_kind: InodeKind,
     pub created_seq: ChangeSeq,
     pub created_by: ActorRef,
-    /// Observational wall-clock stamp of the commit that created the inode.
-    /// `created_seq` remains the ordering authority.
+    /// Time the inode was created, in Unix milliseconds. `created_seq`
+    /// determines order.
     pub created_at_ms: u64,
 }
 
@@ -275,8 +275,8 @@ pub struct AttributesRevisionRecord {
     pub committed_seq: ChangeSeq,
     pub delta_index: u32,
     pub actor: ActorRef,
-    /// Observational wall-clock stamp of the commit that published this
-    /// attribute state. `committed_seq` remains the ordering authority.
+    /// Time of the attribute update, in Unix milliseconds. `committed_seq`
+    /// determines order.
     pub updated_at_ms: u64,
     /// The inode's attributes after this update. An empty map is the cleared
     /// state, not an absent record.

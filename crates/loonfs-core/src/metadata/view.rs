@@ -425,8 +425,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .unwrap_or_else(|| (AttributeRevisionNo(0), Attributes::default())))
     }
 
-    /// The inode's attribute read projection, including the commit metadata
-    /// that exists only when a persisted revision row exists.
+    /// Returns the inode's attributes with the actor and timestamp from the
+    /// latest stored revision. Revision 0 returns `None` for both values.
     pub(crate) async fn attributes_projection_at_visible_seq(
         &self,
         inode_id: InodeId,
