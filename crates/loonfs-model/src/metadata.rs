@@ -4,9 +4,19 @@
 //! `loonfs-core::metadata::visibility`. Differential tests replay the same
 //! commits through both implementations and compare their results. Merging
 //! the implementations would remove the independence those tests require.
+//!
+//! The model derives row attribution independently from each WAL commit's
+//! envelope: every inode, including every implicit parent, retains that
+//! commit's actor as `created_by` and its stamp as `created_at_ms`; every file
+//! revision retains the commit actor and `committed_at_ms`; every tombstone
+//! event retains the commit actor and `deleted_at_ms`; and every persisted
+//! attribute revision retains the commit actor and `updated_at_ms`. Bind and
+//! unbind rows retain neither. Genesis is the one root inode, attributed to
+//! `ActorRef::loonfs_system()` at the bootstrap timestamp. Attribute revision
+//! 0 is synthetic and therefore has no persisted actor or timestamp.
 
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{ChangeSeq, ContentRef, InodeId, InodeKind, RevisionNo};
+use loonfs_api::{ActorRef, ChangeSeq, ContentRef, InodeId, InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -30,6 +40,8 @@ pub struct InodeRecord {
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
     pub created_seq: ChangeSeq,
+    pub created_by: ActorRef,
+    pub created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +73,8 @@ pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     pub committed_seq: ChangeSeq,
+    pub committed_at_ms: u64,
+    pub actor: ActorRef,
     pub revision_delta_index: u32,
     pub content_ref: ContentRef,
 }
@@ -71,6 +85,7 @@ pub struct SubtreeTombstoneRecord {
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
     pub deleted_at_ms: u64,
+    pub actor: ActorRef,
     /// Action recorded by this event. The newest event for each root determines
     /// state; a newest `Revoke` means no tombstone is active.
     pub action: SubtreeTombstoneAction,
@@ -84,6 +99,8 @@ pub struct AttributeRevisionRecord {
     pub revision: u64,
     pub committed_seq: ChangeSeq,
     pub delta_index: u32,
+    pub actor: ActorRef,
+    pub updated_at_ms: u64,
     /// The map after the update, in key order. An empty list is the cleared
     /// state, not a missing record.
     pub entries: Vec<AttributeEntry>,
@@ -129,6 +146,7 @@ impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
+        actor: &ActorRef,
         committed_at_ms: u64,
         deltas: &[WalDelta],
     ) -> MetadataState {
@@ -145,6 +163,8 @@ impl MetadataState {
                         inode_id: *inode_id,
                         inode_kind: *inode_kind,
                         created_seq: committed_seq,
+                        created_by: actor.clone(),
+                        created_at_ms: committed_at_ms,
                     });
                 }
                 WalDelta::BindDirentry {
@@ -193,6 +213,8 @@ impl MetadataState {
                         inode_id: *inode_id,
                         revision_no: *revision_no,
                         committed_seq,
+                        committed_at_ms,
+                        actor: actor.clone(),
                         revision_delta_index: *delta_index,
                         content_ref: content_ref.clone(),
                     });
@@ -209,6 +231,7 @@ impl MetadataState {
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
                             deleted_at_ms: committed_at_ms,
+                            actor: actor.clone(),
                             action: SubtreeTombstoneAction::Set {
                                 deleted_binding: deleted_direntry.as_ref().map(|direntry| {
                                     DeletedBinding {
@@ -232,6 +255,7 @@ impl MetadataState {
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
                             deleted_at_ms: committed_at_ms,
+                            actor: actor.clone(),
                             action: SubtreeTombstoneAction::Revoke {
                                 target: DeletionGeneration {
                                     seq: target.seq,
@@ -253,6 +277,8 @@ impl MetadataState {
                             revision: attributes_revision_no.0,
                             committed_seq,
                             delta_index: *delta_index,
+                            actor: actor.clone(),
+                            updated_at_ms: committed_at_ms,
                             entries: attributes
                                 .iter()
                                 .map(|(key, value)| AttributeEntry {
@@ -279,6 +305,7 @@ mod tests {
     fn bind_direntry_replay_uses_persisted_name_key() {
         let applied = MetadataState::default().apply_committed_wal_deltas(
             ChangeSeq(1),
+            &ActorRef::loonfs_system(),
             4_200,
             &[WalDelta::BindDirentry {
                 delta_index: 7,
@@ -298,6 +325,7 @@ mod tests {
     fn tombstone_replay_restates_the_deleted_binding_and_the_revoked_generation() {
         let applied = MetadataState::default().apply_committed_wal_deltas(
             ChangeSeq(9),
+            &ActorRef::loonfs_system(),
             4_200,
             &[
                 WalDelta::TombstoneSubtree {

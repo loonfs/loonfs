@@ -150,6 +150,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             revision_no,
                             committed_seq,
                             committed_at_ms,
+                            actor,
                             revision_delta_index,
                             content_ref,
                         } => MetadataRow::Revision {
@@ -157,6 +158,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             revision_no,
                             committed_seq,
                             committed_at_ms,
+                            actor,
                             revision_delta_index,
                             content_ref: loonfs_api::ContentRef {
                                 content_id: loonfs_api::ContentId::parse(

@@ -398,6 +398,8 @@ pub struct FileRevision {
     /// Wall-clock stamp of the commit that created this revision, in Unix
     /// milliseconds. Observational: `committed_seq` is the order.
     pub committed_at_ms: u64,
+    /// Application-asserted identity that created this revision.
+    pub actor: crate::ActorRef,
     /// Content stored for this revision.
     pub content_ref: ContentRef,
 }

@@ -4,7 +4,7 @@
 use super::materialize::materialize_validated_op;
 use super::ValidatedOp;
 use crate::metadata::MetadataState;
-use loonfs_api::ChangeSeq;
+use loonfs_api::{ActorRef, ChangeSeq};
 
 pub(super) struct CommitOverlayRows {
     rows: MetadataState,
@@ -41,12 +41,14 @@ impl CommitOverlayRows {
     pub(super) fn apply_validated_op_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        actor: &ActorRef,
         committed_at_ms: u64,
         op: &ValidatedOp,
     ) {
         for delta in &materialize_validated_op(op) {
             self.rows.apply_committed_wal_delta_mut(
                 committed_seq,
+                actor,
                 committed_at_ms,
                 &delta.wal_delta,
             );
@@ -76,6 +78,7 @@ mod tests {
         let mut replayed = MetadataState::default();
         replayed.apply_committed_wal_deltas_mut(
             committed_seq,
+            &loonfs_api::ActorRef::loonfs_system(),
             4_200,
             &materialized_wal_deltas(ops),
         );
@@ -90,7 +93,12 @@ mod tests {
     fn overlay_rows(committed_seq: ChangeSeq, ops: &[ValidatedOp]) -> MetadataState {
         let mut overlay = CommitOverlayRows::new();
         for op in ops {
-            overlay.apply_validated_op_mut(committed_seq, 4_200, op);
+            overlay.apply_validated_op_mut(
+                committed_seq,
+                &loonfs_api::ActorRef::loonfs_system(),
+                4_200,
+                op,
+            );
         }
         overlay.rows
     }
@@ -490,11 +498,13 @@ mod tests {
         let mut replayed = MetadataState::default();
         replayed.apply_committed_wal_deltas_mut(
             first_seq,
+            &loonfs_api::ActorRef::loonfs_system(),
             4_200,
             &materialized_wal_deltas(&first_ops),
         );
         replayed.apply_committed_wal_deltas_mut(
             second_seq,
+            &loonfs_api::ActorRef::loonfs_system(),
             4_200,
             &materialized_wal_deltas(&second_ops),
         );

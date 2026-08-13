@@ -672,9 +672,12 @@ fn wal_tail_projection_slot_is_live(
 mod tests {
     use super::{
         DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache,
-        MetadataTableCacheConfig, MetadataTableCacheKey,
+        MetadataTableCacheConfig, MetadataTableCacheKey, WalTailProjectionCache,
+        WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
     };
+    use crate::metadata::{InodeRecord, MetadataState};
     use loonfs_api::wire::sst_blocks::DecodedDataBlock;
+    use loonfs_api::{ActorId, ActorRef, ChangeSeq, InodeId, InodeKind, ManifestId, NamespaceId};
     use std::sync::Arc;
 
     fn block(decoded_byte_len: usize) -> DecodedMetadataTableBlock {
@@ -693,6 +696,55 @@ mod tests {
             block_kind: MetadataTableBlockKind::Data,
             block_offset: 0,
         }
+    }
+
+    #[test]
+    fn row_attribution_and_timestamps_never_enter_projection_cache_keys() {
+        let cache = WalTailProjectionCache::new(WalTailProjectionCacheConfig {
+            max_entries: 1,
+            max_rows: 10,
+            max_decoded_bytes: 16 * 1024,
+        });
+        let key = WalTailProjectionCacheKey {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            manifest_id: ManifestId(7),
+            manifest_head_seq: ChangeSeq(11),
+            head_seq: ChangeSeq(12),
+            head_etag: "stable-head-etag".to_owned(),
+        };
+        let actors = [
+            ActorRef::user(ActorId::parse("auth0|x").expect("actor id")),
+            ActorRef::service(ActorId::parse("x".repeat(256)).expect("256-byte actor id")),
+            ActorRef::system(ActorId::parse("雪-actor").expect("unicode actor id")),
+        ];
+
+        for (offset, actor) in actors.into_iter().enumerate() {
+            let rows = MetadataState::from_rows(
+                vec![InodeRecord {
+                    inode_id: InodeId(42),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(3),
+                    created_by: actor.clone(),
+                    created_at_ms: 3_000 + offset as u64,
+                }],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            cache.insert(key.clone(), Arc::new(rows));
+            assert_eq!(
+                cache
+                    .get(&key)
+                    .expect("same projection cache key should hit")
+                    .inodes()[0]
+                    .created_by,
+                actor
+            );
+        }
+        assert_eq!(cache.stats().cached_rows, 1);
     }
 
     #[test]

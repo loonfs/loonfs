@@ -447,6 +447,9 @@ pub struct HeadState {
     /// Minted at creation; a fork target carries its source's, sharing the
     /// content keyspace copy-on-write.
     pub content_store_id: ContentStoreId,
+    /// Namespace creation wall-clock stamp. Immutable and observational;
+    /// sequence numbers remain the ordering authority.
+    pub created_at_ms: u64,
     /// Provenance and pre-first-flush basis of a fork target; absent for a
     /// created namespace. Immutable for the namespace's life.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -486,6 +489,7 @@ struct StrictHeadState {
     // malformed. It was a separate durable object before the
     // one-publication protocol; nothing reconstructs it.
     content_store_id: ContentStoreId,
+    created_at_ms: u64,
     #[serde(default)]
     fork_basis: Option<ForkBasis>,
     seq: ChangeSeq,
@@ -557,6 +561,7 @@ impl<'de> Deserialize<'de> for HeadState {
         Ok(Self {
             namespace_id: state.namespace_id,
             content_store_id: state.content_store_id,
+            created_at_ms: state.created_at_ms,
             fork_basis: state.fork_basis,
             seq: state.seq,
             head_commit_id: state.head_commit_id,
@@ -599,10 +604,15 @@ impl fmt::Display for HeadIdentityDrift {
 
 impl HeadState {
     /// Constructs the active sequence-zero head with the root inode already reserved.
-    pub fn initial(namespace_id: NamespaceId, content_store_id: ContentStoreId) -> Self {
+    pub fn initial(
+        namespace_id: NamespaceId,
+        content_store_id: ContentStoreId,
+        created_at_ms: u64,
+    ) -> Self {
         Self {
             namespace_id,
             content_store_id,
+            created_at_ms,
             fork_basis: None,
             seq: ChangeSeq(0),
             head_commit_id: CommitId::parse(GENESIS_COMMIT_ID).expect("genesis commit id is valid"),
@@ -638,6 +648,9 @@ impl HeadState {
         }
         if successor.content_store_id != self.content_store_id {
             return drift("content_store_id");
+        }
+        if successor.created_at_ms != self.created_at_ms {
+            return drift("created_at_ms");
         }
         if successor.fork_basis != self.fork_basis {
             return drift("fork_basis");
@@ -1185,6 +1198,7 @@ mod tests {
             NamespaceId::parse("demo").expect("valid namespace id"),
             ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("valid content store id"),
+            1_000,
         )
     }
 
@@ -1225,6 +1239,7 @@ mod tests {
         let mut head = serde_json::json!({
             "namespace_id": "demo",
             "content_store_id": "cs_0123456789abcdef0123456789abcdef",
+            "created_at_ms": 1_000,
             "seq": 2,
             "head_commit_id": GENESIS_COMMIT_ID,
             "writer_epoch": 0,

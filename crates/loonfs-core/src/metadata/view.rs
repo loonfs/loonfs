@@ -425,6 +425,34 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .unwrap_or_else(|| (AttributeRevisionNo(0), Attributes::default())))
     }
 
+    /// The inode's attribute read projection, including the commit metadata
+    /// that exists only when a persisted revision row exists.
+    pub(crate) async fn attributes_projection_at_visible_seq(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<
+        (
+            AttributeRevisionNo,
+            Attributes,
+            Option<loonfs_api::ActorRef>,
+            Option<u64>,
+        ),
+        CoreError,
+    > {
+        Ok(self
+            .latest_attributes_revision(inode_id)
+            .await?
+            .map(|record| {
+                (
+                    record.attributes_revision_no,
+                    record.attributes,
+                    Some(record.actor),
+                    Some(record.updated_at_ms),
+                )
+            })
+            .unwrap_or_else(|| (AttributeRevisionNo(0), Attributes::default(), None, None)))
+    }
+
     pub(crate) async fn find_commit_receipt(
         &self,
         commit_id: &CommitId,

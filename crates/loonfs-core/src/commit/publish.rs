@@ -94,6 +94,7 @@ pub(crate) fn prepare_commit_head_publish(
         // store, name policy, and fork provenance: every successor carries
         // them forward verbatim, and the assertion below proves it did.
         content_store_id: current_head.content_store_id.clone(),
+        created_at_ms: current_head.created_at_ms,
         fork_basis: current_head.fork_basis.clone(),
         seq: plan.assigned_seq,
         head_commit_id: plan.commit_id.clone(),
@@ -225,6 +226,7 @@ mod tests {
                 "cs_0123456789abcdef0123456789abcdef",
             )
             .expect("content store id"),
+            created_at_ms: 1_000,
             fork_basis: None,
             seq,
             head_commit_id: CommitId::parse("c_00000000000000000000000000000000")

@@ -32,6 +32,8 @@ fn attributes_record(
         attributes_revision_no: AttributeRevisionNo(revision),
         committed_seq: ChangeSeq(seq),
         delta_index: 0,
+        actor: loonfs_api::ActorRef::loonfs_system(),
+        updated_at_ms: 1_000 + seq,
         attributes: attributes(entries),
     }
 }
@@ -122,6 +124,8 @@ fn the_fold_keeps_a_latest_empty_revision() {
             attributes_revision_no: AttributeRevisionNo(2),
             committed_seq: ChangeSeq(4),
             delta_index: 0,
+            actor: loonfs_api::ActorRef::loonfs_system(),
+            updated_at_ms: 1_004,
             attributes: Attributes::default(),
         },
     ]);

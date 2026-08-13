@@ -6,6 +6,7 @@
 //! explains why it cannot share a process.
 
 mod attributes;
+mod attribution_rows;
 mod bulk_file_reads;
 mod cache_seeding;
 mod capability_conformance;

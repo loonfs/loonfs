@@ -3,8 +3,8 @@
 use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, ContentId,
-    ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
+    ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, SubtreeTombstoneAction as CoreTombstoneAction,
@@ -13,9 +13,9 @@ use loonfs_model::metadata::{
     MetadataState as ModelMetadataState, SubtreeTombstoneAction as ModelTombstoneAction,
 };
 
-type NormalizedInodes = Vec<(u64, &'static str, u64)>;
+type NormalizedInodes = Vec<(u64, &'static str, u64, ActorRef, u64)>;
 type NormalizedDirentryBinds = Vec<(u64, String, u64, u64, u32)>;
-type NormalizedRevisions = Vec<(u64, u64, u64, u32, ContentId)>;
+type NormalizedRevisions = Vec<(u64, u64, u64, u64, ActorRef, u32, ContentId)>;
 type NormalizedTombstones = Vec<NormalizedTombstone>;
 type NormalizedAttributes = Vec<NormalizedAttributeRevision>;
 type NormalizedMetadata = (
@@ -36,6 +36,8 @@ struct NormalizedAttributeRevision {
     revision: u64,
     committed_seq: u64,
     delta_index: u32,
+    actor: ActorRef,
+    updated_at_ms: u64,
     entries: Vec<(String, String)>,
 }
 
@@ -49,6 +51,8 @@ struct NormalizedTombstone {
     root_inode_id: u64,
     tombstone_seq: u64,
     tombstone_delta_index: u32,
+    deleted_at_ms: u64,
+    actor: ActorRef,
     action: NormalizedTombstoneAction,
 }
 
@@ -481,7 +485,8 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
 fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(0),
-        4_200,
+        &ActorRef::loonfs_system(),
+        4_000,
         &[WalDelta::CreateInode {
             delta_index: 0,
             inode_id: InodeId(1),
@@ -491,7 +496,7 @@ fn core_bootstrap_state() -> CoreMetadataState {
 }
 
 fn model_bootstrap_state() -> ModelMetadataState {
-    loonfs_model::bootstrap_metadata_state()
+    loonfs_model::bootstrap_metadata_state(4_000)
 }
 
 fn assert_states_match(sequences: &[Vec<WalDelta>]) {
@@ -500,8 +505,12 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
 
     for (index, deltas) in sequences.iter().enumerate() {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
-        core_state = core_state.apply_committed_wal_deltas(seq, 4_200, deltas);
-        model_state = model_state.apply_committed_wal_deltas(seq, 4_200, deltas);
+        let actor = ActorRef::user(
+            ActorId::parse(format!("scenario-actor-{index}")).expect("valid actor id"),
+        );
+        let committed_at_ms = 4_200 + u64::try_from(index).expect("timestamp offset");
+        core_state = core_state.apply_committed_wal_deltas(seq, &actor, committed_at_ms, deltas);
+        model_state = model_state.apply_committed_wal_deltas(seq, &actor, committed_at_ms, deltas);
     }
 
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
@@ -512,7 +521,15 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
         state
             .inodes()
             .iter()
-            .map(|inode| normalize_inode(inode.inode_id.0, inode.inode_kind, inode.created_seq.0))
+            .map(|inode| {
+                normalize_inode(
+                    inode.inode_id.0,
+                    inode.inode_kind,
+                    inode.created_seq.0,
+                    inode.created_by.clone(),
+                    inode.created_at_ms,
+                )
+            })
             .collect(),
         state
             .direntry_binds()
@@ -535,6 +552,8 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     revision.inode_id.0,
                     revision.revision_no.0,
                     revision.committed_seq.0,
+                    revision.committed_at_ms,
+                    revision.actor.clone(),
                     revision.revision_delta_index,
                     revision.content_ref.content_id.clone(),
                 )
@@ -547,6 +566,8 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 root_inode_id: tombstone.root_inode_id.0,
                 tombstone_seq: tombstone.generation.seq.0,
                 tombstone_delta_index: tombstone.generation.delta_index,
+                deleted_at_ms: tombstone.deleted_at_ms,
+                actor: tombstone.actor.clone(),
                 action: match &tombstone.action {
                     CoreTombstoneAction::Set { deleted_direntry } => {
                         NormalizedTombstoneAction::Set {
@@ -574,6 +595,8 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 revision: record.attributes_revision_no.0,
                 committed_seq: record.committed_seq.0,
                 delta_index: record.delta_index,
+                actor: record.actor.clone(),
+                updated_at_ms: record.updated_at_ms,
                 entries: record
                     .attributes
                     .iter()
@@ -596,7 +619,15 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
     (
         inodes
             .iter()
-            .map(|inode| normalize_inode(inode.inode_id.0, inode.inode_kind, inode.created_seq.0))
+            .map(|inode| {
+                normalize_inode(
+                    inode.inode_id.0,
+                    inode.inode_kind,
+                    inode.created_seq.0,
+                    inode.created_by.clone(),
+                    inode.created_at_ms,
+                )
+            })
             .collect(),
         direntry_binds
             .iter()
@@ -617,6 +648,8 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     revision.inode_id.0,
                     revision.revision_no.0,
                     revision.committed_seq.0,
+                    revision.committed_at_ms,
+                    revision.actor.clone(),
                     revision.revision_delta_index,
                     revision.content_ref.content_id.clone(),
                 )
@@ -628,6 +661,8 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 root_inode_id: tombstone.root_inode_id.0,
                 tombstone_seq: tombstone.tombstone_seq.0,
                 tombstone_delta_index: tombstone.tombstone_delta_index,
+                deleted_at_ms: tombstone.deleted_at_ms,
+                actor: tombstone.actor.clone(),
                 action: match &tombstone.action {
                     ModelTombstoneAction::Set { deleted_binding } => {
                         NormalizedTombstoneAction::Set {
@@ -654,6 +689,8 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 revision: record.revision,
                 committed_seq: record.committed_seq.0,
                 delta_index: record.delta_index,
+                actor: record.actor.clone(),
+                updated_at_ms: record.updated_at_ms,
                 entries: record
                     .entries
                     .iter()
@@ -668,7 +705,9 @@ fn normalize_inode(
     inode_id: u64,
     inode_kind: InodeKind,
     created_seq: u64,
-) -> (u64, &'static str, u64) {
+    created_by: ActorRef,
+    created_at_ms: u64,
+) -> (u64, &'static str, u64, ActorRef, u64) {
     (
         inode_id,
         match inode_kind {
@@ -676,5 +715,7 @@ fn normalize_inode(
             InodeKind::File => "file",
         },
         created_seq,
+        created_by,
+        created_at_ms,
     )
 }

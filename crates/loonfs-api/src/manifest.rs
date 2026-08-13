@@ -124,6 +124,10 @@ pub enum MetadataRow {
         inode_kind: InodeKind,
         /// Commit sequence from which the inode can become visible.
         created_seq: ChangeSeq,
+        /// Application-asserted identity that created the inode.
+        created_by: crate::ActorRef,
+        /// Observational wall-clock stamp of the creating commit.
+        created_at_ms: u64,
     },
     /// Records one generation of a directory name binding.
     DirentryBind {
@@ -171,6 +175,8 @@ pub enum MetadataRow {
         /// onto the row so revision reads answer times without a receipt
         /// join. Never a validity input; `committed_seq` is the order.
         committed_at_ms: u64,
+        /// Application-asserted identity that created this revision.
+        actor: crate::ActorRef,
         /// Delta position that disambiguates the revision within `committed_seq`.
         revision_delta_index: u32,
         /// Immutable bytes published by the revision.
@@ -189,6 +195,8 @@ pub enum MetadataRow {
         /// Wall-clock stamp of the recording commit. Observational, like
         /// every `committed_at_ms`.
         deleted_at_ms: u64,
+        /// Application-asserted identity that recorded this event.
+        actor: crate::ActorRef,
     },
     /// Derived row used to list currently recoverable deletions.
     ///
@@ -241,6 +249,10 @@ pub enum MetadataRow {
         committed_seq: ChangeSeq,
         /// Delta position that disambiguates the revision within `committed_seq`.
         delta_index: u32,
+        /// Application-asserted identity that published this attribute state.
+        actor: crate::ActorRef,
+        /// Observational wall-clock stamp of the publishing commit.
+        updated_at_ms: u64,
         /// The inode's complete attribute map at this revision. An empty map
         /// is the cleared state.
         attributes: Attributes,
@@ -330,6 +342,8 @@ pub enum ActiveDeletionRowAction {
         /// Wall-clock stamp of the deleting commit. Observational, like every
         /// `committed_at_ms`.
         deleted_at_ms: u64,
+        /// Application-asserted identity that recorded the deletion.
+        deleted_by: crate::ActorRef,
         /// The binding the deletion removed, copied from the tombstone event
         /// this row derives from, or `null` when it recorded none. Stated
         /// either way, like the event's own.
@@ -1139,6 +1153,7 @@ mod tests {
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
             committed_at_ms: 12_000,
+            actor: crate::ActorRef::loonfs_system(),
             revision_delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
@@ -1168,6 +1183,8 @@ mod tests {
                 attributes_revision_no: crate::AttributeRevisionNo(revision),
                 committed_seq: ChangeSeq(seq),
                 delta_index,
+                actor: crate::ActorRef::loonfs_system(),
+                updated_at_ms: 12_000 + seq,
                 attributes: crate::Attributes::default(),
             };
         let newest = row_of(3, 12, 1);
@@ -1222,6 +1239,7 @@ mod tests {
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
             committed_at_ms: 12_000,
+            actor: crate::ActorRef::loonfs_system(),
             revision_delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
@@ -1236,6 +1254,8 @@ mod tests {
                     inode_id: InodeId(42),
                     inode_kind: crate::InodeKind::File,
                     created_seq: ChangeSeq(3),
+                    created_by: crate::ActorRef::loonfs_system(),
+                    created_at_ms: 3_000,
                 },
             ),
             (MetadataTableFamily::DirentryBinds, bind.clone()),
@@ -1267,6 +1287,7 @@ mod tests {
                         deleted_direntry: None,
                     },
                     deleted_at_ms: 12_000,
+                    actor: crate::ActorRef::loonfs_system(),
                 },
             ),
             (
@@ -1298,6 +1319,8 @@ mod tests {
                     attributes_revision_no: crate::AttributeRevisionNo(3),
                     committed_seq: ChangeSeq(12),
                     delta_index: 0,
+                    actor: crate::ActorRef::loonfs_system(),
+                    updated_at_ms: 12_000,
                     attributes: crate::Attributes::default(),
                 },
             ),
@@ -1314,6 +1337,102 @@ mod tests {
                 row_key.starts_with(prefix),
                 "row key `{row_key}` for `{family:?}` does not start with `{prefix}`"
             );
+        }
+    }
+
+    #[test]
+    fn attribution_values_never_change_row_or_index_keys() {
+        fn rows(actor: crate::ActorRef) -> Vec<(MetadataTableFamily, super::MetadataRow)> {
+            vec![
+                (
+                    MetadataTableFamily::Inodes,
+                    super::MetadataRow::Inode {
+                        inode_id: InodeId(42),
+                        inode_kind: crate::InodeKind::File,
+                        created_seq: ChangeSeq(3),
+                        created_by: actor.clone(),
+                        created_at_ms: 3_000,
+                    },
+                ),
+                (
+                    MetadataTableFamily::RevisionsByInodeDesc,
+                    super::MetadataRow::Revision {
+                        inode_id: InodeId(42),
+                        revision_no: crate::RevisionNo(7),
+                        committed_seq: ChangeSeq(12),
+                        committed_at_ms: 12_000,
+                        actor: actor.clone(),
+                        revision_delta_index: 3,
+                        content_ref: crate::ContentRef::blob_v1(
+                            crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                                .expect("content id"),
+                            b"attribution key test",
+                        ),
+                    },
+                ),
+                (
+                    MetadataTableFamily::Tombstones,
+                    super::MetadataRow::Tombstone {
+                        root_inode_id: InodeId(42),
+                        generation: super::TombstoneGeneration {
+                            seq: ChangeSeq(12),
+                            delta_index: 3,
+                        },
+                        action: super::TombstoneRowAction::Set {
+                            deleted_direntry: None,
+                        },
+                        deleted_at_ms: 12_000,
+                        actor: actor.clone(),
+                    },
+                ),
+                (
+                    MetadataTableFamily::ActiveDeletions,
+                    super::MetadataRow::ActiveDeletion {
+                        root_inode_id: InodeId(42),
+                        deleted_at_seq: ChangeSeq(12),
+                        action: super::ActiveDeletionRowAction::Listed {
+                            deleted_at_ms: 12_000,
+                            deleted_by: actor.clone(),
+                            deleted_direntry: None,
+                        },
+                    },
+                ),
+                (
+                    MetadataTableFamily::Attributes,
+                    super::MetadataRow::AttributesRevision {
+                        inode_id: InodeId(42),
+                        attributes_revision_no: crate::AttributeRevisionNo(2),
+                        committed_seq: ChangeSeq(12),
+                        delta_index: 3,
+                        actor,
+                        updated_at_ms: 12_000,
+                        attributes: crate::Attributes::default(),
+                    },
+                ),
+            ]
+        }
+
+        let actors = [
+            crate::ActorRef::user(crate::ActorId::parse("auth0|x").expect("actor id")),
+            crate::ActorRef::service(
+                crate::ActorId::parse("x".repeat(256)).expect("256-byte actor id"),
+            ),
+            crate::ActorRef::system(crate::ActorId::parse("雪-actor").expect("unicode actor id")),
+        ];
+        let baseline = rows(actors[0].clone());
+        for actor in actors.into_iter().skip(1) {
+            let changed = rows(actor);
+            for ((family, baseline), (changed_family, changed)) in baseline.iter().zip(&changed) {
+                assert_eq!(family, changed_family);
+                assert_eq!(
+                    baseline.row_key_for_family(*family),
+                    changed.row_key_for_family(*family)
+                );
+                assert_eq!(
+                    baseline.filter_key_for_family(*family),
+                    changed.filter_key_for_family(*family)
+                );
+            }
         }
     }
 

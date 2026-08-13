@@ -96,6 +96,7 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
                 &mut resolved,
                 &mut cursor,
                 committed_seq,
+                &request.actor,
                 committed_at_ms,
             )
             .await

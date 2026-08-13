@@ -104,6 +104,7 @@ fn head_with_writer(
         // namespace's immutable identity forward like every other
         // successor.
         content_store_id: current_head.content_store_id.clone(),
+        created_at_ms: current_head.created_at_ms,
         fork_basis: current_head.fork_basis.clone(),
         seq: current_head.seq,
         head_commit_id: current_head.head_commit_id.clone(),
@@ -203,8 +204,11 @@ mod tests {
         writer_id: &str,
         writer_epoch: WriterEpoch,
     ) -> HeadState {
-        let mut head =
-            HeadState::initial(namespace_id.clone(), loonfs_api::ContentStoreId::generate());
+        let mut head = HeadState::initial(
+            namespace_id.clone(),
+            loonfs_api::ContentStoreId::generate(),
+            1_000,
+        );
         head.writer_epoch = writer_epoch;
         head.writer = Some(WriterBlock {
             writer_id: writer_id.to_owned(),

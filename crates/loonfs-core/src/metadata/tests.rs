@@ -5,9 +5,13 @@ use super::*;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::ContentId;
 use loonfs_api::{
-    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
-    CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
+    AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
+    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
 };
+
+fn actor() -> ActorRef {
+    loonfs_test_support::test_actor()
+}
 
 fn name_key(value: &str) -> NameKey {
     NameKey::parse(value).expect("valid name key")
@@ -17,6 +21,7 @@ fn name_key(value: &str) -> NameKey {
 fn bind_direntry_replay_uses_persisted_name_key() {
     let applied = MetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(1),
+        &actor(),
         4_200,
         &[WalDelta::BindDirentry {
             delta_index: 7,
@@ -42,11 +47,15 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(1),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
         ],
         vec![DirentryBindRecord {
@@ -80,16 +89,22 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(0),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(3),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(2),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
         ],
         vec![
@@ -137,6 +152,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
         ChangeSeq(3),
+        &actor(),
         4_200,
         &[WalDelta::UnbindDirentry {
             delta_index: 0,
@@ -157,6 +173,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
         ChangeSeq(4),
+        &actor(),
         4_200,
         &[WalDelta::BindDirentry {
             delta_index: 0,
@@ -179,6 +196,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
         ChangeSeq(5),
+        &actor(),
         4_200,
         &[WalDelta::TombstoneSubtree {
             delta_index: 0,
@@ -206,16 +224,22 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(0),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(1),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(3),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(2),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
         ],
         vec![
@@ -263,11 +287,15 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(1),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
         ],
         vec![DirentryBindRecord {
@@ -356,12 +384,15 @@ fn revisions_advance_watermark_and_receipt_index() {
         inode_id: InodeId(7),
         inode_kind: InodeKind::File,
         created_seq: ChangeSeq(1),
+        created_by: actor(),
+        created_at_ms: 4_200,
     });
     builder.push_revision(RevisionRecord {
         inode_id: InodeId(7),
         revision_no: RevisionNo(1),
         committed_seq: ChangeSeq(2),
         committed_at_ms: 4_200,
+        actor: actor(),
         revision_delta_index: 0,
         content_ref: content_ref.clone(),
     });
@@ -370,6 +401,7 @@ fn revisions_advance_watermark_and_receipt_index() {
         revision_no: RevisionNo(2),
         committed_seq: ChangeSeq(3),
         committed_at_ms: 4_200,
+        actor: actor(),
         revision_delta_index: 0,
         content_ref: replacement_ref.clone(),
     });
@@ -447,6 +479,7 @@ fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
     let mut metadata_state = MetadataState::default();
     metadata_state.apply_committed_wal_deltas_mut(
         ChangeSeq(4),
+        &actor(),
         4_200,
         &[
             append_attributes(0, InodeId(7), 1, attribute_map(&[("owner", "ada")])),
@@ -481,6 +514,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(2),
+        &actor(),
         4_200,
         &[append_attributes(
             0,
@@ -491,6 +525,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     );
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(5),
+        &actor(),
         4_200,
         &[append_attributes(
             0,
@@ -541,6 +576,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
 fn attribute_row_accounting_counts_key_and_value_bytes() {
     let small = MetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(1),
+        &actor(),
         4_200,
         &[append_attributes(
             0,
@@ -552,6 +588,7 @@ fn attribute_row_accounting_counts_key_and_value_bytes() {
     let large_value = "v".repeat(4_096);
     let large = MetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(1),
+        &actor(),
         4_200,
         &[append_attributes(
             0,
@@ -581,6 +618,7 @@ fn churned_binding_state() -> MetadataState {
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(0),
+        &actor(),
         4_200,
         &[WalDelta::CreateInode {
             delta_index: 0,
@@ -590,6 +628,7 @@ fn churned_binding_state() -> MetadataState {
     );
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(1),
+        &actor(),
         4_200,
         &[
             WalDelta::CreateInode {
@@ -622,6 +661,7 @@ fn churned_binding_state() -> MetadataState {
     );
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(2),
+        &actor(),
         4_200,
         &[
             WalDelta::UnbindDirentry {
@@ -656,6 +696,7 @@ fn churned_binding_state() -> MetadataState {
     );
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(3),
+        &actor(),
         4_200,
         &[
             WalDelta::CreateInode {
@@ -782,11 +823,15 @@ fn has_visible_children_sees_through_unbinds() {
                 inode_id: dir,
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(2),
+                created_by: actor(),
+                created_at_ms: 4_200,
             },
         ],
         vec![DirentryBindRecord {

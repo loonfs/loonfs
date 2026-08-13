@@ -9,7 +9,7 @@ use loonfs_api::{
     InodeId, InodeKind, NameKey, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
-use std::mem::{size_of, size_of_val};
+use std::mem::size_of;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataState {
@@ -44,6 +44,10 @@ pub struct InodeRecord {
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
     pub created_seq: ChangeSeq,
+    pub created_by: ActorRef,
+    /// Observational wall-clock stamp of the commit that created the inode.
+    /// `created_seq` remains the ordering authority.
+    pub created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +82,7 @@ pub struct RevisionRecord {
     /// Observational wall-clock stamp of the owning commit; never a
     /// validity input — `committed_seq` is the order.
     pub committed_at_ms: u64,
+    pub actor: ActorRef,
     pub revision_delta_index: u32,
     pub content_ref: ContentRef,
 }
@@ -90,6 +95,7 @@ pub struct SubtreeTombstoneRecord {
     pub generation: TombstoneGeneration,
     /// Wall-clock stamp of the recording commit.
     pub deleted_at_ms: u64,
+    pub actor: ActorRef,
     /// What this event did. Newest generation wins at every read site: a
     /// `Set` newest means that deletion is active, a `Revoke` newest means
     /// none is, and a later re-delete supersedes the revoke.
@@ -157,6 +163,7 @@ pub(crate) enum ActiveDeletionAction {
     /// details.
     Listed {
         deleted_at_ms: u64,
+        deleted_by: ActorRef,
         deleted_direntry: Option<DeletedDirentry>,
     },
     /// An undelete cancelled the deletion, so the listing skips the key.
@@ -182,6 +189,7 @@ pub(crate) fn active_deletion_from_tombstone(
             deleted_at_seq: tombstone.generation.seq,
             action: ActiveDeletionAction::Listed {
                 deleted_at_ms: tombstone.deleted_at_ms,
+                deleted_by: tombstone.actor.clone(),
                 deleted_direntry: deleted_direntry.clone(),
             },
         },
@@ -215,11 +223,13 @@ impl ActiveDeletionRecord {
         match self.action {
             ActiveDeletionAction::Listed {
                 deleted_at_ms,
+                deleted_by,
                 deleted_direntry,
             } => Some(RecoverableDeletion {
                 root_inode_id: self.root_inode_id,
                 deleted_at_seq: self.deleted_at_seq,
                 deleted_at_ms,
+                deleted_by,
                 deleted_direntry,
             }),
             ActiveDeletionAction::Removed { .. } => None,
@@ -233,6 +243,7 @@ pub(crate) struct RecoverableDeletion {
     pub(crate) root_inode_id: InodeId,
     pub(crate) deleted_at_seq: ChangeSeq,
     pub(crate) deleted_at_ms: u64,
+    pub(crate) deleted_by: ActorRef,
     /// The binding the delete removed, and so the one undelete restores in
     /// place; `None` when the deletion recorded no binding.
     pub(crate) deleted_direntry: Option<DeletedDirentry>,
@@ -263,6 +274,10 @@ pub struct AttributesRevisionRecord {
     pub attributes_revision_no: AttributeRevisionNo,
     pub committed_seq: ChangeSeq,
     pub delta_index: u32,
+    pub actor: ActorRef,
+    /// Observational wall-clock stamp of the commit that published this
+    /// attribute state. `committed_seq` remains the ordering authority.
+    pub updated_at_ms: u64,
     /// The inode's attributes after this update. An empty map is the cleared
     /// state, not an absent record.
     pub attributes: Attributes,
@@ -354,7 +369,7 @@ impl MetadataState {
 
     pub(crate) fn push_inode_record(&mut self, record: InodeRecord) {
         self.indexes.record_inode(&record);
-        self.record_row_weight(size_of::<InodeRecord>());
+        self.record_row_weight(inode_decoded_bytes(&record));
         self.inodes.push(record);
     }
 
@@ -378,7 +393,7 @@ impl MetadataState {
 
     pub(crate) fn push_subtree_tombstone_record(&mut self, record: SubtreeTombstoneRecord) {
         self.indexes.record_tombstone(&record);
-        self.record_row_weight(size_of::<SubtreeTombstoneRecord>());
+        self.record_row_weight(subtree_tombstone_decoded_bytes(&record));
         self.subtree_tombstones.push(record);
     }
 
@@ -455,7 +470,11 @@ fn metadata_row_count(state: &MetadataState) -> usize {
 }
 
 fn metadata_decoded_bytes(state: &MetadataState) -> usize {
-    size_of_val(state.inodes.as_slice())
+    state
+        .inodes
+        .iter()
+        .map(inode_decoded_bytes)
+        .sum::<usize>()
         .saturating_add(
             state
                 .direntry_binds
@@ -477,7 +496,13 @@ fn metadata_decoded_bytes(state: &MetadataState) -> usize {
                 .map(revision_decoded_bytes)
                 .sum::<usize>(),
         )
-        .saturating_add(size_of_val(state.subtree_tombstones.as_slice()))
+        .saturating_add(
+            state
+                .subtree_tombstones
+                .iter()
+                .map(subtree_tombstone_decoded_bytes)
+                .sum::<usize>(),
+        )
         .saturating_add(
             state
                 .commit_receipts
@@ -494,6 +519,14 @@ fn metadata_decoded_bytes(state: &MetadataState) -> usize {
         )
 }
 
+fn inode_decoded_bytes(record: &InodeRecord) -> usize {
+    size_of::<InodeRecord>() + actor_ref_decoded_bytes(&record.created_by)
+}
+
+fn subtree_tombstone_decoded_bytes(record: &SubtreeTombstoneRecord) -> usize {
+    size_of::<SubtreeTombstoneRecord>() + actor_ref_decoded_bytes(&record.actor)
+}
+
 fn direntry_bind_decoded_bytes(record: &DirentryBindRecord) -> usize {
     size_of::<DirentryBindRecord>()
         + record.name_key.as_str().len()
@@ -505,14 +538,15 @@ fn direntry_unbind_decoded_bytes(record: &DirentryUnbindRecord) -> usize {
 }
 
 fn revision_decoded_bytes(record: &RevisionRecord) -> usize {
-    size_of::<RevisionRecord>() + content_ref_decoded_bytes(&record.content_ref)
+    size_of::<RevisionRecord>()
+        + actor_ref_decoded_bytes(&record.actor)
+        + content_ref_decoded_bytes(&record.content_ref)
 }
 
 fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
     size_of::<CommitReceiptRecord>()
         + record.commit_id.as_str().len()
-        + record.actor.kind.as_str().len()
-        + record.actor.id.as_str().len()
+        + actor_ref_decoded_bytes(&record.actor)
         + record.semantic_commit_fingerprint.len()
         + record.message.as_ref().map_or(0, String::len)
 }
@@ -520,7 +554,13 @@ fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
 /// The record's struct plus the key and value bytes its map owns. Attribute
 /// maps are caller-sized, so the map's own bytes are what this row weighs.
 fn attributes_revision_decoded_bytes(record: &AttributesRevisionRecord) -> usize {
-    size_of::<AttributesRevisionRecord>() + record.attributes.logical_bytes()
+    size_of::<AttributesRevisionRecord>()
+        + actor_ref_decoded_bytes(&record.actor)
+        + record.attributes.logical_bytes()
+}
+
+fn actor_ref_decoded_bytes(actor: &ActorRef) -> usize {
+    actor.kind.as_str().len() + actor.id.as_str().len()
 }
 
 fn content_ref_decoded_bytes(content_ref: &ContentRef) -> usize {

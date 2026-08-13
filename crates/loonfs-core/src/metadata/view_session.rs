@@ -130,7 +130,15 @@ pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     current_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
     latest_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
     latest_revision_head_cache: HashMap<InodeId, Option<RevisionRecord>>,
-    attributes_cache: HashMap<InodeId, (AttributeRevisionNo, Attributes)>,
+    attributes_cache: HashMap<
+        InodeId,
+        (
+            AttributeRevisionNo,
+            Attributes,
+            Option<loonfs_api::ActorRef>,
+            Option<u64>,
+        ),
+    >,
     active_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     unbind_cache: HashMap<BindingCacheKey, bool>,
@@ -676,13 +684,24 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn attributes_of_visible(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<(AttributeRevisionNo, Attributes), CoreError> {
+    ) -> Result<
+        (
+            AttributeRevisionNo,
+            Attributes,
+            Option<loonfs_api::ActorRef>,
+            Option<u64>,
+        ),
+        CoreError,
+    > {
         self.counters.latest_attributes_calls =
             self.counters.latest_attributes_calls.saturating_add(1);
         if let Some(cached) = self.attributes_cache.get(&inode_id).cloned() {
             return Ok(cached);
         }
-        let attributes = self.base.attributes_at_visible_seq(inode_id).await?;
+        let attributes = self
+            .base
+            .attributes_projection_at_visible_seq(inode_id)
+            .await?;
         self.attributes_cache.insert(inode_id, attributes.clone());
         Ok(attributes)
     }
@@ -716,7 +735,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let base = &self.base;
         let loaded =
             futures::future::try_join_all(pending.into_iter().map(|inode_id| async move {
-                Ok::<_, CoreError>((inode_id, base.attributes_at_visible_seq(inode_id).await?))
+                Ok::<_, CoreError>((
+                    inode_id,
+                    base.attributes_projection_at_visible_seq(inode_id).await?,
+                ))
             }))
             .await?;
         self.attributes_cache.extend(loaded);

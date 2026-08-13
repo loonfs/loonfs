@@ -254,7 +254,9 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     if !loaded.basis.is_owned_by(namespace_id) && floor_seq > namespace_birth_seq(&head) {
         return Err(advanced_floor_without_root(namespace_id, floor_seq));
     }
-    let basis = load_basis_metadata_tables(store, None, namespace_id, &loaded.basis).await?;
+    let basis =
+        load_basis_metadata_tables(store, None, namespace_id, &loaded.basis, head.created_at_ms)
+            .await?;
     let manifest_tables = basis.tables;
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let wal_chain = load_validated_wal_chain(

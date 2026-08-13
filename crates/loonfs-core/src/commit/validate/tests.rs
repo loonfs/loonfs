@@ -146,6 +146,7 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
 fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     let mut state = MetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(0),
+        &loonfs_test_support::test_actor(),
         4_200,
         &[WalDelta::CreateInode {
             delta_index: 0,
@@ -157,6 +158,7 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     for (index, deltas) in sequences.iter().enumerate() {
         state = state.apply_committed_wal_deltas(
             ChangeSeq(u64::try_from(index + 1).expect("seq")),
+            &loonfs_test_support::test_actor(),
             4_200,
             deltas,
         )
@@ -178,6 +180,7 @@ fn validation_context(
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let head = HeadState {
         content_store_id: loonfs_api::ContentStoreId::generate(),
+        created_at_ms: 1_000,
         fork_basis: None,
         namespace_id: namespace_id.clone(),
         seq,
@@ -839,6 +842,7 @@ async fn restore_revision_overflow_is_rejected() {
     let metadata_state = MetadataState::default()
         .apply_committed_wal_deltas(
             ChangeSeq(0),
+            &loonfs_test_support::test_actor(),
             4_200,
             &[WalDelta::CreateInode {
                 delta_index: 0,
@@ -846,7 +850,12 @@ async fn restore_revision_overflow_is_rejected() {
                 inode_kind: InodeKind::Directory,
             }],
         )
-        .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &deltas);
+        .apply_committed_wal_deltas(
+            ChangeSeq(1),
+            &loonfs_test_support::test_actor(),
+            4_200,
+            &deltas,
+        );
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),

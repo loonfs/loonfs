@@ -1780,13 +1780,17 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
         .find(|entry| entry["display_name"] == "Quarterly Report.PDF")
         .expect("report entry");
     assert!(report["deleted_at_ms"].as_u64().expect("ms") > 0);
+    assert_eq!(
+        report["deleted_by"],
+        serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
+    );
 
     // The human table prints the exact undelete invocation.
     let human = harness.run(&["trash"]);
     assert_success(&human);
     let table = stdout_string(&human);
     assert!(
-        table.contains("DELETED\tNAME\tINODE\tSEQ\tRECOVER"),
+        table.contains("DELETED\tDELETED_BY\tNAME\tINODE\tSEQ\tRECOVER"),
         "{table}"
     );
     assert!(table.contains("Quarterly Report.PDF"), "{table}");
@@ -1975,7 +1979,7 @@ fn human_output_shows_dates_and_event_names() {
     assert_success(&revisions);
     let table = stdout_string(&revisions);
     assert!(
-        table.contains("REVISION\tDATE\tSEQ\tSIZE\tDIGEST"),
+        table.contains("REVISION\tDATE\tACTOR\tSEQ\tSIZE\tDIGEST"),
         "{table}"
     );
 
@@ -1986,6 +1990,18 @@ fn human_output_shows_dates_and_event_names() {
         "{}",
         stdout_string(&stat_file)
     );
+    let json_stat = harness.run(&["--json", "stat", "/doc.txt"]);
+    assert_success(&json_stat);
+    let entry = json_data(&json_stat);
+    assert_eq!(
+        entry["created_by"],
+        serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
+    );
+    assert_eq!(
+        entry["revision_actor"],
+        serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
+    );
+    assert!(entry["created_at_ms"].as_u64().expect("creation time") > 0);
 }
 
 #[test]
@@ -4522,6 +4538,8 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
             serde_json::json!({})
         );
         assert_eq!(bare_entry["attributes"]["revision_no"], 0);
+        assert!(bare_entry["attributes"]["updated_by"].is_null());
+        assert!(bare_entry["attributes"]["updated_at_ms"].is_null());
 
         let annotated = harness.run(&[
             "--json",
@@ -4562,6 +4580,16 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         assert_eq!(
             json_data(&with_list_json)["attributes"]["attributes"]["tags"],
             serde_json::json!("red,blue")
+        );
+        assert_eq!(
+            json_data(&with_list_json)["attributes"]["updated_by"],
+            serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
+        );
+        assert!(
+            json_data(&with_list_json)["attributes"]["updated_at_ms"]
+                .as_u64()
+                .expect("attribute update time")
+                > 0
         );
 
         assert_success(&harness.run(&[
@@ -5017,6 +5045,8 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
             "namespace_id": "demo",
             "absolute_path": "/docs",
             "inode_id": 2,
+            "created_by": { "kind": "system", "id": "loonfs" },
+            "created_at_ms": 1_752_624_000_000_u64,
             "inode_kind": "dir",
             "head_seq": 20,
             "parent_inode_id": 1,
@@ -5030,6 +5060,8 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
                 "namespace_id": "demo",
                 "absolute_path": "/docs/sub",
                 "inode_id": 3,
+                "created_by": { "kind": "system", "id": "loonfs" },
+                "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "dir",
                 "head_seq": 20,
                 "parent_inode_id": 2,
@@ -5899,8 +5931,8 @@ fn trash_recovery_command(output: &Output, display_name: &str) -> String {
     let table = stdout_string(output);
     let cell = table
         .lines()
-        .find(|line| line.split('\t').nth(1) == Some(display_name))
-        .and_then(|row| row.split('\t').nth(4))
+        .find(|line| line.split('\t').nth(2) == Some(display_name))
+        .and_then(|row| row.split('\t').nth(5))
         .map(ToOwned::to_owned);
     assert!(
         cell.is_some(),

@@ -27,10 +27,14 @@ pub(crate) fn inode_from_manifest_row(row: MetadataRow) -> Result<InodeRecord, C
             inode_id,
             inode_kind,
             created_seq,
+            created_by,
+            created_at_ms,
         } => Ok(InodeRecord {
             inode_id,
             inode_kind,
             created_seq,
+            created_by,
+            created_at_ms,
         }),
         other => Err(foreign_row("inode", &other)),
     }
@@ -93,6 +97,7 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
             revision_no,
             committed_seq,
             committed_at_ms,
+            actor,
             revision_delta_index,
             content_ref,
         } => Ok(RevisionRecord {
@@ -100,6 +105,7 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
             revision_no,
             committed_seq,
             committed_at_ms,
+            actor,
             revision_delta_index,
             content_ref,
         }),
@@ -125,10 +131,12 @@ pub(crate) fn tombstone_from_manifest_row(
             generation,
             action,
             deleted_at_ms,
+            actor,
         } => Ok(SubtreeTombstoneRecord {
             root_inode_id,
             generation,
             deleted_at_ms,
+            actor,
             action: subtree_tombstone_action(action),
         }),
         other => Err(foreign_row("tombstone", &other)),
@@ -149,9 +157,11 @@ pub(crate) fn active_deletion_from_manifest_row(
             action: match action {
                 ActiveDeletionRowAction::Listed {
                     deleted_at_ms,
+                    deleted_by,
                     deleted_direntry,
                 } => ActiveDeletionAction::Listed {
                     deleted_at_ms,
+                    deleted_by,
                     deleted_direntry,
                 },
                 ActiveDeletionRowAction::Removed { revoked_at_seq } => {
@@ -195,12 +205,16 @@ pub(crate) fn attributes_revision_from_manifest_row(
             attributes_revision_no,
             committed_seq,
             delta_index,
+            actor,
+            updated_at_ms,
             attributes,
         } => Ok(AttributesRevisionRecord {
             inode_id,
             attributes_revision_no,
             committed_seq,
             delta_index,
+            actor,
+            updated_at_ms,
             attributes,
         }),
         other => Err(foreign_row("attributes_revision", &other)),
@@ -218,6 +232,8 @@ mod tests {
             inode_id: InodeId(7),
             inode_kind: loonfs_api::InodeKind::File,
             created_seq: ChangeSeq(3),
+            created_by: loonfs_api::ActorRef::loonfs_system(),
+            created_at_ms: 4_000,
         }
     }
 
@@ -248,6 +264,7 @@ mod tests {
                 deleted_direntry: None,
             },
             deleted_at_ms: 4_000,
+            actor: loonfs_api::ActorRef::loonfs_system(),
         };
         assert!(inode_from_manifest_row(tombstone).is_err());
     }

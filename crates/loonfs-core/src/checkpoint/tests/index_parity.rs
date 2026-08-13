@@ -1195,6 +1195,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
             revision_no,
             committed_seq,
             committed_at_ms,
+            actor,
             revision_delta_index,
             content_ref,
         } => MetadataRow::Revision {
@@ -1202,6 +1203,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
             revision_no: loonfs_api::RevisionNo(revision_no.0 + 100),
             committed_seq,
             committed_at_ms,
+            actor,
             revision_delta_index,
             content_ref,
         },

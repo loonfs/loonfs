@@ -48,6 +48,7 @@ async fn build_commit_plan<S: ObjectStore + ?Sized>(
         &mut metadata_state,
         &mut OpValidationCursor::new(),
         committed_seq,
+        &request.actor,
         committed_at_ms,
     )
     .await?;

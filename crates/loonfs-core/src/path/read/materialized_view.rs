@@ -216,9 +216,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         }
         let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
         let manifest_id = basis.manifest_id();
-        let loaded_basis =
-            load_basis_metadata_tables(store, load_context.table_cache, namespace_id, basis)
-                .await?;
+        let loaded_basis = load_basis_metadata_tables(
+            store,
+            load_context.table_cache,
+            namespace_id,
+            basis,
+            head.created_at_ms,
+        )
+        .await?;
         let tables = loaded_basis.tables;
         let manifest_head = head_from_manifest(&head, tables.manifest());
         let anchor = ReadAnchor {
@@ -487,6 +492,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 root_inode_id: deletion.root_inode_id,
                 deleted_at_seq: deletion.deleted_at_seq,
                 deleted_at_ms: deletion.deleted_at_ms,
+                deleted_by: deletion.deleted_by,
                 parent_inode_id: deletion
                     .deleted_direntry
                     .as_ref()
@@ -563,6 +569,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
                 committed_at_ms: revision.committed_at_ms,
+                actor: revision.actor,
                 content_ref: revision.content_ref,
             })
             .collect();
@@ -594,6 +601,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             revision_no: revision.revision_no,
             size_bytes: revision.content_ref.size_bytes,
             content_ref: revision.content_ref.clone(),
+            revision_actor: revision.actor,
             committed_at_ms: revision.committed_at_ms,
         };
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
@@ -782,6 +790,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     revision_no: revision.revision_no,
                     size_bytes: revision.content_ref.size_bytes,
                     content_ref: revision.content_ref,
+                    revision_actor: revision.actor,
                     committed_at_ms: revision.committed_at_ms,
                 }
             }
@@ -790,10 +799,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         // as a file; only the projection decides whether the read happens.
         let attributes = match attributes {
             AttributeProjection::Include => {
-                let (revision_no, attributes) =
+                let (revision_no, attributes, updated_by, updated_at_ms) =
                     session.attributes_of_visible(resolved.inode_id).await?;
                 Some(AuthoritativeAttributes {
                     revision_no,
+                    updated_by,
+                    updated_at_ms,
                     attributes,
                 })
             }
@@ -820,6 +831,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             namespace_id: self.namespace_id.clone(),
             absolute_path,
             inode_id: resolved.inode_id,
+            created_by: resolved.created_by.clone(),
+            created_at_ms: resolved.created_at_ms,
             kind,
             head_seq: self.head.seq,
             parent_inode_id: resolved.parent_inode_id,
@@ -844,6 +857,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 absolute_path: child_path.as_str().to_owned(),
                 inode_id: child.binding.child_inode_id,
                 inode_kind: child.inode.inode_kind,
+                created_by: child.inode.created_by,
+                created_at_ms: child.inode.created_at_ms,
                 parent_inode_id: Some(child.binding.parent_inode_id),
                 display_name: child.binding.display_name.to_string(),
             },
