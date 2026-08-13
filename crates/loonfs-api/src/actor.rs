@@ -1,5 +1,7 @@
-//! Actor references should use stable opaque ids such as `usr_8f3c`, not emails or display names.
-//! This lets the hosting platform change profile data without rewriting filesystem history.
+//! Types for identifying who made a commit.
+//!
+//! Use a stable ID such as `usr_8f3c`, rather than an email address or display
+//! name. Profile changes should not change the actor recorded in file history.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -7,21 +9,22 @@ use thiserror::Error;
 
 const MAX_ACTOR_ID_BYTES: usize = 256;
 
-/// An application-asserted reference to the identity that caused a logical filesystem commit.
+/// Identifies the user, service, or system responsible for a commit.
 ///
-/// LoonFS records exactly one actor reference per commit and never authenticates or resolves it.
+/// LoonFS stores this value as provided. It does not authenticate the actor or
+/// look up profile information.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ActorRef {
-    /// Classification of the referenced identity.
+    /// The type of actor.
     pub kind: ActorKind,
-    /// Hosting-platform identity within the selected actor kind.
+    /// A stable identifier supplied by the application.
     pub id: ActorId,
 }
 
 impl ActorRef {
-    /// Creates a reference to a human represented by the application.
+    /// Creates a user actor.
     pub fn user(id: ActorId) -> Self {
         Self {
             kind: ActorKind::User,
@@ -29,7 +32,7 @@ impl ActorRef {
         }
     }
 
-    /// Creates a reference to an autonomous service.
+    /// Creates a service actor.
     pub fn service(id: ActorId) -> Self {
         Self {
             kind: ActorKind::Service,
@@ -37,7 +40,7 @@ impl ActorRef {
         }
     }
 
-    /// Creates a reference to system activity.
+    /// Creates a system actor.
     pub fn system(id: ActorId) -> Self {
         Self {
             kind: ActorKind::System,
@@ -45,46 +48,46 @@ impl ActorRef {
         }
     }
 
-    /// Returns the LoonFS bootstrap actor used as the namespace root's creator.
+    /// Returns the actor used when LoonFS creates a namespace root.
     pub fn loonfs_system() -> Self {
         Self::system(ActorId::parse("loonfs").expect("`loonfs` should be a valid actor id"))
     }
 }
 
-/// Closed classification of identities that can cause a logical filesystem commit.
+/// The type of actor responsible for a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ActorKind {
-    /// A human represented by the application.
+    /// A user of the application.
     User,
-    /// An autonomous application, integration, or worker.
+    /// An application, integration, or background worker.
     ///
-    /// A backend acting for a known user records the user, not itself.
+    /// Use [`ActorKind::User`] when a service acts on behalf of a known user.
     Service,
-    /// LoonFS or hosting-platform activity that intentionally changes filesystem semantics.
+    /// System activity that changes filesystem data.
     ///
-    /// Maintenance that produces no logical commit never uses this kind.
+    /// Maintenance that does not create a commit has no actor.
     System,
 }
 
-/// Validated opaque identity supplied by the hosting platform.
+/// A validated actor identifier supplied by the application.
 ///
-/// Actor ids accept external identity-system syntax rather than the narrower LoonFS durable-id
-/// grammar. They are non-empty, at most 256 UTF-8 bytes, unpadded by whitespace, and contain no
-/// control characters.
+/// Actor IDs may use the syntax of the application's identity system. They
+/// must contain between 1 and 256 UTF-8 bytes, must not begin or end with
+/// whitespace, and must not contain control characters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ActorId(String);
 
 impl ActorId {
-    /// Parses and validates an actor id from its serialized form.
+    /// Parses and validates an actor ID.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, ActorIdValidationError> {
         let value = value.as_ref();
         validate_actor_id(value)?;
         Ok(Self(value.to_owned()))
     }
 
-    /// Returns the serialized actor id.
+    /// Returns the actor ID as a string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -171,7 +174,7 @@ impl<'de> Deserialize<'de> for ActorId {
     }
 }
 
-/// Describes why supplied text does not satisfy the actor-id validation contract.
+/// An error returned when an actor ID is invalid.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid actor_id {value:?}: {reason}")]
 pub struct ActorIdValidationError {
@@ -185,7 +188,7 @@ impl ActorIdValidationError {
         &self.value
     }
 
-    /// Returns the specific validation rule the rejected input violated.
+    /// Returns the reason the input was rejected.
     pub fn reason(&self) -> &str {
         &self.reason
     }
