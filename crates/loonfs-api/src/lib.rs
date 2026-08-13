@@ -24,6 +24,7 @@
 
 #![warn(missing_docs)]
 
+mod actor;
 mod attributes;
 mod capability;
 mod commit_identity;
@@ -90,6 +91,7 @@ pub mod wire {
     }
 }
 
+pub use actor::{ActorId, ActorIdValidationError, ActorKind, ActorRef};
 pub use attributes::{
     AttributeKey, AttributeKeyValidationError, AttributeRevisionNo, AttributeValue,
     AttributeValueValidationError, Attributes, AttributesError, MAX_ATTRIBUTES_TOTAL_BYTES,
