@@ -9,7 +9,7 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsWriter,
+    CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsWriter, GcConfig,
     MaintenancePlan, MetadataCompactionOutcome, MetadataMaintenanceOptions, MoveOptions,
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore,
 };
@@ -90,6 +90,68 @@ fn metadata_plan() -> MaintenancePlan {
             max_wal_tail_segments: NonZeroU64::MIN,
         }),
         ..MaintenancePlan::default()
+    }
+}
+
+#[tokio::test]
+async fn an_admin_gc_step_records_the_pass_counters_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (writer, admin, _scheduled, recorder) = manual_deployment(temp_dir.path()).await;
+    let namespace = namespace_id("admin-gc-metrics");
+    writer
+        .create_namespace(&namespace, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(&namespace, "/live.txt", b"live", PutFileOptions::default())
+        .await
+        .expect("write a live GC candidate");
+
+    assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
+    let step = admin
+        .maintenance_step_namespace(
+            &namespace,
+            MaintenancePlan {
+                gc: Some(GcConfig::default()),
+                ..MaintenancePlan::default()
+            },
+        )
+        .await
+        .expect("run the admin GC step");
+    let gc = step.gc.expect("a GC plan reports its pass");
+    assert!(
+        gc.retained_candidates > 0,
+        "the live namespace gives the pass candidates to retain"
+    );
+
+    let snapshot = recorder.snapshot();
+    assert_eq!(
+        counter(&snapshot, "loonfs.gc.retained", &[]),
+        gc.retained_candidates,
+        "the admin pass records its retained count exactly once"
+    );
+    for (category, reclaimed) in [
+        ("deleted_wal_segments", gc.deleted_wal_segments),
+        ("deleted_metadata_tables", gc.deleted_metadata_tables),
+        ("deleted_manifests", gc.deleted_manifests),
+        ("deleted_checkpoint_records", gc.deleted_checkpoint_records),
+        ("released_fork_checkpoints", gc.released_fork_checkpoints),
+        (
+            "released_expired_checkpoints",
+            gc.released_expired_checkpoints,
+        ),
+        ("deleted_upload_sessions", gc.deleted_upload_sessions),
+        ("deleted_content_objects", gc.deleted_content_objects),
+        (
+            "released_missing_basis_checkpoints",
+            gc.released_missing_basis_checkpoints,
+        ),
+    ] {
+        assert_eq!(
+            counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)],),
+            reclaimed,
+            "the admin pass records `{category}` exactly once"
+        );
     }
 }
 

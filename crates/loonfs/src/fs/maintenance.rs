@@ -565,6 +565,9 @@ impl FsAdmin {
         )
         .await
         .map_err(RuntimeError::Core)?;
+        // A caller may drop the response, so its counts survive only when
+        // this shared pass records them here.
+        self.core.instruments().gc_pass(&report);
         // Sweeping can remove objects cached views still reference; drop the
         // namespace caches rather than trusting them across a collection.
         self.invalidate_namespace(namespace_id);

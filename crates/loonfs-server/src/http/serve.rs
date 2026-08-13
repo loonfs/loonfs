@@ -6,6 +6,10 @@ use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
 use crate::config::{ServerConfig, ServerConfigError};
 use crate::local_cache::FoyerStoredMetadataBlockCache;
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
@@ -23,12 +27,99 @@ use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
 use std::future::IntoFuture;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
+
+#[derive(Clone, Default)]
+struct RequestDrain {
+    inner: Arc<RequestDrainInner>,
+}
+
+#[derive(Default)]
+struct RequestDrainInner {
+    active: AtomicUsize,
+    idle: Notify,
+}
+
+impl RequestDrain {
+    fn start(&self) -> ActiveRequest {
+        self.inner.active.fetch_add(1, Ordering::AcqRel);
+        ActiveRequest {
+            drain: self.clone(),
+        }
+    }
+
+    async fn settle(&self) {
+        loop {
+            let idle = self.inner.idle.notified();
+            if self.inner.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            idle.await;
+        }
+    }
+}
+
+struct ActiveRequest {
+    drain: RequestDrain,
+}
+
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        if self.drain.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.drain.inner.idle.notify_waiters();
+        }
+    }
+}
+
+async fn track_request(
+    State(drain): State<RequestDrain>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let active = drain.start();
+    let response = next.run(request).await;
+    response.map(|body| {
+        Body::new(DrainedBody {
+            body,
+            _active: active,
+        })
+    })
+}
+
+/// A response body whose request stays active until the last frame is sent.
+///
+/// Framing passes through untouched — in particular the exact size hint — so
+/// a sized response keeps its `Content-Length` instead of turning chunked.
+struct DrainedBody {
+    body: Body,
+    _active: ActiveRequest,
+}
+
+impl http_body::Body for DrainedBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::pin::Pin::new(&mut self.get_mut().body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
 
 /// Request handles built over one shared store client.
 ///
@@ -462,10 +553,9 @@ pub async fn probe_store(config: &ServerConfig) -> Result<StoreProbeReport, Serv
     Ok(run_store_contract_probe(store.as_ref(), &run_id).await)
 }
 
-/// Serves until ctrl-c or SIGTERM, then shuts down gracefully: the listener
-/// stops accepting, in-flight requests drain, publisher work finishes, and
-/// writer maintenance — the runtime's steps and grep's alike — settles
-/// before this returns.
+/// Serves until ctrl-c or SIGTERM, then shuts down gracefully. Admission
+/// closes while the listener remains available to reads and probes. After
+/// active requests drain, the listener closes and writer-owned work settles.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
     serve_with_shutdown(config, shutdown_signal()).await
 }
@@ -499,9 +589,9 @@ pub async fn serve_with_shutdown(
 }
 
 /// The one serving body, over whichever listener the deployment configured.
-/// Plaintext and TLS differ in what `accept` returns and in nothing else:
-/// the same router, the same graceful shutdown, and the same writer settles
-/// after the listener drains or reaches its deadline.
+/// Plaintext and TLS differ in what `accept` returns and in nothing else.
+/// Both close admission, drain requests, close the listener, and settle the
+/// writer in the same order.
 pub(super) async fn serve_on<L>(
     listener: L,
     config: ServerConfig,
@@ -539,32 +629,60 @@ pub(super) async fn serve_and_settle<L>(
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
-    let (drain_started_tx, mut drain_started_rx) = tokio::sync::oneshot::channel();
-    let shutdown = async move {
-        shutdown.await;
-        let _ = drain_started_tx.send(());
-    };
+    let requests = RequestDrain::default();
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        requests.clone(),
+        track_request,
+    ));
+    let (listener_close_tx, listener_close_rx) = tokio::sync::oneshot::channel();
     let mut server = Box::pin(
         axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
+            .with_graceful_shutdown(async move {
+                let _ = listener_close_rx.await;
+            })
             .into_future(),
     );
-    // The budget starts when shutdown fires. It does not limit server uptime.
+    let mut shutdown = Box::pin(shutdown);
+    enum DrainOutcome {
+        Server(std::io::Result<()>),
+        Settled,
+        Deadline,
+    }
     let served = tokio::select! {
         result = server.as_mut() => result,
-        Ok(()) = &mut drain_started_rx => {
-            match tokio::time::timeout(
-                Duration::from_millis(shutdown_deadline_ms),
-                server.as_mut(),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => {
+        () = shutdown.as_mut() => {
+            // This is synchronous so readiness changes before the drain waits.
+            writer.close_admission_for_shutdown();
+            // The budget starts when shutdown fires. It does not limit uptime.
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_millis(shutdown_deadline_ms);
+            let mut deadline = Box::pin(tokio::time::sleep_until(deadline));
+            let drain = tokio::select! {
+                result = server.as_mut() => DrainOutcome::Server(result),
+                () = requests.settle() => DrainOutcome::Settled,
+                () = deadline.as_mut() => DrainOutcome::Deadline,
+            };
+            match drain {
+                DrainOutcome::Server(result) => result,
+                DrainOutcome::Settled => {
+                    let _ = listener_close_tx.send(());
+                    tokio::select! {
+                        result = server.as_mut() => result,
+                        () = deadline.as_mut() => {
+                            tracing::warn!(
+                                shutdown_deadline_ms,
+                                "graceful drain deadline passed; remaining requests are abandoned"
+                            );
+                            Ok(())
+                        }
+                    }
+                }
+                DrainOutcome::Deadline => {
                     tracing::warn!(
                         shutdown_deadline_ms,
                         "graceful drain deadline passed; remaining requests are abandoned"
                     );
+                    let _ = listener_close_tx.send(());
                     Ok(())
                 }
             }
@@ -573,9 +691,8 @@ where
     // Dropping the server cancels requests left behind by an expired drain.
     drop(server);
     served.map_err(ServeError::Serve)?;
-    // Shut down the writer after the drain finishes or its deadline passes.
-    // Accepted requests keep mutation admission through the drain window.
-    // Task panics surface here.
+    // Admission is already closed on the signal path. This idempotent call
+    // drains publisher and maintenance work after the listener closes.
     let settled = writer.shutdown().await.map_err(ServeError::Shutdown);
     // Close the cache after writer shutdown, even when writer shutdown fails.
     // Closing flushes retained memory entries to disk. If both steps fail, report

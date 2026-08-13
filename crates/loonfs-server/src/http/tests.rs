@@ -2481,10 +2481,32 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
+async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn get(addr: std::net::SocketAddr, path: &str) -> Vec<u8> {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to serving listener");
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("send request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        response
+    }
+
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let config = test_config(temp_dir.path(), "server-writer");
+    let mut config = test_config(temp_dir.path(), "readiness-shutdown-writer");
+    config.shutdown_deadline_ms = 1_000;
+    let shutdown_deadline_ms = config.shutdown_deadline_ms;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -2492,39 +2514,95 @@ async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
     let (router, state) = app_with_store_and_state(config, store)
         .await
         .expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
+    let slow_started = Arc::new(tokio::sync::Notify::new());
+    let slow_release = Arc::new(tokio::sync::Notify::new());
+    let router = router.route(
+        "/slow",
+        axum::routing::get({
+            let slow_started = Arc::clone(&slow_started);
+            let slow_release = Arc::clone(&slow_release);
+            move || {
+                let slow_started = Arc::clone(&slow_started);
+                let slow_release = Arc::clone(&slow_release);
+                async move {
+                    slow_started.notify_one();
+                    slow_release.notified().await;
+                    "slow request finished"
+                }
+            }
+        }),
+    );
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve::serve_and_settle(
+        listener,
+        router,
+        state.writer.clone(),
+        None,
+        shutdown_deadline_ms,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
-    let ready_url = format!("http://{addr}/readiness");
-    let url = ready_url.clone();
-    let body = raw_agent()
-        .get(&url)
-        .call()
-        .expect("an admitting server is ready")
-        .into_string()
-        .expect("readiness body");
-    assert_eq!(body, "ready");
+    let slow = tokio::spawn(get(addr, "/slow"));
+    tokio::time::timeout(std::time::Duration::from_secs(1), slow_started.notified())
+        .await
+        .expect("slow request starts");
 
-    // The production trigger, not a poke at the registry: readiness flips
-    // because the writer shut down. The listener stays up across it, which
-    // is the whole window this route exists for.
-    state.writer.shutdown().await.expect("shut down the writer");
-
-    tokio::task::spawn_blocking(move || match raw_agent().get(&ready_url).call() {
-        Err(ureq::Error::Status(503, response)) => {
-            let body = response.into_string().expect("readiness body");
-            assert!(
-                body.contains("shutting_down"),
-                "readiness names the shutdown: {body}"
-            );
+    let shutdown_started = tokio::time::Instant::now();
+    shutdown_tx.send(()).expect("trigger shutdown");
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !state.writer.is_shutting_down() {
+            tokio::task::yield_now().await;
         }
-        other => panic!("expected 503 from a draining server, got {other:?}"),
     })
     .await
-    .expect("join blocking task");
+    .expect("shutdown closes admission");
 
-    server.abort();
+    let readiness = get(addr, "/readiness").await;
+    let readiness = String::from_utf8(readiness).expect("readiness is utf-8");
+    assert!(
+        readiness.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+        "readiness returns 503 during drain: {readiness}"
+    );
+    assert!(
+        readiness.contains("\"code\":\"shutting_down\""),
+        "readiness names the shutdown: {readiness}"
+    );
+    assert!(
+        !slow.is_finished(),
+        "the original request is still in flight"
+    );
+    assert!(
+        !server.is_finished(),
+        "the listener remains serving while the request drains"
+    );
+
+    slow_release.notify_one();
+    let slow = tokio::time::timeout(std::time::Duration::from_secs(1), slow)
+        .await
+        .expect("slow request completes")
+        .expect("join slow request");
+    let slow = String::from_utf8(slow).expect("slow response is utf-8");
+    assert!(slow.starts_with("HTTP/1.1 200 OK\r\n"), "{slow}");
+    assert!(slow.contains("slow request finished"), "{slow}");
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(shutdown_deadline_ms),
+        server,
+    )
+    .await
+    .expect("serve_and_settle finishes within the configured deadline")
+    .expect("join server task")
+    .expect("shutdown settles the server");
+    assert!(
+        shutdown_started.elapsed() < std::time::Duration::from_millis(shutdown_deadline_ms),
+        "shutdown finishes inside its configured budget"
+    );
+    assert!(
+        tokio::net::TcpStream::connect(addr).await.is_err(),
+        "the listener stops accepting after the slow request finishes"
+    );
 }
 
 async fn seed_grep_error_namespace(

@@ -26,6 +26,7 @@ clap.workspace = true
 foyer.workspace = true
 fs4.workspace = true
 futures.workspace = true
+http-body.workspace = true
 http.workspace = true
 loonfs-api.workspace = true
 loonfs.workspace = true

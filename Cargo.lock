@@ -1544,6 +1544,7 @@ dependencies = [
  "fs4",
  "futures",
  "http",
+ "http-body",
  "loonfs",
  "loonfs-api",
  "loonfs-client",

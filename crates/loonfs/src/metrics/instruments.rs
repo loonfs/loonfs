@@ -318,8 +318,8 @@ impl RuntimeInstruments {
 
     /// Reports what one collection pass reclaimed and retained.
     ///
-    /// The automatic path reads a pass as one conclusion and drops its
-    /// counts; this is where they survive.
+    /// Every runtime collection path records at the shared admin pass before
+    /// its caller can drop the response.
     pub(crate) fn gc_pass(&self, gc: &GcResponse) {
         let Some(installed) = &self.installed else {
             return;
