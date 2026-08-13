@@ -54,26 +54,8 @@ loonfs use {namespace_id}
 
 ## Server deployment
 
-Use a server when multiple clients need to write to the same LoonFS deployment. (Embedded clients talk directly to object storage and compete for the single-writer role; the server instead can provide one shared writer for remote clients.)
-
-Build the server and start it with the local filesystem example:
-
-```bash
-cargo build --release -p loonfs-server
-./target/release/loonfs-server --config crates/loonfs-server/config/local-fs.example.toml
-```
-
-The example listens on `127.0.0.1:9400` and uses `dev-token`. Configure a remote CLI profile to connect to it:
-
-```bash
-LOONFS_AUTH_TOKEN=dev-token loonfs init default --no-input \
-  --mode remote \
-  --server-url http://127.0.0.1:9400
-```
-
-A bind beyond localhost serves the network, and the server refuses one without an authentication token and either its own TLS or an explicit declaration that a trusted proxy terminates TLS. The rule exists because the wire carries the bearer token and the short-lived object-store URLs the upload routes hand back.
-
-[crates/loonfs-server/docs/self-hosting.md](crates/loonfs-server/docs/self-hosting.md) is the rest: the config, the published image and Helm chart, the probes, upgrades, and what this deployment does not do.
+See [Self-hosting LoonFS](crates/loonfs-server/docs/self-hosting.md) for the
+complete deployment guide.
 
 ## Documentation
 
