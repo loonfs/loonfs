@@ -1496,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn expected_revision_no_body_guard_enforces_the_public_integer_range() {
+    fn expected_revision_no_must_fit_the_public_integer_range() {
         let body = |expected_revision_no: u64| {
             serde_json::json!({
                 "commit_id": "bounded-revision-guard",
@@ -1512,7 +1512,7 @@ mod tests {
         };
 
         let request: CommitRequest = serde_json::from_value(body(crate::MAX_PUBLIC_INTEGER))
-            .expect("the exact public maximum decodes");
+            .expect("deserialize the maximum revision number");
         assert!(matches!(
             request.operations.as_slice(),
             [FilesystemOperation::PutFile {
@@ -1522,7 +1522,7 @@ mod tests {
         ));
 
         let error = serde_json::from_value::<CommitRequest>(body(crate::MAX_PUBLIC_INTEGER + 1))
-            .expect_err("a guard above the public range must not decode");
+            .expect_err("reject a revision number above the public limit");
         assert!(
             error
                 .to_string()

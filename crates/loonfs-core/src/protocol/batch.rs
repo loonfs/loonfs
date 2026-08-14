@@ -454,9 +454,8 @@ mod tests {
             .await
             .expect("list WAL before");
 
-        // The loaded metadata remains a valid read basis. Only the in-memory
-        // publish head is moved to exhaustion, which drives the same planning
-        // guard a real namespace at the limit reaches before any write.
+        // Change only the in-memory head so this exercises the sequence limit
+        // without modifying the stored metadata.
         view.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
         let candidate = CommitCandidate::new(CommitRequest::single(
             CommitId::parse("past-sequence-limit").expect("commit id"),
@@ -481,7 +480,7 @@ mod tests {
             .as_ref()
             .expect_err("exhausted sequence must reject the commit");
         assert_eq!(error.code(), loonfs_api::ErrorCode::ServerError);
-        assert!(error.to_string().contains("public integer range"));
+        assert!(error.to_string().contains("cannot exceed"));
         assert!(matches!(result.effect, PublishViewEffect::Unchanged));
         assert_eq!(
             store

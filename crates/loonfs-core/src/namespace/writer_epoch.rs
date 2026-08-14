@@ -23,7 +23,7 @@ pub enum WriterEpochAcquireError {
     #[error("empty writer id")]
     EmptyWriterId,
     #[error(
-        "writer epoch cannot advance beyond the public integer range 0 through 9007199254740991 from `{active}`"
+        "writer epoch `{active}` cannot be incremented because the maximum is 9007199254740991"
     )]
     WriterEpochOverflow { active: WriterEpoch },
     #[error("failed to write head object `{object_key}` during writer epoch acquire: {message}")]

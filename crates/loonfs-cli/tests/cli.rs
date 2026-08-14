@@ -3100,7 +3100,7 @@ fn embedded_namespace_commands_reject_invalid_namespace_ids() {
 }
 
 #[test]
-fn embedded_commands_reject_out_of_range_ordinal_arguments_at_the_cli_boundary() {
+fn embedded_commands_reject_out_of_range_ordinal_arguments() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
 

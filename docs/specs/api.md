@@ -303,12 +303,11 @@ conditional-request failures.
 One SDK serves both backends; deployment mode never forks the client
 codebase.
 
-Public ordinals — revision numbers, change sequences, attribute revisions,
-manifest ids, and writer epochs — are JSON integers in the inclusive range
-0 through 9007199254740991 (`2^53 - 1`). Implementations MUST reject ordinal
-inputs outside that range and MUST NOT durably advance an ordinal past it.
-`inode_id` is an identity rather than an ordinal and is not covered by this
-integer bound.
+Revision numbers, change sequences, attribute revisions, manifest ids, writer
+epochs, and grep run ordinals are JSON integers from 0 through 9007199254740991
+(`2^53 - 1`). Implementations MUST reject larger input values and MUST NOT
+store a larger value. `inode_id` is not an ordinal and may use the full `u64`
+range.
 
 - The embedded handles (`loonfs::FsWriter`, `loonfs::FsReader`) and the
   remote client (`loonfs_client::Client`) expose the same operations and the

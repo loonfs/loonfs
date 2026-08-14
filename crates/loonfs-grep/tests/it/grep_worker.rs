@@ -344,7 +344,7 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
         assert!(matches!(
             error,
             GrepError::Runtime(RuntimeError::Core(CoreError::Internal(message)))
-                if message.contains("grep run ordinal cannot advance beyond the public integer range")
+                if message.contains("grep run ordinal cannot exceed")
         ));
     }
 
@@ -378,7 +378,7 @@ async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root()
             .await
             .expect("list segments after failures"),
         segments_before,
-        "the build guard runs before writing an orphan segment"
+        "the range check must run before writing a segment"
     );
     writer.shutdown().await.expect("shutdown");
 }

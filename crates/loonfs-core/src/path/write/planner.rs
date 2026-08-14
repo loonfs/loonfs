@@ -72,7 +72,7 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
         .map(ChangeSeq)
         .ok_or_else(|| {
             CoreError::Internal(format!(
-                "namespace sequence cannot advance beyond the public integer range 0 through {MAX_PUBLIC_INTEGER}"
+                "namespace sequence cannot exceed {MAX_PUBLIC_INTEGER}"
             ))
         })?;
 

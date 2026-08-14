@@ -37,8 +37,9 @@ use loonfs_api::{
 use loonfs_objectstore::ObjectStore;
 use tracing::Instrument;
 
-/// The basis one flush attempt settled on: the manifest this attempt
-/// published, or the one already covering the head.
+/// Manifest that covers the head after a flush attempt.
+///
+/// This may be a newly published manifest or one that was already current.
 pub(super) struct FlushedBasis {
     pub(super) manifest_id: ManifestId,
     pub(super) manifest_object_id: ManifestObjectId,
@@ -314,9 +315,7 @@ pub(super) fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId> 
     next_public_ordinal(current.0)
         .map(ManifestId)
         .ok_or_else(|| {
-            CoreError::Internal(format!(
-                "manifest id cannot advance beyond the public integer range 0 through {MAX_PUBLIC_INTEGER}"
-            ))
+            CoreError::Internal(format!("manifest id cannot exceed {MAX_PUBLIC_INTEGER}"))
         })
 }
 
@@ -431,7 +430,7 @@ mod ordinal_tests {
             .expect_err("manifest id must not exceed the public maximum");
         assert!(matches!(
             error,
-            CoreError::Internal(message) if message.contains("public integer range")
+            CoreError::Internal(message) if message.contains("cannot exceed")
         ));
     }
 }

@@ -540,7 +540,7 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
 }
 
 #[test]
-fn openapi_caps_public_ordinals_but_not_inode_ids() {
+fn openapi_limits_public_ordinals_but_not_inode_ids() {
     let raw = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
     let spec: Value = serde_json::from_str(&raw).expect("parse openapi json");
     let schemas = spec
@@ -573,7 +573,7 @@ fn openapi_caps_public_ordinals_but_not_inode_ids() {
             .expect("InodeId schema")
             .get("maximum")
             .is_none(),
-        "InodeId stays on its existing full-u64 schema in this wave"
+        "InodeId must allow the full u64 range"
     );
 
     assert_eq!(
@@ -586,7 +586,7 @@ fn openapi_caps_public_ordinals_but_not_inode_ids() {
             .and_then(|schema| schema.get("maximum"))
             .and_then(Value::as_u64),
         Some(loonfs_api::MAX_PUBLIC_INTEGER),
-        "grep status must publish the next run ordinal maximum"
+        "next_run_ordinal must use the public maximum"
     );
 }
 

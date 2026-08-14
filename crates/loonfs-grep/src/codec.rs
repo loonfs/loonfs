@@ -189,7 +189,7 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
 fn read_revision_no(bytes: &[u8], cursor: &mut usize) -> Result<RevisionNo, IndexGramsCodecError> {
     let value = read_varint(bytes, cursor)?;
     RevisionNo::parse(value).map_err(|error| {
-        IndexGramsCodecError::Malformed(format!("posting revision `{value}` {error}"))
+        IndexGramsCodecError::Malformed(format!("invalid posting revision `{value}`: {error}"))
     })
 }
 
@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn posting_batch_decode_caps_revision_numbers_but_not_inode_ids() {
+    fn posting_batch_decode_rejects_oversized_revisions_but_allows_full_inode_range() {
         let mut full_inode_range = Vec::new();
         write_varint(&mut full_inode_range, 1);
         write_varint(&mut full_inode_range, u64::MAX);

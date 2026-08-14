@@ -606,9 +606,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let segments_written = new_segments.len() as u64;
         let mut segments = current.manifest_state().segments().to_vec();
         segments.extend(new_segments);
-        // A finished backfill becomes active at exactly the sequence its
-        // checkpoint captured: the walk answered that state and no other, so
-        // the watermark it hands the change feed is the target it reached.
+        // A completed backfill is current through the sequence captured by
+        // its checkpoint. The change feed resumes after that sequence.
         let (lifecycle, completed_checkpoint_id, built_through_seq) = match progress {
             CollectedProgress::Backfill {
                 checkpoint_id,
@@ -1804,7 +1803,7 @@ fn core_state_error(error: crate::root::GrepManifestStateError) -> GrepError {
 fn next_grep_run_ordinal(current: u64) -> Result<u64> {
     next_public_ordinal(current).ok_or_else(|| {
         CoreError::Internal(format!(
-            "grep run ordinal cannot advance beyond the public integer range 0 through {MAX_PUBLIC_INTEGER}"
+            "grep run ordinal cannot exceed {MAX_PUBLIC_INTEGER}"
         ))
         .into()
     })

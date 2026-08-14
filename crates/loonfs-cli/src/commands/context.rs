@@ -37,7 +37,7 @@ pub(crate) fn fail_for(
     )
 }
 
-/// Validates one numeric command argument before either backend sees it.
+/// Validates an ordinal argument before dispatching the command.
 pub(crate) fn parse_public_ordinal_arg<T>(
     argument: &str,
     value: u64,

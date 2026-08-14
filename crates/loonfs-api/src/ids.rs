@@ -215,12 +215,12 @@ macro_rules! numeric_id {
         pub struct $name(pub u64);
 
         impl $name {
-            /// Parses and validates an ordinal received at a non-serde boundary.
+            /// Validates a numeric value before using it as an ordinal.
             ///
-            /// Serde and this checked constructor guard external inputs. The
-            /// public tuple field and `From<u64>` remain available for trusted
-            /// internal construction, including already-checked advancement
-            /// and durable key formatting.
+            /// Deserialization calls this method automatically. Code that
+            /// receives a raw integer through another interface must call it
+            /// explicitly. Direct tuple construction and `From<u64>` are for
+            /// values that have already been validated.
             pub fn parse(value: u64) -> Result<Self, $crate::PublicOrdinalRangeError> {
                 if value > $crate::MAX_PUBLIC_INTEGER {
                     return Err($crate::PublicOrdinalRangeError);
@@ -737,11 +737,13 @@ impl NameKey {
 // Numeric ids
 // ---------------------------------------------------------------------------
 
-/// Largest integer a JSON client can represent exactly (2^53 - 1). No
-/// API-visible ordinal may durably advance beyond it.
+/// Maximum value for an ordinal exposed through the API.
+///
+/// This is `2^53 - 1`, the largest integer JSON clients can represent
+/// without losing precision.
 pub const MAX_PUBLIC_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// An integer lies outside the exact range supported for public ordinals.
+/// Returned when an ordinal exceeds [`MAX_PUBLIC_INTEGER`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicOrdinalRangeError;
 
@@ -753,7 +755,7 @@ impl fmt::Display for PublicOrdinalRangeError {
 
 impl std::error::Error for PublicOrdinalRangeError {}
 
-/// Advances one API-visible ordinal without crossing [`MAX_PUBLIC_INTEGER`].
+/// Returns the next ordinal, or `None` if the value is already at the limit.
 pub fn next_public_ordinal(current: u64) -> Option<u64> {
     current
         .checked_add(1)
@@ -770,42 +772,40 @@ numeric_id! {
 /// Inode 1 is always the root directory of a namespace.
 pub const ROOT_INODE_ID: InodeId = InodeId(1);
 
-/// First inode id available to a namespace allocator after reserving the root.
+/// First inode id available after the root inode.
 pub const FIRST_ALLOCATABLE_INODE_ID: InodeId = InodeId(ROOT_INODE_ID.0 + 1);
 
 numeric_id! {
-    /// Monotonically increasing file revision counter within one file inode.
+    /// Revision number for a file's content.
     RevisionNo,
     public_ordinal,
-    schema_description = "Monotonically increasing file revision counter within one file inode."
+    schema_description = "Revision number for a file's content. It increases whenever the content is replaced or restored."
 }
 
 numeric_id! {
-    /// Monotonically increasing namespace commit sequence number.
+    /// Sequence number assigned to a namespace commit.
     ///
-    /// This is the global visibility order for a namespace.
+    /// This number determines the order in which commits become visible.
     ChangeSeq,
     public_ordinal,
-    schema_description = "Monotonically increasing namespace commit sequence number.\n\nThis is the global visibility order for a namespace."
+    schema_description = "Sequence number assigned to a namespace commit. It determines the order in which commits become visible."
 }
 
 numeric_id! {
-    /// Monotonically increasing namespace manifest identity.
+    /// Version number for a namespace manifest.
     ///
-    /// This is the durable file-set version identity for namespace manifests.
-    /// Initial/fork manifests may be seeded from the current head sequence, but
-    /// later manifest ids can advance for checkpoint metadata, compaction, or
-    /// fork/index metadata without a new namespace commit.
+    /// The manifest version can increase when metadata changes, even if no
+    /// namespace commit is written.
     ManifestId,
     public_ordinal,
-    schema_description = "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit."
+    schema_description = "Version number for a namespace manifest. It can increase when metadata changes, even if no namespace commit is written."
 }
 
 numeric_id! {
-    /// Monotonically increasing writer epoch for namespace write fencing.
+    /// Counter used to reject writes from an older writer.
     WriterEpoch,
     public_ordinal,
-    schema_description = "Monotonically increasing writer epoch for namespace write fencing."
+    schema_description = "Counter used to reject writes from an older writer."
 }
 
 // ---------------------------------------------------------------------------
@@ -856,22 +856,22 @@ mod tests {
     }
 
     #[test]
-    fn public_ordinal_deserialization_enforces_the_json_safe_integer_range() {
+    fn public_ordinal_inputs_must_fit_the_json_safe_integer_range() {
         macro_rules! assert_range {
             ($type:ty) => {{
-                let constructed =
-                    <$type>::parse(MAX_PUBLIC_INTEGER).expect("maximum public ordinal constructor");
+                let constructed = <$type>::parse(MAX_PUBLIC_INTEGER)
+                    .expect("construct the maximum public ordinal");
                 assert_eq!(constructed.0, MAX_PUBLIC_INTEGER);
 
                 let construction_error = <$type>::parse(MAX_PUBLIC_INTEGER + 1)
-                    .expect_err("ordinal above the constructor's public range");
+                    .expect_err("reject a value above the public limit");
                 assert_eq!(
                     construction_error.to_string(),
                     "must be an integer from 0 through 9007199254740991"
                 );
 
                 let maximum = serde_json::from_str::<$type>(&MAX_PUBLIC_INTEGER.to_string())
-                    .expect("maximum public ordinal");
+                    .expect("deserialize the maximum public ordinal");
                 assert_eq!(maximum.0, MAX_PUBLIC_INTEGER);
 
                 let error = serde_json::from_str::<$type>(&(MAX_PUBLIC_INTEGER + 1).to_string())
