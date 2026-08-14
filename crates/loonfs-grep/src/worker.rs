@@ -34,9 +34,9 @@ use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
 };
 use loonfs_api::{
-    decode_namespace_cursor, encode_cursor, sha256_digest, ChangeSeq, CheckpointId, ContentRef,
-    ErrorCode, IndexSegmentId, InodeId, NamespaceCursor, NamespaceCursorError, NamespaceId,
-    PageCursor, RevisionNo,
+    decode_namespace_cursor, encode_cursor, next_public_ordinal, sha256_digest, ChangeSeq,
+    CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId, NamespaceCursor,
+    NamespaceCursorError, NamespaceId, PageCursor, RevisionNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -585,13 +585,19 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         } = unit;
         let run_seq = progress.run_seq();
         let rows = gram_postings_rows(postings)?;
+        let current_run_ordinal = current.manifest_state().index().next_run_ordinal;
+        let next_run_ordinal = if rows.is_empty() {
+            current_run_ordinal
+        } else {
+            next_grep_run_ordinal(current_run_ordinal)?
+        };
         let timer = StdMonotonicTimer::default();
         let publication_started_ms = timer.monotonic_now_ms();
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
             run_seq,
-            current.manifest_state().index().next_run_ordinal,
+            current_run_ordinal,
             rows,
             policy.max_rows_per_segment,
             INDEX_GRAMS_DELTA_LEVEL,
@@ -600,11 +606,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let segments_written = new_segments.len() as u64;
         let mut segments = current.manifest_state().segments().to_vec();
         segments.extend(new_segments);
-        let next_run_ordinal =
-            current.manifest_state().index().next_run_ordinal + u64::from(segments_written > 0);
-        // A finished backfill becomes active at exactly the sequence its
-        // checkpoint captured: the walk answered that state and no other, so
-        // the watermark it hands the change feed is the target it reached.
+        // A completed backfill is current through the sequence captured by
+        // its checkpoint. The change feed resumes after that sequence.
         let (lifecycle, completed_checkpoint_id, built_through_seq) = match progress {
             CollectedProgress::Backfill {
                 checkpoint_id,
@@ -1122,6 +1125,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     current.manifest_state().index().next_run_ordinal,
                 ),
                 None => {
+                    let current_run_ordinal = current.manifest_state().index().next_run_ordinal;
                     let l0_runs = distinct_run_ordinals_at_level(
                         current.manifest_state().segments(),
                         INDEX_GRAMS_DELTA_LEVEL,
@@ -1165,9 +1169,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                             output_segment_ids: Vec::new(),
                             row_key_cursor: String::new(),
                             output_level,
-                            run_ordinal: current.manifest_state().index().next_run_ordinal,
+                            run_ordinal: current_run_ordinal,
                         },
-                        current.manifest_state().index().next_run_ordinal + 1,
+                        next_grep_run_ordinal(current_run_ordinal)?,
                     )
                 }
             };
@@ -1794,6 +1798,15 @@ fn ensure_publication_budget(timer: &impl MonotonicTimer, started_ms: u64) -> Re
 
 fn core_state_error(error: crate::root::GrepManifestStateError) -> GrepError {
     CoreError::Internal(format!("failed to build grep root state: {error}")).into()
+}
+
+fn next_grep_run_ordinal(current: u64) -> Result<u64> {
+    next_public_ordinal(current).ok_or_else(|| {
+        CoreError::Internal(format!(
+            "grep run ordinal cannot exceed {MAX_PUBLIC_INTEGER}"
+        ))
+        .into()
+    })
 }
 
 fn core_store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {

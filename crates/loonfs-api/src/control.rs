@@ -7,7 +7,7 @@ use crate::WriterEpoch;
 use crate::{
     ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
     ContentRefKind, ContentStoreId, InodeId, ManifestId, ManifestObjectId, MetadataCompactionId,
-    NamespaceId, UploadId, WalSegmentId, ROOT_INODE_ID,
+    NamespaceId, UploadId, WalSegmentId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -619,7 +619,7 @@ impl HeadState {
             writer_epoch: WriterEpoch(0),
             writer: None,
             // Inode 1 is the root directory; inode 2 is the first assignable id.
-            next_inode_id: InodeId(ROOT_INODE_ID.0 + 1),
+            next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
             visible_wal_tip: None,
             recent_segments: Vec::new(),
             state: NamespaceState::Active,

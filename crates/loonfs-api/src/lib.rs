@@ -125,12 +125,13 @@ pub use content::{
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
-    generated_id, manifest_object_id_manifest_id, wal_segment_id_start_seq, ChangeSeq,
-    CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
+    generated_id, manifest_object_id_manifest_id, next_public_ordinal, wal_segment_id_start_seq,
+    ChangeSeq, CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
     GeneratedIdValidationError, IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId,
     MetadataCompactionId, MetadataTableId, NameKey, NameKeyValidationError, NamespaceId,
-    NamespaceIdValidationError, RevisionNo, UploadId, WalSegmentId, WriterEpoch, MAX_ID_BYTES,
-    MAX_NAME_KEY_BYTES, ROOT_INODE_ID,
+    NamespaceIdValidationError, PublicOrdinalRangeError, RevisionNo, UploadId, WalSegmentId,
+    WriterEpoch, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER,
+    ROOT_INODE_ID,
 };
 pub use name_policy::name_key_for_display_name;
 pub use pagination::{

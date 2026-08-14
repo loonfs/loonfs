@@ -1,6 +1,6 @@
 //! `loonfs namespace` commands: create, fork, delete, use, and current.
 
-use super::context::{fail, fail_for};
+use super::context::{fail, fail_for, parse_public_ordinal_arg};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, CurrentArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
@@ -72,6 +72,13 @@ async fn run_namespace_delete(
     let mode = resolved.target.mode_str().to_owned();
     let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+    let expected_head_seq = args
+        .expected_head_seq
+        .map(|value| {
+            parse_public_ordinal_arg("--expected-head-seq", value, loonfs_api::ChangeSeq::parse)
+        })
+        .transpose()
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     if !args.yes {
         // Without a terminal (or under --no-input / --json) there is no
@@ -110,10 +117,7 @@ async fn run_namespace_delete(
 
     let response = resolved
         .target
-        .delete_namespace(
-            &namespace_id,
-            args.expected_head_seq.map(loonfs_api::ChangeSeq),
-        )
+        .delete_namespace(&namespace_id, expected_head_seq)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 

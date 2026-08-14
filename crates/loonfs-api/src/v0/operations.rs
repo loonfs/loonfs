@@ -1495,6 +1495,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn expected_revision_no_must_fit_the_public_integer_range() {
+        let body = |expected_revision_no: u64| {
+            serde_json::json!({
+                "commit_id": "bounded-revision-guard",
+                "actor": crate::ActorRef::loonfs_system(),
+                "operations": [{
+                    "kind": "put_file",
+                    "path": "/docs/a.txt",
+                    "content_ref": sample_content_ref(),
+                    "behavior": "replace",
+                    "expected_revision_no": expected_revision_no
+                }]
+            })
+        };
+
+        let request: CommitRequest = serde_json::from_value(body(crate::MAX_PUBLIC_INTEGER))
+            .expect("deserialize the maximum revision number");
+        assert!(matches!(
+            request.operations.as_slice(),
+            [FilesystemOperation::PutFile {
+                expected_revision_no: Some(RevisionNo(value)),
+                ..
+            }] if *value == crate::MAX_PUBLIC_INTEGER
+        ));
+
+        let error = serde_json::from_value::<CommitRequest>(body(crate::MAX_PUBLIC_INTEGER + 1))
+            .expect_err("reject a revision number above the public limit");
+        assert!(
+            error
+                .to_string()
+                .contains("must be an integer from 0 through 9007199254740991"),
+            "unexpected range error: {error}"
+        );
+    }
+
     /// The whole commit request tree is strict, not just its root: a typo one
     /// level down hides the same guards.
     #[test]

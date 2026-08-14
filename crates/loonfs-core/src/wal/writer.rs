@@ -7,7 +7,7 @@ use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{
     encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
 };
-use loonfs_api::{ChangeSeq, NamespaceId, WalSegmentId, WriterEpoch};
+use loonfs_api::{next_public_ordinal, ChangeSeq, NamespaceId, WalSegmentId, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 
 pub(crate) fn prepare_wal_segment(
@@ -30,10 +30,7 @@ pub(crate) fn prepare_wal_segment(
         }
         let payload_record = wal_payload_from_materialized_commit(record);
         if let Some(previous) = payload_records.last() {
-            let expected = previous
-                .seq
-                .0
-                .checked_add(1)
+            let expected = next_public_ordinal(previous.seq.0)
                 .map(ChangeSeq)
                 .ok_or(WalBuildError::SeqOverflow)?;
             if payload_record.seq != expected {

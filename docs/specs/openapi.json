@@ -3418,7 +3418,8 @@
       "AttributeRevisionNo": {
         "type": "integer",
         "format": "int64",
-        "description": "Monotonically increasing attribute revision counter within one inode.\n\nEvery inode starts at revision 0 with an empty attribute map, and every\neffective update — one that changes the map — advances the counter by\none. The counter is the optimistic-concurrency token for attribute\nwrites: a writer states the revision it expects, and the write fails\nwhen the inode has moved past it. The counter is not an index into a\nhistory. LoonFS keeps the current map and this number, and promises no\nqueryable record of earlier maps.",
+        "description": "Revision number for an inode's attributes. It starts at 0 and increases whenever the attribute map changes.",
+        "maximum": 9007199254740991,
         "minimum": 0
       },
       "AttributeValue": {
@@ -3925,7 +3926,8 @@
       "ChangeSeq": {
         "type": "integer",
         "format": "int64",
-        "description": "Monotonically increasing namespace commit sequence number.\n\nThis is the global visibility order for a namespace.",
+        "description": "Sequence number assigned to a namespace commit. It determines the order in which commits become visible.",
+        "maximum": 9007199254740991,
         "minimum": 0
       },
       "ChangesResponse": {
@@ -5619,6 +5621,7 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "Next logical run ordinal the index will allocate.",
+                "maximum": 9007199254740991,
                 "minimum": 0
               },
               "reorganize_pending": {
@@ -6010,7 +6013,8 @@
       "ManifestId": {
         "type": "integer",
         "format": "int64",
-        "description": "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit.",
+        "description": "Version number for a namespace manifest. It can increase when metadata changes, even if no namespace commit is written.",
+        "maximum": 9007199254740991,
         "minimum": 0
       },
       "MetadataMaintenanceRequest": {
@@ -6349,7 +6353,8 @@
       "RevisionNo": {
         "type": "integer",
         "format": "int64",
-        "description": "Monotonically increasing file revision counter within one file inode.",
+        "description": "Revision number for a file's content. It increases whenever the content is replaced or restored.",
+        "maximum": 9007199254740991,
         "minimum": 0
       },
       "SignUploadPartsRequest": {
@@ -6827,7 +6832,8 @@
       "WriterEpoch": {
         "type": "integer",
         "format": "int64",
-        "description": "Monotonically increasing writer epoch for namespace write fencing.",
+        "description": "Counter used to reject writes from an older writer.",
+        "maximum": 9007199254740991,
         "minimum": 0
       }
     },

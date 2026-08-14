@@ -303,6 +303,12 @@ conditional-request failures.
 One SDK serves both backends; deployment mode never forks the client
 codebase.
 
+Revision numbers, change sequences, attribute revisions, manifest ids, writer
+epochs, and grep run ordinals are JSON integers from 0 through 9007199254740991
+(`2^53 - 1`). Implementations MUST reject larger input values and MUST NOT
+store a larger value. `inode_id` is not an ordinal and may use the full `u64`
+range.
+
 - The embedded handles (`loonfs::FsWriter`, `loonfs::FsReader`) and the
   remote client (`loonfs_client::Client`) expose the same operations and the
   same `capabilities()` accessor returning the capability document of

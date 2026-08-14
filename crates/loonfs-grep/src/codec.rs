@@ -150,7 +150,7 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
     let mut postings = Vec::with_capacity(count);
     let mut previous = GramPosting {
         inode_id: InodeId(read_varint(bytes, &mut cursor)?),
-        revision_no: RevisionNo(read_varint(bytes, &mut cursor)?),
+        revision_no: read_revision_no(bytes, &mut cursor)?,
     };
     postings.push(previous);
     for _ in 1..count {
@@ -164,7 +164,7 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
             })?;
         let posting = GramPosting {
             inode_id: InodeId(inode_id),
-            revision_no: RevisionNo(read_varint(bytes, &mut cursor)?),
+            revision_no: read_revision_no(bytes, &mut cursor)?,
         };
         if posting <= previous {
             return Err(IndexGramsCodecError::PostingsOutOfOrder {
@@ -184,6 +184,13 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
         )));
     }
     Ok(postings)
+}
+
+fn read_revision_no(bytes: &[u8], cursor: &mut usize) -> Result<RevisionNo, IndexGramsCodecError> {
+    let value = read_varint(bytes, cursor)?;
+    RevisionNo::parse(value).map_err(|error| {
+        IndexGramsCodecError::Malformed(format!("invalid posting revision `{value}`: {error}"))
+    })
 }
 
 fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
@@ -405,6 +412,44 @@ mod tests {
             decode_gram_postings(&[]),
             Err(IndexGramsCodecError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn posting_batch_decode_rejects_oversized_revisions_but_allows_full_inode_range() {
+        let mut full_inode_range = Vec::new();
+        write_varint(&mut full_inode_range, 1);
+        write_varint(&mut full_inode_range, u64::MAX);
+        write_varint(&mut full_inode_range, loonfs_api::MAX_PUBLIC_INTEGER);
+        assert_eq!(
+            decode_gram_postings(&full_inode_range).expect("full-range inode id"),
+            vec![posting(u64::MAX, loonfs_api::MAX_PUBLIC_INTEGER)]
+        );
+
+        let mut first_revision_overflow = Vec::new();
+        write_varint(&mut first_revision_overflow, 1);
+        write_varint(&mut first_revision_overflow, 1);
+        write_varint(
+            &mut first_revision_overflow,
+            loonfs_api::MAX_PUBLIC_INTEGER + 1,
+        );
+        let error = decode_gram_postings(&first_revision_overflow)
+            .expect_err("first revision above the public range");
+        assert!(matches!(error, IndexGramsCodecError::Malformed(message)
+            if message.contains("must be an integer from 0 through 9007199254740991")));
+
+        let mut later_revision_overflow = Vec::new();
+        write_varint(&mut later_revision_overflow, 2);
+        write_varint(&mut later_revision_overflow, 1);
+        write_varint(&mut later_revision_overflow, 1);
+        write_varint(&mut later_revision_overflow, 1);
+        write_varint(
+            &mut later_revision_overflow,
+            loonfs_api::MAX_PUBLIC_INTEGER + 1,
+        );
+        let error = decode_gram_postings(&later_revision_overflow)
+            .expect_err("later revision above the public range");
+        assert!(matches!(error, IndexGramsCodecError::Malformed(message)
+            if message.contains("must be an integer from 0 through 9007199254740991")));
     }
 
     #[test]

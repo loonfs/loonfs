@@ -5,7 +5,7 @@ use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
-use loonfs_api::{ChangeSeq, InodeId, NamespaceId, WriterEpoch};
+use loonfs_api::{next_public_ordinal, ChangeSeq, InodeId, NamespaceId, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 
 pub(crate) fn project_validated_wal_tail(
@@ -74,10 +74,7 @@ fn validate_replay_record(
             actual: record.namespace_id.clone(),
         });
     }
-    let expected_seq = current_head
-        .seq
-        .0
-        .checked_add(1)
+    let expected_seq = next_public_ordinal(current_head.seq.0)
         .map(ChangeSeq)
         .ok_or(WalReplayError::SeqOverflow)?;
     if record.seq != expected_seq {
@@ -131,9 +128,7 @@ pub(super) fn validate_wal_segment_for_replay(
         });
     }
 
-    let expected_start = expected_base_head_seq
-        .0
-        .checked_add(1)
+    let expected_start = next_public_ordinal(expected_base_head_seq.0)
         .map(ChangeSeq)
         .ok_or(WalReplayError::SeqOverflow)?;
 

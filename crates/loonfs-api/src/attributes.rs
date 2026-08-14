@@ -242,16 +242,15 @@ pub enum AttributesError {
 }
 
 numeric_id! {
-    /// Monotonically increasing attribute revision counter within one inode.
+    /// Revision number for an inode's attributes.
     ///
-    /// Every inode starts at revision 0 with an empty attribute map, and every
-    /// effective update — one that changes the map — advances the counter by
-    /// one. The counter is the optimistic-concurrency token for attribute
-    /// writes: a writer states the revision it expects, and the write fails
-    /// when the inode has moved past it. The counter is not an index into a
-    /// history. LoonFS keeps the current map and this number, and promises no
-    /// queryable record of earlier maps.
-    AttributeRevisionNo
+    /// Every inode starts at revision 0 with an empty attribute map. The
+    /// revision increases only when an update changes the map. Clients can
+    /// provide the current revision to reject a write if another update
+    /// happened first. Earlier attribute maps cannot be queried.
+    AttributeRevisionNo,
+    public_ordinal,
+    schema_description = "Revision number for an inode's attributes. It starts at 0 and increases whenever the attribute map changes."
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ use loonfs_api::v0::{ChangesResponse, FilesystemChange};
 use loonfs_api::{
     decode_cursor, AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, ContentRef,
     DirectoryPageCursor, EffectiveLimit, InodeId, LimitError, NamespaceId, Page, PageRequest,
-    PaginationPolicy, RevisionNo,
+    PaginationPolicy, RevisionNo, MAX_PUBLIC_INTEGER,
 };
 
 /// One namespace's filesystem reads, borrowed from a reader handle.
@@ -48,19 +48,18 @@ impl<'a> NamespaceReads<'a> {
         }
     }
 
-    /// The namespace every read here answers for.
+    /// Returns the namespace used by this reader.
     pub fn namespace_id(&self) -> &NamespaceId {
         self.namespace_id
     }
 
-    /// The namespace's current head sequence.
+    /// Returns the namespace's current head sequence.
     ///
-    /// The change feed answers this with one head read: asking for changes
-    /// after the last possible sequence reports the head it was evaluated
-    /// against and no history.
+    /// Requesting changes after the largest valid sequence reads the current
+    /// head without returning any history.
     pub async fn head_seq(&self) -> Result<ChangeSeq> {
         Ok(self
-            .list_changes_after(ChangeSeq(u64::MAX), 1)
+            .list_changes_after(ChangeSeq(MAX_PUBLIC_INTEGER), 1)
             .await?
             .through_seq)
     }
@@ -68,10 +67,9 @@ impl<'a> NamespaceReads<'a> {
     /// Reads one page of the files a checkpoint pins, in ascending inode-id
     /// order.
     ///
-    /// A checkpoint that no longer pins its basis — released, expired, or
-    /// reaped — answers `checkpoint_unavailable` instead of falling back to
-    /// current state, which is what turns a lost backfill basis into an
-    /// explicit rebootstrap.
+    /// Returns `checkpoint_unavailable` if the checkpoint was released,
+    /// expired, or removed. The caller must then restart the backfill from a
+    /// new checkpoint.
     pub async fn list_checkpoint_files_page(
         &self,
         checkpoint_id: &CheckpointId,

@@ -31,14 +31,15 @@ use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainL
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{
-    ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestId, ManifestObjectId,
-    NamespaceId,
+    next_public_ordinal, ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestId,
+    ManifestObjectId, NamespaceId, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
 use tracing::Instrument;
 
-/// The basis one flush attempt settled on: the manifest this attempt
-/// published, or the one already covering the head.
+/// Manifest that covers the head after a flush attempt.
+///
+/// This may be a newly published manifest or one that was already current.
 pub(super) struct FlushedBasis {
     pub(super) manifest_id: ManifestId,
     pub(super) manifest_object_id: ManifestObjectId,
@@ -311,11 +312,11 @@ fn ensure_reconstructed_head_matches(
 }
 
 pub(super) fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId> {
-    current
-        .0
-        .checked_add(1)
+    next_public_ordinal(current.0)
         .map(ManifestId)
-        .ok_or_else(|| CoreError::Internal("manifest id overflow".to_owned()))
+        .ok_or_else(|| {
+            CoreError::Internal(format!("manifest id cannot exceed {MAX_PUBLIC_INTEGER}"))
+        })
 }
 
 /// Refuses to initiate a root compare-and-swap once the publication budget
@@ -411,4 +412,25 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             "failed to build namespace manifest envelope: {err}"
         ))
     })
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_id_advancement_accepts_the_maximum_and_rejects_the_next_value() {
+        assert_eq!(
+            next_manifest_id_after(ManifestId(MAX_PUBLIC_INTEGER - 1))
+                .expect("advance to public maximum"),
+            ManifestId(MAX_PUBLIC_INTEGER)
+        );
+
+        let error = next_manifest_id_after(ManifestId(MAX_PUBLIC_INTEGER))
+            .expect_err("manifest id must not exceed the public maximum");
+        assert!(matches!(
+            error,
+            CoreError::Internal(message) if message.contains("cannot exceed")
+        ));
+    }
 }

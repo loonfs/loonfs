@@ -19,6 +19,7 @@ use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
     AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, CommitId, ContentId,
     ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WriterEpoch,
+    MAX_PUBLIC_INTEGER,
 };
 
 fn test_display_name(value: impl AsRef<str>) -> DisplayName {
@@ -836,7 +837,7 @@ async fn restore_revision_overflow_is_rejected() {
     deltas[2] = WalDelta::AppendFileRevision {
         delta_index: 2,
         inode_id: InodeId(2),
-        revision_no: RevisionNo(u64::MAX),
+        revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         content_ref: content_ref("content-max"),
     };
     let metadata_state = MetadataState::default()
@@ -864,8 +865,8 @@ async fn restore_revision_overflow_is_rejected() {
         writer_epoch: WriterEpoch(1),
         ops: planned(vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
-            source_revision_no: RevisionNo(u64::MAX),
-            base_revision_no: RevisionNo(u64::MAX),
+            source_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
+            base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         }]),
         message: None,
     };
@@ -877,7 +878,7 @@ async fn restore_revision_overflow_is_rejected() {
         error,
         CommitValidationError::RestoreRevisionOverflow {
             inode_id: InodeId(2),
-            base_revision_no: RevisionNo(u64::MAX),
+            base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         }
     ));
 }

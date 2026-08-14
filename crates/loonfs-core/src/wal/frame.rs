@@ -34,7 +34,7 @@ pub enum WalBuildError {
     },
     #[error("WAL codec error: {0}")]
     Codec(String),
-    #[error("sequence counter overflow")]
+    #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
 }
 
@@ -234,6 +234,6 @@ pub enum WalReplayError {
         object_key: String,
         required_seq: ChangeSeq,
     },
-    #[error("sequence counter overflow")]
+    #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
 }

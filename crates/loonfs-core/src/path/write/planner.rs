@@ -17,7 +17,7 @@ use crate::commit::{
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{ChangeSeq, NamespaceId};
+use loonfs_api::{next_public_ordinal, ChangeSeq, NamespaceId, MAX_PUBLIC_INTEGER};
 use loonfs_objectstore::ObjectStore;
 
 /// One mutation request compiled into a commit's operations.
@@ -68,12 +68,13 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
             "mutation request carries no operations".to_owned(),
         ));
     }
-    let committed_seq = head
-        .seq
-        .0
-        .checked_add(1)
+    let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
-        .ok_or_else(|| CoreError::Internal("namespace sequence overflow".to_owned()))?;
+        .ok_or_else(|| {
+            CoreError::Internal(format!(
+                "namespace sequence cannot exceed {MAX_PUBLIC_INTEGER}"
+            ))
+        })?;
 
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
     let mut cursor = OpValidationCursor::new();

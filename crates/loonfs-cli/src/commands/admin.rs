@@ -1,7 +1,7 @@
 //! `loonfs admin` commands: checkpoints, retention, GC, indexes, and the
 //! change feed.
 
-use super::context::{fail, fail_for, resolve_command_context};
+use super::context::{fail, fail_for, parse_public_ordinal_arg, resolve_command_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointListArgs, AdminCheckpointReleaseArgs, AdminCommand,
@@ -532,7 +532,8 @@ pub(crate) async fn run_admin_changes(
     args: ChangesArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let after_seq = ChangeSeq(args.after.unwrap_or(0));
+    let after_seq = parse_public_ordinal_arg("--after", args.after.unwrap_or(0), ChangeSeq::parse)
+        .map_err(|error| context.fail(kind, error))?;
     let response = context
         .target
         .list_changes(&context.namespace, after_seq, args.limit)

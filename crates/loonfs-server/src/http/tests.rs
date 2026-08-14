@@ -1754,6 +1754,30 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "{body}"
     );
 
+    // The maximum valid value reaches namespace lookup. The next value is
+    // rejected while parsing the query.
+    let error = raw_agent()
+        .get(&format!(
+            "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740991"
+        ))
+        .set("authorization", "Bearer test-token")
+        .call()
+        .expect_err("valid sequence reaches the missing namespace");
+    expect_enveloped(error, 404, "namespace_not_found");
+
+    let error = raw_agent()
+        .get(&format!(
+            "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740992"
+        ))
+        .set("authorization", "Bearer test-token")
+        .call()
+        .expect_err("out-of-range after_seq should return 400");
+    let body = expect_enveloped(error, 400, "invalid_request");
+    assert_eq!(
+        body["message"],
+        "invalid after_seq `9007199254740992`: must be an integer from 0 through 9007199254740991"
+    );
+
     // The same malformed query without credentials: 401 wins.
     let error = raw_agent()
         .get(&changes_url)

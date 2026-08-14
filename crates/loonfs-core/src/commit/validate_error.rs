@@ -226,14 +226,14 @@ pub enum CommitValidationError {
         active_seq: ChangeSeq,
     },
     #[error(
-        "revision counter overflow restoring inode `{inode_id}` at base revision `{base_revision_no}`"
+        "cannot restore inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
     )]
     RestoreRevisionOverflow {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
     },
     #[error(
-        "revision counter overflow replacing inode `{inode_id}` at base revision `{base_revision_no}`"
+        "cannot replace inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
     )]
     ReplaceFileRevisionOverflow {
         inode_id: InodeId,
@@ -258,7 +258,7 @@ pub enum CommitValidationError {
         tombstone_seq: ChangeSeq,
     },
     #[error(
-        "attribute revision counter overflow updating inode `{inode_id}` at base revision `{base_attributes_revision_no}`"
+        "cannot update attributes for inode `{inode_id}` because revision `{base_attributes_revision_no}` is already at the maximum 9007199254740991"
     )]
     UpdateAttributesRevisionOverflow {
         inode_id: InodeId,
@@ -271,7 +271,7 @@ pub enum CommitValidationError {
     },
     #[error("validated preview apply failed: {0}")]
     ValidatedPreviewApplyFailed(String),
-    #[error("sequence counter overflow")]
+    #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
     #[error("next inode id counter overflow")]
     NextInodeOverflow,

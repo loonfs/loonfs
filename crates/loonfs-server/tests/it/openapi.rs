@@ -540,6 +540,57 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
 }
 
 #[test]
+fn openapi_limits_public_ordinals_but_not_inode_ids() {
+    let raw = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
+    let spec: Value = serde_json::from_str(&raw).expect("parse openapi json");
+    let schemas = spec
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+
+    for name in [
+        "RevisionNo",
+        "ChangeSeq",
+        "AttributeRevisionNo",
+        "ManifestId",
+        "WriterEpoch",
+    ] {
+        let schema = schemas.get(name).unwrap_or_else(|| panic!("{name} schema"));
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("integer"));
+        assert_eq!(schema.get("format").and_then(Value::as_str), Some("int64"));
+        assert_eq!(schema.get("minimum").and_then(Value::as_u64), Some(0));
+        assert_eq!(
+            schema.get("maximum").and_then(Value::as_u64),
+            Some(loonfs_api::MAX_PUBLIC_INTEGER),
+            "wrong public maximum for {name}"
+        );
+    }
+
+    assert!(
+        schemas
+            .get("InodeId")
+            .expect("InodeId schema")
+            .get("maximum")
+            .is_none(),
+        "InodeId must allow the full u64 range"
+    );
+
+    assert_eq!(
+        schemas
+            .get("GrepIndexStatusResponse")
+            .and_then(|schema| schema.get("allOf"))
+            .and_then(Value::as_array)
+            .and_then(|schemas| schemas.iter().find_map(|schema| schema.get("properties")))
+            .and_then(|properties| properties.get("next_run_ordinal"))
+            .and_then(|schema| schema.get("maximum"))
+            .and_then(Value::as_u64),
+        Some(loonfs_api::MAX_PUBLIC_INTEGER),
+        "next_run_ordinal must use the public maximum"
+    );
+}
+
+#[test]
 fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     let raw = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
     for dead_name in [

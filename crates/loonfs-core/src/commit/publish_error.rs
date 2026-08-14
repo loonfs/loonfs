@@ -43,7 +43,7 @@ pub enum CommitHeadPublishError {
     /// before the compare-and-swap so it can never become durable.
     #[error("{0}")]
     HeadIdentityDrift(loonfs_api::wire::control::HeadIdentityDrift),
-    #[error("sequence counter overflow")]
+    #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
     #[error("namespace head changed since the publish view was loaded")]
     StaleHead,
