@@ -4341,7 +4341,7 @@
           {
             "type": "object",
             "title": "FilesystemChangeFileCreated",
-            "description": "A file was created with its required first revision.",
+            "description": "A file and its first revision were created.",
             "required": [
               "inode_id",
               "parent_inode_id",
