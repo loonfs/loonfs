@@ -1661,11 +1661,12 @@ impl ObjectStore for ReadRecorderStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         prefix: &str,
+        start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -2081,11 +2082,12 @@ impl ObjectStore for CancelAfterReadsStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         prefix: &str,
+        start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -3247,11 +3249,12 @@ impl ObjectStore for FlushDuringFinalizationStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         prefix: &str,
+        start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -3556,11 +3559,12 @@ impl ObjectStore for CancelAtTheFirstPublicationStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         prefix: &str,
+        start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 

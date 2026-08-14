@@ -561,7 +561,7 @@ fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
     })
 }
 
-fn resolve_page_limit(
+pub(super) fn resolve_page_limit(
     limit: Option<String>,
 ) -> Result<loonfs_api::EffectiveLimit, ApiResponseError> {
     let requested = limit.as_deref().map(parse_page_limit).transpose()?;

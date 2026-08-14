@@ -754,10 +754,8 @@ pub(crate) struct ChangesArgs {
 pub(crate) enum AdminCommand {
     /// Pin the namespace's current state under a named checkpoint.
     Checkpoint(AdminCheckpointArgs),
-    /// List the namespace's active checkpoint pins, oldest first. A
-    /// checkpoint name is a label, not a key, so this is how a pin is found
-    /// again when its id has been lost.
-    CheckpointList(AdminNamespaceArgs),
+    /// List active checkpoint pins in checkpoint-id order.
+    CheckpointList(AdminCheckpointListArgs),
     /// Release a checkpoint pin.
     CheckpointRelease(AdminCheckpointReleaseArgs),
     /// Flush the WAL tail into a durable segment.
@@ -885,6 +883,18 @@ pub(crate) struct AdminCheckpointArgs {
     /// now. Omitted means the pin holds until explicitly released.
     #[arg(long)]
     pub ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminCheckpointListArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Maximum checkpoints to return. Supplying this requests one page.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Resume cursor from a previous page. Supplying this requests one page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]

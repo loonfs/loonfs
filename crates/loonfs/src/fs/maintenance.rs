@@ -9,13 +9,16 @@ use crate::maintenance_runner::CompactionStart;
 use crate::FsAdmin;
 use crate::NamespaceStatusResponse;
 use crate::{
-    AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenancePlan,
-    MaintenanceStepResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
+    AdvanceRetentionResponse, CheckpointId, CoreError, CreateCheckpointOptions,
+    CreateCheckpointResponse, ErrorCode, FlushWalOutcome, FlushWalResponse,
+    ListCheckpointsResponse, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceOptions,
+    MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
+use loonfs_api::{encode_cursor, PageRequest};
 use loonfs_core::cache::{load_namespace_fold_basis, load_namespace_head_summary};
+use loonfs_core::CheckpointPageCursor;
 use tokio::time::Instant;
 
 #[cfg(test)]
@@ -607,24 +610,74 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Lists every active checkpoint record on a namespace, oldest first.
-    ///
-    /// This is how a pin is found again when the creation response is gone:
-    /// every call to [`Self::create_checkpoint`] mints its own record under
-    /// its own id, so a label identifies nothing, and a record nobody can
-    /// name is a garbage-collection root nobody can release. A record whose
-    /// expiry has passed but which no collection pass has released yet is
-    /// still active and still listed, with its expiry in the answer.
-    ///
-    /// A read: it releases nothing and reaps nothing.
-    pub async fn list_checkpoints(
+    /// Lists every active checkpoint by following bounded pages.
+    pub async fn list_checkpoints_all(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<ListCheckpointsResponse> {
-        self.engine(namespace_id)
-            .list_checkpoints()
+        let limit = super::core::default_page_limit();
+        let (mut response, mut next_cursor) = self
+            .list_checkpoints_page_typed(
+                namespace_id,
+                PageRequest {
+                    limit,
+                    cursor: None,
+                },
+            )
+            .await?;
+        while let Some(cursor) = next_cursor {
+            let (page, page_next_cursor) = self
+                .list_checkpoints_page_typed(
+                    namespace_id,
+                    PageRequest {
+                        limit,
+                        cursor: Some(cursor),
+                    },
+                )
+                .await?;
+            response.checkpoints.extend(page.checkpoints);
+            next_cursor = page_next_cursor;
+        }
+        Ok(response)
+    }
+
+    /// Lists one page of active checkpoints in ascending id order. The cursor
+    /// resumes a live listing and does not create a snapshot.
+    pub async fn list_checkpoints_page(
+        &self,
+        namespace_id: &NamespaceId,
+        request: PageRequest<CheckpointPageCursor>,
+    ) -> Result<ListCheckpointsResponse> {
+        let (mut response, next_cursor) = self
+            .list_checkpoints_page_typed(namespace_id, request)
+            .await?;
+        response.next_cursor = next_cursor
+            .as_ref()
+            .map(encode_cursor)
+            .transpose()
+            .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+        Ok(response)
+    }
+
+    async fn list_checkpoints_page_typed(
+        &self,
+        namespace_id: &NamespaceId,
+        request: PageRequest<CheckpointPageCursor>,
+    ) -> Result<(ListCheckpointsResponse, Option<CheckpointPageCursor>)> {
+        let page = self
+            .engine(namespace_id)
+            .list_checkpoints_page(request)
             .await
-            .map_err(RuntimeError::from)
+            .map_err(RuntimeError::from)?;
+        let next_cursor = page.next_cursor;
+        Ok((
+            ListCheckpointsResponse {
+                namespace_id: namespace_id.clone(),
+                checkpoints: page.items,
+                next_cursor: None,
+            },
+            next_cursor,
+        ))
     }
 
     /// Releases a user-owned checkpoint by id. Idempotent.

@@ -2,24 +2,26 @@
 //! handlers.
 
 use super::error::ApiResponseError;
+use super::handlers_filesystem::resolve_page_limit;
 use super::{authorize, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, OptionalAppJson};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions};
+use loonfs::{CheckpointPageCursor, CreateNamespaceOptions, DeleteNamespaceOptions};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    CapabilityDocument, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, ErrorCode, ForkNamespaceRequest, ListCheckpointsResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, PaginationPolicy, ReleaseCheckpointResponse,
-    FEATURE_ADMIN_GREP_INDEX, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
-    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0, UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES,
+    decode_namespace_cursor, CapabilityDocument, CheckpointId, CreateCheckpointRequest,
+    CreateCheckpointResponse, CreateNamespaceRequest, ErrorCode, ForkNamespaceRequest,
+    ListCheckpointsResponse, MaintenanceStepRequest, MaintenanceStepResponse, PageRequest,
+    PaginationPolicy, ReleaseCheckpointResponse, FEATURE_ADMIN_GREP_INDEX,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
+    UPLOADS_DIRECT_PUT_CHECKSUM_FEATURES,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -37,6 +39,12 @@ pub(super) struct DeleteNamespaceQuery {
     /// Delete only if the head is still at this sequence (`stale_head` on
     /// mismatch).
     expected_head_seq: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct CheckpointPageQuery {
+    limit: Option<String>,
+    cursor: Option<String>,
 }
 
 #[cfg_attr(
@@ -364,11 +372,15 @@ pub(super) async fn create_checkpoint(
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
         summary = "List checkpoints",
-        description = "Lists every active checkpoint record on the namespace, oldest first. Each record is a garbage-collection root, and its id is what the release endpoint takes; because a checkpoint name is a label rather than a key, this is the only way to find a pin whose creation response is gone. An expired record that no collection pass has released yet is still active and is listed, with its expiry in the entry — the operator is looking for roots, and a record that still pins its basis is one. Released records are absent: a release is what stops a record pinning anything.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
+        description = "Lists one page of active checkpoints in checkpoint-id order. Expired checkpoints remain visible until collection releases them. Released checkpoints are omitted. The cursor resumes a live listing and does not create a snapshot.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("cursor" = Option<String>, Query, description = "Opaque checkpoint-list page cursor")
+        ),
         responses(
             (status = 200, description = "Active checkpoint records", body = ListCheckpointsResponse),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 400, description = "Invalid namespace id, limit, or cursor", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             crate::http::openapi::DeadlineExceededResponses
@@ -379,12 +391,32 @@ pub(super) async fn list_checkpoints(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
+    query: AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
+    let query = query.into_params()?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|cursor| decode_namespace_cursor::<CheckpointPageCursor>(cursor, &namespace_id))
+        .transpose()
+        .map_err(|error| {
+            ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &error.to_string(),
+            )
+        })?;
     let response = state
         .admin
-        .list_checkpoints(&namespace_id)
+        .list_checkpoints_page(
+            &namespace_id,
+            PageRequest {
+                limit: resolve_page_limit(query.limit)?,
+                cursor,
+            },
+        )
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))

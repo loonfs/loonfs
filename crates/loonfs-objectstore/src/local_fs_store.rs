@@ -511,31 +511,44 @@ impl ObjectStore for LocalFsStore {
         self.delete_object(&self.scoped(key)?).await
     }
 
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
         let scoped = match scope_list_prefix(self.key_prefix.as_deref(), prefix) {
             Ok(scoped) => scoped,
+            Err(err) => return stream::once(async { Err(err) }).boxed(),
+        };
+        let scoped_start_after = match start_after
+            .map(|key| scope_object_key(self.key_prefix.as_deref(), key))
+            .transpose()
+        {
+            Ok(start_after) => start_after,
             Err(err) => return stream::once(async { Err(err) }).boxed(),
         };
         let root = self.root.clone();
         let key_prefix = self.key_prefix.clone();
         Box::pin(
-            stream::once(async move { list_prefix_for_root(root, scoped).await })
-                .flat_map(|result| match result {
-                    Ok(keys) => stream::iter(keys.into_iter().map(Ok)).boxed(),
-                    Err(err) => stream::once(async { Err(err) }).boxed(),
-                })
-                .filter_map(move |result| {
-                    let key_prefix = key_prefix.clone();
-                    async move {
-                        match result {
-                            Ok(key) => match key_prefix.as_deref() {
-                                Some(prefix) => unscope_listed_key(Some(prefix), &key).map(Ok),
-                                None => Some(Ok(key)),
-                            },
-                            Err(err) => Some(Err(err)),
-                        }
+            stream::once(async move {
+                list_prefix_for_root(root, scoped, scoped_start_after.as_deref()).await
+            })
+            .flat_map(|result| match result {
+                Ok(keys) => stream::iter(keys.into_iter().map(Ok)).boxed(),
+                Err(err) => stream::once(async { Err(err) }).boxed(),
+            })
+            .filter_map(move |result| {
+                let key_prefix = key_prefix.clone();
+                async move {
+                    match result {
+                        Ok(key) => match key_prefix.as_deref() {
+                            Some(prefix) => unscope_listed_key(Some(prefix), &key).map(Ok),
+                            None => Some(Ok(key)),
+                        },
+                        Err(err) => Some(Err(err)),
                     }
-                }),
+                }
+            }),
         )
     }
 }
@@ -554,7 +567,11 @@ fn require_atomic_rename_replace() -> Result<()> {
     ))
 }
 
-async fn list_prefix_for_root(root: PathBuf, prefix: String) -> Result<Vec<String>> {
+async fn list_prefix_for_root(
+    root: PathBuf,
+    prefix: String,
+    start_after: Option<&str>,
+) -> Result<Vec<String>> {
     validate_segments(&prefix, true)?;
 
     if !fs::try_exists(&root)
@@ -565,7 +582,9 @@ async fn list_prefix_for_root(root: PathBuf, prefix: String) -> Result<Vec<Strin
     }
 
     let mut keys = collect_keys(&prefix, root).await?;
-    keys.retain(|key| key.starts_with(&prefix));
+    keys.retain(|key| {
+        key.starts_with(&prefix) && start_after.is_none_or(|start_after| key.as_str() > start_after)
+    });
     keys.sort();
     Ok(keys)
 }

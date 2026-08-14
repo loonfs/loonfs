@@ -512,9 +512,10 @@ where
         .await
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         prefix: &str,
+        start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         let op = self.next_object_op(ObjectOperationKind::ListPrefix, prefix);
         let scheduled = self.scheduled_fault(&op);
@@ -543,7 +544,7 @@ where
             };
 
         Box::pin(TracedListStream {
-            inner: self.inner.list_prefix_stream(prefix),
+            inner: self.inner.list_prefix_from_stream(prefix, start_after),
             trace: self.trace.clone(),
             op: Some(op),
             operation,

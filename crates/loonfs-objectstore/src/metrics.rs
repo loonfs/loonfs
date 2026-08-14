@@ -475,13 +475,17 @@ where
         result
     }
 
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
         // Streamed listings (WAL replay, GC) must not be invisible in the
         // metrics. The wrapper records one sample when the stream is
         // dropped — finished or abandoned — carrying the item count and
         // the first error's class.
         Box::pin(RecordedListStream {
-            inner: self.inner.list_prefix_stream(prefix),
+            inner: self.inner.list_prefix_from_stream(prefix, start_after),
             recorder: Arc::clone(&self.recorder),
             store_kind: self.store_kind.clone(),
             key_class: classify_key(prefix),

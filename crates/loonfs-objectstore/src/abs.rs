@@ -137,8 +137,14 @@ impl ObjectStore for AzureAbsStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
-        self.inner.list_prefix_stream(prefix)
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
+        // Azure has no native start-after key, so the provider adapter filters
+        // results while following its normal continuation pages.
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 

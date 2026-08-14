@@ -300,7 +300,7 @@ async fn enable_releases_its_checkpoint_when_root_reload_fails_before_publicatio
 
     let checkpoints = host
         .admin
-        .list_checkpoints(&namespace_id)
+        .list_checkpoints_all(&namespace_id)
         .await
         .expect("list checkpoints after failed enable");
     assert!(

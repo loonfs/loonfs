@@ -480,6 +480,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             if response.checkpoints.is_empty() {
                 lines.push("(none)".to_owned());
             }
+            if let Some(cursor) = &response.next_cursor {
+                lines.push(format!("next_cursor: {cursor}"));
+            }
             lines.join("\n")
         }
         CommandData::CheckpointReleased(response) => {

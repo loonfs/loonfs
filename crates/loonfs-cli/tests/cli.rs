@@ -5325,7 +5325,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let listed_data = json_data(&listed);
         assert_eq!(listed_data["kind"], "checkpoints_listed");
         assert_eq!(listed_data["namespace_id"], "demo");
-        let mut listed_ids = listed_data["checkpoints"]
+        let listed_ids = listed_data["checkpoints"]
             .as_array()
             .expect("json array")
             .iter()
@@ -5339,10 +5339,66 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
                     .to_owned()
             })
             .collect::<Vec<_>>();
-        listed_ids.sort();
         let mut expected_ids = vec![checkpoint_id.clone(), second_checkpoint_id.clone()];
         expected_ids.sort();
         assert_eq!(listed_ids, expected_ids);
+        assert!(listed_data.get("next_cursor").is_none());
+
+        // A page limit returns one page and a cursor that resumes at the next id.
+        let first_page = harness.run(&[
+            "--json",
+            "admin",
+            "checkpoint-list",
+            "--profile",
+            profile,
+            "--limit",
+            "1",
+        ]);
+        assert_success(&first_page);
+        let first_page_data = json_data(&first_page);
+        assert_eq!(
+            first_page_data["checkpoints"]
+                .as_array()
+                .expect("json array")
+                .len(),
+            1
+        );
+        assert_eq!(
+            first_page_data["checkpoints"][0]["checkpoint_id"],
+            expected_ids[0].as_str()
+        );
+        let cursor = first_page_data["next_cursor"]
+            .as_str()
+            .expect("partial page cursor")
+            .to_owned();
+
+        let resumed_page = harness.run(&[
+            "--json",
+            "admin",
+            "checkpoint-list",
+            "--profile",
+            profile,
+            "--cursor",
+            &cursor,
+        ]);
+        assert_success(&resumed_page);
+        let resumed_page_data = json_data(&resumed_page);
+        assert_eq!(
+            resumed_page_data["checkpoints"][0]["checkpoint_id"],
+            expected_ids[1].as_str()
+        );
+        assert!(resumed_page_data.get("next_cursor").is_none());
+
+        let first_page_human = harness.run(&[
+            "admin",
+            "checkpoint-list",
+            "--profile",
+            profile,
+            "--limit",
+            "1",
+        ]);
+        assert_success(&first_page_human);
+        assert!(stdout_string(&first_page_human).contains("next_cursor:"));
 
         // The human rendering is the same table in both modes, and it names
         // the id the release command takes.

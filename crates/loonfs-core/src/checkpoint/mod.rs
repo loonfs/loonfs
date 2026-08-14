@@ -57,6 +57,7 @@ pub use self::cache::{
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
+pub use self::list::CheckpointPageCursor;
 pub use self::reorganize::{
     FrozenBasePolicy, MetadataCompactionView, MetadataReorganizeOutcome, MetadataReorganizeReport,
 };
@@ -74,7 +75,7 @@ pub(crate) use self::compaction_lease::{claim_compaction_prefix, CompactionPrefi
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;
-pub(crate) use self::list::list_checkpoints;
+pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
     head_from_manifest, load_basis_metadata_tables, load_namespace_manifest_envelope,
     load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,

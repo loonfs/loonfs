@@ -4,9 +4,10 @@
 use super::context::{fail, fail_for, resolve_command_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::args::{
-    AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs,
-    AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminRunArgs, AdminStepArgs,
-    AdminStoreProbeArgs, ChangesArgs, CommandKind, MaintenanceJobArg, RuntimeBehavior,
+    AdminCheckpointArgs, AdminCheckpointListArgs, AdminCheckpointReleaseArgs, AdminCommand,
+    AdminGcArgs, AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminRunArgs,
+    AdminStepArgs, AdminStoreProbeArgs, ChangesArgs, CommandKind, MaintenanceJobArg,
+    RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::render::{format_utc_ms, write_stderr_progress};
@@ -263,14 +264,26 @@ async fn run_admin_checkpoint(
 async fn run_admin_checkpoint_list(
     kind: CommandKind,
     config_path: &Path,
-    args: AdminNamespaceArgs,
+    args: AdminCheckpointListArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let response = context
+    let single_page = args.limit.is_some() || args.cursor.is_some();
+    let mut response = context
         .target
-        .list_checkpoints(&context.namespace)
+        .list_checkpoints_page(&context.namespace, args.limit, args.cursor.as_deref())
         .await
         .map_err(|error| context.fail(kind, error))?;
+    if !single_page {
+        while let Some(cursor) = response.next_cursor.take() {
+            let page = context
+                .target
+                .list_checkpoints_page(&context.namespace, None, Some(&cursor))
+                .await
+                .map_err(|error| context.fail(kind, error))?;
+            response.checkpoints.extend(page.checkpoints);
+            response.next_cursor = page.next_cursor;
+        }
+    }
 
     Ok(CommandOutput {
         kind,

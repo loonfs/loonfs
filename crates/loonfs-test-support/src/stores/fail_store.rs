@@ -319,9 +319,10 @@ impl<S: ObjectStore> ObjectStore for FailStore<S> {
         }
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         prefix: &str,
+        start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         if self.should_fail(&OperationContext::new(prefix, OperationKind::List)) {
             return Box::pin(stream::once({
@@ -329,6 +330,6 @@ impl<S: ObjectStore> ObjectStore for FailStore<S> {
                 async move { Err(error) }
             }));
         }
-        self.inner.list_prefix_stream(prefix)
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }

@@ -160,9 +160,9 @@ pub mod publish {
 // `MetadataReorganizeReport` remains public because
 // `NamespaceEngine::reorganize_metadata` returns it.
 pub use checkpoint::{
-    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, FrozenBasePolicy,
-    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
-    MetadataCompactionView, MetadataFamilyGroup, MetadataReorganizeOutcome,
+    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
+    FrozenBasePolicy, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
+    MetadataCompactionSpec, MetadataCompactionView, MetadataFamilyGroup, MetadataReorganizeOutcome,
     MetadataReorganizeReport,
 };
 pub use context::MutationContext;

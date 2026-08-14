@@ -405,7 +405,21 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Streams keys under `prefix` in ascending lexicographic order.
     ///
     /// Invalid prefixes and listing failures arrive as stream items.
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>>;
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
+        self.list_prefix_from_stream(prefix, None)
+    }
+
+    /// Streams keys under `prefix` strictly after `start_after` in ascending
+    /// lexicographic order.
+    ///
+    /// `start_after` is a durable key rather than a provider continuation
+    /// token. Invalid prefixes, invalid resume keys, and listing failures
+    /// arrive as stream items.
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>>;
 
     /// Collects and sorts every key under `prefix`.
     ///
@@ -526,6 +540,14 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().list_prefix_stream(prefix)
     }
 
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
+        self.as_ref().list_prefix_from_stream(prefix, start_after)
+    }
+
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         self.as_ref().list_prefix(prefix).await
     }
@@ -614,6 +636,14 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         (*self).list_prefix_stream(prefix)
     }
 
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
+        (*self).list_prefix_from_stream(prefix, start_after)
+    }
+
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         (*self).list_prefix(prefix).await
     }
@@ -653,6 +683,7 @@ mod tests {
     #[derive(Debug)]
     struct ListOverrideStore {
         override_reached: Arc<AtomicBool>,
+        resume_reached: Arc<AtomicBool>,
     }
 
     #[async_trait]
@@ -679,8 +710,13 @@ mod tests {
             Ok(())
         }
 
-        fn list_prefix_stream(&self, _prefix: &str) -> BoxStream<'static, Result<String>> {
-            Box::pin(stream::empty())
+        fn list_prefix_from_stream(
+            &self,
+            _prefix: &str,
+            _start_after: Option<&str>,
+        ) -> BoxStream<'static, Result<String>> {
+            self.resume_reached.store(true, Ordering::SeqCst);
+            Box::pin(stream::iter([Ok("resumed".to_owned())]))
         }
 
         async fn list_prefix(&self, _prefix: &str) -> Result<Vec<String>> {
@@ -694,6 +730,7 @@ mod tests {
         let override_reached = Arc::new(AtomicBool::new(false));
         let store: Arc<dyn ObjectStore> = Arc::new(ListOverrideStore {
             override_reached: Arc::clone(&override_reached),
+            resume_reached: Arc::new(AtomicBool::new(false)),
         });
 
         let keys = <Arc<dyn ObjectStore> as ObjectStore>::list_prefix(&store, "prefix/")
@@ -702,5 +739,40 @@ mod tests {
 
         assert_eq!(keys, vec!["overridden"]);
         assert!(override_reached.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn arc_and_reference_stores_forward_start_after_listing() {
+        let arc_reached = Arc::new(AtomicBool::new(false));
+        let store: Arc<dyn ObjectStore> = Arc::new(ListOverrideStore {
+            override_reached: Arc::new(AtomicBool::new(false)),
+            resume_reached: Arc::clone(&arc_reached),
+        });
+        let arc_keys = <Arc<dyn ObjectStore> as ObjectStore>::list_prefix_from_stream(
+            &store,
+            "prefix/",
+            Some("prefix/key"),
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("Arc resume should succeed");
+        assert_eq!(arc_keys, vec!["resumed"]);
+        assert!(arc_reached.load(Ordering::SeqCst));
+
+        let reference_reached = Arc::new(AtomicBool::new(false));
+        let concrete = ListOverrideStore {
+            override_reached: Arc::new(AtomicBool::new(false)),
+            resume_reached: Arc::clone(&reference_reached),
+        };
+        let reference_keys = <&ListOverrideStore as ObjectStore>::list_prefix_from_stream(
+            &&concrete,
+            "prefix/",
+            Some("prefix/key"),
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("reference resume should succeed");
+        assert_eq!(reference_keys, vec!["resumed"]);
+        assert!(reference_reached.load(Ordering::SeqCst));
     }
 }
