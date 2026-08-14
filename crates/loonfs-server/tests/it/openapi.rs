@@ -546,7 +546,7 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
 }
 
 #[test]
-fn openapi_caps_public_ordinals_and_drops_the_numeric_inode_component() {
+fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
     let raw = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
     let spec: Value = serde_json::from_str(&raw).expect("parse openapi json");
     let schemas = spec
@@ -575,7 +575,7 @@ fn openapi_caps_public_ordinals_and_drops_the_numeric_inode_component() {
 
     assert!(
         !schemas.contains_key("InodeId"),
-        "public inode fields use the codec's inline string schema"
+        "public inode fields use inline string schemas"
     );
 
     assert_eq!(
@@ -593,7 +593,7 @@ fn openapi_caps_public_ordinals_and_drops_the_numeric_inode_component() {
 }
 
 #[test]
-fn openapi_never_types_an_inode_property_or_path_parameter_as_integer() {
+fn openapi_uses_strings_for_inode_properties_and_path_parameters() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
     )

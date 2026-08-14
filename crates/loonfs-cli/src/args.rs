@@ -715,7 +715,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// directories were renamed since. A deletion that recorded no binding
     /// needs the explicit path.
     pub path: Option<String>,
-    /// Inode id of the deleted item, as reported by `rm` and the change
+    /// Inode ID of the deleted item, as reported by `rm` and the change
     /// feed.
     #[arg(long, value_parser = parse_public_inode_id)]
     pub inode: InodeId,

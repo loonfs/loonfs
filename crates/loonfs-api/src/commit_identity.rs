@@ -675,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn public_inode_strings_decode_before_semantic_fingerprinting() {
+    fn public_inode_strings_decode_to_existing_fingerprint_inputs() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let decoded: crate::CommitRequest = serde_json::from_value(serde_json::json!({
             "commit_id": "public-inode-fingerprint",

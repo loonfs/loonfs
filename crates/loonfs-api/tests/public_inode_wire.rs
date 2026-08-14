@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 fn json(value: impl Serialize) -> Value {
-    serde_json::to_value(value).expect("serialize public inode-bearing shape")
+    serde_json::to_value(value).expect("serialize public API value")
 }
 
 fn assert_public_inode_values(value: &Value, path: &str, count: &mut usize) {
@@ -30,11 +30,11 @@ fn assert_public_inode_values(value: &Value, path: &str, count: &mut usize) {
                     let encoded = value.as_str().expect("checked JSON string");
                     let decoded = loonfs_api::public_inode_id::decode(encoded);
                     assert!(decoded.is_ok(), "{child_path} is invalid: {decoded:?}");
-                    let decoded = decoded.expect("checked public inode id");
+                    let decoded = decoded.expect("checked public inode ID");
                     assert_eq!(
                         loonfs_api::public_inode_id::encode(decoded),
                         encoded,
-                        "{child_path} is not canonical"
+                        "{child_path} does not use the standard inode ID format"
                     );
                 }
                 assert_public_inode_values(value, &child_path, count);
@@ -50,7 +50,7 @@ fn assert_public_inode_values(value: &Value, path: &str, count: &mut usize) {
 }
 
 #[test]
-fn every_public_inode_field_serializes_with_the_public_codec() {
+fn public_api_shapes_serialize_inode_ids_as_strings() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let actor = ActorRef::loonfs_system();
     let display_name = DisplayName::parse("report.txt").expect("display name");
@@ -190,5 +190,5 @@ fn every_public_inode_field_serializes_with_the_public_codec() {
     for (index, value) in values.iter().enumerate() {
         assert_public_inode_values(value, &format!("shape[{index}]"), &mut count);
     }
-    assert_eq!(count, 26, "update the exhaustive public inode inventory");
+    assert_eq!(count, 26, "update the expected inode ID field count");
 }

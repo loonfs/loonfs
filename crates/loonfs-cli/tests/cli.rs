@@ -1663,7 +1663,7 @@ fn every_mutating_command_records_its_message() {
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
         .as_str()
-        .expect("rm reports the deleted inode id")
+        .expect("rm reports the deleted inode ID")
         .to_owned();
     let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()
@@ -1842,7 +1842,7 @@ fn recovery_hints_name_their_namespace_and_quote_the_path() {
     let inode = json_data(&harness.run(&["--json", "stat", "/docs/Quarterly Report.PDF"]))
         ["inode_id"]
         .as_str()
-        .expect("the stored inode id")
+        .expect("the stored inode ID")
         .to_owned();
 
     // Nothing here is spelled on the command line, so the namespace is the
@@ -3355,7 +3355,7 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
         assert_success(&by_path);
         let inode_id = json_data(&by_path)["inode_id"]
             .as_str()
-            .expect("stat reports inode id")
+            .expect("stat reports inode ID")
             .to_owned();
         let by_inode = harness.run(&[
             "--json",
@@ -3421,7 +3421,7 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
 }
 
 #[test]
-fn inode_arguments_reject_bare_numbers_with_the_public_grammar() {
+fn inode_arguments_reject_bare_numbers() {
     let harness = Harness::new();
     let outputs = [
         harness.run(&["stat", "--inode", "27"]),
@@ -3440,7 +3440,7 @@ fn inode_arguments_reject_bare_numbers_with_the_public_grammar() {
         assert_failure(&output);
         let stderr = stderr_string(&output);
         assert!(
-            stderr.contains("must match `ino_<decimal>` with no leading zeroes"),
+            stderr.contains("must use `ino_` followed by a nonzero u64 without leading zeroes"),
             "{stderr}"
         );
     }
@@ -3665,7 +3665,7 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
         .as_str()
-        .expect("rm reports the deleted inode id")
+        .expect("rm reports the deleted inode ID")
         .to_owned();
     let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()
@@ -3759,7 +3759,7 @@ fn an_undelete_without_a_path_restores_in_place() {
     let entry = json_data(&trash)["entries"][0].clone();
     let inode_id = entry["inode_id"]
         .as_str()
-        .expect("trash reports the deleted inode id")
+        .expect("trash reports the deleted inode ID")
         .to_owned();
     let deletion_seq = entry["deletion_seq"]
         .as_u64()
@@ -3837,7 +3837,7 @@ fn remote_undelete_recovers_through_http() {
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
         .as_str()
-        .expect("rm reports the deleted inode id")
+        .expect("rm reports the deleted inode ID")
         .to_owned();
     let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()

@@ -105,13 +105,13 @@ pub(super) async fn begin_download(
         description = "Authorizes a direct read of one retained inode revision. The request body is `{}` and the response does not include a path.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode id", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("revision_no" = loonfs_api::RevisionNo, Path, description = "Revision number")
         ),
         request_body = BeginDownloadByInodeRequest,
         responses(
             (status = 200, description = "Download authorized", body = BeginDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode id, revision number, or request body", body = ApiError),
+            (status = 400, description = "Invalid inode ID, revision number, or request body", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
             (status = 409, description = "Inode is not a file", body = ApiError),

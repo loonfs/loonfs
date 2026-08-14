@@ -1,4 +1,4 @@
-//! HTTP stat, revision history, and content reads by inode id.
+//! HTTP stat, revision history, and content reads by inode ID.
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
@@ -292,7 +292,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inode_routes_reject_noncanonical_ids_after_authorization() {
+async fn inode_routes_reject_invalid_ids_after_authorization() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -336,7 +336,7 @@ async fn inode_routes_reject_noncanonical_ids_after_authorization() {
             ))
             .set("authorization", "Bearer test-token")
             .call()
-            .expect("canonical ino_27 route");
+            .expect("valid ino_27 route");
     }
 
     let routes = [
@@ -376,7 +376,7 @@ async fn inode_routes_reject_noncanonical_ids_after_authorization() {
             assert!(
                 error
                     .message
-                    .contains("must match `ino_<decimal>` with no leading zeroes"),
+                    .contains("must use `ino_` followed by a nonzero u64 without leading zeroes"),
                 "{}",
                 error.message
             );

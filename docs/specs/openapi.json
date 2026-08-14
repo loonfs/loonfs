@@ -2077,7 +2077,7 @@
           "inodes"
         ],
         "summary": "Stat inode",
-        "description": "Returns the canonical current entry for a visible inode, including its current path. Unknown and currently invisible inodes answer `inode_not_found`.",
+        "description": "Returns the current path entry for a visible inode. Unknown or hidden inodes answer `inode_not_found`.",
         "operationId": "stat_inode",
         "parameters": [
           {
@@ -2092,7 +2092,7 @@
           {
             "name": "inode_id",
             "in": "path",
-            "description": "Inode id",
+            "description": "Inode ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -2123,7 +2123,7 @@
             }
           },
           "400": {
-            "description": "Invalid inode id or include_attributes",
+            "description": "Invalid inode ID or include_attributes",
             "content": {
               "application/json": {
                 "schema": {
@@ -2189,7 +2189,7 @@
           {
             "name": "inode_id",
             "in": "path",
-            "description": "File inode id",
+            "description": "File inode ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -2232,7 +2232,7 @@
             }
           },
           "400": {
-            "description": "Invalid inode id, limit, or cursor",
+            "description": "Invalid inode ID, limit, or cursor",
             "content": {
               "application/json": {
                 "schema": {
@@ -2293,7 +2293,7 @@
           "inodes"
         ],
         "summary": "Read file revision by inode",
-        "description": "Reads and verifies one retained file revision by inode id and revision number.",
+        "description": "Reads and verifies one retained file revision by inode ID and revision number.",
         "operationId": "get_file_revision_bytes_by_inode",
         "parameters": [
           {
@@ -2308,7 +2308,7 @@
           {
             "name": "inode_id",
             "in": "path",
-            "description": "File inode id",
+            "description": "File inode ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -2343,7 +2343,7 @@
             }
           },
           "400": {
-            "description": "Invalid inode id or revision number",
+            "description": "Invalid inode ID or revision number",
             "content": {
               "application/json": {
                 "schema": {
@@ -2436,7 +2436,7 @@
           {
             "name": "inode_id",
             "in": "path",
-            "description": "File inode id",
+            "description": "File inode ID",
             "required": true,
             "schema": {
               "type": "string",
@@ -2476,7 +2476,7 @@
             }
           },
           "400": {
-            "description": "Invalid inode id, revision number, or request body",
+            "description": "Invalid inode ID, revision number, or request body",
             "content": {
               "application/json": {
                 "schema": {
@@ -3538,7 +3538,7 @@
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -3548,7 +3548,7 @@
               },
               "parent_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -3653,7 +3653,7 @@
           },
           "inode_id": {
             "type": "string",
-            "description": "Namespace-scoped stable inode identity",
+            "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
@@ -4425,7 +4425,7 @@
       },
       "DeletedDirentry": {
         "type": "object",
-        "description": "Directory binding removed by a public deletion event.",
+        "description": "Directory entry removed by a delete operation.",
         "required": [
           "parent_inode_id",
           "name_key",
@@ -4434,15 +4434,15 @@
         "properties": {
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
-            "description": "User-facing spelling the binding carried."
+            "description": "Name shown to users."
           },
           "name_key": {
             "$ref": "#/components/schemas/NameKey",
-            "description": "Canonical key the binding was reachable under."
+            "description": "Name used to look up the entry."
           },
           "parent_inode_id": {
             "type": "string",
-            "description": "Namespace-scoped stable inode identity",
+            "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           }
@@ -4676,7 +4676,7 @@
           },
           "inode_id": {
             "type": "string",
-            "description": "Namespace-scoped stable inode identity",
+            "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
@@ -4745,7 +4745,7 @@
           },
           "inode_id": {
             "type": "string",
-            "description": "Namespace-scoped stable inode identity",
+            "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
@@ -4774,7 +4774,7 @@
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -4786,7 +4786,7 @@
               },
               "parent_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               }
@@ -4815,7 +4815,7 @@
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -4827,7 +4827,7 @@
               },
               "parent_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -4854,7 +4854,7 @@
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -4889,13 +4889,13 @@
               },
               "from_parent_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -4911,7 +4911,7 @@
               },
               "to_parent_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               }
@@ -4939,7 +4939,7 @@
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -4968,7 +4968,7 @@
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -4980,7 +4980,7 @@
               },
               "parent_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               }
@@ -5007,7 +5007,7 @@
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -5105,7 +5105,7 @@
               },
               "expected_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -5197,7 +5197,7 @@
               },
               "inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -5268,7 +5268,7 @@
               },
               "expected_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -5570,7 +5570,7 @@
               },
               "cursor_inode_id": {
                 "type": "string",
-                "description": "Namespace-scoped stable inode identity",
+                "description": "Stable inode ID within a namespace",
                 "example": "ino_123",
                 "pattern": "^ino_[1-9][0-9]*$"
               },
@@ -5669,7 +5669,7 @@
           },
           "inode_id": {
             "type": "string",
-            "description": "Namespace-scoped stable inode identity",
+            "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
@@ -5845,7 +5845,7 @@
           },
           "inode_id": {
             "type": "string",
-            "description": "Namespace-scoped stable inode identity",
+            "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
@@ -6531,7 +6531,7 @@
           },
           "inode_id": {
             "type": "string",
-            "description": "Namespace-scoped stable inode identity",
+            "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           },
@@ -6548,7 +6548,7 @@
           },
           "parent_inode_id": {
             "type": "string",
-            "description": "Namespace-scoped stable inode identity",
+            "description": "Stable inode ID within a namespace",
             "example": "ino_123",
             "pattern": "^ino_[1-9][0-9]*$"
           }

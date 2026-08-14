@@ -27,20 +27,20 @@ pub struct CommitResponse {
     pub committed_seq: ChangeSeq,
 }
 
-/// Directory binding removed by a public deletion event.
+/// Directory entry removed by a delete operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedDirentry {
-    /// Directory that held the binding.
+    /// Parent directory of the deleted entry.
     #[serde(with = "crate::public_inode_id")]
     #[cfg_attr(
         feature = "openapi",
         schema(schema_with = crate::public_inode_id::schema)
     )]
     pub parent_inode_id: InodeId,
-    /// Canonical key the binding was reachable under.
+    /// Name used to look up the entry.
     pub name_key: NameKey,
-    /// User-facing spelling the binding carried.
+    /// Name shown to users.
     pub display_name: DisplayName,
 }
 

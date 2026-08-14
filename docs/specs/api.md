@@ -311,20 +311,14 @@ range.
 
 ### 4.1 Public inode identity
 
-Every client-visible inode identity is a JSON string matching
-`^ino_[1-9][0-9]*$`: the literal lowercase prefix `ino_`, followed by a
-base-10 positive integer with no leading zeroes. Request bodies and inode
-route parameters accept only that grammar; bare JSON numbers, numeric
-strings such as `"27"`, zero, leading-zero forms, and differently cased
-prefixes are invalid. `ino_1` is the nameless namespace root and is a valid
-target for inode lookup; it has no alternate spelling.
+Public APIs represent an inode ID as a string such as `ino_27`. The value must
+start with the lowercase prefix `ino_`, followed by a nonzero `u64` with no
+leading zeroes. Numbers, numeric strings such as `"27"`, zero, and uppercase
+prefixes are invalid. `ino_1` identifies the namespace root.
 
-An inode id is scoped to one namespace. Its complete identity is therefore
-`(namespace_id, inode_id)`, not the inode string alone. Although the suffix
-is decimal, clients MUST treat the whole `ino_...` value as opaque: they
-MUST NOT allocate inode ids, infer creation or allocation order from them,
-compare their decimal values for ordering semantics, or synthesize nearby
-ids.
+An inode ID is only unique within its namespace. Use `namespace_id` and
+`inode_id` together when identifying an inode. Clients MUST treat the ID as an
+opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
 
 - The embedded handles (`loonfs::FsWriter`, `loonfs::FsReader`) and the
   remote client (`loonfs_client::Client`) expose the same operations and the

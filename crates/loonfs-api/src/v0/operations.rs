@@ -1497,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn inode_request_fields_accept_only_the_public_inode_grammar() {
+    fn inode_request_fields_accept_only_the_public_format() {
         let operations = [
             serde_json::json!({
                 "kind": "delete_path",
@@ -1518,7 +1518,7 @@ mod tests {
 
         for operation in operations {
             serde_json::from_value::<FilesystemOperation>(operation.clone())
-                .expect("canonical public inode id");
+                .expect("valid public inode ID");
 
             let inode_key = if operation["kind"] == "undelete" {
                 "inode_id"
@@ -1530,7 +1530,7 @@ mod tests {
                 invalid_operation[inode_key] = invalid;
                 assert!(
                     serde_json::from_value::<FilesystemOperation>(invalid_operation).is_err(),
-                    "{inode_key} accepted a non-public inode spelling"
+                    "{inode_key} accepted an invalid inode ID"
                 );
             }
         }
