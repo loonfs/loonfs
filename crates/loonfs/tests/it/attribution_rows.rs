@@ -115,7 +115,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
             .attributes
             .as_ref()
             .expect("copied attributes")
-            .updated_by,
+            .attributes_updated_by,
         Some(copier.clone()),
         "copy restates inherited attributes under the copy commit"
     );
@@ -124,7 +124,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
             .expect("stat source after copy")
             .attributes
             .expect("source attributes")
-            .updated_by,
+            .attributes_updated_by,
         Some(source_attribute_editor),
         "the source keeps its own attribute attribution"
     );
@@ -158,8 +158,8 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     let root = fs.stat_path_blocking(&source_id, "/").expect("stat root");
     assert_eq!(root.created_by, ActorRef::loonfs_system());
     let root_attributes = root.attributes.expect("root attributes projection");
-    assert_eq!(root_attributes.updated_by, None);
-    assert_eq!(root_attributes.updated_at_ms, None);
+    assert_eq!(root_attributes.attributes_updated_by, None);
+    assert_eq!(root_attributes.attributes_updated_at_ms, None);
 
     let creator = actor("file-owner");
     fs.put_file_bytes_blocking(
@@ -184,8 +184,8 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
         .expect("stat attributed attributes")
         .attributes
         .expect("attributes projection");
-    assert_eq!(projected.updated_by, Some(updater));
-    assert!(projected.updated_at_ms.is_some());
+    assert_eq!(projected.attributes_updated_by, Some(updater));
+    assert!(projected.attributes_updated_at_ms.is_some());
 
     let later_updater = actor("metadata-reviewer");
     block_on(fs.writer.update_attributes(
@@ -202,9 +202,9 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
         .expect("stat later attributes")
         .attributes
         .expect("later attributes projection");
-    assert_eq!(later_projection.revision_no.0, 2);
-    assert_eq!(later_projection.updated_by, Some(later_updater));
-    assert!(later_projection.updated_at_ms.is_some());
+    assert_eq!(later_projection.attributes_revision_no.0, 2);
+    assert_eq!(later_projection.attributes_updated_by, Some(later_updater));
+    assert!(later_projection.attributes_updated_at_ms.is_some());
     let source_before_fork = fs
         .stat_path_blocking(&source_id, "/report.txt")
         .expect("stat source before fork");

@@ -234,6 +234,49 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
 }
 
 #[test]
+fn openapi_flattens_the_path_entry_attribute_projection() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let schemas = spec
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+    assert!(!schemas.contains_key("AuthoritativeAttributes"));
+
+    let projection = schemas
+        .get("AttributesProjection")
+        .expect("AttributesProjection schema");
+    let projection_properties = projection
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("attribute projection properties");
+    assert!(projection_properties.contains_key("attributes_revision_no"));
+    assert!(projection_properties.contains_key("attributes"));
+    let required = required_fields(projection);
+    assert!(required.contains("attributes_revision_no"));
+    assert!(required.contains("attributes"));
+
+    let path_entry = schemas
+        .get("AuthoritativePathEntry")
+        .expect("AuthoritativePathEntry schema");
+    let flattened_projection_ref = path_entry
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|schema| schema.get("oneOf").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|schema| schema.get("$ref").and_then(Value::as_str))
+        .any(|reference| reference == "#/components/schemas/AttributesProjection");
+    assert!(
+        flattened_projection_ref,
+        "path entries must flatten AttributesProjection at the top level"
+    );
+}
+
+#[test]
 fn openapi_documents_delete_path_behavior() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),

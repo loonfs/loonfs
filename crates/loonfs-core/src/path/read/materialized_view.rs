@@ -21,7 +21,7 @@ use crate::storage::content::{content_object_key_for_ref, read_durable_content_b
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
-    AbsolutePath, AuthoritativeAttributes, AuthoritativeFileBytes, AuthoritativePathEntry,
+    AbsolutePath, AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,
     AuthoritativePathEntryKind, ChangeSeq, ContentRef, ContentStoreId, DirectoryPageCursor,
     DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestId,
     NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
@@ -801,10 +801,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             AttributeProjection::Include => {
                 let (revision_no, attributes, updated_by, updated_at_ms) =
                     session.attributes_of_visible(resolved.inode_id).await?;
-                Some(AuthoritativeAttributes {
-                    revision_no,
-                    updated_by,
-                    updated_at_ms,
+                Some(AttributesProjection {
+                    attributes_revision_no: revision_no,
+                    attributes_updated_by: updated_by,
+                    attributes_updated_at_ms: updated_at_ms,
                     attributes,
                 })
             }
@@ -1031,7 +1031,7 @@ mod tests {
             annotated
                 .attributes
                 .as_ref()
-                .map(|projection| projection.revision_no),
+                .map(|projection| projection.attributes_revision_no),
             Some(AttributeRevisionNo(1))
         );
         assert_eq!(
@@ -1048,9 +1048,12 @@ mod tests {
             .await
             .expect("stat bare");
         assert_eq!(
-            bare.attributes
-                .as_ref()
-                .map(|projection| (projection.revision_no, projection.attributes.len())),
+            bare.attributes.as_ref().map(|projection| {
+                (
+                    projection.attributes_revision_no,
+                    projection.attributes.len(),
+                )
+            }),
             Some((AttributeRevisionNo(0), 0))
         );
 

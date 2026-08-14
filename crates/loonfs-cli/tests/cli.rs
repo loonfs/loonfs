@@ -4531,13 +4531,10 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         let bare_json = harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
         assert_success(&bare_json);
         let bare_entry = json_data(&bare_json);
-        assert_eq!(
-            bare_entry["attributes"]["attributes"],
-            serde_json::json!({})
-        );
-        assert_eq!(bare_entry["attributes"]["revision_no"], 0);
-        assert!(bare_entry["attributes"]["updated_by"].is_null());
-        assert!(bare_entry["attributes"]["updated_at_ms"].is_null());
+        assert_eq!(bare_entry["attributes"], serde_json::json!({}));
+        assert_eq!(bare_entry["attributes_revision_no"], 0);
+        assert!(bare_entry.get("attributes_updated_by").is_none());
+        assert!(bare_entry.get("attributes_updated_at_ms").is_none());
 
         let annotated = harness.run(&[
             "--json",
@@ -4576,15 +4573,15 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
             harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
         assert_success(&with_list_json);
         assert_eq!(
-            json_data(&with_list_json)["attributes"]["attributes"]["tags"],
+            json_data(&with_list_json)["attributes"]["tags"],
             serde_json::json!("red,blue")
         );
         assert_eq!(
-            json_data(&with_list_json)["attributes"]["updated_by"],
+            json_data(&with_list_json)["attributes_updated_by"],
             serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
         );
         assert!(
-            json_data(&with_list_json)["attributes"]["updated_at_ms"]
+            json_data(&with_list_json)["attributes_updated_at_ms"]
                 .as_u64()
                 .expect("attribute update time")
                 > 0
@@ -4601,10 +4598,11 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         let removed = harness.run(&["--json", "stat", "--profile", profile, "/docs/file.txt"]);
         assert_success(&removed);
         let entry = json_data(&removed);
-        assert!(entry["attributes"]["attributes"]["owner"].is_null());
-        assert_eq!(entry["attributes"]["attributes"]["note"], "has=equals");
+        assert!(entry["attributes"]["owner"].is_null());
+        assert_eq!(entry["attributes"]["note"], "has=equals");
         // Three effective updates, three revisions.
-        assert_eq!(entry["attributes"]["revision_no"], 3);
+        assert_eq!(entry["attributes_revision_no"], 3);
+        assert!(entry.pointer("/attributes/attributes").is_none());
 
         // Attributes belong to the inode, so a directory takes them too.
         assert_success(&harness.run(&[

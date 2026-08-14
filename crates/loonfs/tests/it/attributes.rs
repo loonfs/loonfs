@@ -141,7 +141,7 @@ fn a_write_is_visible_to_the_next_stat() {
         entry
             .attributes
             .as_ref()
-            .map(|projection| projection.revision_no),
+            .map(|projection| projection.attributes_revision_no),
         Some(AttributeRevisionNo(1))
     );
     assert_eq!(
@@ -168,10 +168,12 @@ fn a_write_is_visible_to_the_next_stat() {
         .stat_path_blocking(&namespace_id, "/docs/report.txt")
         .expect("stat cleared");
     assert_eq!(
-        cleared
-            .attributes
-            .as_ref()
-            .map(|projection| (projection.revision_no, projection.attributes.len())),
+        cleared.attributes.as_ref().map(|projection| {
+            (
+                projection.attributes_revision_no,
+                projection.attributes.len(),
+            )
+        }),
         Some((AttributeRevisionNo(2), 0))
     );
 }
@@ -239,7 +241,7 @@ fn read_options_project_grouped_attributes_or_none() {
         let projection = entry.attributes.as_ref().expect("projected attributes");
         match entry.absolute_path.as_str() {
             "/docs/report.txt" => {
-                assert_eq!(projection.revision_no, AttributeRevisionNo(1));
+                assert_eq!(projection.attributes_revision_no, AttributeRevisionNo(1));
                 assert_eq!(
                     projection.attributes.get(&attribute_key("owner")).cloned(),
                     Some(attribute_text("platform"))
@@ -248,7 +250,7 @@ fn read_options_project_grouped_attributes_or_none() {
             // An inode nobody annotated projects the cleared state, not an
             // absent one.
             _ => {
-                assert_eq!(projection.revision_no, AttributeRevisionNo(0));
+                assert_eq!(projection.attributes_revision_no, AttributeRevisionNo(0));
                 assert_eq!(projection.attributes.len(), 0);
             }
         }

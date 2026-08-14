@@ -2928,23 +2928,23 @@
           "type": "string"
         }
       },
-      "AuthoritativeAttributes": {
+      "AttributesProjection": {
         "type": "object",
-        "description": "One inode's complete projected attribute state.",
+        "description": "One inode's structurally complete attribute projection.",
         "required": [
-          "revision_no",
+          "attributes_revision_no",
           "attributes"
         ],
         "properties": {
           "attributes": {
             "$ref": "#/components/schemas/Attributes",
-            "description": "The complete attribute map at `revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
+            "description": "The complete attribute map at `attributes_revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
           },
-          "revision_no": {
+          "attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
             "description": "The attribute revision this projection represents."
           },
-          "updated_at_ms": {
+          "attributes_updated_at_ms": {
             "type": [
               "integer",
               "null"
@@ -2953,7 +2953,7 @@
             "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
             "minimum": 0
           },
-          "updated_by": {
+          "attributes_updated_by": {
             "oneOf": [
               {
                 "type": "null"
@@ -2973,6 +2973,17 @@
             "description": "File-or-directory classification and its kind-specific payload."
           },
           {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AttributesProjection",
+                "description": "The inode's attribute projection, when requested."
+              }
+            ]
+          },
+          {
             "type": "object",
             "required": [
               "namespace_id",
@@ -2986,17 +2997,6 @@
               "absolute_path": {
                 "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute path as rendered from stored display names."
-              },
-              "attributes": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/AuthoritativeAttributes",
-                    "description": "The inode's attribute projection, when requested."
-                  }
-                ]
               },
               "created_at_ms": {
                 "type": "integer",
@@ -3045,7 +3045,7 @@
             }
           }
         ],
-        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. The entry kind carries\nthe file-only revision and content summary, so a directory cannot carry a\npartial file payload. Attributes are likewise projected as one value or\nomitted as one value."
+        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. The entry kind carries\nthe file-only revision and content summary, so a directory cannot carry a\npartial file payload. Attributes are likewise projected as one value or\nomitted as one value, while serializing as prefixed sibling fields.\nThe attribute revision is read independently — clients feed it to\n`expected_attributes_revision_no` on the next write without touching the\nvalues — so this is a prefixed-sibling projection rather than a value\nconsumed as one nested unit."
       },
       "AuthoritativePathEntryKind": {
         "oneOf": [
