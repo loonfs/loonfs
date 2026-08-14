@@ -8,13 +8,12 @@ use loonfs::publish::CommitRequest;
 use loonfs::UploadContentClaim;
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
-    BeginUploadResponse, ChangeSeq, ChangesResponse, Checkpoint, CommitResponse,
-    CompleteUploadResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode,
-    FsAdmin, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, MaintenancePlan,
-    MaintenanceStepResponse, MetadataMaintenanceResponse, MoveOptions, NamespaceId,
-    NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError, SharedObjectStore,
-    UploadContentResponse, UploadId,
+    BeginUploadResponse, ChangeSeq, ChangesResponse, Checkpoint, CommitResponse, ContentRef,
+    CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
+    DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
+    ListChangesOptions, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceResponse,
+    MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError,
+    SharedObjectStore, UploadContentResponse, UploadId, UploadSessionResponse,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -312,7 +311,7 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> loonfs::Result<CompleteUploadResponse>;
+    ) -> loonfs::Result<UploadSessionResponse>;
     fn mutate_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -491,7 +490,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> loonfs::Result<CompleteUploadResponse> {
+    ) -> loonfs::Result<UploadSessionResponse> {
         block_on(self.writer.complete_upload(namespace_id, upload_id))
     }
 

@@ -2799,7 +2799,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UploadStatusResponse"
+                  "$ref": "#/components/schemas/UploadSessionResponse"
                 }
               }
             }
@@ -2884,7 +2884,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AbortUploadResponse"
+                  "$ref": "#/components/schemas/UploadSessionResponse"
                 }
               }
             }
@@ -2990,7 +2990,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompleteUploadResponse"
+                  "$ref": "#/components/schemas/UploadSessionResponse"
                 }
               }
             }
@@ -3316,31 +3316,6 @@
   },
   "components": {
     "schemas": {
-      "AbortUploadResponse": {
-        "type": "object",
-        "description": "Response after aborting an upload session.",
-        "required": [
-          "namespace_id",
-          "upload_id",
-          "aborted_at_ms"
-        ],
-        "properties": {
-          "aborted_at_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Unix-millisecond stamp of the abort that stands, which for a repeated\nabort is the first one's.",
-            "minimum": 0
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that owns the session."
-          },
-          "upload_id": {
-            "$ref": "#/components/schemas/UploadId",
-            "description": "Session that is now final."
-          }
-        }
-      },
       "AbsolutePath": {
         "type": "string",
         "description": "Validated complete absolute namespace path, serialized as a plain string.",
@@ -4272,40 +4247,6 @@
           }
         ],
         "description": "The upload session determines the accepted body. Service-proxied and direct-put sessions use an empty object. Direct-multipart sessions provide the content claim and completed parts."
-      },
-      "CompleteUploadResponse": {
-        "type": "object",
-        "description": "Response after an upload session is completed.",
-        "required": [
-          "namespace_id",
-          "upload_id",
-          "content_ref"
-        ],
-        "properties": {
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Verified content selected by the completed session."
-          },
-          "content_token": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ContentToken",
-                "description": "Short-lived proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
-              }
-            ]
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that owns the completed session."
-          },
-          "upload_id": {
-            "$ref": "#/components/schemas/UploadId",
-            "description": "Session whose result is now frozen for idempotent completion retries."
-          }
-        }
       },
       "CompletedUploadPart": {
         "type": "object",
@@ -6660,6 +6601,15 @@
         "example": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
         "pattern": "^upl_[0-9a-f]{32}$"
       },
+      "UploadMode": {
+        "type": "string",
+        "description": "Upload transport mode.",
+        "enum": [
+          "service_proxied",
+          "direct_put",
+          "direct_multipart"
+        ]
+      },
       "UploadPartChecksumClaim": {
         "type": "object",
         "description": "One part's checksum, supplied by the client so the server can sign it\ninto that part's upload URL.",
@@ -6681,6 +6631,37 @@
         },
         "additionalProperties": false
       },
+      "UploadSessionResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/UploadSessionStatus",
+            "description": "The session's lifecycle and state-specific fields. Completed HTTP\nresponses carry a fresh receipt while the minting window remains open."
+          },
+          {
+            "type": "object",
+            "required": [
+              "namespace_id",
+              "upload_id",
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "$ref": "#/components/schemas/UploadMode",
+                "description": "Transport selected when the session began."
+              },
+              "namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace that owns the session."
+              },
+              "upload_id": {
+                "$ref": "#/components/schemas/UploadId",
+                "description": "Session represented by this view."
+              }
+            }
+          }
+        ],
+        "description": "Current view of one upload session."
+      },
       "UploadSessionStatus": {
         "oneOf": [
           {
@@ -6689,7 +6670,7 @@
             "description": "Accepting content until its lease passes.",
             "required": [
               "expires_at_ms",
-              "state"
+              "status"
             ],
             "properties": {
               "expires_at_ms": {
@@ -6698,7 +6679,7 @@
                 "description": "Unix-millisecond instant after which the session is abandoned and\nmay be aborted by server-side cleanup.",
                 "minimum": 0
               },
-              "state": {
+              "status": {
                 "type": "string",
                 "enum": [
                   "open"
@@ -6713,7 +6694,7 @@
             "required": [
               "completed_at_ms",
               "content_ref",
-              "state"
+              "status"
             ],
             "properties": {
               "completed_at_ms": {
@@ -6737,7 +6718,7 @@
                   }
                 ]
               },
-              "state": {
+              "status": {
                 "type": "string",
                 "enum": [
                   "completed"
@@ -6751,7 +6732,7 @@
             "description": "Final: the session selected no content and its object is gone.",
             "required": [
               "aborted_at_ms",
-              "state"
+              "status"
             ],
             "properties": {
               "aborted_at_ms": {
@@ -6760,7 +6741,7 @@
                 "description": "Unix-millisecond stamp of the abort.",
                 "minimum": 0
               },
-              "state": {
+              "status": {
                 "type": "string",
                 "enum": [
                   "aborted"
@@ -6770,29 +6751,6 @@
           }
         ],
         "description": "Observed state of an upload session.\n\nA session starts as `Open` and ends as either `Completed` or `Aborted`.\nBoth final states are permanent. Reading a completed session issues a new\nreceipt for the durable content, so a lost commit response does not require\nthe content to be uploaded again."
-      },
-      "UploadStatusResponse": {
-        "type": "object",
-        "description": "Response for reading one upload session.",
-        "required": [
-          "namespace_id",
-          "upload_id",
-          "status"
-        ],
-        "properties": {
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that owns the session."
-          },
-          "status": {
-            "$ref": "#/components/schemas/UploadSessionStatus",
-            "description": "The session's state, with a fresh receipt when it is completed."
-          },
-          "upload_id": {
-            "$ref": "#/components/schemas/UploadId",
-            "description": "Session that was read."
-          }
-        }
       },
       "WalFlushStepOutcome": {
         "oneOf": [

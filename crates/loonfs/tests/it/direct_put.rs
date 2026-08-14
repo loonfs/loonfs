@@ -9,7 +9,7 @@ use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     BeginUploadRequest, ChangeSeq, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
     DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions, RuntimeCacheConfig,
-    SharedObjectStore,
+    SharedObjectStore, UploadMode,
 };
 use loonfs_api::v0::{UploadContentClaim, UploadSessionStatus};
 use loonfs_api::Checksum;
@@ -88,7 +88,8 @@ fn upload_flow_is_available_from_runtime() {
     let completed_again = fs
         .complete_upload_blocking(&namespace_id, begin.upload_id())
         .expect("repeat complete upload");
-    assert_eq!(completed.content_ref, completed_again.content_ref);
+    assert_eq!(completed, completed_again);
+    assert_eq!(completed.mode, UploadMode::ServiceProxied);
 }
 
 #[test]
@@ -117,7 +118,8 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
     let completed = fs
         .complete_upload_blocking(&namespace_id, &begin.upload_id)
         .expect("complete direct put");
-    assert_eq!(completed.content_ref, content_ref);
+    assert_eq!(completed.mode, UploadMode::DirectPut);
+    assert_eq!(completed.content_ref(), Some(&content_ref));
 
     block_on(fs.put_file_content_ref(
         &namespace_id,
@@ -161,7 +163,8 @@ fn direct_put_completion_proves_upload_without_reading_content() {
     let completed = fs
         .complete_upload_blocking(&namespace_id, &begin.upload_id)
         .expect("complete direct put");
-    assert_eq!(completed.content_ref, content_ref);
+    assert_eq!(completed.mode, UploadMode::DirectPut);
+    assert_eq!(completed.content_ref(), Some(&content_ref));
     assert_eq!(
         raw_store.count(OperationClass::Read),
         0,
@@ -287,7 +290,8 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
     let completed = fs
         .complete_upload_blocking(&namespace_id, &begin.upload_id)
         .expect("the retried completion verifies and completes");
-    assert_eq!(completed.content_ref, content_ref);
+    assert_eq!(completed.mode, UploadMode::DirectPut);
+    assert_eq!(completed.content_ref(), Some(&content_ref));
 }
 
 #[test]
@@ -533,7 +537,10 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 loonfs_core::content::prepare_existing_content_ref(
                     &object_store,
                     &catalog,
-                    completed.content_ref,
+                    completed
+                        .content_ref()
+                        .expect("completed content ref")
+                        .clone(),
                 )
                 .await
                 .expect("prepare completed content"),

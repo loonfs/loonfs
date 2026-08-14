@@ -518,7 +518,13 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .await
         .expect("complete upload with proof");
     let prepared = completed.prepared;
-    assert_eq!(prepared.content_ref(), &completed.response.content_ref);
+    assert_eq!(
+        prepared.content_ref(),
+        completed
+            .response
+            .content_ref()
+            .expect("completed content ref")
+    );
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
     harness.recording.reset();
 
@@ -568,7 +574,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .await
         .expect("complete direct put with proof");
     let prepared = completed.prepared;
-    assert_eq!(completed.response.content_ref, content_ref);
+    assert_eq!(completed.response.content_ref(), Some(&content_ref));
     // The session path reuses the runtime-resolved immutable store binding
     // and proves the provider write with one object HEAD; it never reads the
     // uploaded blob or reloads the content-store descriptor.

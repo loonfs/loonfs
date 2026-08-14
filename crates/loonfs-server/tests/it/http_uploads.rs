@@ -4,8 +4,8 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{
     v0::{
-        AbortUploadResponse, BeginUploadRequest, FilesystemChange, UploadSessionStatus,
-        UploadStatusResponse,
+        BeginUploadRequest, FilesystemChange, UploadMode, UploadSessionResponse,
+        UploadSessionStatus,
     },
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
@@ -414,17 +414,30 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .await
         .expect("begin upload");
     let status = read_upload_status(&harness.server_url, open.upload_id());
+    assert_eq!(status.namespace_id, namespace);
+    assert_eq!(&status.upload_id, open.upload_id());
+    assert_eq!(status.mode, UploadMode::ServiceProxied);
     assert!(matches!(status.status, UploadSessionStatus::Open { .. }));
 
     // Aborting it is terminal, repeatable, and observable.
     let aborted = abort_upload(&harness.server_url, open.upload_id()).expect("abort");
     let repeated = abort_upload(&harness.server_url, open.upload_id()).expect("repeated abort");
     assert_eq!(repeated, aborted);
+    assert_eq!(aborted.namespace_id, namespace);
+    assert_eq!(&aborted.upload_id, open.upload_id());
+    assert_eq!(aborted.mode, UploadMode::ServiceProxied);
+    let UploadSessionStatus::Aborted {
+        aborted_at_ms: response_aborted_at_ms,
+    } = aborted.status
+    else {
+        unreachable!("abort reports an aborted session")
+    };
     let status = read_upload_status(&harness.server_url, open.upload_id());
+    assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Aborted { aborted_at_ms } = status.status else {
         unreachable!("an aborted session reports itself aborted");
     };
-    assert_eq!(aborted_at_ms, aborted.aborted_at_ms);
+    assert_eq!(aborted_at_ms, response_aborted_at_ms);
 
     // Completing an aborted session reports the same absence its eventual
     // deletion will.
@@ -439,17 +452,19 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     // The client here is one that lost its commit response and threw the
     // completion's receipt away: it reads the session and commits with what
     // the read hands back, without sending a byte of content again.
-    let (upload_id, content_ref) =
+    let (upload_id, content_ref, completed_at_ms) =
         complete_upload_session(&harness, &namespace, b"status re-mint").await;
     let status = read_upload_status(&harness.server_url, &upload_id);
+    assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Completed {
+        completed_at_ms: reported_completed_at_ms,
         content_ref: reported_ref,
         content_token,
-        ..
     } = status.status
     else {
         unreachable!("a completed session reports itself completed");
     };
+    assert_eq!(reported_completed_at_ms, completed_at_ms);
     assert_eq!(reported_ref, content_ref);
     let re_minted = content_token.expect("a completed session re-mints");
     let commit = send_commit(
@@ -507,7 +522,8 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
         .expect("create namespace");
 
     let file_bytes = b"read the session back";
-    let (upload_id, content_ref) = complete_upload_session(&harness, &namespace, file_bytes).await;
+    let (upload_id, content_ref, completed_at_ms) =
+        complete_upload_session(&harness, &namespace, file_bytes).await;
 
     let status = harness
         .client
@@ -516,14 +532,16 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
         .expect("read the upload session back");
     assert_eq!(status.namespace_id, namespace);
     assert_eq!(status.upload_id, upload_id);
+    assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Completed {
+        completed_at_ms: reported_completed_at_ms,
         content_ref: reported_ref,
         content_token,
-        ..
     } = status.status
     else {
         unreachable!("a completed session reports itself completed");
     };
+    assert_eq!(reported_completed_at_ms, completed_at_ms);
     assert_eq!(reported_ref, content_ref);
 
     let commit = harness
@@ -563,7 +581,7 @@ async fn complete_upload_session(
     harness: &crate::common::TestServer,
     namespace: &loonfs_api::NamespaceId,
     bytes: &[u8],
-) -> (loonfs_api::UploadId, ContentRef) {
+) -> (loonfs_api::UploadId, ContentRef, u64) {
     let begin = harness
         .client
         .begin_upload(namespace, &BeginUploadRequest::ServiceProxied {})
@@ -579,10 +597,19 @@ async fn complete_upload_session(
         .complete_upload(namespace, begin.upload_id())
         .await
         .expect("complete upload");
-    (begin.upload_id().clone(), completed.content_ref)
+    assert_eq!(completed.mode, UploadMode::ServiceProxied);
+    let UploadSessionStatus::Completed {
+        completed_at_ms,
+        content_ref,
+        ..
+    } = completed.status
+    else {
+        unreachable!("completion reports a completed session")
+    };
+    (begin.upload_id().clone(), content_ref, completed_at_ms)
 }
 
-fn read_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadStatusResponse {
+fn read_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSessionResponse {
     let response = raw_agent()
         .get(&format!(
             "{server_url}/v0/namespaces/demo/uploads/{upload_id}"
@@ -596,7 +623,7 @@ fn read_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> Upl
 fn abort_upload(
     server_url: &str,
     upload_id: &loonfs_api::UploadId,
-) -> Result<AbortUploadResponse, Box<ureq::Error>> {
+) -> Result<UploadSessionResponse, Box<ureq::Error>> {
     let response = raw_agent()
         .post(&format!(
             "{server_url}/v0/namespaces/demo/uploads/{upload_id}/abort"

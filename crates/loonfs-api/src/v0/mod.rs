@@ -48,10 +48,9 @@ pub use search::{
     GrepRequest, GrepResponse,
 };
 pub use uploads::{
-    AbortUploadResponse, BeginUploadRequest, BeginUploadResponse,
-    CompleteKnownContentUploadRequest, CompleteMultipartUploadRequest, CompleteUploadResponse,
-    CompletedUploadPart, ContentToken, DirectMultipartUpload, DirectMultipartUploadOptions,
-    DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
-    SignedUploadPart, UploadContentClaim, UploadContentResponse, UploadMode,
-    UploadPartChecksumClaim, UploadSessionStatus, UploadStatusResponse,
+    BeginUploadRequest, BeginUploadResponse, CompleteKnownContentUploadRequest,
+    CompleteMultipartUploadRequest, CompletedUploadPart, ContentToken, DirectMultipartUpload,
+    DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest,
+    SignUploadPartsResponse, SignedUploadPart, UploadContentClaim, UploadContentResponse,
+    UploadMode, UploadPartChecksumClaim, UploadSessionResponse, UploadSessionStatus,
 };

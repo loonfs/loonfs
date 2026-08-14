@@ -23,14 +23,14 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_api::{
     v0::{
-        AbortUploadResponse, BeginDownloadByInodeRequest, BeginDownloadByInodeResponse,
-        BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
-        ChangesResponse, CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
-        CompleteMultipartUploadRequest, CompleteUploadResponse, CompletedUploadPart, ContentToken,
+        BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
+        BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+        CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
+        CompleteMultipartUploadRequest, CompletedUploadPart, ContentToken,
         DirectMultipartUploadOptions, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse,
         ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart,
         StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadContentResponse,
-        UploadPartChecksumClaim, UploadStatusResponse,
+        UploadPartChecksumClaim, UploadSessionResponse, UploadSessionStatus,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
@@ -1244,13 +1244,13 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<AbortUploadResponse> {
+    ) -> Result<UploadSessionResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
             self.base_url
         );
         // Aborting is idempotent: a repeat reports the abort that stands.
-        self.request_json::<(), AbortUploadResponse>(self.post(&url), None)
+        self.request_json::<(), UploadSessionResponse>(self.post(&url), None)
             .await
     }
 
@@ -1263,12 +1263,12 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadStatusResponse> {
+    ) -> Result<UploadSessionResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}",
             self.base_url
         );
-        self.request_json::<(), UploadStatusResponse>(self.get(&url), None)
+        self.request_json::<(), UploadSessionResponse>(self.get(&url), None)
             .await
     }
 
@@ -1277,13 +1277,13 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<CompleteUploadResponse> {
+    ) -> Result<UploadSessionResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
         );
         // The durable completed-session record replays an identical completion without new effect.
-        self.request_json::<_, CompleteUploadResponse>(
+        self.request_json::<_, UploadSessionResponse>(
             self.post(&url),
             Some(&CompleteKnownContentUploadRequest {}),
         )
@@ -1296,12 +1296,12 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
-    ) -> Result<CompleteUploadResponse> {
+    ) -> Result<UploadSessionResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
         );
-        self.request_json::<_, CompleteUploadResponse>(self.post(&url), Some(request))
+        self.request_json::<_, UploadSessionResponse>(self.post(&url), Some(request))
             .await
     }
 
@@ -2142,10 +2142,18 @@ impl Client {
         Ok(Self::staged_from_completion(response))
     }
 
-    fn staged_from_completion(response: CompleteUploadResponse) -> StagedContent {
+    fn staged_from_completion(response: UploadSessionResponse) -> StagedContent {
+        let UploadSessionStatus::Completed {
+            content_ref,
+            content_token,
+            ..
+        } = response.status
+        else {
+            unreachable!("the completion endpoint returned a non-completed session")
+        };
         StagedContent {
-            content_ref: response.content_ref,
-            content_token: response.content_token,
+            content_ref,
+            content_token,
         }
     }
 
@@ -3025,11 +3033,15 @@ mod tests {
         let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
             .expect("valid upload id");
         let content_ref = test_content_ref(b"content");
-        let response = CompleteUploadResponse {
+        let response = UploadSessionResponse {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
-            content_ref: content_ref.clone(),
-            content_token: None,
+            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Completed {
+                completed_at_ms: 1,
+                content_ref: content_ref.clone(),
+                content_token: None,
+            },
         };
         let transport = crate::transport::test_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),

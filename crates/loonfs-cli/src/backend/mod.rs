@@ -17,7 +17,7 @@ use bytes::Bytes;
 use loonfs_api::{
     v0::{
         ChangesResponse, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, StoreProbeRequest,
-        StoreProbeResponse, UploadStatusResponse,
+        StoreProbeResponse, UploadSessionResponse,
     },
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, ContentRef,
     CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
@@ -677,7 +677,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<UploadStatusResponse, BackendError> {
+    ) -> Result<UploadSessionResponse, BackendError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target

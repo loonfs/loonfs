@@ -8,7 +8,7 @@ use loonfs_api::{
     v0::{
         BeginUploadResponse, CompleteMultipartUploadRequest, DirectMultipartUpload,
         DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
-        UploadPartChecksumClaim,
+        UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
     },
     ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse,
     DestinationBehavior, FilesystemOperation, NamespaceId,
@@ -202,9 +202,11 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .complete_upload(&namespace_id, begin.upload_id())
         .await
         .expect("complete direct-put upload");
-    assert_eq!(complete.content_ref, content_ref);
+    assert_eq!(complete.mode, UploadMode::DirectPut);
+    assert_eq!(complete.content_ref(), Some(&content_ref));
     let content_token = complete
-        .content_token
+        .content_token()
+        .cloned()
         .expect("completion returns content token");
 
     let response = post_commit(
@@ -448,7 +450,7 @@ async fn assert_direct_put_is_no_replace(
         .await
         .expect("complete first direct put");
     assert!(
-        complete.content_token.is_some(),
+        complete.content_token().is_some(),
         "the refused replay left the first object exactly as it was written"
     );
 }
@@ -774,8 +776,9 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
         .complete_upload(namespace_id, begin.upload_id())
         .await
         .expect("complete the honest promise");
-    assert_eq!(complete.content_ref, content_ref);
-    assert!(complete.content_token.is_some());
+    assert_eq!(complete.mode, UploadMode::DirectPut);
+    assert_eq!(complete.content_ref(), Some(&content_ref));
+    assert!(complete.content_token().is_some());
     assert_eq!(
         content_ref.checksum,
         Checksum::crc32c(bytes),
@@ -1125,7 +1128,17 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .complete_multipart_upload(&namespace_id, &upload_id, &request)
         .await
         .expect("complete the multipart upload");
-    let content_ref = complete.content_ref.clone();
+    assert_eq!(complete.mode, UploadMode::DirectMultipart);
+    let content_ref = complete
+        .content_ref()
+        .expect("completed content ref")
+        .clone();
+    let UploadSessionStatus::Completed {
+        completed_at_ms, ..
+    } = complete.status
+    else {
+        unreachable!("completion reports a completed session")
+    };
     assert_eq!(content_ref.size_bytes, payload.len() as u64);
     assert_eq!(content_ref.checksum, whole_object);
 
@@ -1138,10 +1151,20 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .complete_multipart_upload(&namespace_id, &upload_id, &request)
         .await
         .expect("a lost completion is answered, not failed");
-    assert_eq!(replayed.content_ref, content_ref);
+    assert_eq!(replayed.mode, UploadMode::DirectMultipart);
+    assert_eq!(replayed.content_ref(), Some(&content_ref));
+    let UploadSessionStatus::Completed {
+        completed_at_ms: replayed_at_ms,
+        ..
+    } = &replayed.status
+    else {
+        unreachable!("completion replay reports a completed session")
+    };
+    assert_eq!(*replayed_at_ms, completed_at_ms);
 
     let content_token = replayed
-        .content_token
+        .content_token()
+        .cloned()
         .expect("completion returns content token");
     let response = post_commit(
         &harness.server_url,

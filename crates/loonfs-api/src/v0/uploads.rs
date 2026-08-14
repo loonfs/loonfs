@@ -338,22 +338,6 @@ pub struct CompleteMultipartUploadRequest {
     pub parts: Vec<CompletedUploadPart>,
 }
 
-/// Response after an upload session is completed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CompleteUploadResponse {
-    /// Namespace that owns the completed session.
-    pub namespace_id: NamespaceId,
-    /// Session whose result is now frozen for idempotent completion retries.
-    pub upload_id: UploadId,
-    /// Verified content selected by the completed session.
-    pub content_ref: ContentRef,
-    /// Short-lived proof for a later commit. This is absent after the token
-    /// minting window closes, while `content_ref` remains available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_token: Option<ContentToken>,
-}
-
 /// Observed state of an upload session.
 ///
 /// A session starts as `Open` and ends as either `Completed` or `Aborted`.
@@ -362,7 +346,7 @@ pub struct CompleteUploadResponse {
 /// the content to be uploaded again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum UploadSessionStatus {
     /// Accepting content until its lease passes.
     #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusOpen"))]
@@ -391,38 +375,47 @@ pub enum UploadSessionStatus {
     },
 }
 
-/// Response for reading one upload session.
+/// Current view of one upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct UploadStatusResponse {
+pub struct UploadSessionResponse {
     /// Namespace that owns the session.
     pub namespace_id: NamespaceId,
-    /// Session that was read.
+    /// Session represented by this view.
     pub upload_id: UploadId,
-    /// The session's state, with a fresh receipt when it is completed.
+    /// Transport selected when the session began.
+    pub mode: UploadMode,
+    /// The session's lifecycle and state-specific fields. Completed HTTP
+    /// responses carry a fresh receipt while the minting window remains open.
+    #[serde(flatten)]
     pub status: UploadSessionStatus,
 }
 
-/// Response after aborting an upload session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct AbortUploadResponse {
-    /// Namespace that owns the session.
-    pub namespace_id: NamespaceId,
-    /// Session that is now final.
-    pub upload_id: UploadId,
-    /// Unix-millisecond stamp of the abort that stands, which for a repeated
-    /// abort is the first one's.
-    pub aborted_at_ms: u64,
+impl UploadSessionResponse {
+    /// Returns the completed content reference, or `None` before completion.
+    pub const fn content_ref(&self) -> Option<&ContentRef> {
+        match &self.status {
+            UploadSessionStatus::Completed { content_ref, .. } => Some(content_ref),
+            UploadSessionStatus::Open { .. } | UploadSessionStatus::Aborted { .. } => None,
+        }
+    }
+
+    /// Returns the completed session's current content token, when present.
+    pub const fn content_token(&self) -> Option<&ContentToken> {
+        match &self.status {
+            UploadSessionStatus::Completed { content_token, .. } => content_token.as_ref(),
+            UploadSessionStatus::Open { .. } | UploadSessionStatus::Aborted { .. } => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         BeginUploadRequest, BeginUploadResponse, CompleteKnownContentUploadRequest,
-        CompleteMultipartUploadRequest, CompleteUploadResponse, ContentToken,
-        DirectMultipartUpload, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
-        UploadMode, UploadSessionStatus,
+        CompleteMultipartUploadRequest, ContentToken, DirectMultipartUpload, DirectPutUpload,
+        ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSessionResponse,
+        UploadSessionStatus,
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -679,26 +672,58 @@ mod tests {
     }
 
     #[test]
-    fn upload_status_names_its_state_on_the_wire() {
-        let open = serde_json::to_value(UploadSessionStatus::Open {
-            expires_at_ms: 1_000,
+    fn upload_session_response_is_flat_and_uses_one_status_vocabulary() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
+        let open = serde_json::to_value(UploadSessionResponse {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            mode: UploadMode::DirectMultipart,
+            status: UploadSessionStatus::Open {
+                expires_at_ms: 1_000,
+            },
         })
         .expect("serialize open status");
-        assert_eq!(open["state"], "open");
+        assert_eq!(
+            open,
+            serde_json::json!({
+                "namespace_id": "demo",
+                "upload_id": "upl_00000000000000000000000000000001",
+                "mode": "direct_multipart",
+                "status": "open",
+                "expires_at_ms": 1_000,
+            })
+        );
 
-        let aborted = serde_json::to_value(UploadSessionStatus::Aborted {
-            aborted_at_ms: 2_000,
+        let aborted = serde_json::to_value(UploadSessionResponse {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            mode: UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Aborted {
+                aborted_at_ms: 2_000,
+            },
         })
         .expect("serialize aborted status");
-        assert_eq!(aborted["state"], "aborted");
+        assert_eq!(aborted["status"], "aborted");
+        assert_eq!(aborted["mode"], "service_proxied");
+        assert_eq!(aborted["aborted_at_ms"], 2_000);
+        assert!(aborted.get("state").is_none());
 
-        let completed = serde_json::to_value(UploadSessionStatus::Completed {
-            completed_at_ms: 3_000,
-            content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
-            content_token: None,
+        let completed = serde_json::to_value(UploadSessionResponse {
+            namespace_id,
+            upload_id,
+            mode: UploadMode::DirectPut,
+            status: UploadSessionStatus::Completed {
+                completed_at_ms: 3_000,
+                content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
+                content_token: None,
+            },
         })
         .expect("serialize completed status");
-        assert_eq!(completed["state"], "completed");
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(completed["mode"], "direct_put");
+        assert!(completed.get("state").is_none());
+        assert!(completed.get("status").is_some());
         assert!(
             completed.get("content_token").is_none(),
             "a session past its receipt window reports no token at all"
@@ -717,11 +742,15 @@ mod tests {
             content_ref: content_ref.clone(),
             token: "opaque-server-token".to_owned(),
         };
-        let completion = serde_json::to_value(CompleteUploadResponse {
+        let completion = serde_json::to_value(UploadSessionResponse {
             namespace_id: namespace_id.clone(),
             upload_id,
-            content_ref: content_ref.clone(),
-            content_token: Some(content_token.clone()),
+            mode: UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Completed {
+                completed_at_ms: 3_000,
+                content_ref: content_ref.clone(),
+                content_token: Some(content_token.clone()),
+            },
         })
         .expect("serialize completion");
         let status = serde_json::to_value(UploadSessionStatus::Completed {
