@@ -4433,7 +4433,7 @@
           {
             "type": "object",
             "title": "FilesystemChangeDeleted",
-            "description": "A file or directory subtree was deleted. The enclosing change's\n`committed_seq` is the deletion generation an undelete request passes\nas `deletion_seq`.",
+            "description": "A file or directory subtree was deleted. Use the enclosing change's\n`committed_seq` as `deletion_seq` when restoring it.",
             "required": [
               "inode_id",
               "kind"
@@ -4694,7 +4694,7 @@
           {
             "type": "object",
             "title": "FsOpUndelete",
-            "description": "Recover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deletion_seq` (both reported by the\ndelete and by the change feed) and re-bind it. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
+            "description": "Restore a deleted file or subtree.\n\n`inode_id` and `deletion_seq` identify one exact deletion. A stale\nsequence returns `not_deleted` and cannot undo a later deletion.",
             "required": [
               "inode_id",
               "deletion_seq",
@@ -6026,7 +6026,7 @@
       },
       "TrashEntry": {
         "type": "object",
-        "description": "One recoverable deletion: an active subtree tombstone plus the identity\nof the binding it deleted, when the delete recorded one. Entries with no\nrecorded name predate the enriched tombstone rows; their inode and\nsequence still form a complete `undelete` handle.",
+        "description": "One deletion that can still be restored.\n\n`inode_id` and `deletion_seq` are sufficient to restore it. The original\nparent and name are included when they were recorded.",
         "required": [
           "inode_id",
           "deletion_seq",
@@ -6046,7 +6046,7 @@
           },
           "deletion_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Commit sequence of the deletion; the other half of the handle."
+            "description": "Commit sequence that identifies this deletion."
           },
           "display_name": {
             "oneOf": [
@@ -6061,7 +6061,7 @@
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "Inode the deletion hid; half of the recovery handle."
+            "description": "Inode hidden by the deletion."
           },
           "name_key": {
             "oneOf": [
