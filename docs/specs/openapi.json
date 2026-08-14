@@ -2149,7 +2149,7 @@
           "inodes"
         ],
         "summary": "List file revisions by inode",
-        "description": "Returns retained revisions for a file inode without requiring a current path or binding. The response is path-free.",
+        "description": "Returns retained revisions for a file inode without requiring a current path.",
         "operationId": "list_file_revisions_by_inode",
         "parameters": [
           {
@@ -2262,7 +2262,7 @@
           "inodes"
         ],
         "summary": "Read file revision by inode",
-        "description": "Reads and verifies one retained file revision directly by `(inode_id, revision_no)`, without resolving a current path.",
+        "description": "Reads and verifies one retained file revision by inode id and revision number.",
         "operationId": "get_file_revision_bytes_by_inode",
         "parameters": [
           {
@@ -2388,7 +2388,7 @@
           "inodes"
         ],
         "summary": "Begin download by inode",
-        "description": "Authorizes a direct read of one retained inode revision. The strict body is `{}` and the response is path-free because historical identity does not imply a current binding.",
+        "description": "Authorizes a direct read of one retained inode revision. The request body is `{}` and the response does not include a path.",
         "operationId": "begin_download_by_inode",
         "parameters": [
           {
@@ -3591,12 +3591,12 @@
       },
       "BeginDownloadByInodeRequest": {
         "type": "object",
-        "description": "Strict empty body for a download already addressed by route identity.",
+        "description": "Empty request for an inode-addressed download.",
         "additionalProperties": false
       },
       "BeginDownloadByInodeResponse": {
         "type": "object",
-        "description": "A short-lived capability to read one inode revision's content object.\n\nHistorical inode identity is deliberately path-free: the inode may have\nmoved since the revision was written or may have no current binding.",
+        "description": "A short-lived capability to read one inode revision.",
         "required": [
           "namespace_id",
           "inode_id",
@@ -3607,15 +3607,15 @@
         "properties": {
           "access": {
             "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "Short-lived read capability the client uses without learning the raw object key."
+            "description": "Short-lived provider access without the raw object key."
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Identity, byte length, and checksum evidence for the authorized object."
+            "description": "Content identity, size, and checksum."
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "File inode whose revision is authorized."
+            "description": "File inode being read."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -3623,7 +3623,7 @@
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "Revision the capability reads."
+            "description": "Revision being read."
           }
         }
       },
