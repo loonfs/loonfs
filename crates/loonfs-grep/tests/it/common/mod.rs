@@ -96,7 +96,7 @@ impl GrepHost {
         let target_seq = match &lifecycle {
             GrepLifecycle::Disabled => None,
             GrepLifecycle::Backfilling { target_seq, .. } => Some(*target_seq),
-            GrepLifecycle::Steady { .. } => Some(
+            GrepLifecycle::Active { .. } => Some(
                 NamespaceReads::new(&self.reader, namespace_id)
                     .head_seq()
                     .await?,

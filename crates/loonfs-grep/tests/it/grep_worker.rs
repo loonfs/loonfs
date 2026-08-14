@@ -595,7 +595,7 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
         .expect("the record survives until core GC reaps it");
     assert!(
         matches!(finished.state, CheckpointRecordLifecycle::Released { .. }),
-        "the attempt ran to steady state on that pin and then released it"
+        "the attempt completed the backfill using that pin and then released it"
     );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
@@ -672,8 +672,8 @@ async fn grep_built_through_seq(
         .expect("grep root exists")
         .manifest_state()
         .lifecycle()
-        .steady_watermark()
-        .expect("a steady grep root has a watermark")
+        .active_watermark()
+        .expect("an active grep root has a watermark")
         .0
 }
 
@@ -1231,7 +1231,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .expect("load grep root")
         .expect("grep root exists");
     assert_eq!(
-        grep_root.manifest_state().lifecycle().steady_watermark(),
+        grep_root.manifest_state().lifecycle().active_watermark(),
         Some((head.seq, 0)),
         "the independent worker can advance past metadata materialization"
     );

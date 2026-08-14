@@ -174,10 +174,9 @@ impl GrepRootPointer {
 
 /// Durable lifecycle of grep indexing for one namespace.
 ///
-/// Each phase carries its own position and nothing else's. A backfill knows
-/// the sequence it is walking toward and how far the walk got; a steady
-/// index knows the sequence it has really built through. Neither can report
-/// the other's number, because neither has a field to put it in.
+/// Each phase stores only the position it needs. A backfill records its
+/// target and progress. An active index records how far indexing has
+/// progressed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrepLifecycle {
@@ -195,7 +194,7 @@ pub enum GrepLifecycle {
         checkpoint_id: CheckpointId,
     },
     /// Backfill is complete and changes are consumed incrementally.
-    Steady {
+    Active {
         /// Sequence of the commit at the index cursor. Everything at or
         /// below it is indexed, subject to `next_event_index`.
         built_through_seq: ChangeSeq,
@@ -215,10 +214,10 @@ pub enum GrepLifecycle {
 }
 
 impl GrepLifecycle {
-    /// The steady watermark pair, or `None` in any phase that has none.
-    pub fn steady_watermark(&self) -> Option<(ChangeSeq, u32)> {
+    /// Returns the index position for the active lifecycle.
+    pub fn active_watermark(&self) -> Option<(ChangeSeq, u32)> {
         match self {
-            Self::Steady {
+            Self::Active {
                 built_through_seq,
                 next_event_index,
             } => Some((*built_through_seq, *next_event_index)),
@@ -227,12 +226,6 @@ impl GrepLifecycle {
     }
 }
 
-/// The durable lifecycle as the admin plane reports it.
-///
-/// The wire enum mirrors the durable one state for state. The durable
-/// `Steady` spelling maps to the admin API's `Active` spelling without
-/// changing the durable encoding, and no host invents a number for a state
-/// that does not have one.
 impl From<&GrepLifecycle> for loonfs_api::v0::GrepIndexLifecycle {
     fn from(lifecycle: &GrepLifecycle) -> Self {
         match lifecycle {
@@ -246,7 +239,7 @@ impl From<&GrepLifecycle> for loonfs_api::v0::GrepIndexLifecycle {
                 cursor_inode_id: *cursor,
                 checkpoint_id: checkpoint_id.clone(),
             },
-            GrepLifecycle::Steady {
+            GrepLifecycle::Active {
                 built_through_seq,
                 next_event_index,
             } => Self::Active {
@@ -274,10 +267,9 @@ pub struct GrepReorganizeState {
 
 /// Durable index bookkeeping paired with the visible segment set.
 ///
-/// What lives here is what every phase has: segments are written and folded
-/// during a backfill and during steady indexing alike, so the reorganize
-/// state and the run allocator belong to the index rather than to a phase.
-/// Anything only one phase has lives in [`GrepLifecycle`].
+/// Segments can be written and reorganized during both backfill and active
+/// indexing. Shared state therefore lives here, while phase-specific state
+/// lives in [`GrepLifecycle`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepIndexState {
     /// Version of this nested index-state schema.

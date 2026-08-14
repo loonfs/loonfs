@@ -211,7 +211,7 @@ async fn racing_advancers_have_one_winner_and_loser_can_reload_and_retry() {
         .expect("final load succeeds")
         .expect("root exists");
     assert_eq!(
-        final_root.manifest_state().lifecycle().steady_watermark(),
+        final_root.manifest_state().lifecycle().active_watermark(),
         Some((ChangeSeq(3), 0))
     );
 }
@@ -237,7 +237,7 @@ async fn stale_etag_advance_fails_after_concurrent_advance() {
 fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepManifestState {
     GrepManifestState::new(
         namespace_id,
-        GrepLifecycle::Steady {
+        GrepLifecycle::Active {
             built_through_seq,
             next_event_index: 0,
         },

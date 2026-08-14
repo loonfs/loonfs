@@ -116,7 +116,7 @@ impl Default for GramIndexBuildPolicy {
 /// Both settled outcomes answer with the durable lifecycle itself rather
 /// than a sequence number, because the two phases do not have the same
 /// number to give: a fresh enable publishes a backfill with a target, and an
-/// already-enabled namespace may be mid-backfill or steady.
+/// already-enabled namespace may be backfilling or active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrepEnableOutcome {
     Enabled { state: GrepLifecycle },
@@ -360,7 +360,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         }
         let checkpoint_id = match current.manifest_state().lifecycle() {
             GrepLifecycle::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
-            GrepLifecycle::Steady { .. } | GrepLifecycle::Disabled => None,
+            GrepLifecycle::Active { .. } | GrepLifecycle::Disabled => None,
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
@@ -408,7 +408,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 cursor,
                 checkpoint_id,
             } => collect_backfill_unit(&reads, checkpoint_id, *target_seq, *cursor, policy).await,
-            GrepLifecycle::Steady {
+            GrepLifecycle::Active {
                 built_through_seq,
                 next_event_index,
             } => {
@@ -420,14 +420,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 
         let unit = match collected {
             Ok(Some(unit)) => unit,
-            // Only a steady root can be up to date: a backfill always has
-            // its next page, and answering `None` there would be a claim
-            // about a watermark it does not have.
+            // `None` is valid only during active indexing. A backfill must
+            // always return its next page.
             Ok(None) => {
                 let built_through_seq = current
                     .manifest_state()
                     .lifecycle()
-                    .steady_watermark()
+                    .active_watermark()
                     .map(|(built_through_seq, _)| built_through_seq)
                     .ok_or_else(|| GrepError::CorruptIndex {
                         message: "a backfilling grep root reported nothing left to index"
@@ -530,7 +529,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     ) -> Result<GrepBuildReport> {
         let previous_checkpoint_id = match current.manifest_state().lifecycle() {
             GrepLifecycle::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
-            GrepLifecycle::Steady { .. } | GrepLifecycle::Disabled => None,
+            GrepLifecycle::Active { .. } | GrepLifecycle::Disabled => None,
         };
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let next = match backfilling_root(
@@ -602,7 +601,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         segments.extend(new_segments);
         let next_run_ordinal =
             current.manifest_state().index().next_run_ordinal + u64::from(segments_written > 0);
-        // A finished backfill turns steady at exactly the sequence its
+        // A finished backfill becomes active at exactly the sequence its
         // checkpoint captured: the walk answered that state and no other, so
         // the watermark it hands the change feed is the target it reached.
         let (lifecycle, completed_checkpoint_id, built_through_seq) = match progress {
@@ -621,7 +620,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     target_seq,
                 ),
                 None => (
-                    GrepLifecycle::Steady {
+                    GrepLifecycle::Active {
                         built_through_seq: target_seq,
                         next_event_index: 0,
                     },
@@ -634,7 +633,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 built_through_seq,
                 next_event_index,
             } => (
-                GrepLifecycle::Steady {
+                GrepLifecycle::Active {
                     built_through_seq,
                     next_event_index,
                 },
@@ -642,7 +641,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 built_through_seq,
             ),
         };
-        let materialized = matches!(lifecycle, GrepLifecycle::Steady { .. });
+        let materialized = matches!(lifecycle, GrepLifecycle::Active { .. });
         let next = GrepManifestState::new(
             namespace_id.clone(),
             lifecycle,

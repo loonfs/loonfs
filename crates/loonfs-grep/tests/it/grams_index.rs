@@ -78,8 +78,8 @@ async fn grams_built_through_seq(
         .expect("grep root exists")
         .manifest_state()
         .lifecycle()
-        .steady_watermark()
-        .expect("a steady grep root has a watermark")
+        .active_watermark()
+        .expect("an active grep root has a watermark")
         .0
 }
 
@@ -453,8 +453,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     let (partial_seq, partial_event_index) = partial
         .manifest_state()
         .lifecycle()
-        .steady_watermark()
-        .expect("the partial root is steady");
+        .active_watermark()
+        .expect("the partial root is active");
     assert_eq!(partial_seq, commit.committed_seq);
     assert!(
         partial_event_index > 0,
@@ -530,8 +530,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         complete
             .manifest_state()
             .lifecycle()
-            .steady_watermark()
-            .expect("the complete root is steady"),
+            .active_watermark()
+            .expect("the complete root is active"),
         (commit.committed_seq, 0)
     );
     let complete_segment_ids: BTreeSet<_> = complete

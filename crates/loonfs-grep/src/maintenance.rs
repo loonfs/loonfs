@@ -95,9 +95,9 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         )))
     }
 
-    /// Answers whether the index trails its namespace, in at most two small
-    /// reads: the grep root, and — only for a steady root at a commit
-    /// boundary — one page of one change after its watermark.
+    /// Reports whether the index is behind its namespace. This reads the
+    /// grep root and, for an active index at a commit boundary, at most one
+    /// page of the change feed.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
         let Some(root) = load_grep_root(self.worker.store(), namespace_id)
             .await
@@ -113,10 +113,10 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
             GrepLifecycle::Backfilling { .. } => Ok(MaintenanceProbe::Due),
             // A watermark inside a commit has the rest of that commit left,
             // which no question about later commits would reveal.
-            GrepLifecycle::Steady {
+            GrepLifecycle::Active {
                 next_event_index, ..
             } if *next_event_index != 0 => Ok(MaintenanceProbe::Due),
-            GrepLifecycle::Steady {
+            GrepLifecycle::Active {
                 built_through_seq, ..
             } => {
                 let built_through_seq = *built_through_seq;

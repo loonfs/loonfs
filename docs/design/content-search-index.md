@@ -119,16 +119,16 @@ in-progress reorganization snapshot, outputs, and cursor. The pointer and
 manifests are independent of the namespace manifest, so core never has to
 understand grep state to read the filesystem.
 
-Each lifecycle phase carries its own position and nothing else's. A
-`backfilling` root carries the namespace sequence its checkpoint captured
-and the inode its walk resumes after; a `steady` root carries the
-incremental `(built_through_seq, next_event_index)` cursor. A zero or absent
+Each lifecycle phase stores only its own position. The `backfilling` state
+stores the namespace sequence captured by the checkpoint and the inode after
+which the walk resumes. The `active` state stores the incremental
+`(built_through_seq, next_event_index)` cursor. A zero or absent
 `next_event_index` is the commit boundary; a nonzero value resumes at that
 offset in the watermark commit's ordered change events, one per committed
 operation. Neither phase can report the other's sequence, because neither
 has a field to put it in — which is what lets a status reader trust the
-number it sees. A finished backfill turns steady at exactly the sequence it
-walked to, and the change feed takes over from there.
+number it sees. When backfill finishes, the lifecycle changes to `active` at
+exactly the sequence it indexed, and the change feed takes over from there.
 
 Publication writes the immutable manifest first and installs the pointer by
 one etag CAS. A CAS loser's manifest and segments are unreachable derived
@@ -159,7 +159,7 @@ that records the checkpoint id, target sequence, and no cursor. Build
 steps enumerate the files that checkpoint pins — one current revision per
 visible file, in ascending inode order — read eligible content, write delta
 segments, and publish the cursor (the last inode consumed) and segment set
-in one root CAS. The completing step changes the lifecycle to `steady` and
+in one root CAS. The completing step changes the lifecycle to `active` and
 releases the checkpoint.
 
 The grep index is background maintenance like any other, so it runs under
@@ -174,7 +174,7 @@ still has work. A poisoned root therefore backs off alone and cannot delay
 a sibling namespace, and no permit is held by a namespace with nothing to do.
 
 The job's probe is the cheap question the sweep and the query path both ask:
-read the grep root, and — only for a steady root sitting at a commit
+read the grep root, and — only for an active root sitting at a commit
 boundary — ask the change feed for one commit after its watermark. Two small
 reads answer whether the index trails its namespace.
 
@@ -194,7 +194,7 @@ A library-embedded host (the CLI's embedded mode) schedules nothing, so
 enabling the index is the schedule: `loonfs admin index-enable` captures one
 namespace sequence before it starts — the target a fresh backfill's
 checkpoint pinned, or the namespace's current head for an index that is
-already steady — and then runs the same job's bounded steps itself until the
+already active — and then runs the same job's bounded steps itself until the
 index has built through that sequence. It stops there even if writes keep
 landing, so a busy namespace cannot keep the command running; `--no-wait`
 skips the waiting entirely, and `--max-steps` and `--deadline-ms` bound it,
@@ -220,7 +220,7 @@ nothing and maintains assigned namespaces is what `admin run` already is.
 Grep has no private poller, no private timer, and no private configuration
 file; it never lists a namespace prefix.
 
-Steady-state build steps read the change feed after `built_through_seq` as
+Once active, build steps read the change feed after `built_through_seq` as
 semantic events, collect the file revisions those events published, read
 each eligible revision's content, extract grams, and write new delta-level
 segments. Moves, deletes, and undeletes publish no content, so they index
@@ -310,7 +310,7 @@ backfill: the worker creates an expiring user checkpoint and a root cursor
 walks the files that checkpoint pins, in inode order across steps, indexing
 as it goes. While lifecycle is `backfilling` the index is not yet
 materialized and queries are refused with the feature named; when the walk
-completes, lifecycle becomes `steady`, the checkpoint is released, and the
+completes, lifecycle becomes `active`, the checkpoint is released, and the
 watermark takes over. Two answers mean the basis is gone — the enumeration
 reporting its checkpoint no longer pins a manifest, and the feed reporting
 the watermark below the retention floor — and both discard the incomplete
@@ -412,7 +412,7 @@ a pinned sequence is answered in two parts: the index covers
 commits at or below `built_through_seq`, and the revisions that
 landed in between — enumerable from the change feed after that
 watermark — are scanned exhaustively with the same eligibility
-rule and the same verifier. Steady-state
+rule and the same verifier. Background
 maintenance keeps that tail small, and write backpressure bounds
 it outright. If maintenance has been off long enough that the gap
 exceeds the query's tail budget, the query fails with a typed

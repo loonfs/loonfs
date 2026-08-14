@@ -122,15 +122,15 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     );
     settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
-    let steady = index_status(&router, &namespace_id).await;
+    let active = index_status(&router, &namespace_id).await;
     assert_eq!(
-        steady.lifecycle,
+        active.lifecycle,
         GrepIndexLifecycle::Active {
             built_through_seq: ChangeSeq(0),
             next_event_index: 0,
         }
     );
-    assert!(!steady.reorganize_pending);
+    assert!(!active.reorganize_pending);
 
     // Re-enabling an active root reports the phase it found, still tagged.
     let again: GrepIndexStatusResponse = response_json(
@@ -143,7 +143,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         .await,
     )
     .await;
-    assert_eq!(again.lifecycle, steady.lifecycle);
+    assert_eq!(again.lifecycle, active.lifecycle);
 
     // The file lands through a writer of its own, so nothing in this server
     // observed the publish: the index stays where it was until a request
@@ -409,7 +409,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
         .expect("write file");
     settle(&server).await;
     assert_eq!(
-        lifecycle_of(&store, &namespace_id).await.steady_watermark(),
+        lifecycle_of(&store, &namespace_id).await.active_watermark(),
         None,
         "a deployment that maintains nothing must leave the backfill where it was"
     );
@@ -481,7 +481,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .expect("maintained root");
     assert!(matches!(
         root.manifest_state().lifecycle(),
-        GrepLifecycle::Steady { .. }
+        GrepLifecycle::Active { .. }
     ));
     assert!(
         !root.manifest_state().segments().is_empty(),
@@ -530,7 +530,7 @@ async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
 
     settle(&server).await;
     assert_eq!(
-        lifecycle_of(&store, &namespace_id).await.steady_watermark(),
+        lifecycle_of(&store, &namespace_id).await.active_watermark(),
         None,
         "nothing here schedules the backfill it published"
     );
@@ -616,8 +616,8 @@ fn maintains_grep_index(server: &FsWriter) -> bool {
 async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> ChangeSeq {
     lifecycle_of(store, namespace_id)
         .await
-        .steady_watermark()
-        .expect("a steady grep root has a watermark")
+        .active_watermark()
+        .expect("an active grep root has a watermark")
         .0
 }
 
