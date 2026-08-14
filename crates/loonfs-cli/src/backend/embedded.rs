@@ -25,8 +25,7 @@ use loonfs_api::{
     CreateCheckpointRequest, CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest,
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
-    ReleaseCheckpointResponse, RevisionNo,
+    NamespaceId, NamespaceStatusResponse, PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
@@ -142,7 +141,7 @@ impl EmbeddedBackend {
     pub(super) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<NamespaceSummary, BackendError> {
+    ) -> Result<NamespaceStatusResponse, BackendError> {
         let result = self
             .writer
             .create_namespace(namespace_id, CreateNamespaceOptions::default())
@@ -169,7 +168,7 @@ impl EmbeddedBackend {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<NamespaceSummary, BackendError> {
+    ) -> Result<NamespaceStatusResponse, BackendError> {
         let result = self
             .writer
             .fork_namespace(source_namespace_id, new_namespace_id)

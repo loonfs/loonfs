@@ -4,7 +4,7 @@ use super::core::{should_invalidate_after_result, ReadCore, WriterIdentity};
 use crate::FsWriter;
 use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespaceId,
-    NamespaceSummary,
+    NamespaceStatusResponse,
 };
 use crate::{Result, RuntimeError};
 
@@ -12,12 +12,12 @@ impl FsWriter {
     /// Creates a namespace, bootstrapping its durable state.
     ///
     /// With `options.allow_existing`, an already-existing namespace is
-    /// treated as success.
+    /// treated as success. Returns the namespace's post-operation status.
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> Result<NamespaceSummary> {
+    ) -> Result<NamespaceStatusResponse> {
         let result = self
             .engine(namespace_id)
             .bootstrap_namespace(loonfs_core::BootstrapOptions {
@@ -30,12 +30,13 @@ impl FsWriter {
 
     /// Forks `source` into `target` at the source's current head.
     ///
-    /// The fork shares immutable file bytes but gets its own metadata history.
+    /// The fork shares immutable file bytes but gets its own metadata history,
+    /// and the response reports the target at the fork point.
     pub async fn fork_namespace(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> Result<NamespaceSummary> {
+    ) -> Result<NamespaceStatusResponse> {
         let result = self
             .engine(source)
             .fork_namespace(target)

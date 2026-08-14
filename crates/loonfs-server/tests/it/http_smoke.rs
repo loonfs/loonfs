@@ -227,11 +227,16 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     ))
     .await;
 
-    harness
+    let created = harness
         .client
         .create_namespace(&namespace_id("demo"))
         .await
         .expect("create namespace");
+    assert_eq!(created.namespace_id.as_str(), "demo");
+    assert_eq!(created.head_seq, ChangeSeq(0));
+    assert_eq!(created.current_manifest_id, None);
+    assert_eq!(created.wal_tail_segments, 0);
+    assert_eq!(created.retention_floor_seq, ChangeSeq(0));
     let directory = NamespacePath::parse("demo", "/notes").expect("parse directory path");
     harness
         .client
@@ -371,6 +376,10 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .await
         .expect("fork namespace");
     assert_eq!(forked.namespace_id.as_str(), "clone");
+    assert_eq!(forked.head_seq, ChangeSeq(1));
+    assert_eq!(forked.current_manifest_id, None);
+    assert_eq!(forked.wal_tail_segments, 0);
+    assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
 
     let source_entry = harness
         .client

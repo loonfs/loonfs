@@ -104,7 +104,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+    ) -> loonfs::Result<loonfs::NamespaceStatusResponse> {
         self.writer.create_namespace(namespace_id, options).await
     }
 
@@ -230,12 +230,12 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs::NamespaceSummary>;
+    ) -> loonfs::Result<loonfs::NamespaceStatusResponse>;
     fn fork_namespace_blocking(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> loonfs::Result<loonfs::NamespaceSummary>;
+    ) -> loonfs::Result<loonfs::NamespaceStatusResponse>;
     fn namespace_status_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -339,7 +339,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+    ) -> loonfs::Result<loonfs::NamespaceStatusResponse> {
         block_on(self.writer.create_namespace(namespace_id, options))
     }
 
@@ -347,7 +347,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+    ) -> loonfs::Result<loonfs::NamespaceStatusResponse> {
         block_on(self.writer.fork_namespace(source, target))
     }
 

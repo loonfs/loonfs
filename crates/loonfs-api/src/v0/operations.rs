@@ -140,14 +140,6 @@ pub struct ForkNamespaceRequest {
     pub new_namespace_id: NamespaceId,
 }
 
-/// Short namespace identifier returned by namespace create/fork operations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct NamespaceSummary {
-    /// Durable namespace id.
-    pub namespace_id: NamespaceId,
-}
-
 /// Status summary for one namespace.
 ///
 /// This is the point-lookup answer to "does this namespace exist, and where
@@ -1060,6 +1052,43 @@ mod tests {
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id"),
             b"hello",
         )
+    }
+
+    #[test]
+    fn namespace_create_and_fork_responses_use_the_status_shape() {
+        let create = NamespaceStatusResponse {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            head_seq: ChangeSeq(0),
+            current_manifest_id: None,
+            wal_tail_segments: 0,
+            retention_floor_seq: ChangeSeq(0),
+        };
+        assert_eq!(
+            serde_json::to_value(create).expect("serialize create response"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "head_seq": 0,
+                "wal_tail_segments": 0,
+                "retention_floor_seq": 0
+            })
+        );
+
+        let fork = NamespaceStatusResponse {
+            namespace_id: NamespaceId::parse("demo-branch").expect("namespace id"),
+            head_seq: ChangeSeq(7),
+            current_manifest_id: None,
+            wal_tail_segments: 0,
+            retention_floor_seq: ChangeSeq(7),
+        };
+        assert_eq!(
+            serde_json::to_value(fork).expect("serialize fork response"),
+            serde_json::json!({
+                "namespace_id": "demo-branch",
+                "head_seq": 7,
+                "wal_tail_segments": 0,
+                "retention_floor_seq": 7
+            })
+        );
     }
 
     #[test]

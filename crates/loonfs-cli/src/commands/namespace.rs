@@ -55,7 +55,7 @@ async fn run_namespace_create(
         kind,
         profile: Some(resolved.profile_name),
         mode: Some(mode),
-        data: CommandData::NamespaceSummary(namespace),
+        data: CommandData::NamespaceStatus(namespace),
     })
 }
 
@@ -149,7 +149,7 @@ async fn run_namespace_fork(
         kind,
         profile: Some(resolved.profile_name),
         mode: Some(mode),
-        data: CommandData::NamespaceSummary(namespace),
+        data: CommandData::NamespaceStatus(namespace),
     })
 }
 

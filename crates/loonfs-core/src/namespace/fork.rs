@@ -15,7 +15,7 @@ use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordLifecycle, ForkBasis, HeadState, NamespaceState, WriterBlock,
 };
-use loonfs_api::{NamespaceId, NamespaceSummary, WriterEpoch};
+use loonfs_api::{NamespaceId, NamespaceStatusResponse, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -23,7 +23,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<NamespaceSummary> {
+) -> Result<NamespaceStatusResponse> {
     // The guard at the end needs to know how long this attempt has been
     // running, so it starts here, before the first write.
     let timer = StdMonotonicTimer::default();
@@ -152,9 +152,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         return Err(error);
     }
 
-    Ok(NamespaceSummary {
-        namespace_id: new_namespace_id.clone(),
-    })
+    crate::namespace::status::load_namespace_head_summary(store, new_namespace_id).await
 }
 
 /// Proves, after the target head is durable, that the source record still

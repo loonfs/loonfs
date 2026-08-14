@@ -33,7 +33,7 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
-    NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo,
+    NamespaceId, NamespaceStatusResponse, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo,
     TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
@@ -151,11 +151,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
 
     /// Creates the namespace if it does not already exist.
     ///
-    /// Use this before normal reads and writes for a new namespace.
+    /// Use this before normal reads and writes for a new namespace. Returns
+    /// the namespace's status after its head is installed.
     pub async fn bootstrap_namespace(
         &self,
         options: BootstrapOptions,
-    ) -> std::result::Result<NamespaceSummary, BootstrapNamespaceError> {
+    ) -> std::result::Result<NamespaceStatusResponse, BootstrapNamespaceError> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
@@ -168,7 +169,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// Creates a new namespace at the current head of this namespace.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
-    pub async fn fork_namespace(&self, target: &NamespaceId) -> Result<NamespaceSummary> {
+    /// Returns the target's status at the fork point.
+    pub async fn fork_namespace(&self, target: &NamespaceId) -> Result<NamespaceStatusResponse> {
         fork::fork_namespace(
             &self.store,
             &self.namespace_id,

@@ -2468,7 +2468,16 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
 
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "clone"]);
     assert_success(&fork);
-    assert_eq!(json_data(&fork)["namespace_id"], "clone");
+    assert_eq!(
+        json_data(&fork),
+        serde_json::json!({
+            "kind": "namespace_status",
+            "namespace_id": "clone",
+            "head_seq": 1,
+            "wal_tail_segments": 0,
+            "retention_floor_seq": 1
+        })
+    );
 
     let source = harness.run(&["--json", "stat", "/docs/shared.txt"]);
     let clone = harness.run(&["--json", "stat", "--namespace", "clone", "/docs/shared.txt"]);
@@ -3174,9 +3183,28 @@ fn external_remote_profile_executes_through_http() {
 
     let create = harness.run(&["--json", "namespace", "create", "demo"]);
     assert_success(&create);
+    assert_eq!(
+        json_data(&create),
+        serde_json::json!({
+            "kind": "namespace_status",
+            "namespace_id": "demo",
+            "head_seq": 0,
+            "wal_tail_segments": 0,
+            "retention_floor_seq": 0
+        })
+    );
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "clone"]);
     assert_success(&fork);
-    assert_eq!(json_data(&fork)["namespace_id"], "clone");
+    assert_eq!(
+        json_data(&fork),
+        serde_json::json!({
+            "kind": "namespace_status",
+            "namespace_id": "clone",
+            "head_seq": 0,
+            "wal_tail_segments": 0,
+            "retention_floor_seq": 0
+        })
+    );
 
     let use_namespace = harness.run(&["--json", "use", "demo"]);
     assert_success(&use_namespace);

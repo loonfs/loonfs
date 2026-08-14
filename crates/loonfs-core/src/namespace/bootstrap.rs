@@ -16,7 +16,8 @@ use loonfs_api::wire::control::{
     WriterBlock,
 };
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, NamespaceId, NamespaceSummary, ROOT_INODE_ID,
+    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, NamespaceId, NamespaceStatusResponse,
+    ROOT_INODE_ID,
 };
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -80,7 +81,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     allow_existing: bool,
-) -> Result<NamespaceSummary, BootstrapNamespaceError> {
+) -> Result<NamespaceStatusResponse, BootstrapNamespaceError> {
     if context.writer_id.trim().is_empty() {
         return Err(BootstrapNamespaceError::EmptyHolderId);
     }
@@ -99,25 +100,29 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     });
 
     match install_namespace_head(store, namespace_id, &head).await? {
-        NamespaceHeadInstall::Landed => Ok(NamespaceSummary {
-            namespace_id: namespace_id.clone(),
-        }),
+        NamespaceHeadInstall::Landed => {}
         // Whoever wrote the head owns the id. A caller retrying after a
         // lost acknowledgment gets the same answer as a caller who lost the
         // race outright, and the namespace it names is complete and usable
         // either way — the old flow's `namespace_partial`, which named a
         // namespace nobody could use, is gone. `allow_existing` is how a
         // caller says "create it if it is not there", including on a retry.
-        NamespaceHeadInstall::Exists if allow_existing => Ok(NamespaceSummary {
-            namespace_id: namespace_id.clone(),
-        }),
-        NamespaceHeadInstall::Exists => Err(BootstrapNamespaceError::NamespaceAlreadyExists {
-            namespace_id: namespace_id.clone(),
-        }),
-        NamespaceHeadInstall::Deleted => Err(BootstrapNamespaceError::NamespaceDeleted {
-            namespace_id: namespace_id.clone(),
-        }),
+        NamespaceHeadInstall::Exists if allow_existing => {}
+        NamespaceHeadInstall::Exists => {
+            return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
+                namespace_id: namespace_id.clone(),
+            })
+        }
+        NamespaceHeadInstall::Deleted => {
+            return Err(BootstrapNamespaceError::NamespaceDeleted {
+                namespace_id: namespace_id.clone(),
+            })
+        }
     }
+
+    crate::namespace::status::load_namespace_head_summary(store, namespace_id)
+        .await
+        .map_err(BootstrapNamespaceError::Core)
 }
 
 /// How one namespace-installing conditional write resolved.

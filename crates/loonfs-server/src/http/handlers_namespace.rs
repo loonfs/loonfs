@@ -183,7 +183,7 @@ pub(super) async fn capabilities(
         description = "Creates a new empty namespace.",
         request_body = CreateNamespaceRequest,
         responses(
-            (status = 200, description = "Namespace created", body = loonfs_api::NamespaceSummary),
+            (status = 200, description = "Namespace created", body = loonfs_api::NamespaceStatusResponse),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 409, description = "Namespace already exists or is partial", body = ApiError),
@@ -195,13 +195,14 @@ pub(super) async fn capabilities(
 pub(super) async fn create_namespace(
     State(state): State<AppState>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
-) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
-    let summary = state
+) -> Result<Json<loonfs_api::NamespaceStatusResponse>, ApiResponseError> {
+    state
         .writer
         .create_namespace(&request.namespace_id, CreateNamespaceOptions::default())
         .await
         .map_err(ApiResponseError::runtime)?;
-    Ok(Json(summary))
+    let status = read_namespace_status(&state, &request.namespace_id).await?;
+    Ok(Json(status))
 }
 
 #[cfg_attr(
@@ -230,12 +231,19 @@ pub(super) async fn namespace_status(
 ) -> Result<Json<loonfs_api::NamespaceStatusResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
-    let status = state
-        .admin
-        .namespace_status(&namespace_id)
-        .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let status = read_namespace_status(&state, &namespace_id).await?;
     Ok(Json(status))
+}
+
+async fn read_namespace_status(
+    state: &AppState,
+    namespace_id: &loonfs_api::NamespaceId,
+) -> Result<loonfs_api::NamespaceStatusResponse, ApiResponseError> {
+    state
+        .admin
+        .namespace_status(namespace_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(namespace_id, error))
 }
 
 #[cfg_attr(
@@ -307,7 +315,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         params(("namespace_id" = String, Path, description = "Source namespace id")),
         request_body = ForkNamespaceRequest,
         responses(
-            (status = 200, description = "Namespace forked", body = loonfs_api::NamespaceSummary),
+            (status = 200, description = "Namespace forked", body = loonfs_api::NamespaceStatusResponse),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Source namespace not found", body = ApiError),
@@ -321,14 +329,15 @@ pub(super) async fn fork_namespace(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<ForkNamespaceRequest>,
-) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
+) -> Result<Json<loonfs_api::NamespaceStatusResponse>, ApiResponseError> {
     let source_namespace_id = namespace_id_path.into_id()?;
-    let summary = state
+    state
         .writer
         .fork_namespace(&source_namespace_id, &request.new_namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))?;
-    Ok(Json(summary))
+    let status = read_namespace_status(&state, &request.new_namespace_id).await?;
+    Ok(Json(status))
 }
 
 #[cfg_attr(

@@ -38,11 +38,11 @@ use loonfs_api::{
     DeleteNamespaceResponse, ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest,
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutRetryAttempt,
-    PutRetryErrorClassification, PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo,
-    SecretString, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    NamespaceId, NamespaceStatusResponse, PutRetryAttempt, PutRetryErrorClassification,
+    PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo, SecretString, StreamingChecksum,
+    UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
@@ -546,11 +546,14 @@ impl Client {
             .clone())
     }
 
-    /// Creates an empty namespace with the given ID.
-    pub async fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceSummary> {
+    /// Creates an empty namespace with the given ID and returns its genesis status.
+    pub async fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceStatusResponse> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
-        self.request_json_once::<_, NamespaceSummary>(
+        self.request_json_once::<_, NamespaceStatusResponse>(
             self.post(&url),
             Some(&CreateNamespaceRequest {
                 namespace_id: namespace_id.clone(),
@@ -590,18 +593,19 @@ impl Client {
             .await
     }
 
-    /// Creates a new namespace from the source namespace's current state.
+    /// Creates a new namespace from the source namespace's current state and
+    /// returns the target's status at the fork point.
     pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<NamespaceSummary> {
+    ) -> Result<NamespaceStatusResponse> {
         let url = format!(
             "{}/v0/namespaces/{source_namespace_id}/forks",
             self.base_url
         );
         // Namespace forks have no durable request identity to replay after an ambiguous success.
-        self.request_json_once::<_, NamespaceSummary>(
+        self.request_json_once::<_, NamespaceStatusResponse>(
             self.post(&url),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),

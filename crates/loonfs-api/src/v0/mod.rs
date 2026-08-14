@@ -34,10 +34,9 @@ pub use operations::{
     FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
     GcRequest, GcResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
     MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
-    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
-    WalFlushStepOutcome,
+    MetadataMaintenanceResponse, NamespaceStatusResponse, ReleaseCheckpointResponse,
+    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, StoreProbeCheckOutcome,
+    StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse, WalFlushStepOutcome,
 };
 pub use reads::{
     AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,

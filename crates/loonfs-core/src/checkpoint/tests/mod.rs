@@ -188,7 +188,7 @@ async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     allow_existing: bool,
-) -> Result<loonfs_api::NamespaceSummary, crate::namespace::BootstrapNamespaceError> {
+) -> Result<loonfs_api::NamespaceStatusResponse, crate::namespace::BootstrapNamespaceError> {
     let summary = crate::namespace::bootstrap::bootstrap_namespace(
         store,
         namespace_id,
