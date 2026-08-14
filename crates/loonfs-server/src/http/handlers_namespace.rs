@@ -372,7 +372,7 @@ pub(super) async fn create_checkpoint(
         path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
         summary = "List checkpoints",
-        description = "Lists one bounded page of active checkpoint records in ascending checkpoint-id order. Each record is a garbage-collection root, and its id is what the release endpoint takes; because a checkpoint name is a label rather than a key, this is the only way to find a pin whose creation response is gone. An expired record that no collection pass has released yet is still active and is listed, with its expiry in the entry. Released records are absent. Pagination is a live key-order resume, not a snapshot.",
+        description = "Lists one page of active checkpoints in checkpoint-id order. Expired checkpoints remain visible until collection releases them. Released checkpoints are omitted. The cursor resumes a live listing and does not create a snapshot.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("limit" = Option<String>, Query, description = "Maximum page size"),

@@ -5344,9 +5344,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(listed_ids, expected_ids);
         assert!(listed_data.get("next_cursor").is_none());
 
-        // Supplying a page control requests exactly one page. The opaque
-        // cursor is printed in both renderings, and resuming yields the
-        // second id in the same durable-id order as the default aggregate.
+        // A page limit returns one page and a cursor that resumes at the next id.
         let first_page = harness.run(&[
             "--json",
             "admin",

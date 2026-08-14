@@ -754,9 +754,7 @@ pub(crate) struct ChangesArgs {
 pub(crate) enum AdminCommand {
     /// Pin the namespace's current state under a named checkpoint.
     Checkpoint(AdminCheckpointArgs),
-    /// List the namespace's active checkpoint pins in checkpoint-id order. A
-    /// checkpoint name is a label, not a key, so this is how a pin is found
-    /// again when its id has been lost.
+    /// List active checkpoint pins in checkpoint-id order.
     CheckpointList(AdminCheckpointListArgs),
     /// Release a checkpoint pin.
     CheckpointRelease(AdminCheckpointReleaseArgs),

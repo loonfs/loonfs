@@ -792,33 +792,18 @@ creation response is where that id comes from, so losing it — or never
 seeing it — would otherwise leave a garbage-collection root nobody can name.
 The listing is the way back to it.
 
-`GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns one
-bounded page of active records in ascending `checkpoint_id` order, which is
-the durable checkpoint-record key order. Efficient oldest-first listing
-would require a durable creation-time index that this inventory endpoint
-does not justify. Each entry carries its `checkpoint_id`, `owner`,
-`created_at_ms`, `expires_at_ms` (absent when the pin holds until released),
-`checkpoint_seq`, and `manifest_id` — the same identity the create response
-returned. `owner` is tagged: `user` carries the label the creator recorded,
-and `fork` carries the `target_namespace_id` whose existence keeps that
-lease standing. Only a `user` record is released by id; a `fork` record goes
-when its target namespace does. `limit` uses the advertised
-`pagination.default` and `pagination.max` limits; zero and over-limit values
-answer `invalid_request`. `next_cursor` is absent once the enumerated
-checkpoint keyspace is complete.
+`GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns active
+checkpoints in ascending `checkpoint_id` order. Each entry includes its id,
+owner, creation and expiration times, checkpoint sequence, and manifest id.
+User checkpoints can be released by id. Fork checkpoints remain until their
+target namespace is deleted.
 
-The cursor is opaque, URL-safe, namespace-bound, and operation-bound. It
-encodes the last checkpoint-record key the page inspected, not the last
-active checkpoint it returned: released records and records reaped between
-listing and loading are skipped while still advancing the resume position.
-Resumption is strictly after that key, so a run of filtered records cannot
-stall a caller. Clients must only round-trip cursor strings returned by this
-endpoint; their encoding is internal and may change between builds.
+`limit` follows the advertised pagination limits. `next_cursor` is omitted
+after the final page. Cursors are opaque and tied to this namespace and
+operation; clients should only return them unchanged.
 
-Checkpoint pagination is a live listing, not a snapshot. A record released
-or reaped between key listing and record loading is skipped; a checkpoint
-created before the cursor position is not returned by a later page, while
-one created after it can appear. Listing creates no snapshot pin.
+This is a live listing, not a snapshot. Checkpoints created, released, or
+collected while a client is paging can affect later pages.
 
 Released records are absent, because a release is what stops a record
 pinning anything. A record whose `expires_at_ms` has passed is still

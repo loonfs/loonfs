@@ -286,14 +286,10 @@ Maintenance
     expires the pin, and an omitted TTL holds it until release
 
   loonfs admin checkpoint-list [--limit <n>] [--cursor <cursor>]
-    List the namespace's active checkpoint pins in checkpoint-id order: when
-    each was taken, when it expires, the sequence it pins, its label or fork
-    target, and the id `checkpoint-release` takes. By default the command
-    follows bounded pages to completion; --limit or --cursor requests one
-    page and prints next_cursor when more keys remain. A name is a label
-    rather than a key, so this is how a pin is found again once its id has
-    been lost; a pin whose expiry has passed is still listed until collection
-    releases it
+    List active checkpoint pins in checkpoint-id order. By default the
+    command follows every page. Use --limit or --cursor to request one page;
+    next_cursor is printed when another page is available. Expired pins stay
+    visible until collection releases them
 
   loonfs admin checkpoint-release <checkpoint-id>
     Release a checkpoint pin

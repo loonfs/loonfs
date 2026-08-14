@@ -330,8 +330,7 @@ async fn assert_provider_conformance(store: &dyn ObjectStore, direct_put_proven:
     assert_rejects_invalid_keys_consistently(store).await;
 }
 
-/// Pins the provider-independent resume contract: the public offset is a
-/// durable key, results are sorted, and the named key is never repeated.
+/// Checks that every provider resumes after the given key in sorted order.
 async fn assert_start_after_contract(store: &dyn ObjectStore) {
     let run_id = loonfs_api::generated_id("list");
     let prefix = format!("start-after/{run_id}/");

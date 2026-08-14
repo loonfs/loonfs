@@ -781,10 +781,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Lists one page of active checkpoint records in ascending id order.
-    ///
-    /// This method does not release expired records. A record remains active and
-    /// appears in the result until garbage collection processes it.
+    /// Lists one page of active checkpoints in ascending id order. Expired
+    /// records remain visible until garbage collection releases them.
     pub async fn list_checkpoints_page(
         &self,
         request: PageRequest<CheckpointPageCursor>,

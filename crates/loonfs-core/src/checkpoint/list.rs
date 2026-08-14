@@ -24,10 +24,7 @@ use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
 
-/// Opaque checkpoint-inventory position returned by one runtime page.
-///
-/// Cursor payloads are short-lived API tokens, not durable objects. Serde's
-/// default unknown-field handling keeps decoding tolerant of additive fields.
+/// Resume position for a checkpoint listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointPageCursor {
     namespace_id: NamespaceId,
@@ -75,24 +72,12 @@ impl CheckpointPageCursor {
     }
 }
 
-/// Lists one page of active checkpoint records in ascending checkpoint-id order.
+/// Lists active checkpoints in ascending checkpoint-id order.
 ///
-/// An expired record that no collection pass has released yet is reported,
-/// with its expiry in the answer. It is still active, it still roots its
-/// basis, and reads still serve from it (`files.rs`) — filtering it out
-/// would hide a live root from the one operation whose job is to find live
-/// roots. The expiry instant is what says the record is on its way out.
-///
-/// Fork-owned records are reported beside user pins for the same reason:
-/// they root a basis too. The owner in each entry is what says which ones
-/// `release_checkpoint` will act on.
-///
-/// The head is read first so a namespace that does not exist answers
-/// `namespace_not_found` rather than "no checkpoints" — an inventory that
-/// cannot tell those apart is not an inventory. A terminally deleted
-/// namespace still answers: its records outlive the tombstone until garbage
-/// collection reaps them, and that is exactly the state an operator is
-/// looking into.
+/// Expired checkpoints remain active until collection releases them, so they
+/// are included. Released checkpoints are omitted. Fork-owned records are
+/// included because they also pin data. The namespace head is read first so
+/// a missing namespace does not look like an empty checkpoint list.
 pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -123,8 +108,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
         };
         let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
         last_inspected_key = Some(key.clone());
-        // Gone between the listing and the read: reaped underneath this
-        // call, which is the same answer as never having been there.
+        // Skip records deleted after the key listing was read.
         let loaded = match load_checkpoint_record_at_key(store, &key).await {
             Ok(loaded) => loaded,
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,

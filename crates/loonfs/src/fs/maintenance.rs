@@ -610,16 +610,7 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Lists every active checkpoint record by aggregating bounded pages.
-    ///
-    /// This is how a pin is found again when the creation response is gone:
-    /// every call to [`Self::create_checkpoint`] mints its own record under
-    /// its own id, so a label identifies nothing, and a record nobody can
-    /// name is a garbage-collection root nobody can release. A record whose
-    /// expiry has passed but which no collection pass has released yet is
-    /// still active and still listed, with its expiry in the answer.
-    ///
-    /// A read: it releases nothing and reaps nothing.
+    /// Lists every active checkpoint by following bounded pages.
     pub async fn list_checkpoints_all(
         &self,
         namespace_id: &NamespaceId,
@@ -650,10 +641,8 @@ impl FsAdmin {
         Ok(response)
     }
 
-    /// Lists one bounded page of active checkpoint records in ascending id order.
-    ///
-    /// The cursor is an opaque live-list resume position, not a snapshot pin.
-    /// Released, reaped, or concurrently deleted records are skipped.
+    /// Lists one page of active checkpoints in ascending id order. The cursor
+    /// resumes a live listing and does not create a snapshot.
     pub async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
