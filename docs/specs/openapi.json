@@ -932,7 +932,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NamespaceSummary"
+                  "$ref": "#/components/schemas/NamespaceStatusResponse"
                 }
               }
             }
@@ -2010,7 +2010,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NamespaceSummary"
+                  "$ref": "#/components/schemas/NamespaceStatusResponse"
                 }
               }
             }
@@ -6096,19 +6096,6 @@
             "format": "int64",
             "description": "Number of visible WAL segments after the current manifest.",
             "minimum": 0
-          }
-        }
-      },
-      "NamespaceSummary": {
-        "type": "object",
-        "description": "Short namespace identifier returned by namespace create/fork operations.",
-        "required": [
-          "namespace_id"
-        ],
-        "properties": {
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Durable namespace id."
           }
         }
       },

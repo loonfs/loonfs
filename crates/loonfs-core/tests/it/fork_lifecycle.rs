@@ -39,7 +39,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::NamespaceSummary, CoreError> {
+) -> Result<loonfs_api::NamespaceStatusResponse, CoreError> {
     namespace_engine(store, source_namespace_id, context)
         .fork_namespace(new_namespace_id)
         .await
@@ -102,9 +102,14 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    let created = bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap namespace");
+    assert_eq!(created.namespace_id, namespace_id);
+    assert_eq!(created.head_seq, ChangeSeq(0));
+    assert_eq!(created.current_manifest_id, None);
+    assert_eq!(created.wal_tail_segments, 0);
+    assert_eq!(created.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
         vec![wal_head(&namespace_id)],
@@ -341,9 +346,14 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .expect("list blobs before fork");
 
     store.reset();
-    fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+    let forked = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .await
         .expect("fork namespace");
+    assert_eq!(forked.namespace_id, clone_namespace_id);
+    assert_eq!(forked.head_seq, ChangeSeq(1));
+    assert_eq!(forked.current_manifest_id, None);
+    assert_eq!(forked.wal_tail_segments, 0);
+    assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
         store.count(OperationClass::Read),
         0,

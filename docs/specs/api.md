@@ -1263,11 +1263,24 @@ server-issued identifier is the stable in-flight identifier of that
 interaction.
 
 Namespace creation uses the namespace id directly. v0 has no namespace aliases
-or separate display names:
+or separate display names. Representative request:
 
 ```json
 {
   "namespace_id": "demo"
+}
+```
+
+The response contains the new namespace's initial status. A new namespace
+starts at sequence 0 with a retention floor of 0 and no WAL tail. It does not
+have a manifest yet, so the response omits `current_manifest_id`:
+
+```json
+{
+  "namespace_id": "demo",
+  "head_seq": 0,
+  "wal_tail_segments": 0,
+  "retention_floor_seq": 0
 }
 ```
 
@@ -2260,7 +2273,10 @@ Representative response:
 
 ```json
 {
-  "namespace_id": "demo-branch"
+  "namespace_id": "demo-branch",
+  "head_seq": 418,
+  "wal_tail_segments": 0,
+  "retention_floor_seq": 418
 }
 ```
 
@@ -2270,11 +2286,17 @@ namespace metadata. The fork creates a fork-owned source checkpoint so the
 source-owned immutable metadata files stay available for as long as the
 target may still read them, then installs the target namespace's head in one
 conditional write, then checks that the source checkpoint still holds. That
-head carries the fork provenance for the target's whole life. A fork answers
-`namespace_exists` and `namespace_deleted` on the target id exactly as create
-does, and `checkpoint_unavailable` when the source pin did not survive the
-attempt — in which case the target it published is deleted before the error
-comes back.
+head carries the fork provenance for the target's whole life.
+
+The response contains the new namespace's initial status. `head_seq` and
+`retention_floor_seq` are set to the source namespace's sequence at the fork
+point, and `wal_tail_segments` starts at 0. The response omits
+`current_manifest_id` until the new namespace publishes its own manifest.
+
+If the target ID already exists or has been deleted, the server returns the
+same `namespace_exists` or `namespace_deleted` error as namespace creation.
+If the source checkpoint disappears before the operation completes, the
+server deletes the new target and returns `checkpoint_unavailable`.
 
 ### 6.13 `POST /query/grep`
 

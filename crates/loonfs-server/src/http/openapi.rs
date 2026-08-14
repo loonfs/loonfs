@@ -112,7 +112,6 @@ impl utoipa::ToSchema for CompleteUploadRequestSchema {
         loonfs_api::WriterEpoch,
         CreateNamespaceRequest,
         ForkNamespaceRequest,
-        loonfs_api::NamespaceSummary,
         loonfs_api::NamespaceStatusResponse,
         loonfs_api::DeleteNamespaceResponse,
         loonfs_api::DestinationBehavior,
