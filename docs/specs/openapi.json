@@ -2439,7 +2439,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
-        "description": "Completes an upload session using the request schema selected by its durable mode. Service-proxied and direct-put sessions accept `{}`; direct-multipart sessions accept the content claim and completed parts. The response may include a short-lived content token for a following file write.",
+        "description": "Completes an upload using the body required by its stored mode. Service-proxied and direct-put sessions accept `{}`. Direct-multipart sessions require the content claim and completed parts.",
         "operationId": "complete_upload",
         "parameters": [
           {
@@ -2462,7 +2462,7 @@
           }
         ],
         "requestBody": {
-          "description": "The stored session mode selects which strict oneOf variant is accepted.",
+          "description": "The stored upload mode determines which body is accepted.",
           "content": {
             "application/json": {
               "schema": {
@@ -3667,12 +3667,12 @@
       },
       "CompleteKnownContentUploadRequest": {
         "type": "object",
-        "description": "Request to complete a service-proxied or `direct_put` upload.\n\nThe durable session already owns the content reference and selects this\nschema, so the caller has nothing to repeat.",
+        "description": "Empty request used when the upload session already contains the content\nreference.",
         "additionalProperties": false
       },
       "CompleteMultipartUploadRequest": {
         "type": "object",
-        "description": "Request to complete a `direct_multipart` upload.\n\nThe durable session selects this schema and owns the content object's\nidentity. The caller supplies only what became known while uploading the\nparts.",
+        "description": "Information required to complete a `direct_multipart` upload.",
         "required": [
           "content",
           "parts"
@@ -3680,14 +3680,14 @@
         "properties": {
           "content": {
             "$ref": "#/components/schemas/UploadContentClaim",
-            "description": "The assembled object's length and checksum, which completion verifies\nagainst the provider's own reading of the object."
+            "description": "Expected length and checksum of the assembled object."
           },
           "parts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CompletedUploadPart"
             },
-            "description": "Every part the client uploaded, in ascending part order. The server\nholds no part records of its own, so this list is what it assembles the\nobject from."
+            "description": "Uploaded parts in ascending part order."
           }
         },
         "additionalProperties": false
@@ -3701,7 +3701,7 @@
             "$ref": "#/components/schemas/CompleteMultipartUploadRequest"
           }
         ],
-        "description": "The stored upload session mode selects the accepted variant: service_proxied and direct_put use the empty object; direct_multipart uses the content claim and completed parts."
+        "description": "The stored upload mode determines the accepted body. Service-proxied and direct-put sessions use an empty object. Direct-multipart sessions provide the content claim and completed parts."
       },
       "CompleteUploadResponse": {
         "type": "object",
