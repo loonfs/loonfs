@@ -309,6 +309,17 @@ epochs, and grep run ordinals are JSON integers from 0 through 9007199254740991
 store a larger value. `inode_id` is not an ordinal and may use the full `u64`
 range.
 
+### 4.1 Public inode identity
+
+Public APIs represent an inode ID as a string such as `ino_27`. The value must
+start with the lowercase prefix `ino_`, followed by a nonzero `u64` with no
+leading zeroes. Numbers, numeric strings such as `"27"`, zero, and uppercase
+prefixes are invalid. `ino_1` identifies the namespace root.
+
+An inode ID is only unique within its namespace. Use `namespace_id` and
+`inode_id` together when identifying an inode. Clients MUST treat the ID as an
+opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
+
 - The embedded handles (`loonfs::FsWriter`, `loonfs::FsReader`) and the
   remote client (`loonfs_client::Client`) expose the same operations and the
   same `capabilities()` accessor returning the capability document of
@@ -327,7 +338,7 @@ range.
   grouped (`core`, `admin`, and later), so the surface a deployment does not
   support is visibly absent instead of failing call by call.
 
-### 4.1 Checksums
+### 4.2 Checksums
 
 Every public checksum value uses one shape:
 
@@ -716,7 +727,7 @@ For example:
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":4,"checkpoint_id":"chk_00000000000000000000000000000009","next_run_ordinal":1,"reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"chk_00000000000000000000000000000009","next_run_ordinal":1,"reorganize_pending":false}
 ```
 
 A backfill therefore never reports a `built_through_seq`, and an active index
@@ -1390,12 +1401,12 @@ the durable naming rules (`format.md`, "Durable naming conventions").
 {
   "namespace_id": "demo",
   "path": "/docs/report.txt",
-  "inode_id": 42,
+  "inode_id": "ino_42",
   "created_by": { "kind": "user", "id": "usr_8f3c" },
   "created_at_ms": 1752623000000,
   "inode_kind": "file",
   "head_seq": 418,
-  "parent_inode_id": 7,
+  "parent_inode_id": "ino_7",
   "display_name": "report.txt",
   "revision_no": 7,
   "revision_actor": { "kind": "service", "id": "render-worker" },
@@ -1495,12 +1506,12 @@ An unrecognized cursor version is also rejected as `invalid_request`.
     {
       "namespace_id": "demo",
       "path": "/docs/report.txt",
-      "inode_id": 42,
+      "inode_id": "ino_42",
       "created_by": { "kind": "user", "id": "usr_8f3c" },
       "created_at_ms": 1752623000000,
       "inode_kind": "file",
       "head_seq": 418,
-      "parent_inode_id": 7,
+      "parent_inode_id": "ino_7",
       "display_name": "report.txt",
       "revision_no": 7,
       "revision_actor": { "kind": "service", "id": "render-worker" },
@@ -1516,12 +1527,12 @@ An unrecognized cursor version is also rejected as `invalid_request`.
     {
       "namespace_id": "demo",
       "path": "/docs/slides",
-      "inode_id": 43,
+      "inode_id": "ino_43",
       "created_by": { "kind": "user", "id": "usr_8f3c" },
       "created_at_ms": 1752623000000,
       "inode_kind": "dir",
       "head_seq": 418,
-      "parent_inode_id": 7,
+      "parent_inode_id": "ino_7",
       "display_name": "slides"
     }
   ],
@@ -1552,11 +1563,11 @@ leaves the inner one listed.
   "head_seq": 418,
   "entries": [
     {
-      "inode_id": 42,
+      "inode_id": "ino_42",
       "deletion_seq": 417,
       "deleted_at_ms": 1752625000000,
       "deleted_by": { "kind": "user", "id": "usr_8f3c" },
-      "parent_inode_id": 7,
+      "parent_inode_id": "ino_7",
       "name_key": "report.txt",
       "display_name": "report.txt"
     }
@@ -1589,11 +1600,11 @@ retained. A directory returns `path_conflict`, an unknown inode returns
 ```json
 {
   "namespace_id": "demo",
-  "inode_id": 42,
+  "inode_id": "ino_42",
   "head_seq": 418,
   "revisions": [
     {
-      "inode_id": 42,
+      "inode_id": "ino_42",
       "revision_no": 7,
       "committed_seq": 418,
       "committed_at_ms": 1752624000000,
@@ -1765,7 +1776,7 @@ deletion's committed sequence.
   "operations": [
     {
       "kind": "undelete",
-      "inode_id": 42,
+      "inode_id": "ino_42",
       "deletion_seq": 17,
       "path": "/docs/report.txt"
     }
@@ -2128,7 +2139,7 @@ Its body is `{}` and its response does not include a path:
 ```json
 {
   "namespace_id": "demo",
-  "inode_id": 42,
+  "inode_id": "ino_42",
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
@@ -2203,7 +2214,7 @@ more than three events. The events stay in request order.
       "events": [
         {
           "kind": "content_changed",
-          "inode_id": 42,
+          "inode_id": "ino_42",
           "revision_no": 8,
           "content_ref": {
             "kind": "blob_v1",
@@ -2236,15 +2247,15 @@ includes its first revision and content reference:
 ```json
 {
   "kind": "directory_created",
-  "inode_id": 42,
-  "parent_inode_id": 1,
+  "inode_id": "ino_42",
+  "parent_inode_id": "ino_1",
   "display_name": "docs"
 }
 
 {
   "kind": "file_created",
-  "inode_id": 43,
-  "parent_inode_id": 1,
+  "inode_id": "ino_43",
+  "parent_inode_id": "ino_1",
   "display_name": "report.txt",
   "revision_no": 1,
   "content_ref": {
@@ -2328,7 +2339,7 @@ Representative response:
   "matches": [
     {
       "path": "/src/search.rs",
-      "inode_id": 42,
+      "inode_id": "ino_42",
       "revision_no": 3,
       "line_number": 17,
       "byte_offset": 512,

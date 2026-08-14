@@ -2,8 +2,13 @@
 
 use crate::progress::ProgressMode;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use loonfs_api::InodeId;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+
+fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
+    loonfs_api::public_inode_id::decode(value).map_err(|error| error.to_string())
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "loonfs", version)]
@@ -451,8 +456,8 @@ pub(crate) struct FilesystemStatArgs {
     #[arg(required_unless_present = "inode", conflicts_with = "inode")]
     pub path: Option<String>,
     /// Visible inode to describe instead of a path.
-    #[arg(long, value_name = "INODE_ID")]
-    pub inode: Option<u64>,
+    #[arg(long, value_name = "INODE_ID", value_parser = parse_public_inode_id)]
+    pub inode: Option<InodeId>,
 }
 
 #[derive(Debug, Args)]
@@ -478,8 +483,8 @@ pub(crate) struct FilesystemAnnotateArgs {
     pub attributes_json: Option<String>,
     /// Update only while the path still resolves to this inode; a raced
     /// rebinding fails instead of annotating a different inode.
-    #[arg(long)]
-    pub expected_inode_id: Option<u64>,
+    #[arg(long, value_parser = parse_public_inode_id)]
+    pub expected_inode_id: Option<InodeId>,
     /// Update only while the inode's attribute revision is still this one.
     #[arg(long)]
     pub expected_attributes_revision: Option<u64>,
@@ -710,10 +715,10 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// directories were renamed since. A deletion that recorded no binding
     /// needs the explicit path.
     pub path: Option<String>,
-    /// Inode id of the deleted item, as reported by `rm` and the change
+    /// Inode ID of the deleted item, as reported by `rm` and the change
     /// feed.
-    #[arg(long)]
-    pub inode: u64,
+    #[arg(long, value_parser = parse_public_inode_id)]
+    pub inode: InodeId,
     /// Committed sequence of the delete being recovered, as reported by
     /// `rm` and the change feed. Scopes recovery to that exact deletion,
     /// so a stale command cannot cancel a later delete.

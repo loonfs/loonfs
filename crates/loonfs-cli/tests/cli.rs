@@ -1662,8 +1662,9 @@ fn every_mutating_command_records_its_message() {
     let removed = harness.run(&["--json", "rm", "/dir/moved.txt", "-m", "rm message"]);
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
-        .as_u64()
-        .expect("rm reports the deleted inode id");
+        .as_str()
+        .expect("rm reports the deleted inode ID")
+        .to_owned();
     let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()
         .expect("rm reports the committed seq");
@@ -1671,7 +1672,7 @@ fn every_mutating_command_records_its_message() {
         "undelete",
         "/dir/moved.txt",
         "--inode",
-        &inode_id.to_string(),
+        &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
         "-m",
@@ -1795,13 +1796,13 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
     assert!(table.contains("loonfs undelete "), "{table}");
 
     // Recovering through the listed handle empties that entry out of trash.
-    let inode = report["inode_id"].as_u64().expect("inode");
+    let inode = report["inode_id"].as_str().expect("inode");
     let seq = report["deletion_seq"].as_u64().expect("seq");
     assert_success(&harness.run(&[
         "undelete",
         "/docs/Quarterly Report.PDF",
         "--inode",
-        &inode.to_string(),
+        inode,
         "--deletion-seq",
         &seq.to_string(),
     ]));
@@ -1840,8 +1841,9 @@ fn recovery_hints_name_their_namespace_and_quote_the_path() {
     ]));
     let inode = json_data(&harness.run(&["--json", "stat", "/docs/Quarterly Report.PDF"]))
         ["inode_id"]
-        .as_u64()
-        .expect("the stored inode id");
+        .as_str()
+        .expect("the stored inode ID")
+        .to_owned();
 
     // Nothing here is spelled on the command line, so the namespace is the
     // only ambient value the hint has to pin down.
@@ -3352,8 +3354,9 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
         ]);
         assert_success(&by_path);
         let inode_id = json_data(&by_path)["inode_id"]
-            .as_u64()
-            .expect("stat reports inode id");
+            .as_str()
+            .expect("stat reports inode ID")
+            .to_owned();
         let by_inode = harness.run(&[
             "--json",
             "stat",
@@ -3362,7 +3365,7 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
             "--namespace",
             "demo",
             "--inode",
-            &inode_id.to_string(),
+            &inode_id,
         ]);
         assert_success(&by_inode);
         assert_eq!(json_data(&by_inode), json_data(&by_path));
@@ -3384,10 +3387,10 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
             "--namespace",
             "demo",
             "--inode",
-            &inode_id.to_string(),
+            &inode_id,
         ]);
         assert_success(&renamed);
-        assert_eq!(json_data(&renamed)["inode_id"], inode_id);
+        assert_eq!(json_data(&renamed)["inode_id"], inode_id.as_str());
         assert_eq!(json_data(&renamed)["path"], "/after.txt");
 
         let missing = harness.run(&[
@@ -3398,7 +3401,7 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
             "--namespace",
             "demo",
             "--inode",
-            &u64::MAX.to_string(),
+            &format!("ino_{}", u64::MAX),
         ]);
         assert_failure(&missing);
         assert_eq!(json_error(&missing)["code"], "inode_not_found");
@@ -3412,9 +3415,35 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
         "embedded",
         "/after.txt",
         "--inode",
-        "2",
+        "ino_2",
     ]);
     assert_failure(&both);
+}
+
+#[test]
+fn inode_arguments_reject_bare_numbers() {
+    let harness = Harness::new();
+    let outputs = [
+        harness.run(&["stat", "--inode", "27"]),
+        harness.run(&["undelete", "--inode", "27", "--deletion-seq", "1"]),
+        harness.run(&[
+            "annotate",
+            "/docs",
+            "--expected-inode-id",
+            "27",
+            "--set",
+            "owner=ada",
+        ]),
+    ];
+
+    for output in outputs {
+        assert_failure(&output);
+        let stderr = stderr_string(&output);
+        assert!(
+            stderr.contains("must use `ino_` followed by a nonzero u64 without leading zeroes"),
+            "{stderr}"
+        );
+    }
 }
 
 #[test]
@@ -3635,8 +3664,9 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     let removed = harness.run(&["--json", "rm", "/docs/report.txt"]);
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
-        .as_u64()
-        .expect("rm reports the deleted inode id");
+        .as_str()
+        .expect("rm reports the deleted inode ID")
+        .to_owned();
     let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()
         .expect("rm reports the deletion sequence");
@@ -3648,7 +3678,7 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         "undelete",
         "/docs/report.txt",
         "--inode",
-        &inode_id.to_string(),
+        &inode_id,
         "--deleted-at",
         &deletion_seq.to_string(),
     ]);
@@ -3663,7 +3693,7 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         "undelete",
         "/docs/report.txt",
         "--inode",
-        &inode_id.to_string(),
+        &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
     ]);
@@ -3688,7 +3718,7 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         "undelete",
         "/docs/report-copy.txt",
         "--inode",
-        &inode_id.to_string(),
+        &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
     ]);
@@ -3728,8 +3758,9 @@ fn an_undelete_without_a_path_restores_in_place() {
     assert_success(&trash);
     let entry = json_data(&trash)["entries"][0].clone();
     let inode_id = entry["inode_id"]
-        .as_u64()
-        .expect("trash reports the deleted inode id");
+        .as_str()
+        .expect("trash reports the deleted inode ID")
+        .to_owned();
     let deletion_seq = entry["deletion_seq"]
         .as_u64()
         .expect("trash reports the deletion sequence");
@@ -3741,7 +3772,7 @@ fn an_undelete_without_a_path_restores_in_place() {
         "--json",
         "undelete",
         "--inode",
-        &inode_id.to_string(),
+        &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
     ]);
@@ -3771,7 +3802,7 @@ fn an_undelete_without_a_path_restores_in_place() {
         "--json",
         "undelete",
         "--inode",
-        &inode_id.to_string(),
+        &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
     ]);
@@ -3805,8 +3836,9 @@ fn remote_undelete_recovers_through_http() {
     let removed = harness.run(&["--json", "rm", "/wire.txt"]);
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
-        .as_u64()
-        .expect("rm reports the deleted inode id");
+        .as_str()
+        .expect("rm reports the deleted inode ID")
+        .to_owned();
     let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()
         .expect("rm reports the deletion sequence");
@@ -3828,7 +3860,7 @@ fn remote_undelete_recovers_through_http() {
         "undelete",
         "/wire.txt",
         "--inode",
-        &inode_id.to_string(),
+        &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
     ]);
@@ -4878,7 +4910,9 @@ fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
         let again_data = json_data(&again);
         assert_eq!(again_data["kind"], "directory_already_exists");
         assert_eq!(again_data["target"], "demo:/a/b");
-        assert!(again_data["inode_id"].is_number());
+        assert!(again_data["inode_id"]
+            .as_str()
+            .is_some_and(|inode_id| { loonfs_api::public_inode_id::decode(inode_id).is_ok() }));
 
         // Without -p the conflict still surfaces.
         let strict = harness.run(&["--json", "mkdir", "/a/b", "--profile", profile]);
@@ -5221,12 +5255,12 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
         serde_json::json!({
             "namespace_id": "demo",
             "path": "/docs",
-            "inode_id": 2,
+            "inode_id": "ino_2",
             "created_by": { "kind": "system", "id": "loonfs" },
             "created_at_ms": 1_752_624_000_000_u64,
             "inode_kind": "dir",
             "head_seq": 20,
-            "parent_inode_id": 1,
+            "parent_inode_id": "ino_1",
             "display_name": "docs",
         }),
         serde_json::json!({
@@ -5236,12 +5270,12 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
             "entries": [{
                 "namespace_id": "demo",
                 "path": "/docs/sub",
-                "inode_id": 3,
+                "inode_id": "ino_3",
                 "created_by": { "kind": "system", "id": "loonfs" },
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "dir",
                 "head_seq": 20,
-                "parent_inode_id": 2,
+                "parent_inode_id": "ino_2",
                 "display_name": "sub",
             }],
         }),

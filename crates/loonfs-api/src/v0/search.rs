@@ -77,6 +77,11 @@ pub struct GrepMatch {
     /// The file's absolute path, derived at the snapshot.
     pub path: AbsolutePath,
     /// Durable identity of the matched file.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
     pub inode_id: InodeId,
     /// The matched revision (the newest visible one at the snapshot).
     pub revision_no: RevisionNo,
@@ -136,7 +141,15 @@ pub enum GrepIndexLifecycle {
         target_seq: ChangeSeq,
         /// Inode the walk resumes strictly after. Absent before the first
         /// page.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::optional_schema)
+        )]
         cursor_inode_id: Option<InodeId>,
         /// Checkpoint pinning the state being walked.
         checkpoint_id: CheckpointId,
@@ -270,7 +283,7 @@ mod tests {
             serde_json::to_value(found).expect("serialize grep match"),
             serde_json::json!({
                 "path": "/docs/a.txt",
-                "inode_id": 2,
+                "inode_id": "ino_2",
                 "revision_no": 3,
                 "line_number": 4,
                 "byte_offset": 5,
@@ -293,7 +306,7 @@ mod tests {
             serde_json::json!({
                 "status": "backfilling",
                 "target_seq": 9,
-                "cursor_inode_id": 4,
+                "cursor_inode_id": "ino_4",
                 "checkpoint_id": "chk_00000000000000000000000000000009"
             }),
             "a backfill reports its target and its walk, never a watermark"
@@ -376,7 +389,7 @@ mod tests {
 
         assert_eq!(
             serde_json::to_string(&response).expect("serialize backfilling status"),
-            r#"{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":4,"checkpoint_id":"chk_00000000000000000000000000000009","next_run_ordinal":1,"reorganize_pending":false}"#
+            r#"{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"chk_00000000000000000000000000000009","next_run_ordinal":1,"reorganize_pending":false}"#
         );
     }
 

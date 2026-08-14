@@ -38,6 +38,9 @@ meant to send:
   read-modify-write and still report a successful guarded update
   (section 1.7).
 
+Durable formats store inode IDs as integers. The public API uses strings such
+as `ino_27`; this does not change stored data.
+
 ## 1. Object store contract
 
 LoonFS relies on object storage as its only required durable dependency. The

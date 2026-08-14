@@ -26,6 +26,11 @@ pub struct AuthoritativePathEntry {
     /// Absolute path as rendered from stored display names.
     pub path: AbsolutePath,
     /// Stable inode identity for this item.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
     pub inode_id: InodeId,
     /// Actor that created this inode, as supplied by the application.
     pub created_by: ActorRef,
@@ -38,7 +43,15 @@ pub struct AuthoritativePathEntry {
     /// Namespace head sequence this answer was read from.
     pub head_seq: ChangeSeq,
     /// Parent directory inode, or `None` for the root.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::public_inode_id::option"
+    )]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::optional_schema)
+    )]
     pub parent_inode_id: Option<InodeId>,
     /// Stored display name for this path component, absent for the nameless root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,12 +238,12 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "path": "/docs",
-                "inode_id": 2,
+                "inode_id": "ino_2",
                 "created_by": { "kind": "system", "id": "loonfs" },
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "dir",
                 "head_seq": 3,
-                "parent_inode_id": 1,
+                "parent_inode_id": "ino_1",
                 "display_name": "docs"
             })
         );
@@ -251,12 +264,12 @@ mod tests {
                 "entries": [{
                     "namespace_id": "demo",
                     "path": "/docs",
-                    "inode_id": 2,
+                    "inode_id": "ino_2",
                     "created_by": { "kind": "system", "id": "loonfs" },
                     "created_at_ms": 1_752_624_000_000_u64,
                     "inode_kind": "dir",
                     "head_seq": 3,
-                    "parent_inode_id": 1,
+                    "parent_inode_id": "ino_1",
                     "display_name": "docs"
                 }]
             })
@@ -280,7 +293,7 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "path": "/report.txt",
-                "inode_id": 2,
+                "inode_id": "ino_2",
                 "created_by": { "kind": "system", "id": "loonfs" },
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "file",
@@ -290,7 +303,7 @@ mod tests {
                 "revision_actor": { "kind": "system", "id": "loonfs" },
                 "committed_at_ms": 1_752_624_000_000_u64,
                 "head_seq": 3,
-                "parent_inode_id": 1,
+                "parent_inode_id": "ino_1",
                 "display_name": "report.txt"
             })
         );
@@ -309,7 +322,7 @@ mod tests {
 
         let named_json = serde_json::to_value(entry("/docs", Some(InodeId(1)), Some("docs")))
             .expect("serialize named entry");
-        assert_eq!(named_json["parent_inode_id"], 1);
+        assert_eq!(named_json["parent_inode_id"], "ino_1");
         assert_eq!(named_json["display_name"], "docs");
     }
 
@@ -432,7 +445,7 @@ mod tests {
             display_name: Some(DisplayName::parse("Report.txt").expect("display name")),
         };
         let trash_json = serde_json::to_value(trash).expect("serialize trash entry");
-        assert_eq!(trash_json["inode_id"], serde_json::json!(42));
+        assert_eq!(trash_json["inode_id"], serde_json::json!("ino_42"));
         assert_eq!(trash_json["deletion_seq"], serde_json::json!(417));
         assert!(trash_json.get("root_inode_id").is_none());
         assert!(trash_json.get("deleted_at_seq").is_none());
@@ -473,6 +486,11 @@ mod tests {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
     /// Inode hidden by the deletion.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
     pub inode_id: InodeId,
     /// Commit sequence that identifies this deletion.
     pub deletion_seq: ChangeSeq,
@@ -481,7 +499,15 @@ pub struct TrashEntry {
     /// Actor responsible for the deletion.
     pub deleted_by: ActorRef,
     /// Directory that held the deleted binding, when recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::public_inode_id::option"
+    )]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::optional_schema)
+    )]
     pub parent_inode_id: Option<InodeId>,
     /// Canonical key of the deleted binding, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]

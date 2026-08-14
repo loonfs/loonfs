@@ -88,6 +88,11 @@ pub struct BeginDownloadByInodeResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// File inode being read.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
     pub inode_id: InodeId,
     /// Revision being read.
     pub revision_no: RevisionNo,
@@ -174,7 +179,7 @@ mod tests {
             },
         };
         let json = serde_json::to_value(response).expect("serialize response");
-        assert_eq!(json["inode_id"], 42);
+        assert_eq!(json["inode_id"], "ino_42");
         assert!(json.get("path").is_none());
     }
 }

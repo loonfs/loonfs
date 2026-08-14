@@ -27,7 +27,7 @@ use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
     AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId,
-    CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeId, InodeKind,
+    CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind,
     ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use loonfs_client::{
@@ -216,7 +216,7 @@ pub(crate) async fn run_filesystem_stat(
         Some(inode_id) => {
             context
                 .target
-                .stat_inode(&context.namespace, InodeId(inode_id))
+                .stat_inode(&context.namespace, inode_id)
                 .await
         }
         None => {
@@ -301,7 +301,7 @@ fn update_attributes_options(
         set,
         remove,
         commit: commit_options(actor, commit_id, args.message.clone()),
-        expected_inode_id: args.expected_inode_id.map(InodeId),
+        expected_inode_id: args.expected_inode_id,
         expected_attributes_revision_no: args
             .expected_attributes_revision
             .map(|value| {
@@ -1253,7 +1253,7 @@ pub(crate) async fn run_filesystem_undelete(
         .undelete(
             &context.namespace,
             spec.as_ref().map(|spec| spec.absolute_path()),
-            loonfs_api::InodeId(args.inode),
+            args.inode,
             deletion_seq,
             &loonfs_client::UndeleteOptions {
                 commit: commit_options(&context.actor, commit_id, args.message.clone()),
@@ -1274,7 +1274,7 @@ pub(crate) async fn run_filesystem_undelete(
             target,
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
-            inode_id: Some(loonfs_api::InodeId(args.inode)),
+            inode_id: Some(args.inode),
             recovery_command: None,
         },
     })
