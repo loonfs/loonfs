@@ -595,7 +595,7 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
         .expect("the record survives until core GC reaps it");
     assert!(
         matches!(finished.state, CheckpointRecordLifecycle::Released { .. }),
-        "the attempt ran to steady state on that pin and then released it"
+        "the attempt completed the backfill using that pin and then released it"
     );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
@@ -672,8 +672,8 @@ async fn grep_built_through_seq(
         .expect("grep root exists")
         .manifest_state()
         .lifecycle()
-        .steady_watermark()
-        .expect("a steady grep root has a watermark")
+        .active_watermark()
+        .expect("an active grep root has a watermark")
         .0
 }
 
@@ -1231,7 +1231,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .expect("load grep root")
         .expect("grep root exists");
     assert_eq!(
-        grep_root.manifest_state().lifecycle().steady_watermark(),
+        grep_root.manifest_state().lifecycle().active_watermark(),
         Some((head.seq, 0)),
         "the independent worker can advance past metadata materialization"
     );
@@ -2347,24 +2347,24 @@ async fn a_backfilling_root_never_reports_a_built_through_sequence() {
     };
     assert_eq!(again, state);
 
-    // Once the walk finishes, the steady root carries the target it reached
-    // as its own watermark, and no target field survives.
+    // Once the walk finishes, the API reports the root as active with the
+    // target it reached as its own watermark, and no target field survives.
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let steady = loonfs_api::v0::GrepIndexLifecycle::from(
+    let active = loonfs_api::v0::GrepIndexLifecycle::from(
         &worker
             .lifecycle(&namespace_id)
             .await
-            .expect("read steady lifecycle"),
+            .expect("read completed lifecycle"),
     );
     assert_eq!(
-        steady,
-        loonfs_api::v0::GrepIndexLifecycle::Steady {
+        active,
+        loonfs_api::v0::GrepIndexLifecycle::Active {
             built_through_seq: ChangeSeq(1),
             next_event_index: 0,
         }
     );
-    assert!(!serde_json::to_string(&steady)
-        .expect("serialize the steady lifecycle")
+    assert!(!serde_json::to_string(&active)
+        .expect("serialize the active API lifecycle")
         .contains("target_seq"));
     writer.shutdown().await.expect("shutdown");
 }

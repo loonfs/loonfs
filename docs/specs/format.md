@@ -1925,7 +1925,7 @@ It holds what every phase has — the in-progress `reorganize` state and the
 - `backfilling`: `target_seq` (the namespace sequence the pinned checkpoint
   captured), optional `cursor` (the inode the walk resumes strictly after),
   and `checkpoint_id`;
-- `steady`: `built_through_seq` and an optional `next_event_index`;
+- `active`: `built_through_seq` and an optional `next_event_index`;
 - `disabled`: no fields, no segments, and no reorganization.
 
 A phase carrying another phase's sequence is not representable. Before the

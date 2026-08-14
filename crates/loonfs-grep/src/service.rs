@@ -170,13 +170,12 @@ impl GrepService {
 fn materialized_snapshot_from_state(
     root: &GrepManifestState,
 ) -> Result<MaterializedGrepIndexSnapshot> {
-    // Only a steady root has a watermark, and only a watermark makes an
-    // index answerable: the other two phases refuse the query outright
-    // rather than borrow a sequence they do not own.
+    // Queries require an active index and its watermark. Disabled and
+    // backfilling indexes return their corresponding errors.
     let (built_through_seq, next_event_index) = match root.lifecycle() {
         GrepLifecycle::Disabled => return Err(GrepError::NotEnabled),
         GrepLifecycle::Backfilling { .. } => return Err(GrepError::Backfilling),
-        GrepLifecycle::Steady {
+        GrepLifecycle::Active {
             built_through_seq,
             next_event_index,
         } => (*built_through_seq, *next_event_index),

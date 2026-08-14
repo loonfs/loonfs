@@ -18,9 +18,8 @@ use loonfs::{
 };
 use loonfs_api::{
     v0::{
-        DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse,
-        GrepIndexLifecycle, GrepIndexStatusResponse, StoreProbeCheckOutcome, StoreProbeCheckResult,
-        StoreProbeResponse,
+        GrepGcRequest, GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse,
+        StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
     },
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse,
     CreateCheckpointRequest, CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest,
@@ -304,31 +303,26 @@ impl EmbeddedBackend {
     pub(super) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGrepIndexResponse, BackendError> {
+    ) -> Result<GrepIndexStatusResponse, BackendError> {
         let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
-        let (already_enabled, lifecycle) = match self
+        match self
             .grep_worker()
             .enable(namespace_id)
             .await
             .map_err(grep_error)?
         {
-            GrepEnableOutcome::Enabled { state } => (false, state),
-            GrepEnableOutcome::AlreadyEnabled { state } => (true, state),
+            GrepEnableOutcome::Enabled { .. } | GrepEnableOutcome::AlreadyEnabled { .. } => {}
             GrepEnableOutcome::Superseded => {
                 return Err(grep_error(GrepError::PublicationConflict {
                     object_key: loonfs_grep::keyspace::root_key(namespace_id),
                 }))
             }
-        };
+        }
         // Enabling is one compare-and-swap and nothing else, here as on a
         // server. Driving the backfill afterwards is the command's job, not
         // this call's, so an embedded caller and a remote one get the same
         // answer to the same question.
-        Ok(EnableGrepIndexResponse {
-            namespace_id: namespace_id.clone(),
-            already_enabled,
-            state: GrepIndexLifecycle::from(&lifecycle),
-        })
+        self.grep_index_status(namespace_id).await
     }
 
     pub(super) async fn grep_index_status(
@@ -340,7 +334,7 @@ impl EmbeddedBackend {
             .root_state(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?;
-        let (state, next_run_ordinal, reorganize_pending) = match &root {
+        let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
             Some(root) => (
                 GrepIndexLifecycle::from(root.lifecycle()),
                 root.index().next_run_ordinal,
@@ -350,7 +344,7 @@ impl EmbeddedBackend {
         };
         Ok(GrepIndexStatusResponse {
             namespace_id: namespace_id.clone(),
-            state,
+            lifecycle,
             next_run_ordinal,
             reorganize_pending,
         })
@@ -405,20 +399,16 @@ impl EmbeddedBackend {
         let mut steps = 0;
         let mut settled = false;
         loop {
-            let state = GrepIndexLifecycle::from(
+            let lifecycle = GrepIndexLifecycle::from(
                 &worker
                     .lifecycle(namespace_id)
                     .await
                     .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?,
             );
-            let reached = state.is_built_through(target_seq);
+            let reached = lifecycle.is_built_through(target_seq);
             let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
             if reached || settled || budget.spent(steps, elapsed_ms) {
-                return Ok(GrepWaitProgress {
-                    state,
-                    steps,
-                    reached,
-                });
+                return Ok(GrepWaitProgress { steps, reached });
             }
             let conclusion = job
                 .step(namespace_id, None)
@@ -555,7 +545,7 @@ impl EmbeddedBackend {
     pub(super) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGrepIndexResponse, BackendError> {
+    ) -> Result<GrepIndexStatusResponse, BackendError> {
         let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
         match self
             .grep_worker()
@@ -563,14 +553,9 @@ impl EmbeddedBackend {
             .await
             .map_err(grep_error)?
         {
-            GrepDisableOutcome::Disabled => Ok(DisableGrepIndexResponse {
-                namespace_id: namespace_id.clone(),
-                was_enabled: true,
-            }),
-            GrepDisableOutcome::NotEnabled => Ok(DisableGrepIndexResponse {
-                namespace_id: namespace_id.clone(),
-                was_enabled: false,
-            }),
+            GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
+                self.grep_index_status(namespace_id).await
+            }
             GrepDisableOutcome::Superseded => Err(grep_error(GrepError::PublicationConflict {
                 object_key: loonfs_grep::keyspace::root_key(namespace_id),
             })),
@@ -1134,9 +1119,9 @@ mod tests {
             .await
             .expect("index status after the drain");
         assert!(
-            indexed_status.state.is_built_through(head_seq),
+            indexed_status.lifecycle.is_built_through(head_seq),
             "the assigned index must reach the head it was behind: {:?}",
-            indexed_status.state
+            indexed_status.lifecycle
         );
     }
 
@@ -1221,7 +1206,7 @@ mod tests {
                     .grep_index_status(&namespace)
                     .await
                     .expect("index status while hosting")
-                    .state
+                    .lifecycle
                     .is_built_through(head_seq)
             })
             .await;

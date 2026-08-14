@@ -784,7 +784,7 @@ pub(crate) enum AdminCommand {
     /// Disable the gram content index.
     IndexDisable(AdminNamespaceArgs),
     /// Report where the gram content index is: disabled, backfilling, or
-    /// steady at a watermark.
+    /// active at a watermark.
     IndexStatus(AdminNamespaceArgs),
     /// Collect the namespace's unreferenced gram-index objects.
     IndexGc(AdminIndexGcArgs),

@@ -51,7 +51,7 @@ fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u64) -> Strin
     }
 }
 
-/// One phrase for where the index is, in the terms that phase actually has.
+/// One phrase for where the index is, in the terms that status actually has.
 fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
     match state {
         GrepIndexLifecycle::Disabled => "disabled".to_owned(),
@@ -66,15 +66,15 @@ fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
             ),
             None => format!("backfilling toward seq {}, not yet started", target_seq.0),
         },
-        GrepIndexLifecycle::Steady {
+        GrepIndexLifecycle::Active {
             built_through_seq,
             next_event_index,
         } => {
             if *next_event_index == 0 {
-                format!("steady, built through seq {}", built_through_seq.0)
+                format!("active, built through seq {}", built_through_seq.0)
             } else {
                 format!(
-                    "steady, built through seq {} up to event {}",
+                    "active, built through seq {} up to event {}",
                     built_through_seq.0, next_event_index
                 )
             }
@@ -623,27 +623,24 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             lines.join("\n")
         }
         CommandData::GrepIndexEnabled {
-            namespace_id,
-            already_enabled,
-            state,
+            response,
             waited_for_seq,
             steps,
             budget_exhausted,
         } => {
-            let opening = if *already_enabled {
-                format!("grep index already enabled on {namespace_id}")
-            } else {
-                format!("grep index enabled on {namespace_id}")
-            };
+            let opening = format!("grep index enabled on {}", response.namespace_id);
             if *budget_exhausted {
                 let target = waited_for_seq
                     .map_or_else(|| "its target".to_owned(), |seq| format!("seq {}", seq.0));
                 format!(
                     "{opening}; gave up waiting for {target} after {steps} steps — {}",
-                    grep_index_state_summary(state)
+                    grep_index_state_summary(&response.lifecycle)
                 )
             } else {
-                format!("{opening}; {}", grep_index_state_summary(state))
+                format!(
+                    "{opening}; {}",
+                    grep_index_state_summary(&response.lifecycle)
+                )
             }
         }
         CommandData::MaintenanceHosted { namespaces, jobs } => format!(
@@ -698,17 +695,13 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             lines.join("\n")
         }
         CommandData::GrepIndexDisabled(response) => {
-            if response.was_enabled {
-                format!("grep index disabled on {}", response.namespace_id)
-            } else {
-                format!("grep index was not enabled on {}", response.namespace_id)
-            }
+            format!("grep index disabled on {}", response.namespace_id)
         }
         CommandData::GrepIndexStatus(response) => {
             let mut summary = format!(
                 "grep index on {}: {}",
                 response.namespace_id,
-                grep_index_state_summary(&response.state)
+                grep_index_state_summary(&response.lifecycle)
             );
             if response.reorganize_pending {
                 summary.push_str("; a reorganization is in progress");

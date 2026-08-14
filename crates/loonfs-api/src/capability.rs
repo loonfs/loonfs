@@ -81,7 +81,7 @@ pub fn direct_put_checksum_feature(algorithm: ChecksumAlgorithm) -> &'static str
 }
 
 /// Gates grep-index content search: the serving half of the capability;
-/// the namespace's verified steady-state grep root is the data half.
+/// the namespace's verified active grep root is the data half.
 pub const FEATURE_QUERY_GREP: &str = "query.grep";
 
 /// Gates grep-index administration: enabling a namespace's grep root,

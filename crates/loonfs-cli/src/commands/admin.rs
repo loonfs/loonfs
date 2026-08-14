@@ -564,17 +564,17 @@ async fn run_admin_index_enable(
         .enable_grep_index(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
-    let target_seq = match (args.no_wait, &response.state) {
+    let target_seq = match (args.no_wait, &response.lifecycle) {
         // Nothing to wait for: the caller opted out, or the index is
         // disabled, which enable would have changed if it could.
         (true, _) | (_, GrepIndexLifecycle::Disabled) => None,
         // A backfill already names the namespace sequence its checkpoint
         // captured, and reaching it is what completes the backfill.
         (_, GrepIndexLifecycle::Backfilling { target_seq, .. }) => Some(*target_seq),
-        // A steady index is asked to catch up to where the namespace is
+        // An active index is asked to catch up to where the namespace is
         // now: one read, before any stepping, so an index that is already
         // there returns without doing anything.
-        (_, GrepIndexLifecycle::Steady { .. }) => Some(
+        (_, GrepIndexLifecycle::Active { .. }) => Some(
             context
                 .target
                 .namespace_status(&context.namespace)
@@ -600,17 +600,22 @@ async fn run_admin_index_enable(
         ),
         None => None,
     };
+    let response = if waited.is_some() {
+        context
+            .target
+            .grep_index_status(&context.namespace)
+            .await
+            .map_err(|error| context.fail(kind, error))?
+    } else {
+        response
+    };
 
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::GrepIndexEnabled {
-            namespace_id: response.namespace_id,
-            already_enabled: response.already_enabled,
-            state: waited
-                .as_ref()
-                .map_or(response.state, |waited| waited.state.clone()),
+            response,
             waited_for_seq: target_seq,
             steps: waited.as_ref().map_or(0, |waited| waited.steps),
             budget_exhausted: waited.is_some_and(|waited| !waited.reached),

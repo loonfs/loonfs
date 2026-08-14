@@ -12,8 +12,8 @@
 //! that walk resumable across steps and processes: it answers the same
 //! state every time, whatever commits land meanwhile.
 //!
-//! **Semantic changes after it.** Once the walk finishes, the root turns
-//! `Steady` and the change feed takes over from the checkpoint's sequence.
+//! **Semantic changes after it.** Once the walk finishes, the lifecycle
+//! changes to `Active` and indexing continues from the checkpoint's sequence.
 //! The feed reports what happened, not which bytes moved, so grep indexes
 //! only the events that publish content and ignores moves, deletes, and
 //! undeletes outright — the index is keyed by durable `(inode_id,

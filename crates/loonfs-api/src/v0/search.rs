@@ -118,13 +118,13 @@ pub struct GrepResponse {
 
 /// Where a namespace's grep index is in its lifecycle.
 ///
-/// Each phase contains only the fields valid for that phase. `Backfilling`
-/// reports its target and current position. `Steady` reports how far the
-/// index has been built. Clients should treat a namespace as searchable only
-/// when the index is in the `Steady` phase.
+/// Each status contains only the fields valid for that lifecycle state.
+/// `Backfilling` reports its target and current position. `Active` reports
+/// how far the index has been built. Clients should treat a namespace as
+/// searchable only when the index is `Active`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "phase", rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum GrepIndexLifecycle {
     /// No index is maintained for this namespace.
     Disabled,
@@ -143,7 +143,7 @@ pub enum GrepIndexLifecycle {
     },
     /// The index follows the change feed. Commits at or below the watermark
     /// are searchable.
-    Steady {
+    Active {
         /// Sequence of the commit at the index cursor.
         built_through_seq: ChangeSeq,
         /// Offset of the next change event within `built_through_seq`, or
@@ -162,7 +162,7 @@ impl GrepIndexLifecycle {
     pub fn is_built_through(&self, target_seq: ChangeSeq) -> bool {
         match self {
             Self::Disabled | Self::Backfilling { .. } => false,
-            Self::Steady {
+            Self::Active {
                 built_through_seq,
                 next_event_index,
             } => {
@@ -177,18 +177,6 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
-/// Result of enabling the grep index on a namespace (admin plane).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct EnableGrepIndexResponse {
-    /// Namespace whose grep root was enabled.
-    pub namespace_id: NamespaceId,
-    /// True when the namespace already carried an enabled grep root.
-    pub already_enabled: bool,
-    /// The durable lifecycle this call published or found.
-    pub state: GrepIndexLifecycle,
-}
-
 /// The namespace's grep-index lifecycle and its cheap bookkeeping (admin
 /// plane).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,21 +185,12 @@ pub struct GrepIndexStatusResponse {
     /// Namespace the status describes.
     pub namespace_id: NamespaceId,
     /// Where the index is in its lifecycle.
-    pub state: GrepIndexLifecycle,
+    #[serde(flatten)]
+    pub lifecycle: GrepIndexLifecycle,
     /// Next logical run ordinal the index will allocate.
     pub next_run_ordinal: u64,
     /// True while a partitioned segment reorganization is in progress.
     pub reorganize_pending: bool,
-}
-
-/// Result of disabling the grep index on a namespace (admin plane).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DisableGrepIndexResponse {
-    /// Namespace whose grep root was disabled.
-    pub namespace_id: NamespaceId,
-    /// False when the namespace had no enabled grep root.
-    pub was_enabled: bool,
 }
 
 /// One explicit grep-index garbage-collection pass (admin plane).
@@ -301,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn the_lifecycle_phases_never_share_a_sequence_field() {
+    fn lifecycle_statuses_never_share_a_sequence_field() {
         let backfilling = GrepIndexLifecycle::Backfilling {
             target_seq: ChangeSeq(9),
             cursor_inode_id: Some(InodeId(4)),
@@ -311,7 +290,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&backfilling).expect("serialize backfilling"),
             serde_json::json!({
-                "phase": "backfilling",
+                "status": "backfilling",
                 "target_seq": 9,
                 "cursor_inode_id": 4,
                 "checkpoint_id": "chk_00000000000000000000000000000009"
@@ -320,23 +299,23 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::to_value(GrepIndexLifecycle::Steady {
+            serde_json::to_value(GrepIndexLifecycle::Active {
                 built_through_seq: ChangeSeq(9),
                 next_event_index: 0,
             })
-            .expect("serialize steady"),
-            serde_json::json!({"phase": "steady", "built_through_seq": 9}),
-            "a steady index reports its watermark and no target"
+            .expect("serialize active"),
+            serde_json::json!({"status": "active", "built_through_seq": 9}),
+            "an active index reports its watermark and no target"
         );
 
         assert_eq!(
             serde_json::to_value(GrepIndexLifecycle::Disabled).expect("serialize disabled"),
-            serde_json::json!({"phase": "disabled"})
+            serde_json::json!({"status": "disabled"})
         );
     }
 
     #[test]
-    fn only_a_steady_index_has_built_through_a_sequence() {
+    fn only_an_active_index_has_built_through_a_sequence() {
         let backfilling = GrepIndexLifecycle::Backfilling {
             target_seq: ChangeSeq(9),
             cursor_inode_id: None,
@@ -345,21 +324,59 @@ mod tests {
         };
         assert!(
             !backfilling.is_built_through(ChangeSeq(0)),
-            "a backfill has indexed nothing until it turns steady"
+            "a backfill has indexed nothing until it turns active"
         );
         assert!(!GrepIndexLifecycle::Disabled.is_built_through(ChangeSeq(0)));
 
-        let steady = |built_through_seq, next_event_index| GrepIndexLifecycle::Steady {
+        let active = |built_through_seq, next_event_index| GrepIndexLifecycle::Active {
             built_through_seq,
             next_event_index,
         };
-        assert!(steady(ChangeSeq(9), 0).is_built_through(ChangeSeq(9)));
-        assert!(steady(ChangeSeq(9), 0).is_built_through(ChangeSeq(8)));
-        assert!(!steady(ChangeSeq(9), 0).is_built_through(ChangeSeq(10)));
+        assert!(active(ChangeSeq(9), 0).is_built_through(ChangeSeq(9)));
+        assert!(active(ChangeSeq(9), 0).is_built_through(ChangeSeq(8)));
+        assert!(!active(ChangeSeq(9), 0).is_built_through(ChangeSeq(10)));
         // A watermark inside a commit leaves the rest of that commit
         // unindexed, so only earlier sequences count as reached.
-        assert!(!steady(ChangeSeq(9), 3).is_built_through(ChangeSeq(9)));
-        assert!(steady(ChangeSeq(9), 3).is_built_through(ChangeSeq(8)));
+        assert!(!active(ChangeSeq(9), 3).is_built_through(ChangeSeq(9)));
+        assert!(active(ChangeSeq(9), 3).is_built_through(ChangeSeq(8)));
+    }
+
+    #[test]
+    fn grep_index_status_flattens_active_lifecycle() {
+        let response = GrepIndexStatusResponse {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            lifecycle: GrepIndexLifecycle::Active {
+                built_through_seq: ChangeSeq(12),
+                next_event_index: 0,
+            },
+            next_run_ordinal: 3,
+            reorganize_pending: false,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&response).expect("serialize active status"),
+            r#"{"namespace_id":"demo","status":"active","built_through_seq":12,"next_run_ordinal":3,"reorganize_pending":false}"#
+        );
+    }
+
+    #[test]
+    fn grep_index_status_flattens_backfilling_lifecycle() {
+        let response = GrepIndexStatusResponse {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            lifecycle: GrepIndexLifecycle::Backfilling {
+                target_seq: ChangeSeq(12),
+                cursor_inode_id: Some(InodeId(4)),
+                checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+                    .expect("checkpoint id"),
+            },
+            next_run_ordinal: 1,
+            reorganize_pending: false,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&response).expect("serialize backfilling status"),
+            r#"{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":4,"checkpoint_id":"chk_00000000000000000000000000000009","next_run_ordinal":1,"reorganize_pending":false}"#
+        );
     }
 
     #[test]

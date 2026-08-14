@@ -112,6 +112,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "next_after_seq",
     "next_cursor",
     "next_event_index",
+    "next_run_ordinal",
     "next_reclamation_at_ms",
     "no_provider_timestamp",
     "no_reference_manifest",
@@ -133,6 +134,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "requested_deletion_seq",
     "retained_candidates",
     "retention_floor_seq",
+    "reorganize_pending",
     "revision_actor",
     "revision_no",
     "run_id",
@@ -1091,8 +1093,8 @@ async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> Chan
         .expect("an enabled namespace has a grep root")
         .manifest_state()
         .lifecycle()
-        .steady_watermark()
-        .expect("a steady grep root has a watermark")
+        .active_watermark()
+        .expect("an active grep root has a watermark")
         .0
 }
 

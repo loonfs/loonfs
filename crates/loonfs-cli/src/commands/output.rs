@@ -5,8 +5,8 @@ use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use loonfs_api::v0::{
-    ChangesResponse, DisableGrepIndexResponse, GrepGcResponse, GrepIndexLifecycle,
-    GrepIndexStatusResponse, StoreProbeCheckOutcome, StoreProbeResponse,
+    ChangesResponse, GrepGcResponse, GrepIndexStatusResponse, StoreProbeCheckOutcome,
+    StoreProbeResponse,
 };
 use loonfs_api::{
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, CreateCheckpointResponse,
@@ -131,12 +131,10 @@ pub(crate) enum CommandData {
     MaintenanceStepped(MaintenanceStepResponse),
     GarbageCollected(GcResponse),
     GrepIndexEnabled {
-        namespace_id: NamespaceId,
-        /// True when the namespace already carried an enabled grep root.
-        already_enabled: bool,
-        /// The lifecycle last observed: what enable published with
-        /// `--no-wait`, otherwise where the wait stopped.
-        state: GrepIndexLifecycle,
+        /// The lifecycle and bookkeeping last observed: what enable read
+        /// with `--no-wait`, otherwise the status after waiting stopped.
+        #[serde(flatten)]
+        response: GrepIndexStatusResponse,
         /// The sequence the wait drove toward. Absent with `--no-wait` and
         /// on a namespace whose index is disabled.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,7 +166,7 @@ pub(crate) enum CommandData {
     /// What one store contract probe found. Failed checks are data, not an
     /// error: the probe ran and the store is what it is.
     StoreProbed(StoreProbeResponse),
-    GrepIndexDisabled(DisableGrepIndexResponse),
+    GrepIndexDisabled(GrepIndexStatusResponse),
     GrepIndexStatus(GrepIndexStatusResponse),
     GrepIndexCollected(GrepGcResponse),
     Changes(ChangesResponse),

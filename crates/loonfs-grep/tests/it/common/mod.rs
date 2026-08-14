@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use loonfs::{FsAdmin, FsReader, MaintenanceJob, MaintenanceStepConclusion, SharedObjectStore};
-use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, GrepIndexLifecycle};
+use loonfs_api::v0::{GrepIndexLifecycle, GrepIndexStatusResponse};
 use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId};
 use loonfs_grep::root::GrepLifecycle;
 use loonfs_grep::{
@@ -82,10 +82,11 @@ impl GrepHost {
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGrepIndexResponse, GrepError> {
-        let (already_enabled, lifecycle) = match self.worker.enable(namespace_id).await? {
-            GrepEnableOutcome::Enabled { state } => (false, state),
-            GrepEnableOutcome::AlreadyEnabled { state } => (true, state),
+    ) -> Result<GrepIndexStatusResponse, GrepError> {
+        let lifecycle = match self.worker.enable(namespace_id).await? {
+            GrepEnableOutcome::Enabled { state } | GrepEnableOutcome::AlreadyEnabled { state } => {
+                state
+            }
             GrepEnableOutcome::Superseded => {
                 return Err(GrepError::PublicationConflict {
                     object_key: loonfs_grep::keyspace::root_key(namespace_id),
@@ -95,21 +96,16 @@ impl GrepHost {
         let target_seq = match &lifecycle {
             GrepLifecycle::Disabled => None,
             GrepLifecycle::Backfilling { target_seq, .. } => Some(*target_seq),
-            GrepLifecycle::Steady { .. } => Some(
+            GrepLifecycle::Active { .. } => Some(
                 NamespaceReads::new(&self.reader, namespace_id)
                     .head_seq()
                     .await?,
             ),
         };
-        let state = match target_seq {
-            Some(target_seq) => self.catch_up_grep_index(namespace_id, target_seq).await?,
-            None => lifecycle,
-        };
-        Ok(EnableGrepIndexResponse {
-            namespace_id: namespace_id.clone(),
-            already_enabled,
-            state: GrepIndexLifecycle::from(&state),
-        })
+        if let Some(target_seq) = target_seq {
+            self.catch_up_grep_index(namespace_id, target_seq).await?;
+        }
+        self.grep_index_status(namespace_id).await
     }
 
     /// Runs the index job's bounded steps until the index has built through
@@ -142,20 +138,36 @@ impl GrepHost {
     pub(crate) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGrepIndexResponse, GrepError> {
+    ) -> Result<GrepIndexStatusResponse, GrepError> {
         match self.worker.disable(namespace_id).await? {
-            GrepDisableOutcome::Disabled => Ok(DisableGrepIndexResponse {
-                namespace_id: namespace_id.clone(),
-                was_enabled: true,
-            }),
-            GrepDisableOutcome::NotEnabled => Ok(DisableGrepIndexResponse {
-                namespace_id: namespace_id.clone(),
-                was_enabled: false,
-            }),
+            GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
+                self.grep_index_status(namespace_id).await
+            }
             GrepDisableOutcome::Superseded => Err(GrepError::PublicationConflict {
                 object_key: loonfs_grep::keyspace::root_key(namespace_id),
             }),
         }
+    }
+
+    pub(crate) async fn grep_index_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<GrepIndexStatusResponse, GrepError> {
+        let root = self.worker.root_state(namespace_id).await?;
+        let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
+            Some(root) => (
+                GrepIndexLifecycle::from(root.lifecycle()),
+                root.index().next_run_ordinal,
+                root.index().reorganize.is_some(),
+            ),
+            None => (GrepIndexLifecycle::Disabled, 0, false),
+        };
+        Ok(GrepIndexStatusResponse {
+            namespace_id: namespace_id.clone(),
+            lifecycle,
+            next_run_ordinal,
+            reorganize_pending,
+        })
     }
 }
 
