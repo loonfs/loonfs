@@ -21,7 +21,7 @@ use loonfs_api::v0::{ChangesResponse, FilesystemChange};
 use loonfs_api::{
     decode_cursor, AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, ContentRef,
     DirectoryPageCursor, EffectiveLimit, InodeId, LimitError, NamespaceId, Page, PageRequest,
-    PaginationPolicy, RevisionNo,
+    PaginationPolicy, RevisionNo, MAX_PUBLIC_INTEGER,
 };
 
 /// One namespace's filesystem reads, borrowed from a reader handle.
@@ -60,7 +60,7 @@ impl<'a> NamespaceReads<'a> {
     /// against and no history.
     pub async fn head_seq(&self) -> Result<ChangeSeq> {
         Ok(self
-            .list_changes_after(ChangeSeq(u64::MAX), 1)
+            .list_changes_after(ChangeSeq(MAX_PUBLIC_INTEGER), 1)
             .await?
             .through_seq)
     }

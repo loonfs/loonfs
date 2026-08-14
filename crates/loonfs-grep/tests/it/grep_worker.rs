@@ -6,16 +6,17 @@
 use crate::common::{control, grep_with, GrepHost};
 use bytes::Bytes;
 use loonfs::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter,
-    GcConfig, MaintenancePlan, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
-    SharedObjectStore,
+    CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsReader,
+    FsWriter, GcConfig, MaintenancePlan, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
+    RuntimeError, SharedObjectStore,
 };
 use loonfs_api::wire::control::CheckpointRecordLifecycle;
 use loonfs_api::{
     sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId,
+    MAX_PUBLIC_INTEGER,
 };
 use loonfs_grep::keyspace::{
-    manifest_key, manifests_prefix, namespace_prefix, root_key, segment_key,
+    manifest_key, manifests_prefix, namespace_prefix, root_key, segment_key, segments_prefix,
 };
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_root, load_grep_root, GrepIndexState, GrepLifecycle,
@@ -251,6 +252,134 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         root.manifest_state().lifecycle(),
         GrepLifecycle::Backfilling { .. }
     ));
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn exhausted_run_ordinals_fail_as_server_errors_without_writing_the_root() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("run-ordinal-limit").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("run-ordinal-limit-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/initial.txt",
+            b"initial ordinal boundary needle\n",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write initial file");
+
+    let worker = worker(&store).await;
+    worker.enable(&namespace_id).await.expect("enable grep");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    let current = load_grep_root(&*store, &namespace_id)
+        .await
+        .expect("load current root")
+        .expect("current root");
+    let current_state = current.manifest_state();
+    let maximum_state = GrepManifestState::new(
+        namespace_id.clone(),
+        current_state.lifecycle().clone(),
+        GrepIndexState::new(current_state.index().reorganize.clone(), MAX_PUBLIC_INTEGER),
+        current_state.segments().to_vec(),
+    )
+    .expect("valid root at the public maximum");
+    let maximum = advance_grep_root(&*store, &current, &maximum_state)
+        .await
+        .expect("install root at the public maximum");
+
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/incremental.txt",
+            b"incremental ordinal boundary needle\n",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write incremental file");
+    let pointer_before = store
+        .get(&root_key(&namespace_id), None)
+        .await
+        .expect("read root pointer before failure")
+        .expect("root pointer exists");
+    let manifests_before = store
+        .list_prefix(&manifests_prefix(&namespace_id))
+        .await
+        .expect("list manifests before failure");
+    let segments_before = store
+        .list_prefix(&segments_prefix(&namespace_id))
+        .await
+        .expect("list segments before failure");
+
+    for error in [
+        worker
+            .build_step(&namespace_id, GramIndexBuildPolicy::default())
+            .await
+            .expect_err("a build cannot allocate a run above the public maximum"),
+        worker
+            .reorganize_step(
+                &namespace_id,
+                GramIndexBuildPolicy {
+                    max_l0_runs: NonZeroUsize::MIN,
+                    ..GramIndexBuildPolicy::default()
+                },
+            )
+            .await
+            .expect_err("a reorganization cannot allocate above the public maximum"),
+    ] {
+        assert_eq!(error.code(), ErrorCode::ServerError);
+        assert!(matches!(
+            error,
+            GrepError::Runtime(RuntimeError::Core(CoreError::Internal(message)))
+                if message.contains("grep run ordinal cannot advance beyond the public integer range")
+        ));
+    }
+
+    let after = load_grep_root(&*store, &namespace_id)
+        .await
+        .expect("load root after failures")
+        .expect("root remains");
+    assert_eq!(after.manifest_id(), maximum.manifest_id());
+    assert_eq!(
+        after.manifest_state().index().next_run_ordinal,
+        MAX_PUBLIC_INTEGER
+    );
+    assert_eq!(
+        store
+            .get(&root_key(&namespace_id), None)
+            .await
+            .expect("read root pointer after failure")
+            .expect("root pointer remains"),
+        pointer_before
+    );
+    assert_eq!(
+        store
+            .list_prefix(&manifests_prefix(&namespace_id))
+            .await
+            .expect("list manifests after failures"),
+        manifests_before
+    );
+    assert_eq!(
+        store
+            .list_prefix(&segments_prefix(&namespace_id))
+            .await
+            .expect("list segments after failures"),
+        segments_before,
+        "the build guard runs before writing an orphan segment"
+    );
     writer.shutdown().await.expect("shutdown");
 }
 

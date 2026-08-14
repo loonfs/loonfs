@@ -295,7 +295,7 @@ pub(super) async fn delete_namespace(
 }
 
 fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
-    parse_public_ordinal("expected_head_seq", value).map(ChangeSeq)
+    parse_public_ordinal("expected_head_seq", value, ChangeSeq::parse)
 }
 
 #[cfg_attr(

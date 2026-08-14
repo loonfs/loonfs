@@ -28,7 +28,7 @@ use loonfs_api::{
     v0::{ChangesResponse, CommitResponse as ApiCommitResponse},
     CommitRequest as ApiCommitRequest, DirectoryPageCursor, FileRevisionsPageCursor,
     FilesystemOperation, LimitError, ListFileRevisionsResponse, ListTrashResponse, PageCursorError,
-    PageRequest, PaginationPolicy, RevisionNo, MAX_PUBLIC_INTEGER,
+    PageRequest, PaginationPolicy, PublicOrdinalRangeError, RevisionNo,
 };
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -587,7 +587,7 @@ pub(super) async fn list_changes(
 }
 
 fn parse_after_seq(value: &str) -> Result<loonfs_api::ChangeSeq, ApiResponseError> {
-    parse_public_ordinal("after_seq", value).map(loonfs_api::ChangeSeq)
+    parse_public_ordinal("after_seq", value, loonfs_api::ChangeSeq::parse)
 }
 
 pub(super) fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {
@@ -603,23 +603,30 @@ pub(super) fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseE
 }
 
 pub(super) fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
-    parse_public_ordinal("revision_no", value).map(RevisionNo)
+    parse_public_ordinal("revision_no", value, RevisionNo::parse)
 }
 
-pub(super) fn parse_public_ordinal(name: &str, value: &str) -> Result<u64, ApiResponseError> {
-    value
+pub(super) fn parse_public_ordinal<T>(
+    name: &str,
+    value: &str,
+    constructor: impl FnOnce(u64) -> Result<T, PublicOrdinalRangeError>,
+) -> Result<T, ApiResponseError> {
+    let parsed = value
         .parse::<u64>()
-        .ok()
-        .filter(|parsed| *parsed <= MAX_PUBLIC_INTEGER)
-        .ok_or_else(|| {
-            ApiResponseError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                &format!(
-                    "invalid {name} `{value}`: must be an integer from 0 through {MAX_PUBLIC_INTEGER}"
-                ),
-            )
-        })
+        .map_err(|_| public_ordinal_response_error(name, value, PublicOrdinalRangeError))?;
+    constructor(parsed).map_err(|error| public_ordinal_response_error(name, value, error))
+}
+
+fn public_ordinal_response_error(
+    name: &str,
+    value: &str,
+    error: PublicOrdinalRangeError,
+) -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidRequest,
+        &format!("invalid {name} `{value}`: {error}"),
+    )
 }
 
 pub(super) fn resolve_page_limit(
@@ -695,7 +702,7 @@ mod tests {
     fn after_seq_parser_accepts_the_public_maximum_and_rejects_the_next_value() {
         assert!(matches!(
             parse_after_seq("9007199254740991"),
-            Ok(loonfs_api::ChangeSeq(MAX_PUBLIC_INTEGER))
+            Ok(loonfs_api::ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER))
         ));
         assert!(parse_after_seq("9007199254740992").is_err());
     }

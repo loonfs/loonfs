@@ -3,8 +3,8 @@
 
 use super::context::{
     default_remote_put_path, destination_path_for_get, destination_user_path, directory_intent,
-    fail, namespace_path, parse_user_path, render_target, resolve_command_context,
-    resolve_mutation_context, CommandContext, UndeleteHint,
+    fail, namespace_path, parse_public_ordinal_arg, parse_user_path, render_target,
+    resolve_command_context, resolve_mutation_context, CommandContext, UndeleteHint,
 };
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
@@ -302,7 +302,16 @@ fn update_attributes_options(
         remove,
         commit: commit_options(actor, commit_id, args.message.clone()),
         expected_inode_id: args.expected_inode_id.map(InodeId),
-        expected_attributes_revision_no: args.expected_attributes_revision.map(AttributeRevisionNo),
+        expected_attributes_revision_no: args
+            .expected_attributes_revision
+            .map(|value| {
+                parse_public_ordinal_arg(
+                    "--expected-attributes-revision",
+                    value,
+                    AttributeRevisionNo::parse,
+                )
+            })
+            .transpose()?,
     })
 }
 
@@ -419,7 +428,11 @@ pub(crate) async fn run_filesystem_cat(
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let revision_no = args.revision.map(RevisionNo);
+    let revision_no = args
+        .revision
+        .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
+        .transpose()
+        .map_err(|error| context.fail(kind, error))?;
     let bytes = match revision_no {
         Some(revision_no) => {
             context
@@ -457,6 +470,11 @@ pub(crate) async fn run_filesystem_get(
 
     let allow_root = args.recursive;
     let spec = namespace_path(&context.namespace, &args.remote_path, allow_root)
+        .map_err(|error| context.fail(kind, error))?;
+    let revision_no = args
+        .revision
+        .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
+        .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
@@ -510,7 +528,6 @@ pub(crate) async fn run_filesystem_get(
         ));
     }
 
-    let revision_no = args.revision.map(RevisionNo);
     if args.local_destination.as_deref() == Some("-") {
         // No progress and no resume: standard output is carrying the file,
         // and bytes already piped onward are somewhere this CLI cannot see.
@@ -1092,7 +1109,10 @@ fn put_file_options(
     actor: &ActorRef,
 ) -> Result<PutFileOptions, CliError> {
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())?;
-    let expected_revision_no = args.expected_revision.map(RevisionNo);
+    let expected_revision_no = args
+        .expected_revision
+        .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
+        .transpose()?;
     // The revision guard is a stronger replace statement, so it implies
     // --force rather than demanding both flags.
     let behavior = if args.force || expected_revision_no.is_some() {
@@ -1180,11 +1200,13 @@ pub(crate) async fn run_filesystem_restore(
         .map_err(|error| context.fail(kind, error))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
+    let revision_no = parse_public_ordinal_arg("--revision", args.revision, RevisionNo::parse)
+        .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
         .restore_file_revision(
             &spec,
-            RevisionNo(args.revision),
+            revision_no,
             &loonfs_client::RestoreRevisionOptions {
                 commit: commit_options(&context.actor, commit_id, args.message.clone()),
             },
@@ -1223,13 +1245,16 @@ pub(crate) async fn run_filesystem_undelete(
         .map_err(|error| context.fail(kind, error))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
+    let deletion_seq =
+        parse_public_ordinal_arg("--deletion-seq", args.deletion_seq, ChangeSeq::parse)
+            .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
         .undelete(
             &context.namespace,
             spec.as_ref().map(|spec| spec.absolute_path()),
             loonfs_api::InodeId(args.inode),
-            loonfs_api::ChangeSeq(args.deletion_seq),
+            deletion_seq,
             &loonfs_client::UndeleteOptions {
                 commit: commit_options(&context.actor, commit_id, args.message.clone()),
             },

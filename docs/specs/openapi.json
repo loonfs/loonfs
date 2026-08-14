@@ -5621,6 +5621,7 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "Next logical run ordinal the index will allocate.",
+                "maximum": 9007199254740991,
                 "minimum": 0
               },
               "reorganize_pending": {

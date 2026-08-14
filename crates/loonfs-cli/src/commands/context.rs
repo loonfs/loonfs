@@ -7,7 +7,9 @@ use crate::error::CliError;
 use crate::resolve::{
     load_cli_config, resolve_actor, resolve_namespace, resolve_target_profile_from_config,
 };
-use loonfs_api::{AbsolutePath, ActorRef, ChangeSeq, InodeId, NamespaceId};
+use loonfs_api::{
+    AbsolutePath, ActorRef, ChangeSeq, ErrorCode, InodeId, NamespaceId, PublicOrdinalRangeError,
+};
 use loonfs_client::NamespacePath;
 use std::path::{Path, PathBuf};
 
@@ -33,6 +35,20 @@ pub(crate) fn fail_for(
         Some(mode.to_owned()),
         error,
     )
+}
+
+/// Validates one numeric command argument before either backend sees it.
+pub(crate) fn parse_public_ordinal_arg<T>(
+    argument: &str,
+    value: u64,
+    constructor: impl FnOnce(u64) -> Result<T, PublicOrdinalRangeError>,
+) -> Result<T, CliError> {
+    constructor(value).map_err(|error| {
+        CliError::new(
+            ErrorCode::InvalidRequest.as_str(),
+            format!("invalid {argument} `{value}`: {error}"),
+        )
+    })
 }
 
 impl CommandContext {

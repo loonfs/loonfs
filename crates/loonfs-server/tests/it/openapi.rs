@@ -575,6 +575,19 @@ fn openapi_caps_public_ordinals_but_not_inode_ids() {
             .is_none(),
         "InodeId stays on its existing full-u64 schema in this wave"
     );
+
+    assert_eq!(
+        schemas
+            .get("GrepIndexStatusResponse")
+            .and_then(|schema| schema.get("allOf"))
+            .and_then(Value::as_array)
+            .and_then(|schemas| schemas.iter().find_map(|schema| schema.get("properties")))
+            .and_then(|properties| properties.get("next_run_ordinal"))
+            .and_then(|schema| schema.get("maximum"))
+            .and_then(Value::as_u64),
+        Some(loonfs_api::MAX_PUBLIC_INTEGER),
+        "grep status must publish the next run ordinal maximum"
+    );
 }
 
 #[test]

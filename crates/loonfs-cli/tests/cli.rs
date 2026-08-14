@@ -3100,6 +3100,29 @@ fn embedded_namespace_commands_reject_invalid_namespace_ids() {
 }
 
 #[test]
+fn embedded_commands_reject_out_of_range_ordinal_arguments_at_the_cli_boundary() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+
+    let changes = harness.run(&[
+        "--json",
+        "changes",
+        "--profile",
+        "default",
+        "--namespace",
+        "demo",
+        "--after",
+        "9007199254740992",
+    ]);
+    assert_failure(&changes);
+    assert_eq!(json_error(&changes)["code"], "invalid_request");
+    assert!(json_error(&changes)["message"]
+        .as_str()
+        .expect("json string")
+        .contains("must be an integer from 0 through 9007199254740991"));
+}
+
+#[test]
 fn remote_namespace_commands_reject_invalid_namespace_ids_before_http() {
     let harness = Harness::new();
     let add_remote = harness.run(&[

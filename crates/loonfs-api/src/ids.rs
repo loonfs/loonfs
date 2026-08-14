@@ -214,6 +214,21 @@ macro_rules! numeric_id {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
         pub struct $name(pub u64);
 
+        impl $name {
+            /// Parses and validates an ordinal received at a non-serde boundary.
+            ///
+            /// Serde and this checked constructor guard external inputs. The
+            /// public tuple field and `From<u64>` remain available for trusted
+            /// internal construction, including already-checked advancement
+            /// and durable key formatting.
+            pub fn parse(value: u64) -> Result<Self, $crate::PublicOrdinalRangeError> {
+                if value > $crate::MAX_PUBLIC_INTEGER {
+                    return Err($crate::PublicOrdinalRangeError);
+                }
+                Ok(Self(value))
+            }
+        }
+
         #[cfg(feature = "openapi")]
         impl utoipa::PartialSchema for $name {
             fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
@@ -238,13 +253,7 @@ macro_rules! numeric_id {
                 D: serde::Deserializer<'de>,
             {
                 let value = <u64 as serde::Deserialize>::deserialize(deserializer)?;
-                if value > $crate::MAX_PUBLIC_INTEGER {
-                    return Err(serde::de::Error::custom(format_args!(
-                        "must be an integer from 0 through {}",
-                        $crate::MAX_PUBLIC_INTEGER
-                    )));
-                }
-                Ok(Self(value))
+                Self::parse(value).map_err(serde::de::Error::custom)
             }
         }
 
@@ -658,7 +667,10 @@ impl ManifestObjectId {
 pub fn manifest_object_id_manifest_id(object_id: &str) -> Option<ManifestId> {
     validate_position_suffix_id(object_id, ("manifest_id", "manifest id")).ok()?;
     let (position, _) = object_id.split_once('-')?;
-    position.parse().ok().map(ManifestId)
+    position
+        .parse()
+        .ok()
+        .and_then(|value| ManifestId::parse(value).ok())
 }
 
 string_id! {
@@ -697,7 +709,10 @@ impl WalSegmentId {
 pub fn wal_segment_id_start_seq(segment_id: &str) -> Option<ChangeSeq> {
     validate_position_suffix_id(segment_id, ("start_seq", "position")).ok()?;
     let (position, _) = segment_id.split_once('-')?;
-    position.parse().ok().map(ChangeSeq)
+    position
+        .parse()
+        .ok()
+        .and_then(|value| ChangeSeq::parse(value).ok())
 }
 
 string_id! {
@@ -725,6 +740,18 @@ impl NameKey {
 /// Largest integer a JSON client can represent exactly (2^53 - 1). No
 /// API-visible ordinal may durably advance beyond it.
 pub const MAX_PUBLIC_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// An integer lies outside the exact range supported for public ordinals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicOrdinalRangeError;
+
+impl fmt::Display for PublicOrdinalRangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "must be an integer from 0 through {MAX_PUBLIC_INTEGER}")
+    }
+}
+
+impl std::error::Error for PublicOrdinalRangeError {}
 
 /// Advances one API-visible ordinal without crossing [`MAX_PUBLIC_INTEGER`].
 pub fn next_public_ordinal(current: u64) -> Option<u64> {
@@ -832,6 +859,17 @@ mod tests {
     fn public_ordinal_deserialization_enforces_the_json_safe_integer_range() {
         macro_rules! assert_range {
             ($type:ty) => {{
+                let constructed =
+                    <$type>::parse(MAX_PUBLIC_INTEGER).expect("maximum public ordinal constructor");
+                assert_eq!(constructed.0, MAX_PUBLIC_INTEGER);
+
+                let construction_error = <$type>::parse(MAX_PUBLIC_INTEGER + 1)
+                    .expect_err("ordinal above the constructor's public range");
+                assert_eq!(
+                    construction_error.to_string(),
+                    "must be an integer from 0 through 9007199254740991"
+                );
+
                 let maximum = serde_json::from_str::<$type>(&MAX_PUBLIC_INTEGER.to_string())
                     .expect("maximum public ordinal");
                 assert_eq!(maximum.0, MAX_PUBLIC_INTEGER);
@@ -1100,6 +1138,10 @@ mod tests {
             Some(ChangeSeq(412))
         );
         assert_eq!(super::wal_segment_id_start_seq("not-a-segment-id"), None);
+        assert_eq!(
+            super::wal_segment_id_start_seq("00009007199254740992-9f2a6c0e4b7d4a90"),
+            None
+        );
     }
 
     #[test]
@@ -1110,6 +1152,10 @@ mod tests {
         );
         assert_eq!(
             super::manifest_object_id_manifest_id("not-a-manifest-object-id"),
+            None
+        );
+        assert_eq!(
+            super::manifest_object_id_manifest_id("00009007199254740992-9f2a6c0e4b7d4a90"),
             None
         );
     }

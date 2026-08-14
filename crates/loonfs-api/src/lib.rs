@@ -129,8 +129,8 @@ pub use ids::{
     ChangeSeq, CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
     GeneratedIdValidationError, IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId,
     MetadataCompactionId, MetadataTableId, NameKey, NameKeyValidationError, NamespaceId,
-    NamespaceIdValidationError, RevisionNo, UploadId, WalSegmentId, WriterEpoch,
-    FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER,
+    NamespaceIdValidationError, PublicOrdinalRangeError, RevisionNo, UploadId, WalSegmentId,
+    WriterEpoch, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER,
     ROOT_INODE_ID,
 };
 pub use name_policy::name_key_for_display_name;

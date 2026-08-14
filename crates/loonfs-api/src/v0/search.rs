@@ -188,6 +188,7 @@ pub struct GrepIndexStatusResponse {
     #[serde(flatten)]
     pub lifecycle: GrepIndexLifecycle,
     /// Next logical run ordinal the index will allocate.
+    #[cfg_attr(feature = "openapi", schema(maximum = 9007199254740991_u64))]
     pub next_run_ordinal: u64,
     /// True while a partitioned segment reorganization is in progress.
     pub reorganize_pending: bool,
