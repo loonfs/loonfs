@@ -40,6 +40,7 @@ mod name_policy;
 pub mod options;
 mod pagination;
 mod path;
+pub mod public_inode_id;
 mod secret;
 mod sst_blocks;
 pub mod v0;

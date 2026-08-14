@@ -465,6 +465,35 @@ mod tests {
     }
 
     #[test]
+    fn trash_cursor_round_trips() {
+        let cursor = TrashPageCursor {
+            head_seq: ChangeSeq(11),
+            last_deleted_at_seq: ChangeSeq(10),
+            last_root_inode_id: InodeId(7),
+        };
+
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let decoded: TrashPageCursor = decode_cursor(&encoded).expect("decode cursor");
+
+        assert_eq!(decoded, cursor);
+    }
+
+    #[test]
+    fn grep_cursor_round_trips() {
+        let cursor = GrepPageCursor {
+            head_seq: ChangeSeq(11),
+            last_inode_id: InodeId(7),
+            last_byte_offset: 13,
+            fingerprint: 17,
+        };
+
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let decoded: GrepPageCursor = decode_cursor(&encoded).expect("decode cursor");
+
+        assert_eq!(decoded, cursor);
+    }
+
+    #[test]
     fn cursor_kind_must_match_decoder() {
         let cursor = FileRevisionsPageCursor {
             head_seq: ChangeSeq(11),
@@ -512,6 +541,78 @@ mod tests {
                 expected: PAGE_CURSOR_VERSION,
                 actual: PAGE_CURSOR_VERSION + 1,
             })
+        );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct TestNamespaceCursor {
+        namespace_id: NamespaceId,
+        last_key: String,
+    }
+
+    impl PageCursor for TestNamespaceCursor {
+        const KIND: &'static str = "test_namespace";
+    }
+
+    impl NamespaceCursor for TestNamespaceCursor {
+        fn namespace_id(&self) -> &NamespaceId {
+            &self.namespace_id
+        }
+
+        fn last_key(&self) -> Option<&str> {
+            Some(&self.last_key)
+        }
+
+        fn key_prefix(&self) -> String {
+            format!("namespaces/{}/items/", self.namespace_id)
+        }
+    }
+
+    #[test]
+    fn namespace_cursor_accepts_its_namespace_and_keyspace() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let cursor = TestNamespaceCursor {
+            namespace_id: namespace_id.clone(),
+            last_key: "namespaces/demo/items/item-42".to_owned(),
+        };
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+
+        assert_eq!(
+            decode_namespace_cursor::<TestNamespaceCursor>(&encoded, &namespace_id)
+                .expect("decode namespace cursor"),
+            cursor
+        );
+    }
+
+    #[test]
+    fn namespace_cursor_rejects_a_different_namespace() {
+        let cursor = TestNamespaceCursor {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            last_key: "namespaces/demo/items/item-42".to_owned(),
+        };
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+
+        assert_eq!(
+            decode_namespace_cursor::<TestNamespaceCursor>(
+                &encoded,
+                &NamespaceId::parse("other").expect("other namespace id")
+            ),
+            Err(NamespaceCursorError::ForeignNamespace)
+        );
+    }
+
+    #[test]
+    fn namespace_cursor_rejects_a_key_outside_its_keyspace() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let cursor = TestNamespaceCursor {
+            namespace_id: namespace_id.clone(),
+            last_key: "namespaces/demo/checkpoints/checkpoint-42".to_owned(),
+        };
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+
+        assert_eq!(
+            decode_namespace_cursor::<TestNamespaceCursor>(&encoded, &namespace_id),
+            Err(NamespaceCursorError::OutsideKeyspace)
         );
     }
 }
