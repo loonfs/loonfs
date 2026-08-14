@@ -1273,7 +1273,7 @@ or separate display names. Representative request:
 
 The response contains the new namespace's initial status. A new namespace
 starts at sequence 0 with a retention floor of 0 and no WAL tail. It does not
-have a manifest yet, so the response omits `current_manifest_id`:
+have a manifest yet, so the optional manifest field is omitted:
 
 ```json
 {
@@ -2288,10 +2288,10 @@ target may still read them, then installs the target namespace's head in one
 conditional write, then checks that the source checkpoint still holds. That
 head carries the fork provenance for the target's whole life.
 
-The response contains the new namespace's initial status. `head_seq` and
-`retention_floor_seq` are set to the source namespace's sequence at the fork
-point, and `wal_tail_segments` starts at 0. The response omits
-`current_manifest_id` until the new namespace publishes its own manifest.
+The response contains the new namespace's initial status. Its head sequence
+and retention floor are set to the source namespace's sequence at the fork
+point, and its WAL tail starts empty. The response omits the manifest field
+until the new namespace publishes its own manifest.
 
 If the target ID already exists or has been deleted, the server returns the
 same `namespace_exists` or `namespace_deleted` error as namespace creation.
