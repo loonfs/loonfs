@@ -27,7 +27,6 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
         return Ok(ReleaseCheckpointResponse {
             namespace_id: namespace_id.clone(),
             checkpoint_id: checkpoint_id.clone(),
-            was_active: false,
         });
     };
     if let CheckpointOwner::Fork {
@@ -46,13 +45,11 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
         return Ok(ReleaseCheckpointResponse {
             namespace_id: namespace_id.clone(),
             checkpoint_id: checkpoint_id.clone(),
-            was_active: false,
         });
     }
     release_checkpoint_record(store, namespace_id, checkpoint_id, context.now_ms).await?;
     Ok(ReleaseCheckpointResponse {
         namespace_id: namespace_id.clone(),
         checkpoint_id: checkpoint_id.clone(),
-        was_active: true,
     })
 }

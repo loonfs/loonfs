@@ -446,16 +446,16 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             response.namespace_id, response.head_seq.0
         ),
         CommandData::CheckpointCreated(response) => {
-            let expiry = match response.expires_at_ms {
+            let expiry = match response.checkpoint.expires_at_ms {
                 Some(expires_at_ms) => format!(", expires at {expires_at_ms}"),
                 None => String::new(),
             };
             format!(
                 "checkpointed {} @ seq {} (checkpoint {}, manifest {}{expiry})",
                 response.namespace_id,
-                response.checkpoint_seq.0,
-                response.checkpoint_id,
-                response.manifest_id
+                response.checkpoint.checkpoint_seq.0,
+                response.checkpoint.checkpoint_id,
+                response.checkpoint.manifest_id
             )
         }
         CommandData::CheckpointsListed(response) => {
@@ -485,17 +485,10 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             lines.join("\n")
         }
-        CommandData::CheckpointReleased(response) => {
-            let state = if response.was_active {
-                "released"
-            } else {
-                "already released or gone"
-            };
-            format!(
-                "checkpoint {} in {}: {state}",
-                response.checkpoint_id, response.namespace_id
-            )
-        }
+        CommandData::CheckpointReleased(response) => format!(
+            "checkpoint {} in {} released or already gone",
+            response.checkpoint_id, response.namespace_id
+        ),
         // One clause per action the step selected, and none for an action it
         // did not: the line says what ran, never what was skipped.
         CommandData::MaintenanceStepped(response) => {

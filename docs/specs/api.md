@@ -806,16 +806,37 @@ floor has advanced.
 #### Checkpoint inventory
 
 A checkpoint name is a label, not a key: every create mints a new record
-under a new id, and two creates under one name leave two records. The
-creation response is where that id comes from, so losing it — or never
-seeing it — would otherwise leave a garbage-collection root nobody can name.
-The listing is the way back to it.
+under a new id, and two creates under one name leave two records. Create and
+list use one checkpoint object: `checkpoint_id`, `owner`, `created_at_ms`,
+optional `expires_at_ms`, `checkpoint_seq`, and `manifest_id`. The create
+response adds `namespace_id` as an envelope and flattens that object into the
+same JSON level. For an API create, `owner` is `user` with the request's
+`name`; `created_at_ms` is the durable record timestamp that listing later
+reports.
+
+For example, a create response is:
+
+```json
+{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_id":9}
+```
 
 `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns active
-checkpoints in ascending `checkpoint_id` order. Each entry includes its id,
-owner, creation and expiration times, checkpoint sequence, and manifest id.
-User checkpoints can be released by id. Fork checkpoints remain until their
-target namespace is deleted.
+checkpoints in ascending `checkpoint_id` order. Each entry is the same
+checkpoint object returned by create. User checkpoints can be released by
+id. Fork checkpoints retain their `fork` owner and remain until their target
+namespace is deleted.
+
+```json
+{"namespace_id":"demo","checkpoints":[{"checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_id":9}]}
+```
+
+Release is idempotent and returns only the addressed namespace and
+checkpoint. The response is identical whether this call released an active
+record or the record was already released or reaped:
+
+```json
+{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009"}
+```
 
 `limit` follows the advertised pagination limits. `next_cursor` is omitted
 after the final page. Cursors are opaque and tied to this namespace and

@@ -60,6 +60,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("create checkpoint")
+    .checkpoint
     .checkpoint_id
 }
 

@@ -48,9 +48,6 @@ pub(super) struct FlushedBasis {
     pub(super) head_commit_id: CommitId,
     /// Head sequence the attempt targeted.
     pub(super) target_head_seq: ChangeSeq,
-    /// Root manifest observed when the projection loaded, for callers that
-    /// report the newest manifest id they saw.
-    pub(super) root_manifest_id_at_load: ManifestId,
     /// Manifest `metadata/root.json` references after the attempt — the
     /// basis itself, or the newer root that superseded it.
     pub(super) root_after_manifest_id: ManifestId,
@@ -128,8 +125,6 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         .await?;
     let head_seq = projection.head.seq;
     let basis_manifest_id = projection.basis.manifest_id();
-    let root_manifest_id_at_load = basis_manifest_id;
-
     // Only a manifest this namespace published can already cover the head.
     // A genesis or fork basis must be materialized here even at an
     // unchanged head, because the namespace owns no manifest yet and a
@@ -146,7 +141,6 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
             manifest_payload_checksum: basis_manifest.manifest_payload_checksum.clone(),
             head_commit_id: projection.head.head_commit_id.clone(),
             target_head_seq: head_seq,
-            root_manifest_id_at_load,
             root_after_manifest_id: basis_manifest.manifest_id,
             root_after_head_seq: head_seq,
             outcome: FlushWalOutcome::AlreadyCurrent,
@@ -213,7 +207,6 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         manifest_payload_checksum: manifest.payload_checksum.clone(),
         head_commit_id: projection.head.head_commit_id.clone(),
         target_head_seq: head_seq,
-        root_manifest_id_at_load,
         root_after_manifest_id,
         root_after_head_seq,
         outcome,

@@ -5412,6 +5412,11 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let checkpoint_data = json_data(&checkpoint);
         assert_eq!(checkpoint_data["kind"], "checkpoint_created");
         assert_eq!(checkpoint_data["namespace_id"], "demo");
+        assert_eq!(
+            checkpoint_data["owner"],
+            serde_json::json!({"kind": "user", "name": "nightly"})
+        );
+        assert!(checkpoint_data["created_at_ms"].is_u64());
         assert_eq!(checkpoint_data["checkpoint_seq"], 2);
         let checkpoint_id = checkpoint_data["checkpoint_id"]
             .as_str()
@@ -5571,7 +5576,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let release_data = json_data(&release);
         assert_eq!(release_data["kind"], "checkpoint_released");
         assert_eq!(release_data["checkpoint_id"], checkpoint_id.as_str());
-        assert_eq!(release_data["was_active"], true);
+        assert!(release_data.get("was_active").is_none());
 
         let release_again = harness.run(&[
             "--json",
@@ -5582,7 +5587,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             profile,
         ]);
         assert_success(&release_again);
-        assert_eq!(json_data(&release_again)["was_active"], false);
+        assert_eq!(json_data(&release_again), release_data);
 
         let retention =
             harness.run(&["--json", "admin", "retention-advance", "--profile", profile]);

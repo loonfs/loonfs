@@ -498,7 +498,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     async fn create_backfill_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<loonfs_api::CreateCheckpointResponse> {
+    ) -> Result<loonfs_api::Checkpoint> {
         Ok(self
             .admin
             .create_checkpoint(
@@ -508,7 +508,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     ttl_ms: Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),
                 },
             )
-            .await?)
+            .await?
+            .checkpoint)
     }
 
     async fn release_checkpoint(

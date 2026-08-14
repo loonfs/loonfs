@@ -608,7 +608,8 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
     let checkpoint = namespace_engine(&store, &clone, &context)
         .create_checkpoint("clone-pin".to_owned(), None)
         .await
-        .expect("checkpoint the unflushed fork target");
+        .expect("checkpoint the unflushed fork target")
+        .checkpoint;
     let record = loonfs_core::control::load_namespace_checkpoint_record_control(
         &store,
         &clone,
@@ -749,7 +750,8 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
         .create_checkpoint("test-pin".to_owned(), None)
         .await
-        .expect("create source checkpoint");
+        .expect("create source checkpoint")
+        .checkpoint;
 
     let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
         &store,

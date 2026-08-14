@@ -154,7 +154,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Active checkpoint records",
+            "description": "Active checkpoint objects",
             "content": {
               "application/json": {
                 "schema": {
@@ -229,7 +229,7 @@
         },
         "responses": {
           "200": {
-            "description": "Checkpoint created",
+            "description": "Namespace envelope containing the created checkpoint",
             "content": {
               "application/json": {
                 "schema": {
@@ -324,7 +324,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Checkpoint released (or already gone)",
+            "description": "Checkpoint release accepted (including an already released or reaped checkpoint)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3995,6 +3995,50 @@
           }
         }
       },
+      "Checkpoint": {
+        "type": "object",
+        "description": "One checkpoint resource, reported from what its durable record carries.",
+        "required": [
+          "checkpoint_id",
+          "owner",
+          "created_at_ms",
+          "checkpoint_seq",
+          "manifest_id"
+        ],
+        "properties": {
+          "checkpoint_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Durable checkpoint id used to address the checkpoint for release."
+          },
+          "checkpoint_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence covered by the checkpoint's pinned basis."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time the checkpoint record was created, in Unix milliseconds.",
+            "minimum": 0
+          },
+          "expires_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When garbage collection may release the record without being asked,\nin Unix milliseconds. Absent means the pin holds until it is\nreleased. An instant already in the past is a record whose expiry\nhas passed and which no collection pass has reached yet: it is still\na root, so it is still listed.",
+            "minimum": 0
+          },
+          "manifest_id": {
+            "$ref": "#/components/schemas/ManifestId",
+            "description": "Manifest pinned by the checkpoint."
+          },
+          "owner": {
+            "$ref": "#/components/schemas/CheckpointOwnerSummary",
+            "description": "Who owns the checkpoint, including the label carried by a user pin."
+          }
+        }
+      },
       "CheckpointId": {
         "type": "string",
         "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version.",
@@ -4047,50 +4091,6 @@
           }
         ],
         "description": "Who a checkpoint record answers to, as the record durably records it.\n\nThe two owners have different releases, so a listing that names the\nowner also says which records the release endpoint will act on: a user\npin is released by id, and a fork lease is released by deleting the\ntarget namespace it protects."
-      },
-      "CheckpointSummary": {
-        "type": "object",
-        "description": "One active checkpoint record, reported from what the record carries.",
-        "required": [
-          "checkpoint_id",
-          "owner",
-          "created_at_ms",
-          "checkpoint_seq",
-          "manifest_id"
-        ],
-        "properties": {
-          "checkpoint_id": {
-            "$ref": "#/components/schemas/CheckpointId",
-            "description": "Durable checkpoint id, as the creation response returned it. This is\nwhat the release endpoint takes."
-          },
-          "checkpoint_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence the pinned basis covers — the same number the creation\nresponse reported as `checkpoint_seq`."
-          },
-          "created_at_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "When the record was written, in Unix milliseconds.",
-            "minimum": 0
-          },
-          "expires_at_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "When garbage collection may release the record without being asked,\nin Unix milliseconds. Absent means the pin holds until it is\nreleased. An instant already in the past is a record whose expiry\nhas passed and which no collection pass has reached yet: it is still\na root, so it is still listed.",
-            "minimum": 0
-          },
-          "manifest_id": {
-            "$ref": "#/components/schemas/ManifestId",
-            "description": "Manifest the record pins."
-          },
-          "owner": {
-            "$ref": "#/components/schemas/CheckpointOwnerSummary",
-            "description": "Who the record answers to, and the label a user pin carries."
-          }
-        }
       },
       "Checksum": {
         "type": "object",
@@ -4413,52 +4413,25 @@
         "additionalProperties": false
       },
       "CreateCheckpointResponse": {
-        "type": "object",
-        "description": "Result of creating a checkpoint.",
-        "required": [
-          "namespace_id",
-          "checkpoint_id",
-          "checkpoint_seq",
-          "manifest_id"
-        ],
-        "properties": {
-          "checkpoint_id": {
-            "$ref": "#/components/schemas/CheckpointId",
-            "description": "Durable checkpoint id."
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Checkpoint",
+            "description": "Checkpoint that was created."
           },
-          "checkpoint_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence covered by the checkpoint."
-          },
-          "current_manifest_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ManifestId",
-                "description": "Manifest `metadata/root.json` references after the operation."
-              }
-            ]
-          },
-          "expires_at_ms": {
-            "type": [
-              "integer",
-              "null"
+          {
+            "type": "object",
+            "required": [
+              "namespace_id"
             ],
-            "format": "int64",
-            "description": "Expiry recorded on the record, when the request carried a `ttl_ms`.",
-            "minimum": 0
-          },
-          "manifest_id": {
-            "$ref": "#/components/schemas/ManifestId",
-            "description": "Manifest pinned by the checkpoint."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that was checkpointed."
+            "properties": {
+              "namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace that was checkpointed."
+              }
+            }
           }
-        }
+        ],
+        "description": "Result of creating a checkpoint."
       },
       "CreateNamespaceRequest": {
         "type": "object",
@@ -5883,7 +5856,7 @@
           "checkpoints": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/CheckpointSummary"
+              "$ref": "#/components/schemas/Checkpoint"
             },
             "description": "Active records in ascending checkpoint-id order. Released records are\nomitted even if garbage collection has not deleted them yet."
           },
@@ -6251,8 +6224,7 @@
         "description": "Result of releasing a checkpoint pin.",
         "required": [
           "namespace_id",
-          "checkpoint_id",
-          "was_active"
+          "checkpoint_id"
         ],
         "properties": {
           "checkpoint_id": {
@@ -6262,10 +6234,6 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the checkpoint belonged to."
-          },
-          "was_active": {
-            "type": "boolean",
-            "description": "True when this call flipped an active record to released; false when\nthe record was already released or no longer exists. Release is\nidempotent — the end state is the same either way."
           }
         }
       },
