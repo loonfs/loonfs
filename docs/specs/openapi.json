@@ -6274,10 +6274,10 @@
           {
             "type": "object",
             "required": [
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "not_needed"
@@ -6288,10 +6288,10 @@
           {
             "type": "object",
             "required": [
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "unit_published"
@@ -6302,10 +6302,10 @@
           {
             "type": "object",
             "required": [
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "compaction_started"
@@ -6316,10 +6316,10 @@
           {
             "type": "object",
             "required": [
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "compaction_running"
@@ -6330,10 +6330,10 @@
           {
             "type": "object",
             "required": [
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "compaction_at_capacity"
@@ -6344,10 +6344,10 @@
           {
             "type": "object",
             "required": [
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "compaction_required"
@@ -6358,10 +6358,10 @@
           {
             "type": "object",
             "required": [
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "superseded"
@@ -6832,10 +6832,10 @@
             "type": "object",
             "description": "The tail was below the threshold, so there was nothing to fold.",
             "required": [
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "not_needed"
@@ -6848,18 +6848,18 @@
             "description": "The step flushed the WAL tail and advanced the metadata root.",
             "required": [
               "manifest_head_seq",
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "manifest_head_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence covered by the published manifest."
+              },
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "flushed"
                 ]
-              },
-              "manifest_head_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence covered by the published manifest."
               }
             }
           },
@@ -6869,7 +6869,7 @@
             "required": [
               "attempted_seq",
               "current_manifest_id",
-              "kind"
+              "outcome"
             ],
             "properties": {
               "attempted_seq": {
@@ -6880,7 +6880,7 @@
                 "$ref": "#/components/schemas/ManifestId",
                 "description": "Manifest the root currently references."
               },
-              "kind": {
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "superseded"
@@ -6893,18 +6893,18 @@
             "description": "A concurrent head update won the race.",
             "required": [
               "observed_head_seq",
-              "kind"
+              "outcome"
             ],
             "properties": {
-              "kind": {
+              "observed_head_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Head sequence observed before the advance attempt."
+              },
+              "outcome": {
                 "type": "string",
                 "enum": [
                   "race_lost"
                 ]
-              },
-              "observed_head_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Head sequence observed before the advance attempt."
               }
             }
           }

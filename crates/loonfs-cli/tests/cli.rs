@@ -5551,7 +5551,10 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let flush_data = json_data(&flush);
         assert_eq!(flush_data["kind"], "maintenance_stepped");
         assert_eq!(flush_data["namespace_id"], "demo");
-        assert_eq!(flush_data["metadata"]["reorganize"]["kind"], "not_needed");
+        assert_eq!(
+            flush_data["metadata"]["reorganize"]["outcome"],
+            "not_needed"
+        );
         assert!(flush_data["metadata"]["wal_flush"].is_object());
         assert!(flush_data.get("retention").is_none());
         assert!(flush_data.get("gc").is_none());
@@ -5598,8 +5601,8 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let step_data = json_data(&step);
         assert_eq!(step_data["kind"], "maintenance_stepped");
         assert_eq!(step_data["namespace_id"], "demo");
-        assert_eq!(step_data["metadata"]["wal_flush"]["kind"], "not_needed");
-        assert_eq!(step_data["metadata"]["reorganize"]["kind"], "not_needed");
+        assert_eq!(step_data["metadata"]["wal_flush"]["outcome"], "not_needed");
+        assert_eq!(step_data["metadata"]["reorganize"]["outcome"], "not_needed");
         // A step without `--retention` never advances the floor, and says
         // nothing about it: the floor is `status_before`'s to report.
         assert!(step_data.get("retention").is_none());
