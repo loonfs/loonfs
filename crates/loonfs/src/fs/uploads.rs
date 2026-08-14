@@ -17,14 +17,10 @@ use crate::ByteStream;
 use crate::FsWriter;
 use crate::Result;
 use crate::{
-    BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest,
-    CompleteUploadResponse, MaintenanceJobId, NamespaceId, UploadContentClaim,
-    UploadContentResponse, UploadMode,
+    BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, MaintenanceJobId,
+    NamespaceId, UploadContentClaim, UploadContentResponse, UploadMode, UploadSessionResponse,
 };
-use loonfs_api::v0::{
-    AbortUploadResponse, DirectMultipartUploadOptions, UploadPartChecksumClaim,
-    UploadStatusResponse,
-};
+use loonfs_api::v0::{DirectMultipartUploadOptions, UploadPartChecksumClaim};
 use loonfs_api::UploadId;
 
 impl FsWriter {
@@ -143,7 +139,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<CompleteUploadResponse> {
+    ) -> Result<UploadSessionResponse> {
         Ok(self
             .complete_upload_prepared(namespace_id, upload_id)
             .await?
@@ -156,7 +152,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
-    ) -> Result<CompleteUploadResponse> {
+    ) -> Result<UploadSessionResponse> {
         Ok(self
             .complete_multipart_upload_prepared(namespace_id, upload_id, request)
             .await?
@@ -240,7 +236,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<AbortUploadResponse> {
+    ) -> Result<UploadSessionResponse> {
         Ok(self.engine(namespace_id).abort_upload(upload_id).await?)
     }
 
@@ -249,7 +245,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<(UploadStatusResponse, Option<CompletedUploadReceipt>)> {
+    ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
         Ok(self
             .engine(namespace_id)
             .read_upload_status(upload_id)

@@ -32,10 +32,9 @@ use crate::storage::content_admission::{
 };
 use bytes::Bytes;
 use loonfs_api::v0::{
-    AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest,
-    CompleteUploadResponse, CompletedUploadPart, DirectMultipartUploadOptions, UploadContentClaim,
-    UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
-    UploadStatusResponse,
+    BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, CompletedUploadPart,
+    DirectMultipartUploadOptions, UploadContentClaim, UploadContentResponse, UploadMode,
+    UploadPartChecksumClaim, UploadSessionResponse, UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, NamespaceState, ProxiedStaging,
@@ -899,8 +898,8 @@ where
             upload_id: upload_id.clone(),
         });
     }
-    let completion =
-        resolve(upload_mode(&loaded.transport)).map_err(CoreError::InvalidUploadContent)?;
+    let mode = upload_mode(&loaded.transport);
+    let completion = resolve(mode).map_err(CoreError::InvalidUploadContent)?;
     let plan = completion_plan(&loaded, &completion)?;
     if let Some(completed) = completed_outcome(
         &loaded.state,
@@ -908,6 +907,7 @@ where
         content_store_id,
         upload_id,
         plan.expected_completed_content(),
+        mode,
         now_ms,
     )? {
         return Ok(completed);
@@ -978,6 +978,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
                     &content_store_id,
                     &upload_id,
                     Some(&verified),
+                    upload_mode(&state.transport),
                     now_ms,
                 )? {
                     return Ok(UploadSessionUpdate::Noop(completed));
@@ -995,6 +996,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
                     &content_store_id,
                     &upload_id,
                     &verified,
+                    upload_mode(&state.transport),
                     now_ms,
                     now_ms,
                 );
@@ -1137,7 +1139,7 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     context: &MutationContext,
-) -> Result<AbortUploadResponse> {
+) -> Result<UploadSessionResponse> {
     let now_ms = context.now_ms;
     let (response, abandoned) = update_upload_session(
         store,
@@ -1148,10 +1150,12 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
             async move {
-                let aborted = |aborted_at_ms| AbortUploadResponse {
+                let mode = upload_mode(&state.transport);
+                let aborted = |aborted_at_ms| UploadSessionResponse {
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.clone(),
-                    aborted_at_ms,
+                    mode,
+                    status: UploadSessionStatus::Aborted { aborted_at_ms },
                 };
                 match state.state {
                     UploadSessionLifecycle::Aborted { aborted_at_ms } => {
@@ -1243,8 +1247,9 @@ pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     now_ms: u64,
-) -> Result<(UploadStatusResponse, Option<CompletedUploadReceipt>)> {
+) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
     let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
+    let mode = upload_mode(&loaded.transport);
     let (status, receipt) = match loaded.state {
         UploadSessionLifecycle::Open { expires_at_ms, .. } => {
             (UploadSessionStatus::Open { expires_at_ms }, None)
@@ -1271,9 +1276,10 @@ pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
         ),
     };
     Ok((
-        UploadStatusResponse {
+        UploadSessionResponse {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
+            mode,
             status,
         },
         receipt,
@@ -1286,7 +1292,7 @@ pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUpload {
     /// Wire response for the completion or its idempotent replay.
-    pub response: CompleteUploadResponse,
+    pub response: UploadSessionResponse,
     /// Admission for a publication in this process, which needs no token.
     pub prepared: PreparedContent,
     /// Receipt for a publication elsewhere, or `None` once the session has
@@ -1299,15 +1305,20 @@ fn completed_upload(
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     content_ref: &ContentRef,
+    mode: UploadMode,
     completed_at_ms: u64,
     now_ms: u64,
 ) -> CompletedUpload {
     CompletedUpload {
-        response: CompleteUploadResponse {
+        response: UploadSessionResponse {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
-            content_ref: content_ref.clone(),
-            content_token: None,
+            mode,
+            status: UploadSessionStatus::Completed {
+                completed_at_ms,
+                content_ref: content_ref.clone(),
+                content_token: None,
+            },
         },
         prepared: PreparedContent::from_admission(ContentAdmission::for_durable_content_write(
             content_store_id.clone(),
@@ -1354,6 +1365,7 @@ fn completed_outcome(
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     expected: Option<&ContentRef>,
+    mode: UploadMode,
     now_ms: u64,
 ) -> Result<Option<CompletedUpload>> {
     match state {
@@ -1375,6 +1387,7 @@ fn completed_outcome(
                 content_store_id,
                 upload_id,
                 content_ref,
+                mode,
                 *completed_at_ms,
                 now_ms,
             )))
@@ -1909,7 +1922,13 @@ mod tests {
         .await
         .expect("repeated abort");
 
-        assert_eq!(first.aborted_at_ms, 2_000);
+        assert_eq!(first.mode, UploadMode::ServiceProxied);
+        assert!(matches!(
+            &first.status,
+            UploadSessionStatus::Aborted {
+                aborted_at_ms: 2_000
+            }
+        ));
         assert_eq!(second, first);
     }
 
@@ -2102,8 +2121,8 @@ mod tests {
         )
         .await
         .expect("replay still succeeds");
-        assert_eq!(replay.response.content_ref, content_ref);
-        assert!(replay.response.content_token.is_none());
+        assert_eq!(replay.response.content_ref(), Some(&content_ref));
+        assert!(replay.response.content_token().is_none());
         assert!(replay.receipt.is_none());
     }
 }

@@ -71,7 +71,7 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     context: &MutationContext,
-) -> Result<loonfs_api::v0::CompleteUploadResponse, CoreError> {
+) -> Result<loonfs_api::v0::UploadSessionResponse, CoreError> {
     namespace_engine(store, namespace_id, context)
         .complete_upload(upload_id)
         .await
@@ -268,14 +268,14 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let completed = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
         .await
         .expect("complete upload");
-    assert_eq!(completed.content_ref, uploaded.content_ref);
+    assert_eq!(completed.content_ref(), Some(&uploaded.content_ref));
     assert_eq!(store.count(OperationClass::Read), 0);
 
     store.reset();
     let completed_again = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
         .await
         .expect("complete upload idempotently");
-    assert_eq!(completed_again.content_ref, completed.content_ref);
+    assert_eq!(completed_again, completed);
     assert_eq!(store.count(OperationClass::Read), 0);
 }
 
@@ -375,7 +375,7 @@ mod streamed_content {
         let completed = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
             .await
             .expect("complete a streamed upload");
-        assert_eq!(completed.content_ref, staged.content_ref);
+        assert_eq!(completed.content_ref(), Some(&staged.content_ref));
     }
 
     /// Re-sending a body is the case that forces the shape: the digest only
@@ -668,7 +668,7 @@ mod direct_multipart {
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
         context: &MutationContext,
-    ) -> Result<loonfs_api::v0::CompleteUploadResponse, CoreError> {
+    ) -> Result<loonfs_api::v0::UploadSessionResponse, CoreError> {
         namespace_engine(store, namespace_id, context)
             .complete_multipart_upload(upload_id, request)
             .await
@@ -699,18 +699,25 @@ mod direct_multipart {
 
         assert!(
             completed
-                .content_ref
+                .content_ref()
+                .expect("completed content ref")
                 .content_id
                 .as_str()
                 .ends_with(session.object_key.rsplit('/').next().expect("key tail")),
             "the completion names the identity the session held all along"
         );
         assert_eq!(
-            completed.content_ref.size_bytes,
+            completed
+                .content_ref()
+                .expect("completed content ref")
+                .size_bytes,
             session.payload.len() as u64
         );
         assert_eq!(
-            completed.content_ref.checksum,
+            completed
+                .content_ref()
+                .expect("completed content ref")
+                .checksum,
             Checksum::crc64nvme(&session.payload),
             "a provider-assembled object's evidence is the crc it computed"
         );
@@ -814,7 +821,7 @@ mod direct_multipart {
         .await
         .expect("a lost completion is answered, not failed");
 
-        assert_eq!(replayed.content_ref, first.content_ref);
+        assert_eq!(replayed, first);
         assert_eq!(
             store
                 .get(&session.object_key, None)
@@ -1026,7 +1033,10 @@ mod direct_multipart {
         .await
         .expect("the retried completion verifies the assembled object");
         assert_eq!(
-            completed.content_ref.checksum,
+            completed
+                .content_ref()
+                .expect("completed content ref")
+                .checksum,
             Checksum::crc64nvme(&session.payload)
         );
     }

@@ -250,7 +250,11 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .complete_upload_prepared(upload.upload_id())
         .await
         .expect("complete upload");
-    let content_ref = completed.response.content_ref.clone();
+    let content_ref = completed
+        .response
+        .content_ref()
+        .expect("completed content ref")
+        .clone();
     let token = mint_content_token(
         "test-content-token-secret",
         completed

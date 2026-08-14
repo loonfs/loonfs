@@ -482,6 +482,14 @@ fn openapi_names_tagged_one_of_alternatives() {
             &["ObjectTransferAccessPresignedUrl"][..],
         ),
         (
+            "UploadSessionStatus",
+            &[
+                "UploadSessionStatusOpen",
+                "UploadSessionStatusCompleted",
+                "UploadSessionStatusAborted",
+            ][..],
+        ),
+        (
             "CheckpointOwnerSummary",
             &["CheckpointOwnerUser", "CheckpointOwnerFork"][..],
         ),
@@ -560,6 +568,78 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     assert!(schemas.contains_key("Checksum"));
     assert!(schemas.contains_key("UploadContentClaim"));
     assert!(schemas.contains_key("ContentToken"));
+    assert!(schemas.contains_key("UploadMode"));
+    assert!(schemas.contains_key("UploadSessionResponse"));
+    assert!(schemas.contains_key("UploadSessionStatus"));
+    for retired_response in [
+        "CompleteUploadResponse",
+        "AbortUploadResponse",
+        "UploadStatusResponse",
+    ] {
+        assert!(!schemas.contains_key(retired_response));
+    }
+
+    assert_eq!(
+        schemas
+            .get("UploadMode")
+            .and_then(|schema| schema.get("enum"))
+            .and_then(Value::as_array)
+            .map(Vec::as_slice),
+        Some(
+            &[
+                Value::String("service_proxied".to_owned()),
+                Value::String("direct_put".to_owned()),
+                Value::String("direct_multipart".to_owned()),
+            ][..]
+        )
+    );
+    let session_response = schemas
+        .get("UploadSessionResponse")
+        .expect("UploadSessionResponse schema");
+    let session_response_refs: BTreeSet<_> = session_response
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|schema| schema.get("$ref").and_then(Value::as_str))
+        .collect();
+    assert!(session_response_refs.contains("#/components/schemas/UploadSessionStatus"));
+    assert!(serde_json::to_string(
+        schemas
+            .get("UploadSessionStatus")
+            .expect("UploadSessionStatus schema")
+    )
+    .expect("serialize UploadSessionStatus schema")
+    .contains(r#""status""#));
+    assert!(!serde_json::to_string(
+        schemas
+            .get("UploadSessionStatus")
+            .expect("UploadSessionStatus schema")
+    )
+    .expect("serialize UploadSessionStatus schema")
+    .contains(r#""state""#));
+
+    for (path, method) in [
+        ("/v0/namespaces/{namespace_id}/uploads/{upload_id}", "get"),
+        (
+            "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
+            "post",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
+            "post",
+        ),
+    ] {
+        assert_eq!(
+            spec.get("paths")
+                .and_then(|paths| paths.get(path))
+                .and_then(|path| path.get(method))
+                .and_then(|operation| operation
+                    .pointer("/responses/200/content/application~1json/schema/$ref"))
+                .and_then(Value::as_str),
+            Some("#/components/schemas/UploadSessionResponse")
+        );
+    }
 
     let checksum_ref = Value::String("#/components/schemas/Checksum".to_owned());
     let checksum_ref_count = values_named(&spec, "$ref")
@@ -643,8 +723,8 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         .filter(|reference| *reference == &content_token_ref)
         .count();
     assert_eq!(
-        content_token_ref_count, 3,
-        "completion, status, and commit should share one ContentToken schema"
+        content_token_ref_count, 2,
+        "the unified upload session and commit should share one ContentToken schema"
     );
 }
 

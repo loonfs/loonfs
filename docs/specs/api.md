@@ -1853,9 +1853,10 @@ The semantic rule is:
   `content_ref`;
 - `complete` finalizes the upload session from the content facts frozen in the
   durable session; and
-- the returned `content_ref` is then safe to reference from a commit. Remote
-  servers may also return an opaque `content_token` that remote
-  create/replace mutations carry back as their content-preparation proof.
+- the returned completed session's `content_ref` is then safe to reference
+  from a commit. Remote servers may also return an opaque `content_token` that
+  remote create/replace mutations carry back as their content-preparation
+  proof.
 
 Begin requests use `mode` to select the upload transport. A request may include
 only the fields for that mode:
@@ -1892,14 +1893,27 @@ rescue a missing proof.
 A session is `open`, then `completed` or `aborted`, and both of those are
 final (format spec, section 3.10). What that means at the API:
 
-- `GET /uploads/{upload_id}` reports the state. An `open` session reports its
-  `expires_at_ms`; a `completed` one reports `completed_at_ms`, its
-  `content_ref`, and a **freshly minted** `content_token`; an
-  `aborted` one reports `aborted_at_ms`.
+- `GET /uploads/{upload_id}`, `POST /uploads/{upload_id}/complete`, and
+  `POST /uploads/{upload_id}/abort` all return one flat upload-session object.
+  Its `mode` is the transport frozen when the session began, and `status` is
+  `open`, `completed`, or `aborted`. The status-specific fields are siblings
+  of that tag rather than a nested object:
+
+  ```json
+  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_multipart", "status": "open", "expires_at_ms": 1730000000000 }
+  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
+  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "service_proxied", "status": "aborted", "aborted_at_ms": 1730000002000 }
+  ```
+
+  A completed status read supplies a **freshly minted** `content_token` while
+  its minting window remains open. The field is absent after that window.
+  Completion returns the `completed_at_ms` stored by the terminal session
+  transition; an idempotent replay returns that same stored timestamp.
 - `POST /uploads/{upload_id}/abort` ends an open session and deletes the
   object it was writing. Repeating it succeeds and reports the abort that
-  stands. A completed session is refused with `upload_already_completed`,
-  because its content may already be published.
+  stands, including the original stored `aborted_at_ms`. A completed session
+  is refused with `upload_already_completed`, because its content may already
+  be published.
 - An aborted session reports `upload_not_found` from `PUT /content` and from
   `complete` — the same stable surface as the physical absence that follows
   it. This is also what a completion sees when server-side cleanup aborted

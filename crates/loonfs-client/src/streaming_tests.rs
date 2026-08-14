@@ -12,7 +12,7 @@
 use super::*;
 use crate::transport::test_transport::{self, Outcome};
 use futures::stream::StreamExt;
-use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload};
+use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload, UploadMode};
 use loonfs_api::{
     direct_put_checksum_feature, CapabilityDocument, ContentId, ContentRef, ContentRefKind,
     FEATURE_UPLOADS_DIRECT_PUT, PROFILE_CORE_V0, PROTOCOL_VERSION,
@@ -268,11 +268,15 @@ fn content_ref(bytes: &[u8]) -> ContentRef {
 }
 
 fn completed(content_ref: ContentRef) -> Outcome {
-    json(&CompleteUploadResponse {
+    json(&UploadSessionResponse {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
-        content_ref,
-        content_token: None,
+        mode: UploadMode::DirectMultipart,
+        status: UploadSessionStatus::Completed {
+            completed_at_ms: 1,
+            content_ref,
+            content_token: None,
+        },
     })
 }
 

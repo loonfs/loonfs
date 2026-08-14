@@ -21,11 +21,11 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     direct_put_checksum_feature,
     v0::{
-        AbortUploadResponse, BeginUploadRequest, BeginUploadResponse,
-        CompleteKnownContentUploadRequest, CompleteMultipartUploadRequest, CompleteUploadResponse,
-        DirectMultipartUpload, DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentClaim,
-        UploadContentResponse, UploadMode, UploadSessionStatus, UploadStatusResponse,
+        BeginUploadRequest, BeginUploadResponse, CompleteKnownContentUploadRequest,
+        CompleteMultipartUploadRequest, DirectMultipartUpload, DirectMultipartUploadOptions,
+        DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
+        SignedUploadPart, UploadContentClaim, UploadContentResponse, UploadMode,
+        UploadSessionResponse, UploadSessionStatus,
     },
     ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
@@ -578,7 +578,7 @@ pub(super) async fn upload_content(
             description = "The stored upload mode determines which body is accepted."
         ),
         responses(
-            (status = 200, description = "Upload completed", body = CompleteUploadResponse),
+            (status = 200, description = "Upload completed", body = UploadSessionResponse),
             (status = 400, description = "Invalid completion request", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
@@ -594,7 +594,7 @@ pub(super) async fn complete_upload(
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
     body: UploadBodyBytes<MAX_COMPLETION_BODY_BYTES>,
-) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
+) -> Result<Json<UploadSessionResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
@@ -607,8 +607,10 @@ pub(super) async fn complete_upload(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let mut response = completed.response;
-    response.content_token = ContentTokenVerifier::new(state.config.content_token_secret())
-        .mint_receipt(completed.receipt.as_ref())?;
+    if let UploadSessionStatus::Completed { content_token, .. } = &mut response.status {
+        *content_token = ContentTokenVerifier::new(state.config.content_token_secret())
+            .mint_receipt(completed.receipt.as_ref())?;
+    }
     Ok(Json(response))
 }
 
@@ -776,7 +778,7 @@ mod completion_body_tests {
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         responses(
-            (status = 200, description = "Upload session state", body = UploadStatusResponse),
+            (status = 200, description = "Upload session state", body = UploadSessionResponse),
             (status = 400, description = "Invalid upload id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
@@ -790,7 +792,7 @@ pub(super) async fn read_upload_status(
     headers: HeaderMap,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
-) -> Result<Json<UploadStatusResponse>, ApiResponseError> {
+) -> Result<Json<UploadSessionResponse>, ApiResponseError> {
     // Completed sessions return a fresh token when they are still allowed to
     // mint one. Authorization runs before the upload id is parsed.
     authorize(state.config.auth_policy(), &headers)?;
@@ -822,7 +824,7 @@ pub(super) async fn read_upload_status(
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         responses(
-            (status = 200, description = "Upload aborted", body = AbortUploadResponse),
+            (status = 200, description = "Upload aborted", body = UploadSessionResponse),
             (status = 400, description = "Invalid upload id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
@@ -837,7 +839,7 @@ pub(super) async fn abort_upload(
     headers: HeaderMap,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
-) -> Result<Json<AbortUploadResponse>, ApiResponseError> {
+) -> Result<Json<UploadSessionResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;

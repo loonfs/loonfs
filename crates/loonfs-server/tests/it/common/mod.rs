@@ -292,8 +292,8 @@ pub(crate) mod http_split_support {
     #![allow(dead_code)]
 
     use loonfs_api::{
-        v0::{BeginUploadRequest, CompleteUploadResponse, ContentToken},
-        CommitRequest, DestinationBehavior, NamespaceId,
+        v0::{BeginUploadRequest, ContentToken, UploadMode, UploadSessionStatus},
+        CommitRequest, ContentRef, DestinationBehavior, NamespaceId,
     };
     use loonfs_client::{Client, PutFileOptions};
 
@@ -348,11 +348,16 @@ pub(crate) mod http_split_support {
             .map_err(Box::new)
     }
 
+    pub(crate) struct StagedUpload {
+        pub(crate) content_ref: ContentRef,
+        pub(crate) content_token: Option<ContentToken>,
+    }
+
     pub(crate) async fn stage_uploaded_content(
         client: &Client,
         namespace_id: &NamespaceId,
         file_bytes: &[u8],
-    ) -> CompleteUploadResponse {
+    ) -> StagedUpload {
         let begin = client
             .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await
@@ -371,13 +376,35 @@ pub(crate) mod http_split_support {
             .expect("repeat complete upload");
         assert_eq!(repeated.namespace_id, complete.namespace_id);
         assert_eq!(repeated.upload_id, complete.upload_id);
-        assert_eq!(repeated.content_ref, complete.content_ref);
-        assert!(complete.content_token.is_some());
-        assert!(repeated.content_token.is_some());
-        complete
+        assert_eq!(repeated.mode, UploadMode::ServiceProxied);
+        assert_eq!(complete.mode, UploadMode::ServiceProxied);
+        let UploadSessionStatus::Completed {
+            completed_at_ms,
+            content_ref,
+            content_token,
+        } = complete.status
+        else {
+            unreachable!("completion reports a completed session")
+        };
+        let UploadSessionStatus::Completed {
+            completed_at_ms: repeated_at_ms,
+            content_ref: repeated_ref,
+            content_token: repeated_token,
+        } = repeated.status
+        else {
+            unreachable!("completion replay reports a completed session")
+        };
+        assert_eq!(repeated_at_ms, completed_at_ms);
+        assert_eq!(repeated_ref, content_ref);
+        assert!(content_token.is_some());
+        assert!(repeated_token.is_some());
+        StagedUpload {
+            content_ref,
+            content_token,
+        }
     }
 
-    pub(crate) fn content_token(completed: &CompleteUploadResponse) -> ContentToken {
+    pub(crate) fn content_token(completed: &StagedUpload) -> ContentToken {
         completed
             .content_token
             .clone()

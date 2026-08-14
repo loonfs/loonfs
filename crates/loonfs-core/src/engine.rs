@@ -23,10 +23,9 @@ use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent}
 use crate::time::current_time_ms;
 use loonfs_api::options::{ListPathEntriesOptions, StatPathOptions};
 use loonfs_api::v0::{
-    AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
-    CompleteMultipartUploadRequest, CompleteUploadResponse, DirectMultipartUploadOptions,
-    UploadContentClaim, UploadContentResponse, UploadMode, UploadPartChecksumClaim,
-    UploadStatusResponse,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
+    CompleteMultipartUploadRequest, DirectMultipartUploadOptions, UploadContentClaim,
+    UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSessionResponse,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
 use loonfs_api::EffectiveLimit;
@@ -588,7 +587,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     /// Completes a service-proxied or direct-PUT upload session.
-    pub async fn complete_upload(&self, upload_id: &UploadId) -> Result<CompleteUploadResponse> {
+    pub async fn complete_upload(&self, upload_id: &UploadId) -> Result<UploadSessionResponse> {
         Ok(self.complete_upload_prepared(upload_id).await?.response)
     }
 
@@ -597,7 +596,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
-    ) -> Result<CompleteUploadResponse> {
+    ) -> Result<UploadSessionResponse> {
         Ok(self
             .complete_multipart_upload_prepared(upload_id, request)
             .await?
@@ -746,7 +745,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ///
     /// Terminal and idempotent: repeating it succeeds, and it refuses a
     /// session that already completed, whose content may be published.
-    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<AbortUploadResponse> {
+    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSessionResponse> {
         let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
             &self.store,
             &self.namespace_id,
@@ -768,7 +767,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn read_upload_status(
         &self,
         upload_id: &UploadId,
-    ) -> Result<(UploadStatusResponse, Option<CompletedUploadReceipt>)> {
+    ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
         let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
             &self.store,
             &self.namespace_id,
