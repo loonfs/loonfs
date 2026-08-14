@@ -107,6 +107,9 @@ pub const LIMIT_UPLOAD_MAX_CONTENT_BYTES: &str = "upload.max_content_bytes";
 /// answers `content_too_large` at begin rather than being signed into a
 /// write the provider would reject.
 pub const LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES: &str = "upload.direct_put_max_content_bytes";
+/// Advisory limit: the largest JSON body accepted when completing an upload.
+/// It is large enough for the maximum number of multipart entries.
+pub const LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES: &str = "upload.completion_max_body_bytes";
 /// Advisory limit: the largest file content a service-proxied read will
 /// buffer and return in one response.
 pub const LIMIT_DOWNLOAD_MAX_CONTENT_BYTES: &str = "download.max_content_bytes";

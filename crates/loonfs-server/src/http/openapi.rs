@@ -45,7 +45,7 @@ impl utoipa::PartialSchema for CompleteUploadRequestSchema {
                 "CompleteMultipartUploadRequest",
             ))
             .description(Some(
-                "The stored upload mode determines the accepted body. Service-proxied and \
+                "The upload session determines the accepted body. Service-proxied and \
                  direct-put sessions use an empty object. Direct-multipart sessions provide \
                  the content claim and completed parts.",
             ))

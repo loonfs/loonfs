@@ -109,7 +109,8 @@ pub use loonfs_core::cache::{
     StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 pub use loonfs_core::limits::{
-    DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
+    DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS, MAX_MULTIPART_PARTS,
+    MAX_SIGNED_PARTS_PER_REQUEST, METADATA_PUBLICATION_BUDGET_MS,
 };
 pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
