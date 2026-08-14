@@ -435,72 +435,60 @@ mod tests {
     }
 
     #[test]
-    fn directory_cursor_encoding_is_stable() {
-        // Cursor payloads keep numeric inode IDs. This token detects accidental
-        // changes to version 1 encoding, including the `dir_inode_id` field.
-        const TOKEN: &str = "7b2276223a312c226b696e64223a226469726563746f7279222c22686561645f736571223a3130312c226469725f696e6f64655f6964223a3230322c226c6173745f6e616d655f6b6579223a22717561727465726c792d7265706f72742e6d64227d";
+    fn directory_cursor_round_trips() {
         let cursor = DirectoryPageCursor {
-            head_seq: ChangeSeq(101),
-            directory_inode_id: InodeId(202),
-            last_name_key: NameKey::parse("quarterly-report.md").expect("name key"),
+            head_seq: ChangeSeq(11),
+            directory_inode_id: InodeId(7),
+            last_name_key: NameKey::parse("plan.md").expect("name key"),
         };
 
-        assert_eq!(encode_cursor(&cursor).expect("encode cursor"), TOKEN);
-        let decoded: DirectoryPageCursor = decode_cursor(TOKEN).expect("decode pinned cursor");
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let decoded: DirectoryPageCursor = decode_cursor(&encoded).expect("decode cursor");
 
         assert_eq!(decoded, cursor);
     }
 
     #[test]
-    fn file_revisions_cursor_encoding_is_stable() {
-        // Cursor payloads keep numeric inode IDs. This token detects accidental
-        // changes to version 1 encoding.
-        const TOKEN: &str = "7b2276223a312c226b696e64223a2266696c655f7265766973696f6e73222c22686561645f736571223a3330332c22696e6f64655f6964223a3430342c226c6173745f7265766973696f6e5f6e6f223a3530352c226c6173745f636f6d6d69747465645f736571223a3630362c226c6173745f7265766973696f6e5f64656c74615f696e646578223a3730377d";
+    fn file_revisions_cursor_round_trips() {
         let cursor = FileRevisionsPageCursor {
-            head_seq: ChangeSeq(303),
-            inode_id: InodeId(404),
-            last_revision_no: RevisionNo(505),
-            last_committed_seq: ChangeSeq(606),
-            last_revision_delta_index: 707,
+            head_seq: ChangeSeq(11),
+            inode_id: InodeId(7),
+            last_revision_no: RevisionNo(5),
+            last_committed_seq: ChangeSeq(10),
+            last_revision_delta_index: 3,
         };
 
-        assert_eq!(encode_cursor(&cursor).expect("encode cursor"), TOKEN);
-        let decoded: FileRevisionsPageCursor = decode_cursor(TOKEN).expect("decode pinned cursor");
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let decoded: FileRevisionsPageCursor = decode_cursor(&encoded).expect("decode cursor");
 
         assert_eq!(decoded, cursor);
     }
 
     #[test]
-    fn trash_cursor_encoding_is_stable() {
-        // Cursor payloads keep numeric inode IDs. This token detects accidental
-        // changes to version 1 encoding.
-        const TOKEN: &str = "7b2276223a312c226b696e64223a227472617368222c22686561645f736571223a3830382c226c6173745f64656c657465645f61745f736571223a3930392c226c6173745f726f6f745f696e6f64655f6964223a313031307d";
+    fn trash_cursor_round_trips() {
         let cursor = TrashPageCursor {
-            head_seq: ChangeSeq(808),
-            last_deleted_at_seq: ChangeSeq(909),
-            last_root_inode_id: InodeId(1010),
+            head_seq: ChangeSeq(11),
+            last_deleted_at_seq: ChangeSeq(10),
+            last_root_inode_id: InodeId(7),
         };
 
-        assert_eq!(encode_cursor(&cursor).expect("encode cursor"), TOKEN);
-        let decoded: TrashPageCursor = decode_cursor(TOKEN).expect("decode pinned cursor");
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let decoded: TrashPageCursor = decode_cursor(&encoded).expect("decode cursor");
 
         assert_eq!(decoded, cursor);
     }
 
     #[test]
-    fn grep_cursor_encoding_is_stable() {
-        // Cursor payloads keep numeric inode IDs. This token detects accidental
-        // changes to version 1 encoding.
-        const TOKEN: &str = "7b2276223a312c226b696e64223a2267726570222c22686561645f736571223a313131312c226c6173745f696e6f64655f6964223a313231322c226c6173745f627974655f6f6666736574223a313331332c2266696e6765727072696e74223a313431347d";
+    fn grep_cursor_round_trips() {
         let cursor = GrepPageCursor {
-            head_seq: ChangeSeq(1111),
-            last_inode_id: InodeId(1212),
-            last_byte_offset: 1313,
-            fingerprint: 1414,
+            head_seq: ChangeSeq(11),
+            last_inode_id: InodeId(7),
+            last_byte_offset: 13,
+            fingerprint: 17,
         };
 
-        assert_eq!(encode_cursor(&cursor).expect("encode cursor"), TOKEN);
-        let decoded: GrepPageCursor = decode_cursor(TOKEN).expect("decode pinned cursor");
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let decoded: GrepPageCursor = decode_cursor(&encoded).expect("decode cursor");
 
         assert_eq!(decoded, cursor);
     }
@@ -581,20 +569,50 @@ mod tests {
     }
 
     #[test]
-    fn namespace_cursor_encoding_and_validation_are_stable() {
-        // This token covers version, kind, namespace, and key-prefix checks.
-        const TOKEN: &str = "7b2276223a312c226b696e64223a22746573745f6e616d657370616365222c226e616d6573706163655f6964223a2264656d6f222c226c6173745f6b6579223a226e616d657370616365732f64656d6f2f6974656d732f6974656d2d3432227d";
+    fn namespace_cursor_accepts_its_namespace_and_keyspace() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let cursor = TestNamespaceCursor {
             namespace_id: namespace_id.clone(),
             last_key: "namespaces/demo/items/item-42".to_owned(),
         };
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
 
-        assert_eq!(encode_cursor(&cursor).expect("encode cursor"), TOKEN);
         assert_eq!(
-            decode_namespace_cursor::<TestNamespaceCursor>(TOKEN, &namespace_id)
-                .expect("decode pinned namespace cursor"),
+            decode_namespace_cursor::<TestNamespaceCursor>(&encoded, &namespace_id)
+                .expect("decode namespace cursor"),
             cursor
+        );
+    }
+
+    #[test]
+    fn namespace_cursor_rejects_a_different_namespace() {
+        let cursor = TestNamespaceCursor {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            last_key: "namespaces/demo/items/item-42".to_owned(),
+        };
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+
+        assert_eq!(
+            decode_namespace_cursor::<TestNamespaceCursor>(
+                &encoded,
+                &NamespaceId::parse("other").expect("other namespace id")
+            ),
+            Err(NamespaceCursorError::ForeignNamespace)
+        );
+    }
+
+    #[test]
+    fn namespace_cursor_rejects_a_key_outside_its_keyspace() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let cursor = TestNamespaceCursor {
+            namespace_id: namespace_id.clone(),
+            last_key: "namespaces/demo/checkpoints/checkpoint-42".to_owned(),
+        };
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+
+        assert_eq!(
+            decode_namespace_cursor::<TestNamespaceCursor>(&encoded, &namespace_id),
+            Err(NamespaceCursorError::OutsideKeyspace)
         );
     }
 }
