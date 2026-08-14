@@ -212,11 +212,9 @@ where
     }
 }
 
-/// Begin and part-signing bodies remain small control requests. The largest
-/// part-signing request names [`MAX_SIGNED_PARTS_PER_REQUEST`] (1,000)
-/// claims. A maximal five-digit part number plus the largest full checksum
-/// object serializes to 130 bytes, so `1_000 × 130 + 999 commas + 12 bytes`
-/// for the envelope is 131,011 bytes, comfortably below 1 MiB.
+/// Maximum body size for starting an upload or signing multipart parts.
+/// A request with 1,000 part claims is at most 131,011 bytes, so 1 MiB leaves
+/// ample room for every valid request.
 pub(super) const MAX_UPLOAD_CONTROL_BODY_BYTES: usize = 1024 * 1024;
 
 const MAX_SERIALIZED_SIGNING_PART_BYTES: usize = 130;
@@ -230,21 +228,15 @@ const _: () = assert!(
 
 /// The largest completion body accepted by the multipart completion route.
 ///
-/// [`MAX_MULTIPART_PARTS`] is the provider-backed 10,000-part contract. The
-/// completion path currently validates that an ETag is nonempty but does not
-/// bound its length, so this HTTP budget assumes a generous 256-byte provider
-/// ETag including its quotes. Budgeting its JSON string as 260 bytes adds the
-/// JSON delimiters and escapes those provider quotes. With a five-digit part
-/// number and the largest full checksum object (`sha256` plus 64 hex
-/// characters), one serialized part entry is 398 bytes. The maximal content
-/// claim and empty-list envelope is 167 bytes, so the derived request bound is:
+/// A completion may contain 10,000 parts. The calculation allows 398 bytes
+/// per part: a five-digit part number, a 256-byte quoted ETag, and a full
+/// SHA-256 checksum. The remaining JSON fields use at most 167 bytes. This
+/// puts the largest expected request at:
 ///
 /// `10_000 × 398 + 9_999 commas + 167 = 3_990_166 bytes`.
 ///
-/// Four MiB would leave only 204,138 bytes of headroom. Eight MiB is the next
-/// clean power-of-two budget with room for harmless serialization evolution.
-/// If multipart geometry or the ETag assumption changes, re-derive this cap
-/// rather than tuning it empirically.
+/// The 8 MiB limit leaves room for future fields. Recalculate it if the part
+/// limit or expected ETag size changes.
 pub(super) const MAX_COMPLETION_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 const MAX_SERIALIZED_COMPLETION_PART_BYTES: usize = 398;
@@ -256,7 +248,7 @@ const _: () = assert!(
         <= MAX_COMPLETION_BODY_BYTES
 );
 
-/// JSON for an upload-control route with an explicit per-route body cap.
+/// JSON from an upload route with an explicit body-size limit.
 pub(super) struct UploadControlJson<T, const MAX_BYTES: usize>(pub(super) T);
 
 impl<T, const MAX_BYTES: usize> FromRequest<AppState> for UploadControlJson<T, MAX_BYTES>
@@ -498,7 +490,7 @@ fn json_body_too_large_error() -> ApiResponseError {
     )
 }
 
-/// 413 for upload-control JSON or raw bodies with a route-selected cap.
+/// Returns a 413 error for an upload request that exceeds its route's limit.
 fn upload_control_body_too_large_error(max_bytes: usize) -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::PAYLOAD_TOO_LARGE,
@@ -507,7 +499,7 @@ fn upload_control_body_too_large_error(max_bytes: usize) -> ApiResponseError {
     )
 }
 
-/// 413 for optional JSON routes with their explicit body cap.
+/// Returns a 413 error when optional JSON exceeds its body-size limit.
 fn optional_json_body_too_large_error() -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::PAYLOAD_TOO_LARGE,

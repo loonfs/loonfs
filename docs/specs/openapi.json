@@ -4244,7 +4244,7 @@
             "$ref": "#/components/schemas/CompleteMultipartUploadRequest"
           }
         ],
-        "description": "The stored upload session mode selects the accepted body. Service-proxied and direct-put sessions use an empty object. Direct-multipart sessions provide the content claim and completed parts."
+        "description": "The upload session determines the accepted body. Service-proxied and direct-put sessions use an empty object. Direct-multipart sessions provide the content claim and completed parts."
       },
       "CompleteUploadResponse": {
         "type": "object",

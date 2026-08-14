@@ -8,7 +8,7 @@ use loonfs_api::{
         UploadStatusResponse,
     },
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
-    DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, InodeKind, RevisionNo,
+    DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
     LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
 };
 use loonfs_client::{ClientError, NamespacePath};
