@@ -1,29 +1,27 @@
-//! Public HTTP codec for namespace-scoped inode identities.
+//! Converts inode IDs between internal numbers and public API strings.
 //!
-//! Despite their decimal spelling, public inode ids are opaque to clients:
-//! clients must not allocate them or use lexicographic ordering. An inode id
-//! is scoped to one namespace, so its complete identity is
-//! `(namespace_id, inode_id)`.
+//! Public IDs use the form `ino_<number>`. They are scoped to a namespace and
+//! should be treated as identifiers rather than numbers.
 
 use crate::InodeId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-/// Prefix on every public inode id.
+/// Prefix used by every public inode ID.
 pub const PREFIX: &str = "ino_";
 
-/// OpenAPI pattern for public inode ids.
+/// OpenAPI pattern for public inode IDs.
 pub const PATTERN: &str = r"^ino_[1-9][0-9]*$";
 
-/// Representative public inode id for OpenAPI examples.
+/// Example public inode ID used in OpenAPI.
 pub const EXAMPLE: &str = "ino_123";
 
-/// OpenAPI description for public inode ids.
-pub const DESCRIPTION: &str = "Namespace-scoped stable inode identity";
+/// OpenAPI description for public inode IDs.
+pub const DESCRIPTION: &str = "Stable inode ID within a namespace";
 
-const INVALID_REASON: &str = "must match `ino_<decimal>` with no leading zeroes";
+const INVALID_REASON: &str = "must use `ino_` followed by a nonzero u64 without leading zeroes";
 
-/// Describes why text is not a valid public inode id.
+/// Explains why a string is not a valid public inode ID.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid inode id {value:?}: {reason}")]
 pub struct PublicInodeIdError {
@@ -37,18 +35,18 @@ impl PublicInodeIdError {
         &self.value
     }
 
-    /// Returns the public inode-id grammar the input violated.
+    /// Returns the validation rule that the input failed.
     pub fn reason(&self) -> &str {
         &self.reason
     }
 }
 
-/// Encodes an inode id in its public HTTP representation.
+/// Converts an inode ID to its public API string.
 pub fn encode(id: InodeId) -> String {
     format!("{PREFIX}{}", id.0)
 }
 
-/// Decodes and validates a public HTTP inode id.
+/// Parses and validates a public inode ID.
 pub fn decode(value: &str) -> Result<InodeId, PublicInodeIdError> {
     let Some(suffix) = value.strip_prefix(PREFIX) else {
         return Err(invalid(value));
@@ -73,7 +71,7 @@ fn invalid(value: &str) -> PublicInodeIdError {
     }
 }
 
-/// Serializes an inode id in its public HTTP representation.
+/// Serializes an inode ID as a public API string.
 pub fn serialize<S>(id: &InodeId, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -81,7 +79,7 @@ where
     encode(*id).serialize(serializer)
 }
 
-/// Deserializes an inode id from only its public HTTP string representation.
+/// Deserializes an inode ID from its public API string.
 pub fn deserialize<'de, D>(deserializer: D) -> Result<InodeId, D::Error>
 where
     D: Deserializer<'de>,
@@ -90,13 +88,13 @@ where
     decode(&value).map_err(serde::de::Error::custom)
 }
 
-/// Serde adapter for optional public inode-id fields.
+/// Serde support for optional public inode ID fields.
 pub mod option {
     use super::{decode, encode};
     use crate::InodeId;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    /// Serializes an optional inode id in its public HTTP representation.
+    /// Serializes an optional inode ID as a public API string.
     pub fn serialize<S>(id: &Option<InodeId>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -104,7 +102,7 @@ pub mod option {
         id.map(encode).serialize(serializer)
     }
 
-    /// Deserializes an optional inode id from only its public HTTP string representation.
+    /// Deserializes an optional inode ID from its public API string.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<InodeId>, D::Error>
     where
         D: Deserializer<'de>,
@@ -116,10 +114,7 @@ pub mod option {
     }
 }
 
-/// Builds the authoritative OpenAPI schema for a public inode id.
-///
-/// Cite this from fields as
-/// `#[schema(schema_with = crate::public_inode_id::schema)]`.
+/// Builds the OpenAPI schema for a public inode ID.
 #[cfg(feature = "openapi")]
 #[allow(deprecated)]
 pub fn schema() -> utoipa::openapi::schema::Object {
@@ -248,7 +243,7 @@ mod tests {
 
     #[cfg(feature = "openapi")]
     #[test]
-    fn openapi_schema_uses_authoritative_metadata() {
+    fn openapi_schema_uses_shared_metadata() {
         let schema = serde_json::to_value(schema()).expect("serialize public inode-id schema");
 
         assert_eq!(schema["type"], "string");

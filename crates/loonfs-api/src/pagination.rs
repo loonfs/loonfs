@@ -435,10 +435,9 @@ mod tests {
     }
 
     #[test]
-    fn directory_cursor_round_trips() {
-        // Version 1 keeps inode ids numeric inside cursor payloads. A public
-        // `ino_...` spelling change must not move these bytes, change version
-        // 1, or undo the frozen `dir_inode_id` wire rename.
+    fn directory_cursor_encoding_is_stable() {
+        // Cursor payloads keep numeric inode IDs. This token detects accidental
+        // changes to version 1 encoding, including the `dir_inode_id` field.
         const TOKEN: &str = "7b2276223a312c226b696e64223a226469726563746f7279222c22686561645f736571223a3130312c226469725f696e6f64655f6964223a3230322c226c6173745f6e616d655f6b6579223a22717561727465726c792d7265706f72742e6d64227d";
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(101),
@@ -453,10 +452,9 @@ mod tests {
     }
 
     #[test]
-    fn file_revisions_cursor_round_trips() {
-        // Version 1 keeps inode ids numeric inside cursor payloads. A public
-        // `ino_...` spelling change must not move these bytes or change the
-        // cursor format version.
+    fn file_revisions_cursor_encoding_is_stable() {
+        // Cursor payloads keep numeric inode IDs. This token detects accidental
+        // changes to version 1 encoding.
         const TOKEN: &str = "7b2276223a312c226b696e64223a2266696c655f7265766973696f6e73222c22686561645f736571223a3330332c22696e6f64655f6964223a3430342c226c6173745f7265766973696f6e5f6e6f223a3530352c226c6173745f636f6d6d69747465645f736571223a3630362c226c6173745f7265766973696f6e5f64656c74615f696e646578223a3730377d";
         let cursor = FileRevisionsPageCursor {
             head_seq: ChangeSeq(303),
@@ -473,10 +471,9 @@ mod tests {
     }
 
     #[test]
-    fn trash_cursor_round_trips() {
-        // Version 1 keeps inode ids numeric inside cursor payloads. A public
-        // `ino_...` spelling change must not move these bytes or change the
-        // cursor format version.
+    fn trash_cursor_encoding_is_stable() {
+        // Cursor payloads keep numeric inode IDs. This token detects accidental
+        // changes to version 1 encoding.
         const TOKEN: &str = "7b2276223a312c226b696e64223a227472617368222c22686561645f736571223a3830382c226c6173745f64656c657465645f61745f736571223a3930392c226c6173745f726f6f745f696e6f64655f6964223a313031307d";
         let cursor = TrashPageCursor {
             head_seq: ChangeSeq(808),
@@ -491,10 +488,9 @@ mod tests {
     }
 
     #[test]
-    fn grep_cursor_round_trips() {
-        // Version 1 keeps inode ids numeric inside cursor payloads. A public
-        // `ino_...` spelling change must not move these bytes or change the
-        // cursor format version.
+    fn grep_cursor_encoding_is_stable() {
+        // Cursor payloads keep numeric inode IDs. This token detects accidental
+        // changes to version 1 encoding.
         const TOKEN: &str = "7b2276223a312c226b696e64223a2267726570222c22686561645f736571223a313131312c226c6173745f696e6f64655f6964223a313231322c226c6173745f627974655f6f6666736574223a313331332c2266696e6765727072696e74223a313431347d";
         let cursor = GrepPageCursor {
             head_seq: ChangeSeq(1111),
@@ -585,10 +581,8 @@ mod tests {
     }
 
     #[test]
-    fn pinned_cursor_passes_version_kind_and_namespace_validation() {
-        // This literal pins the complete shared validation path: v1 envelope,
-        // cursor kind, and namespace/keyspace binding must all keep accepting
-        // the same encoded bytes.
+    fn namespace_cursor_encoding_and_validation_are_stable() {
+        // This token covers version, kind, namespace, and key-prefix checks.
         const TOKEN: &str = "7b2276223a312c226b696e64223a22746573745f6e616d657370616365222c226e616d6573706163655f6964223a2264656d6f222c226c6173745f6b6579223a226e616d657370616365732f64656d6f2f6974656d732f6974656d2d3432227d";
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let cursor = TestNamespaceCursor {
