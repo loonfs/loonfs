@@ -17,6 +17,7 @@ mod content_request_accounting;
 mod direct_put;
 mod handles;
 mod immutable_view_inputs;
+mod inode_reads;
 mod invalidation;
 mod maintenance;
 mod metrics_instruments;

@@ -75,6 +75,8 @@ pub enum CoreError {
     InvalidUploadId(#[from] GeneratedIdValidationError),
     #[error("path not found `{0}`")]
     PathNotFound(String),
+    #[error("inode not found `{0}`")]
+    InodeNotFound(InodeId),
     #[error("revision `{revision_no}` not found for inode `{inode_id}`")]
     RevisionNotFound {
         inode_id: InodeId,
@@ -388,6 +390,7 @@ impl CoreError {
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
+            CoreError::InodeNotFound(_) => ErrorCode::InodeNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
             CoreError::ContentTooLarge { .. } => ErrorCode::ContentTooLarge,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,

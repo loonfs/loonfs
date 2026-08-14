@@ -8,6 +8,7 @@ mod error;
 mod extractors;
 mod handlers_downloads;
 mod handlers_filesystem;
+mod handlers_inodes;
 mod handlers_namespace;
 mod handlers_query;
 mod handlers_store;
@@ -32,10 +33,13 @@ use self::extractors::{
     authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
     UploadBodyBytes, UploadBodyStream,
 };
-use self::handlers_downloads::begin_download;
+use self::handlers_downloads::{begin_download, begin_download_by_inode};
 use self::handlers_filesystem::{
     apply_commit, get_file_bytes, list_changes, list_file_revisions, list_path_entries, list_trash,
     stat_path,
+};
+use self::handlers_inodes::{
+    get_file_revision_bytes_by_inode, list_file_revisions_by_inode, stat_inode,
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, delete_namespace, fork_namespace, list_checkpoints,
@@ -268,6 +272,22 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/revisions",
             get(list_file_revisions),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
+            get(stat_inode),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            get(list_file_revisions_by_inode),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+            get(get_file_revision_bytes_by_inode),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+            post(begin_download_by_inode),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/trash",

@@ -23,7 +23,10 @@ mod search;
 mod uploads;
 
 pub use commits::{ChangesResponse, CommitResponse, CommittedChange, FilesystemChange};
-pub use downloads::{BeginDownloadRequest, BeginDownloadResponse};
+pub use downloads::{
+    BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
+    BeginDownloadResponse,
+};
 pub use operations::{
     AdvanceRetentionResponse, ApiError, CheckpointOwnerSummary, CheckpointSummary, CommitRequest,
     CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,

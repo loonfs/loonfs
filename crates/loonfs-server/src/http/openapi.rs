@@ -9,8 +9,9 @@
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
-        BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
-        ChangesResponse, CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
+        BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
+        BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+        CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
         CompleteMultipartUploadRequest, CompleteUploadResponse, ContentToken, DirectPutUpload,
         ObjectTransferAccess, UploadContentResponse,
     },
@@ -79,6 +80,10 @@ impl utoipa::ToSchema for CompleteUploadRequestSchema {
         crate::http::handlers_filesystem::get_file_bytes,
         crate::http::handlers_downloads::begin_download,
         crate::http::handlers_filesystem::list_file_revisions,
+        crate::http::handlers_inodes::stat_inode,
+        crate::http::handlers_inodes::list_file_revisions_by_inode,
+        crate::http::handlers_inodes::get_file_revision_bytes_by_inode,
+        crate::http::handlers_downloads::begin_download_by_inode,
         crate::http::handlers_filesystem::list_trash,
         crate::http::handlers_filesystem::apply_commit,
         crate::http::handlers_uploads::begin_upload,
@@ -172,6 +177,8 @@ impl utoipa::ToSchema for CompleteUploadRequestSchema {
         loonfs_api::v0::CompletedUploadPart,
         BeginDownloadRequest,
         BeginDownloadResponse,
+        BeginDownloadByInodeRequest,
+        BeginDownloadByInodeResponse,
         ObjectTransferAccess,
         ContentToken,
         ApiCommitResponse,
@@ -204,6 +211,7 @@ impl utoipa::ToSchema for CompleteUploadRequestSchema {
         (name = "capabilities", description = "Capability discovery"),
         (name = "namespaces", description = "Namespace lifecycle and status"),
         (name = "filesystem", description = "Path-oriented filesystem APIs"),
+        (name = "inodes", description = "Identity-oriented inode read APIs"),
         (name = "uploads", description = "Upload session APIs"),
         (name = "admin", description = "Administrative maintenance APIs"),
         (name = "query", description = "Derived-index query APIs")

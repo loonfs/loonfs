@@ -140,6 +140,7 @@ error_codes! {
     NamespaceExists => "namespace_exists",
     ContentNotPrepared => "content_not_prepared",
     PathNotFound => "path_not_found",
+    InodeNotFound => "inode_not_found",
     RevisionNotFound => "revision_not_found",
     PathConflict => "path_conflict",
     DirectoryNotEmpty => "directory_not_empty",
@@ -188,6 +189,7 @@ impl ErrorCode {
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
             | ErrorCode::PathNotFound
+            | ErrorCode::InodeNotFound
             | ErrorCode::RevisionNotFound
             | ErrorCode::UploadNotFound
             | ErrorCode::RouteNotFound => ErrorKind::NotFound,
@@ -251,6 +253,7 @@ impl ErrorCode {
             | ErrorCode::NamespaceExists
             | ErrorCode::ContentNotPrepared
             | ErrorCode::PathNotFound
+            | ErrorCode::InodeNotFound
             | ErrorCode::RevisionNotFound
             | ErrorCode::PathConflict
             | ErrorCode::DirectoryNotEmpty

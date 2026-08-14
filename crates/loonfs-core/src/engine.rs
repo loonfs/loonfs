@@ -11,7 +11,8 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{
-    load_metadata_view, CurrentFileState, DirectDownloadTarget, LoadedMetadataView, ReadLoadContext,
+    load_metadata_view, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget,
+    LoadedMetadataView, ReadLoadContext,
 };
 use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
@@ -279,6 +280,31 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> Result<DirectDownloadTarget> {
         let view = self.load_read_view(context).await?;
         view.direct_download_target(path.as_ref(), revision_no)
+            .await
+    }
+
+    /// Resolves one inode revision for a direct download without reading its
+    /// content bytes.
+    pub async fn direct_download_target_by_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        context: &RuntimeReadContext,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        let view = self.load_read_view(context).await?;
+        view.direct_download_target_by_inode(inode_id, revision_no)
+            .await
+    }
+
+    /// Returns the current entry for a visible inode.
+    pub async fn stat_inode(
+        &self,
+        inode_id: InodeId,
+        options: StatPathOptions,
+        context: &RuntimeReadContext,
+    ) -> Result<AuthoritativePathEntry> {
+        let view = self.load_read_view(context).await?;
+        view.stat_inode(inode_id, options.include_attributes.into())
             .await
     }
 

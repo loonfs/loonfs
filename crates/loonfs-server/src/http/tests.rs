@@ -2387,6 +2387,12 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         "download-busy-seed-01",
     )
     .await;
+    let inode_id = seed_writer
+        .reader()
+        .stat_path(&namespace_id("demo"), "/note.txt", Default::default())
+        .await
+        .expect("stat seeded file")
+        .inode_id;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.max_concurrent_downloads = 1;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2424,10 +2430,22 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         "server_busy",
         Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
     );
+    assert_api_error(
+        client
+            .get_file_revision_bytes_by_inode(
+                &namespace_id("demo"),
+                inode_id,
+                loonfs_api::RevisionNo(1),
+            )
+            .await,
+        503,
+        "server_busy",
+        Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
+    );
     assert!(state
         .metrics
         .render(None, 0, 0)
-        .contains("loonfs_server_busy_rejections_total{kind=\"download\"} 1\n"));
+        .contains("loonfs_server_busy_rejections_total{kind=\"download\"} 2\n"));
 
     drop(held);
     let client = Client::new(client_config).expect("valid client config");
@@ -2437,6 +2455,17 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         .await
         .expect("a freed slot admits the read");
     assert_eq!(bytes, b"bounded");
+    assert_eq!(
+        client
+            .get_file_revision_bytes_by_inode(
+                &namespace_id("demo"),
+                inode_id,
+                loonfs_api::RevisionNo(1),
+            )
+            .await
+            .expect("a freed slot admits the inode read"),
+        b"bounded"
+    );
 
     server.abort();
 }
@@ -2520,6 +2549,18 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         "download-limit-seed-02",
     )
     .await;
+    let big_inode_id = seed_writer
+        .reader()
+        .stat_path(&namespace_id("demo"), "/big.bin", Default::default())
+        .await
+        .expect("stat big file")
+        .inode_id;
+    let small_inode_id = seed_writer
+        .reader()
+        .stat_path(&namespace_id("demo"), "/small.bin", Default::default())
+        .await
+        .expect("stat small file")
+        .inode_id;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.max_download_bytes = 16;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2547,12 +2588,36 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         "content_too_large",
         None,
     );
+    assert_api_error(
+        client
+            .get_file_revision_bytes_by_inode(
+                &namespace_id("demo"),
+                big_inode_id,
+                loonfs_api::RevisionNo(1),
+            )
+            .await,
+        413,
+        "content_too_large",
+        None,
+    );
     // Content inside the limit still reads through the same route.
     let bytes = client
         .get_file_bytes(&NamespacePath::parse("demo", "/small.bin").expect("target"))
         .await
         .expect("small content fits under the limit");
     assert_eq!(bytes.len(), 8);
+    assert_eq!(
+        client
+            .get_file_revision_bytes_by_inode(
+                &namespace_id("demo"),
+                small_inode_id,
+                loonfs_api::RevisionNo(1),
+            )
+            .await
+            .expect("small inode content fits under the limit")
+            .len(),
+        8
+    );
 
     server.abort();
 }
@@ -3342,6 +3407,10 @@ mod direct_download {
             .put_file_bytes(&target, &payload, &replace_file_options())
             .await
             .expect("seed the oversized file");
+        let entry = client
+            .stat_path(&target, &Default::default())
+            .await
+            .expect("stat seeded file");
 
         // The wall the audit found: this deployment let the file exist and
         // will not proxy it back.
@@ -3358,6 +3427,7 @@ mod direct_download {
             .expect("download grant");
         assert_eq!(grant.path.as_str(), "/big.bin");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
+        assert_eq!(Some(&grant.content_ref), entry.content_ref());
 
         let mut received = Vec::new();
         let written = client
@@ -3366,6 +3436,29 @@ mod direct_download {
             .expect("stream the granted object");
         assert_eq!(written, payload.len() as u64);
         assert_eq!(received, payload);
+
+        client
+            .delete_path(
+                &target,
+                &DeleteOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("delete current binding");
+        let inode_grant = client
+            .begin_download_by_inode(&namespace, entry.inode_id, RevisionNo(1))
+            .await
+            .expect("grant retained inode revision");
+        assert_eq!(inode_grant.inode_id, entry.inode_id);
+        assert_eq!(inode_grant.content_ref, grant.content_ref);
+        let mut stream = client
+            .open_direct_download_by_inode(&inode_grant)
+            .await
+            .expect("open inode grant");
+        let mut inode_received = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("read inode grant") {
+            inode_received.extend_from_slice(&chunk);
+        }
+        assert_eq!(inode_received, payload);
     }
 
     /// A grant names one immutable object, so a commit that replaces the
@@ -3451,6 +3544,28 @@ mod direct_download {
                 ..
             } => {
                 assert_eq!(*status, 501);
+                assert_eq!(code, ErrorCode::NotSupported.as_str());
+                assert_eq!(feature.as_deref(), Some(FEATURE_DOWNLOADS_DIRECT_GET));
+            }
+            other => panic!("expected a typed not_supported, got {other:?}"),
+        }
+        let inode_id = client
+            .stat_path(&target, &Default::default())
+            .await
+            .expect("stat proxied file")
+            .inode_id;
+        let inode_error = client
+            .begin_download_by_inode(&namespace, inode_id, RevisionNo(1))
+            .await
+            .expect_err("the inode route honors the same provider gate");
+        match inode_error {
+            ClientError::Api {
+                status,
+                code,
+                feature,
+                ..
+            } => {
+                assert_eq!(status, 501);
                 assert_eq!(code, ErrorCode::NotSupported.as_str());
                 assert_eq!(feature.as_deref(), Some(FEATURE_DOWNLOADS_DIRECT_GET));
             }

@@ -13,13 +13,13 @@ use crate::{
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
-    encode_cursor, AbsolutePath, CapabilityDocument, EffectiveLimit, FileRevision,
-    FileRevisionsPageCursor, Page, PaginationPolicy, FEATURE_ATTRIBUTES,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
-    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    encode_cursor, CapabilityDocument, EffectiveLimit, FileRevision, FileRevisionsPageCursor, Page,
+    PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
+    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataTableCache, StoredMetadataBlockCache, WalTailProjectionCache,
@@ -307,7 +307,6 @@ pub(super) fn default_page_limit() -> EffectiveLimit {
 
 pub(super) fn file_revisions_page_response(
     namespace_id: NamespaceId,
-    absolute_path: AbsolutePath,
     head_seq: ChangeSeq,
     page: Page<FileRevision, FileRevisionsPageCursor>,
     fallback_inode_id: Option<InodeId>,
@@ -329,7 +328,6 @@ pub(super) fn file_revisions_page_response(
         .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
     Ok(ListFileRevisionsResponse {
         namespace_id,
-        path: absolute_path,
         inode_id,
         head_seq,
         revisions: page.items,

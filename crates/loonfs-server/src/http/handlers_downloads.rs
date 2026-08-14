@@ -7,17 +7,21 @@
 //! advertised together.
 
 use super::error::ApiResponseError;
+use super::handlers_inodes::InodeRevisionPathParams;
 use super::handlers_uploads::{presign_issuer_error, presign_time};
-use super::{AppJson, AppState, NamespaceIdPath};
+use super::{AppJson, AppPath, AppState, NamespaceIdPath};
 use axum::extract::State;
 use axum::Json;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
-    v0::{BeginDownloadRequest, BeginDownloadResponse, ObjectTransferAccess},
-    FEATURE_DOWNLOADS_DIRECT_GET,
+    v0::{
+        BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
+        BeginDownloadResponse, ObjectTransferAccess,
+    },
+    InodeId, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
 };
-use loonfs_objectstore::presign::PresignedGetRequest;
+use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use std::time::Duration;
 
 /// Lifetime of one read capability, the same window a whole-object write
@@ -72,44 +76,109 @@ pub(super) async fn begin_download(
     // A store either authorizes direct transfers or it does not, and one
     // that does can always sign a read — so this asks for the bundle, not
     // for a direction within it.
-    let Some(issuer) = state
-        .direct_transfers
-        .as_ref()
-        .map(|transfers| &transfers.get)
-    else {
-        return Err(ApiResponseError::not_supported(
-            FEATURE_DOWNLOADS_DIRECT_GET,
-            "direct_get requires an object store that can presign object reads; \
-             this deployment's endpoint cannot, so every read is proxied and \
-             bounded by `download.max_content_bytes`",
-        ));
-    };
+    let issuer = direct_get_issuer(&state)?;
 
     let target = state
         .reader
         .direct_download_target(&namespace_id, request.path.as_str(), request.revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    let signed = issuer
-        .presign_get(
-            PresignedGetRequest {
-                object_key: &target.object_key,
-                expires_in: DIRECT_GET_URL_TTL,
-            },
-            presign_time(),
-        )
-        .map_err(presign_issuer_error)?;
+    let access = presigned_access(issuer, &target.object_key)?;
 
     Ok(Json(BeginDownloadResponse {
         namespace_id,
         path: target.absolute_path,
         revision_no: target.revision_no,
         content_ref: target.content_ref,
-        access: ObjectTransferAccess::PresignedUrl {
-            method: signed.method,
-            url: signed.url,
-            headers: signed.headers,
-            expires_at_ms: signed.expires_at_ms,
-        },
+        access,
     }))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+        tag = "inodes",
+        summary = "Begin download by inode",
+        description = "Authorizes a direct read of one retained inode revision. The request body is `{}` and the response does not include a path.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("inode_id" = InodeId, Path, description = "File inode id"),
+            ("revision_no" = RevisionNo, Path, description = "Revision number")
+        ),
+        request_body = BeginDownloadByInodeRequest,
+        responses(
+            (status = 200, description = "Download authorized", body = BeginDownloadByInodeResponse),
+            (status = 400, description = "Invalid inode id, revision number, or request body", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
+            (status = 409, description = "Inode is not a file", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 501, description = "Direct download is unsupported", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
+        )
+    )
+)]
+/// Authorizes a direct read of one retained inode revision.
+pub(super) async fn begin_download_by_inode(
+    State(state): State<AppState>,
+    namespace_id_path: NamespaceIdPath,
+    path: AppPath<InodeRevisionPathParams>,
+    AppJson(_request): AppJson<BeginDownloadByInodeRequest>,
+) -> Result<Json<BeginDownloadByInodeResponse>, ApiResponseError> {
+    let namespace_id = namespace_id_path.into_id()?;
+    let path = path.into_params()?;
+    let inode_id = InodeId(path.inode_id);
+    let revision_no = RevisionNo(path.revision_no);
+    let issuer = direct_get_issuer(&state)?;
+    let target = state
+        .reader
+        .direct_download_target_by_inode(&namespace_id, inode_id, revision_no)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let access = presigned_access(issuer, &target.object_key)?;
+    Ok(Json(BeginDownloadByInodeResponse {
+        namespace_id,
+        inode_id: target.inode_id,
+        revision_no: target.revision_no,
+        content_ref: target.content_ref,
+        access,
+    }))
+}
+
+fn direct_get_issuer(state: &AppState) -> Result<&dyn DirectGetIssuer, ApiResponseError> {
+    state
+        .direct_transfers
+        .as_ref()
+        .map(|transfers| transfers.get.as_ref())
+        .ok_or_else(|| {
+            ApiResponseError::not_supported(
+                FEATURE_DOWNLOADS_DIRECT_GET,
+                "direct_get requires an object store that can presign object reads; \
+                 this deployment's endpoint cannot, so every read is proxied and \
+                 bounded by `download.max_content_bytes`",
+            )
+        })
+}
+
+fn presigned_access(
+    issuer: &dyn DirectGetIssuer,
+    object_key: &str,
+) -> Result<ObjectTransferAccess, ApiResponseError> {
+    let signed = issuer
+        .presign_get(
+            PresignedGetRequest {
+                object_key,
+                expires_in: DIRECT_GET_URL_TTL,
+            },
+            presign_time(),
+        )
+        .map_err(presign_issuer_error)?;
+    Ok(ObjectTransferAccess::PresignedUrl {
+        method: signed.method,
+        url: signed.url,
+        headers: signed.headers,
+        expires_at_ms: signed.expires_at_ms,
+    })
 }

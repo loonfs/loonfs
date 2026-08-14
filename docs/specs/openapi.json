@@ -2049,6 +2049,463 @@
         }
       }
     },
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}": {
+      "get": {
+        "tags": [
+          "inodes"
+        ],
+        "summary": "Stat inode",
+        "description": "Returns the canonical current entry for a visible inode, including its current path. Unknown and currently invisible inodes answer `inode_not_found`.",
+        "operationId": "stat_inode",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inode_id",
+            "in": "path",
+            "description": "Inode id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/InodeId"
+            }
+          },
+          {
+            "name": "include_attributes",
+            "in": "query",
+            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative current inode entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthoritativePathEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inode id or include_attributes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or visible inode not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions": {
+      "get": {
+        "tags": [
+          "inodes"
+        ],
+        "summary": "List file revisions by inode",
+        "description": "Returns retained revisions for a file inode without requiring a current path.",
+        "operationId": "list_file_revisions_by_inode",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inode_id",
+            "in": "path",
+            "description": "File inode id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/InodeId"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque file-revisions page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File revisions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListFileRevisionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inode id, limit, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or inode not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "409": {
+            "description": "Inode is not a file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {
+      "get": {
+        "tags": [
+          "inodes"
+        ],
+        "summary": "Read file revision by inode",
+        "description": "Reads and verifies one retained file revision by inode id and revision number.",
+        "operationId": "get_file_revision_bytes_by_inode",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inode_id",
+            "in": "path",
+            "description": "File inode id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/InodeId"
+            }
+          },
+          {
+            "name": "revision_no",
+            "in": "path",
+            "description": "Revision number",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RevisionNo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revision bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inode id or revision number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace, inode, or revision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Inode is not a file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Content exceeds the advertised `download.max_content_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is at its concurrent content-read limit; retry shortly",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads": {
+      "post": {
+        "tags": [
+          "inodes"
+        ],
+        "summary": "Begin download by inode",
+        "description": "Authorizes a direct read of one retained inode revision. The request body is `{}` and the response does not include a path.",
+        "operationId": "begin_download_by_inode",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inode_id",
+            "in": "path",
+            "description": "File inode id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/InodeId"
+            }
+          },
+          {
+            "name": "revision_no",
+            "in": "path",
+            "description": "Revision number",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RevisionNo"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeginDownloadByInodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Download authorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BeginDownloadByInodeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inode id, revision number, or request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace, inode, or revision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "409": {
+            "description": "Inode is not a file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Direct download is unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/namespaces/{namespace_id}/query/grep": {
       "post": {
         "tags": [
@@ -3131,6 +3588,44 @@
           }
         ],
         "description": "Kind-specific metadata for an authoritative path entry."
+      },
+      "BeginDownloadByInodeRequest": {
+        "type": "object",
+        "description": "Empty request for an inode-addressed download.",
+        "additionalProperties": false
+      },
+      "BeginDownloadByInodeResponse": {
+        "type": "object",
+        "description": "A short-lived capability to read one inode revision.",
+        "required": [
+          "namespace_id",
+          "inode_id",
+          "revision_no",
+          "content_ref",
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Short-lived provider access without the raw object key."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Content identity, size, and checksum."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "File inode being read."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision being read."
+          }
+        }
       },
       "BeginDownloadRequest": {
         "type": "object",
@@ -5391,7 +5886,6 @@
         "description": "Response for listing file revisions.",
         "required": [
           "namespace_id",
-          "path",
           "inode_id",
           "head_seq",
           "revisions"
@@ -5415,10 +5909,6 @@
               "null"
             ],
             "description": "Opaque cursor for the next page, if more revisions are available."
-          },
-          "path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute file path requested by the caller."
           },
           "revisions": {
             "type": "array",
@@ -6490,6 +6980,10 @@
     {
       "name": "filesystem",
       "description": "Path-oriented filesystem APIs"
+    },
+    {
+      "name": "inodes",
+      "description": "Identity-oriented inode read APIs"
     },
     {
       "name": "uploads",

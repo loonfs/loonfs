@@ -321,7 +321,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let inode = self
             .inode_at_seq(inode_id)
             .await?
-            .ok_or_else(|| CoreError::PathNotFound(inode_id.to_string()))?;
+            .ok_or(CoreError::InodeNotFound(inode_id))?;
         if inode.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
                 path: inode_id.to_string(),

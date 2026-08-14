@@ -56,8 +56,8 @@ pub(crate) enum Command {
     Current(CurrentArgs),
     /// List a directory.
     Ls(FilesystemLsArgs),
-    /// Describe one path (kind, size, revision, content digest, attributes).
-    Stat(FilesystemPathArgs),
+    /// Describe one visible path or inode (kind, size, revision, content digest, attributes).
+    Stat(FilesystemStatArgs),
     /// Write and remove attributes on a file or directory.
     Annotate(FilesystemAnnotateArgs),
     /// Print a file's content to stdout.
@@ -444,10 +444,15 @@ pub(crate) struct FilesystemLsArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct FilesystemPathArgs {
+pub(crate) struct FilesystemStatArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    pub path: String,
+    /// Absolute path to describe.
+    #[arg(required_unless_present = "inode", conflicts_with = "inode")]
+    pub path: Option<String>,
+    /// Visible inode to describe instead of a path.
+    #[arg(long, value_name = "INODE_ID")]
+    pub inode: Option<u64>,
 }
 
 #[derive(Debug, Args)]
