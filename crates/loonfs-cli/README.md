@@ -285,12 +285,15 @@ Maintenance
     Pin the namespace's current state under a named checkpoint; --ttl-ms
     expires the pin, and an omitted TTL holds it until release
 
-  loonfs admin checkpoint-list
-    List the namespace's active checkpoint pins, oldest first: when each was
-    taken, when it expires, the sequence it pins, its label or fork target,
-    and the id `checkpoint-release` takes. A name is a label rather than a
-    key, so this is how a pin is found again once its id has been lost; a
-    pin whose expiry has passed is still listed until collection releases it
+  loonfs admin checkpoint-list [--limit <n>] [--cursor <cursor>]
+    List the namespace's active checkpoint pins in checkpoint-id order: when
+    each was taken, when it expires, the sequence it pins, its label or fork
+    target, and the id `checkpoint-release` takes. By default the command
+    follows bounded pages to completion; --limit or --cursor requests one
+    page and prints next_cursor when more keys remain. A name is a label
+    rather than a key, so this is how a pin is found again once its id has
+    been lost; a pin whose expiry has passed is still listed until collection
+    releases it
 
   loonfs admin checkpoint-release <checkpoint-id>
     Release a checkpoint pin

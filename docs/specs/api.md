@@ -676,7 +676,7 @@ A representative v0 binding is shown below.
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; every call mints a new user-owned record under a new id, and that record is a GC root until it is released) |
-| List checkpoints | `GET /v0/admin/namespaces/{ns}/checkpoints` (every active record, oldest first, with the id the release route takes; see below) |
+| List checkpoints | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` (one bounded page of active records in ascending checkpoint-id order, with the id the release route takes; see below) |
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
 | Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
@@ -792,14 +792,33 @@ creation response is where that id comes from, so losing it — or never
 seeing it — would otherwise leave a garbage-collection root nobody can name.
 The listing is the way back to it.
 
-`GET /v0/admin/namespaces/{ns}/checkpoints` returns every active record on
-the namespace, oldest first, each carrying its `checkpoint_id`, `owner`,
+`GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns one
+bounded page of active records in ascending `checkpoint_id` order, which is
+the durable checkpoint-record key order. Efficient oldest-first listing
+would require a durable creation-time index that this inventory endpoint
+does not justify. Each entry carries its `checkpoint_id`, `owner`,
 `created_at_ms`, `expires_at_ms` (absent when the pin holds until released),
 `checkpoint_seq`, and `manifest_id` — the same identity the create response
 returned. `owner` is tagged: `user` carries the label the creator recorded,
 and `fork` carries the `target_namespace_id` whose existence keeps that
 lease standing. Only a `user` record is released by id; a `fork` record goes
-when its target namespace does.
+when its target namespace does. `limit` uses the advertised
+`pagination.default` and `pagination.max` limits; zero and over-limit values
+answer `invalid_request`. `next_cursor` is absent once the enumerated
+checkpoint keyspace is complete.
+
+The cursor is opaque, URL-safe, namespace-bound, and operation-bound. It
+encodes the last checkpoint-record key the page inspected, not the last
+active checkpoint it returned: released records and records reaped between
+listing and loading are skipped while still advancing the resume position.
+Resumption is strictly after that key, so a run of filtered records cannot
+stall a caller. Clients must only round-trip cursor strings returned by this
+endpoint; their encoding is internal and may change between builds.
+
+Checkpoint pagination is a live listing, not a snapshot. A record released
+or reaped between key listing and record loading is skipped; a checkpoint
+created before the cursor position is not returned by a later page, while
+one created after it can appear. Listing creates no snapshot pin.
 
 Released records are absent, because a release is what stops a record
 pinning anything. A record whose `expires_at_ms` has passed is still

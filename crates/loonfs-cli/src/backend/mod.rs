@@ -819,14 +819,24 @@ impl ResolvedTarget {
         }
     }
 
-    /// Lists the namespace's active checkpoint pins, oldest first.
-    pub(crate) async fn list_checkpoints(
+    /// Lists one page of the namespace's active checkpoint pins.
+    pub(crate) async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
     ) -> Result<ListCheckpointsResponse, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.list_checkpoints(namespace_id).await,
-            Self::Remote(target) => Ok(target.client.list_checkpoints(namespace_id).await?),
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .list_checkpoints_page(namespace_id, limit, cursor)
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .list_checkpoints_page(namespace_id, limit, cursor)
+                .await?),
         }
     }
 

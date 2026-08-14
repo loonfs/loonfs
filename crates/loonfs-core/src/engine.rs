@@ -2,7 +2,7 @@
 //! uploads, checkpoints, and maintenance.
 
 use crate::cache::{MetadataTableCache, WalTailProjectionCache};
-use crate::checkpoint::{CheckpointFilesPage, CheckpointFilesPageCursor};
+use crate::checkpoint::{CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -33,8 +33,8 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
-    ListCheckpointsResponse, NamespaceId, NamespaceSummary, Page, PageRequest,
-    ReleaseCheckpointResponse, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
+    NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo,
+    TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -781,12 +781,15 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Lists active checkpoint records from oldest to newest.
+    /// Lists one page of active checkpoint records in ascending id order.
     ///
     /// This method does not release expired records. A record remains active and
     /// appears in the result until garbage collection processes it.
-    pub async fn list_checkpoints(&self) -> Result<ListCheckpointsResponse> {
-        crate::checkpoint::list_checkpoints(&self.store, &self.namespace_id).await
+    pub async fn list_checkpoints_page(
+        &self,
+        request: PageRequest<CheckpointPageCursor>,
+    ) -> Result<Page<loonfs_api::CheckpointSummary, CheckpointPageCursor>> {
+        crate::checkpoint::list_checkpoints_page(&self.store, &self.namespace_id, request).await
     }
 
     /// Releases a user-owned checkpoint by id.

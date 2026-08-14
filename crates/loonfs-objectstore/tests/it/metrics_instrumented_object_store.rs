@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
+use futures::TryStreamExt;
 use loonfs_api::ManifestObjectId;
 use loonfs_objectstore::keys::{
     checkpoint_record, metadata_manifest_object, metadata_table, wal_head, wal_segment,
@@ -194,6 +195,33 @@ async fn records_list_count() {
     assert_eq!(sample.result, ObjectStoreResultClass::Ok);
     assert_eq!(sample.item_count, Some(2));
     assert_eq!(sample.range_class, Some(RangeClass::Prefix));
+}
+
+#[tokio::test]
+async fn instrumented_store_forwards_start_after_listing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
+    let prefix = "namespaces/ns-1/checkpoints/";
+    let first = format!("{prefix}chk_00000000000000000000000000000001.json");
+    let second = format!("{prefix}chk_00000000000000000000000000000002.json");
+    for key in [&first, &second] {
+        store
+            .put_overwrite(key, bytes(b"checkpoint"))
+            .await
+            .expect("put checkpoint");
+    }
+
+    let keys = store
+        .list_prefix_from_stream(prefix, Some(&first))
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("resume instrumented listing");
+
+    assert_eq!(keys, vec![second]);
+    let sample = recorder.samples().pop().expect("streamed list sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::ListPrefixStream);
+    assert_eq!(sample.item_count, Some(1));
 }
 
 #[tokio::test]
@@ -420,9 +448,10 @@ impl ObjectStore for DelegatingWriteStore {
         Ok(())
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         _prefix: &str,
+        _start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         Box::pin(stream::empty())
     }

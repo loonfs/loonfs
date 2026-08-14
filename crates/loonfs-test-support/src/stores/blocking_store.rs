@@ -290,13 +290,14 @@ impl<S: ObjectStore> ObjectStore for BlockingStore<S> {
         result
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         prefix: &str,
+        start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         let selected = self.matches(&OperationContext::new(prefix, OperationKind::List));
         let gate = Arc::clone(&self.gate);
-        let inner = self.inner.list_prefix_stream(prefix);
+        let inner = self.inner.list_prefix_from_stream(prefix, start_after);
         if !selected {
             return inner;
         }

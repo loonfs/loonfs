@@ -91,6 +91,12 @@ fn openapi_documents_current_server_paths() {
         "get",
         &["after_seq", "limit"],
     );
+    assert_query_params(
+        paths,
+        "/v0/admin/namespaces/{namespace_id}/checkpoints",
+        "get",
+        &["limit", "cursor"],
+    );
 
     let mut namespace_scoped_operations = 0;
     for (path, path_item) in paths {

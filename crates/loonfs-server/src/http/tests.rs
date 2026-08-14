@@ -394,11 +394,12 @@ impl ObjectStore for StaleHeadOnceStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
+    fn list_prefix_from_stream(
         &self,
         prefix: &str,
+        start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -1695,7 +1696,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
         // The checkpoint inventory names this deployment's garbage-collection
         // roots, so it answers behind the same token as everything else.
         assert_api_error(
-            client.list_checkpoints(&namespace_id("demo")).await,
+            client.list_checkpoints_all(&namespace_id("demo")).await,
             401,
             "unauthorized",
             Some("missing or invalid bearer token"),
@@ -3308,11 +3309,12 @@ mod direct_download {
             self.inner.delete(key).await
         }
 
-        fn list_prefix_stream(
+        fn list_prefix_from_stream(
             &self,
             prefix: &str,
+            start_after: Option<&str>,
         ) -> futures::stream::BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_stream(prefix)
+            self.inner.list_prefix_from_stream(prefix, start_after)
         }
     }
 

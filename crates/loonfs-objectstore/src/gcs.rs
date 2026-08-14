@@ -274,8 +274,16 @@ impl ObjectStore for GcpGcsStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
-        self.inner.list_prefix_stream(prefix)
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
+        // GCS's JSON `startOffset` is inclusive. Whichever native listing
+        // transport the upstream adapter selects, `ProviderObjectStore`
+        // filters the exact match so this public operation remains
+        // strictly-after.
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 

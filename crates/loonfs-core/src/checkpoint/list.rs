@@ -16,11 +16,66 @@ use crate::error::{CoreError, Result};
 use crate::namespace::control::read_head_object;
 use futures::StreamExt;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
-use loonfs_api::{CheckpointOwnerSummary, CheckpointSummary, ListCheckpointsResponse, NamespaceId};
+use loonfs_api::{
+    CheckpointOwnerSummary, CheckpointSummary, NamespaceCursor, NamespaceId, Page, PageCursor,
+    PageRequest,
+};
 use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::ObjectStore;
+use serde::{Deserialize, Serialize};
 
-/// Lists every active checkpoint record under `namespace_id`, oldest first.
+/// Opaque checkpoint-inventory position returned by one runtime page.
+///
+/// Cursor payloads are short-lived API tokens, not durable objects. Serde's
+/// default unknown-field handling keeps decoding tolerant of additive fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointPageCursor {
+    namespace_id: NamespaceId,
+    last_key: String,
+}
+
+impl PageCursor for CheckpointPageCursor {
+    const KIND: &'static str = "checkpoint_inventory";
+}
+
+impl NamespaceCursor for CheckpointPageCursor {
+    fn namespace_id(&self) -> &NamespaceId {
+        &self.namespace_id
+    }
+
+    fn last_key(&self) -> Option<&str> {
+        Some(&self.last_key)
+    }
+
+    fn key_prefix(&self) -> String {
+        checkpoint_prefix(&self.namespace_id)
+    }
+}
+
+impl CheckpointPageCursor {
+    fn after(namespace_id: &NamespaceId, last_key: String) -> Self {
+        Self {
+            namespace_id: namespace_id.clone(),
+            last_key,
+        }
+    }
+
+    fn validate_for(&self, namespace_id: &NamespaceId) -> Result<()> {
+        if &self.namespace_id != namespace_id {
+            return Err(CoreError::InvalidCursor(
+                "cursor belongs to a different namespace".to_owned(),
+            ));
+        }
+        if !self.last_key.starts_with(&checkpoint_prefix(namespace_id)) {
+            return Err(CoreError::InvalidCursor(
+                "cursor names a key outside the checkpoint inventory".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Lists one page of active checkpoint records in ascending checkpoint-id order.
 ///
 /// An expired record that no collection pass has released yet is reported,
 /// with its expiry in the answer. It is still active, it still roots its
@@ -38,19 +93,36 @@ use loonfs_objectstore::ObjectStore;
 /// namespace still answers: its records outlive the tombstone until garbage
 /// collection reaps them, and that is exactly the state an operator is
 /// looking into.
-pub(crate) async fn list_checkpoints<S: ObjectStore + ?Sized>(
+pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<ListCheckpointsResponse> {
+    request: PageRequest<CheckpointPageCursor>,
+) -> Result<Page<CheckpointSummary, CheckpointPageCursor>> {
     read_head_object(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
 
+    if let Some(cursor) = &request.cursor {
+        cursor.validate_for(namespace_id)?;
+    }
+
     let prefix = checkpoint_prefix(namespace_id);
-    let mut keys = store.list_prefix_stream(&prefix);
-    let mut checkpoints = Vec::new();
-    while let Some(item) = keys.next().await {
+    let start_after = request
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.last_key.as_str());
+    let keys = store
+        .list_prefix_from_stream(&prefix, start_after)
+        .peekable();
+    futures::pin_mut!(keys);
+    let mut checkpoints = Vec::with_capacity(request.limit.as_usize());
+    let mut last_inspected_key = None;
+    while checkpoints.len() < request.limit.as_usize() {
+        let Some(item) = keys.next().await else {
+            break;
+        };
         let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
+        last_inspected_key = Some(key.clone());
         // Gone between the listing and the read: reaped underneath this
         // call, which is the same answer as never having been there.
         let loaded = match load_checkpoint_record_at_key(store, &key).await {
@@ -78,18 +150,72 @@ pub(crate) async fn list_checkpoints<S: ObjectStore + ?Sized>(
             manifest_id: record.manifest_id,
         });
     }
-    // Oldest first, and the id breaks ties, so two records minted in one
-    // millisecond still list in one order across calls.
-    checkpoints.sort_by(|left, right| {
-        left.created_at_ms.cmp(&right.created_at_ms).then_with(|| {
-            left.checkpoint_id
-                .as_str()
-                .cmp(right.checkpoint_id.as_str())
-        })
+    let has_more = if checkpoints.len() == request.limit.as_usize() {
+        match keys.as_mut().peek().await {
+            Some(Ok(_)) => true,
+            Some(Err(_)) => {
+                let error = keys
+                    .next()
+                    .await
+                    .expect("a peeked listing item should still be present")
+                    .expect_err("the peeked listing item should still be an error");
+                return Err(CoreError::store(&prefix, &error));
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    let next_cursor = has_more.then(|| {
+        CheckpointPageCursor::after(
+            namespace_id,
+            last_inspected_key.expect("a full page should inspect at least one key"),
+        )
     });
 
-    Ok(ListCheckpointsResponse {
-        namespace_id: namespace_id.clone(),
-        checkpoints,
+    Ok(Page {
+        items: checkpoints,
+        next_cursor,
     })
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    use loonfs_api::{decode_namespace_cursor, encode_cursor, DirectoryPageCursor, NameKey};
+
+    #[test]
+    fn cursor_decode_tolerates_additive_fields() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let token = loonfs_api::wire::hex::hex_encode_bytes(
+            &serde_json::to_vec(&serde_json::json!({
+                "v": 1,
+                "kind": "checkpoint_inventory",
+                "namespace_id": "demo",
+                "last_key": "namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json",
+                "future_field": {"ignored": true}
+            }))
+            .expect("encode cursor"),
+        );
+
+        let cursor = decode_namespace_cursor::<CheckpointPageCursor>(&token, &namespace_id)
+            .expect("decode cursor with additive field");
+        assert_eq!(
+            cursor.last_key(),
+            Some("namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json")
+        );
+    }
+
+    #[test]
+    fn cursor_is_operation_bound() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let directory = DirectoryPageCursor {
+            head_seq: loonfs_api::ChangeSeq(1),
+            directory_inode_id: loonfs_api::InodeId(1),
+            last_name_key: NameKey::parse("entry").expect("name key"),
+        };
+        let token = encode_cursor(&directory).expect("encode directory cursor");
+
+        assert!(decode_namespace_cursor::<CheckpointPageCursor>(&token, &namespace_id).is_err());
+    }
 }

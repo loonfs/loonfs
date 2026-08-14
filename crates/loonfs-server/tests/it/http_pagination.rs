@@ -3,8 +3,9 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{
-    v0::FilesystemChange, ApiError, ChangeSeq, CommitId, DestinationBehavior,
-    ListPathEntriesResponse, RevisionNo,
+    v0::FilesystemChange, ApiError, ChangeSeq, CommitId, CreateCheckpointRequest,
+    DestinationBehavior, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
+    DEFAULT_MAX_PAGE_LIMIT,
 };
 use loonfs_client::{
     ClientError, CreateDirectoryOptions, MoveOptions, NamespacePath, PutFileOptions,
@@ -26,6 +27,133 @@ fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
                 .as_str()
         })
         .collect()
+}
+
+fn assert_invalid_request<T: std::fmt::Debug>(result: Result<T, ClientError>) {
+    match result.expect_err("request should be rejected") {
+        ClientError::Api { status, code, .. } => {
+            assert_eq!(status, 400);
+            assert_eq!(code, "invalid_request");
+        }
+        other => unreachable!("expected invalid_request API error, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-checkpoint-pagination",
+    ))
+    .await;
+    let demo = namespace_id("demo");
+    let other = namespace_id("other");
+    for namespace_id in [&demo, &other] {
+        harness
+            .client
+            .create_namespace(namespace_id)
+            .await
+            .expect("create namespace");
+    }
+
+    let mut expected_ids = Vec::new();
+    for index in 0..5 {
+        expected_ids.push(
+            harness
+                .client
+                .create_checkpoint(
+                    &demo,
+                    &CreateCheckpointRequest {
+                        name: format!("pin-{index}"),
+                        ttl_ms: None,
+                    },
+                )
+                .await
+                .expect("create checkpoint")
+                .checkpoint_id,
+        );
+    }
+    expected_ids.sort();
+
+    let mut actual_ids = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = harness
+            .client
+            .list_checkpoints_page(&demo, Some(2), cursor.as_deref())
+            .await
+            .expect("list checkpoint page");
+        actual_ids.extend(
+            page.checkpoints
+                .into_iter()
+                .map(|checkpoint| checkpoint.checkpoint_id),
+        );
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    assert_eq!(actual_ids, expected_ids);
+
+    let all = harness
+        .client
+        .list_checkpoints_all(&demo)
+        .await
+        .expect("aggregate checkpoint pages");
+    assert_eq!(
+        all.checkpoints
+            .into_iter()
+            .map(|checkpoint| checkpoint.checkpoint_id)
+            .collect::<Vec<_>>(),
+        expected_ids
+    );
+    assert!(all.next_cursor.is_none());
+
+    let first = harness
+        .client
+        .list_checkpoints_page(&demo, Some(1), None)
+        .await
+        .expect("first checkpoint page");
+    let foreign_cursor = first.next_cursor.expect("checkpoint cursor");
+    assert_invalid_request(
+        harness
+            .client
+            .list_checkpoints_page(&other, Some(1), Some(&foreign_cursor))
+            .await,
+    );
+    assert_invalid_request(
+        harness
+            .client
+            .list_checkpoints_page(&demo, Some(1), Some("not-a-cursor"))
+            .await,
+    );
+    assert_invalid_request(
+        harness
+            .client
+            .list_checkpoints_page(&demo, Some(0), None)
+            .await,
+    );
+    assert_invalid_request(
+        harness
+            .client
+            .list_checkpoints_page(&demo, Some(DEFAULT_MAX_PAGE_LIMIT + 1), None)
+            .await,
+    );
+
+    let raw: ListCheckpointsResponse = get_json(
+        &format!(
+            "{}/v0/admin/namespaces/demo/checkpoints?limit=1",
+            harness.server_url
+        ),
+        "test-token",
+    )
+    .expect("raw checkpoint page");
+    assert_eq!(raw.checkpoints.len(), 1);
+    assert!(raw.next_cursor.is_some());
+
+    harness.server.abort();
 }
 
 fn get_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> Result<T, ApiError> {

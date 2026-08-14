@@ -6,9 +6,41 @@
 //! release removes them from the answer, and a passed expiry does not.
 
 use super::*;
-use crate::checkpoint::list::list_checkpoints;
+use crate::checkpoint::list::list_checkpoints_page;
 use loonfs_api::wire::control::CheckpointOwner;
-use loonfs_api::{CheckpointOwnerSummary, ErrorCode};
+use loonfs_api::{
+    CheckpointOwnerSummary, EffectiveLimit, ErrorCode, ListCheckpointsResponse, NamespaceCursor,
+    PageRequest, PaginationPolicy,
+};
+
+fn page_limit(limit: u32) -> EffectiveLimit {
+    PaginationPolicy::default()
+        .resolve_limit(Some(limit))
+        .expect("test page limit")
+}
+
+async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> crate::error::Result<ListCheckpointsResponse> {
+    let limit = page_limit(2);
+    let mut checkpoints = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page =
+            list_checkpoints_page(store, namespace_id, PageRequest { limit, cursor }).await?;
+        checkpoints.extend(page.items);
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    Ok(ListCheckpointsResponse {
+        namespace_id: namespace_id.clone(),
+        checkpoints,
+        next_cursor: None,
+    })
+}
 
 async fn pin_named<S: ObjectStore + ?Sized>(
     store: &S,
@@ -47,7 +79,7 @@ async fn two_pins_under_one_label_list_as_two_records() {
     let second = pin_named(&store, &namespace_id, "nightly", None, &context).await;
     assert_ne!(first, second, "each call mints its own record");
 
-    let listed = list_checkpoints(&store, &namespace_id)
+    let listed = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect("list checkpoints");
     assert_eq!(listed.namespace_id, namespace_id);
@@ -73,7 +105,7 @@ async fn two_pins_under_one_label_list_as_two_records() {
     super::super::release::release_checkpoint(&store, &namespace_id, &first, &context)
         .await
         .expect("release checkpoint");
-    let after_release = list_checkpoints(&store, &namespace_id)
+    let after_release = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect("list checkpoints");
     assert_eq!(after_release.checkpoints.len(), 1);
@@ -104,7 +136,7 @@ async fn an_expired_record_is_listed_with_its_expiry_until_it_is_released() {
     )
     .await;
 
-    let listed = list_checkpoints(&store, &namespace_id)
+    let listed = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect("list checkpoints");
     assert_eq!(listed.checkpoints.len(), 1);
@@ -120,8 +152,315 @@ async fn a_namespace_that_does_not_exist_is_not_a_namespace_without_checkpoints(
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("absent").expect("namespace id");
 
-    let error = list_checkpoints(&store, &namespace_id)
+    let error = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect_err("listing an absent namespace fails");
     assert_eq!(error.code(), ErrorCode::NamespaceNotFound);
+}
+
+#[tokio::test]
+async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+
+    let mut expected = Vec::new();
+    for index in 0..7 {
+        expected.push(
+            pin_named(
+                &store,
+                &namespace_id,
+                &format!("pin-{index}"),
+                None,
+                &context,
+            )
+            .await,
+        );
+    }
+    expected.sort();
+
+    let mut actual = Vec::new();
+    let mut cursor = None;
+    let mut page_count = 0;
+    loop {
+        let page = list_checkpoints_page(
+            &store,
+            &namespace_id,
+            PageRequest {
+                limit: page_limit(2),
+                cursor,
+            },
+        )
+        .await
+        .expect("list checkpoint page");
+        page_count += 1;
+        actual.extend(
+            page.items
+                .into_iter()
+                .map(|checkpoint| checkpoint.checkpoint_id),
+        );
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    assert!(page_count > 1);
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn released_runs_advance_the_last_inspected_key_cursor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+
+    let mut ids = Vec::new();
+    for index in 0..8 {
+        ids.push(
+            pin_named(
+                &store,
+                &namespace_id,
+                &format!("pin-{index}"),
+                None,
+                &context,
+            )
+            .await,
+        );
+    }
+    ids.sort();
+    for checkpoint_id in &ids[1..6] {
+        super::super::release::release_checkpoint(&store, &namespace_id, checkpoint_id, &context)
+            .await
+            .expect("release checkpoint in filtered run");
+    }
+
+    let first = list_checkpoints_page(
+        &store,
+        &namespace_id,
+        PageRequest {
+            limit: page_limit(1),
+            cursor: None,
+        },
+    )
+    .await
+    .expect("first page");
+    assert_eq!(first.items[0].checkpoint_id, ids[0]);
+
+    let second = list_checkpoints_page(
+        &store,
+        &namespace_id,
+        PageRequest {
+            limit: page_limit(1),
+            cursor: first.next_cursor,
+        },
+    )
+    .await
+    .expect("second page across released run");
+    assert_eq!(second.items[0].checkpoint_id, ids[6]);
+    assert_eq!(
+        second
+            .next_cursor
+            .as_ref()
+            .and_then(NamespaceCursor::last_key),
+        Some(loonfs_objectstore::keys::checkpoint_record(&namespace_id, &ids[6]).as_str())
+    );
+
+    let third = list_checkpoints_page(
+        &store,
+        &namespace_id,
+        PageRequest {
+            limit: page_limit(1),
+            cursor: second.next_cursor,
+        },
+    )
+    .await
+    .expect("third page");
+    assert_eq!(third.items[0].checkpoint_id, ids[7]);
+    assert!(third.next_cursor.is_none());
+}
+
+#[derive(Debug)]
+struct DeleteOnCheckpointLoadStore<S> {
+    inner: S,
+    target: String,
+    deleted: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl<S: ObjectStore> ObjectStore for DeleteOnCheckpointLoadStore<S> {
+    async fn head(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<ObjectBody>, ObjectStoreError> {
+        if key == self.target && !self.deleted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.inner.delete(key).await?;
+        }
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> std::result::Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> std::result::Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> std::result::Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, std::result::Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_from_stream(prefix, start_after)
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_deleted_between_listing_and_load_is_skipped() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+
+    let mut ids = Vec::new();
+    for index in 0..3 {
+        ids.push(
+            pin_named(
+                &inner,
+                &namespace_id,
+                &format!("pin-{index}"),
+                None,
+                &context,
+            )
+            .await,
+        );
+    }
+    ids.sort();
+    let deleted = ids[1].clone();
+    let store = DeleteOnCheckpointLoadStore {
+        inner,
+        target: loonfs_objectstore::keys::checkpoint_record(&namespace_id, &deleted),
+        deleted: std::sync::atomic::AtomicBool::new(false),
+    };
+
+    let listed = list_all_checkpoints(&store, &namespace_id)
+        .await
+        .expect("list across concurrent reap");
+    let listed_ids = listed
+        .checkpoints
+        .into_iter()
+        .map(|checkpoint| checkpoint.checkpoint_id)
+        .collect::<Vec<_>>();
+    assert_eq!(listed_ids, vec![ids[0].clone(), ids[2].clone()]);
+}
+
+#[tokio::test]
+async fn first_page_loads_only_the_records_needed_to_fill_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+    for index in 0..20 {
+        pin_named(
+            &inner,
+            &namespace_id,
+            &format!("pin-{index}"),
+            None,
+            &context,
+        )
+        .await;
+    }
+    let prefix = loonfs_objectstore::keys::checkpoint_prefix(&namespace_id);
+    let store = CountingStore::new(inner, KeyPredicate::prefix(prefix));
+
+    let page = list_checkpoints_page(
+        &store,
+        &namespace_id,
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+    )
+    .await
+    .expect("first checkpoint page");
+
+    assert_eq!(page.items.len(), 2);
+    assert!(page.next_cursor.is_some());
+    let counts = store.snapshot();
+    assert_eq!(counts.lists, 1);
+    assert_eq!(counts.gets_with_metadata, 2);
+}
+
+#[tokio::test]
+async fn checkpoint_cursor_is_bound_to_its_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("namespace id");
+    let target = NamespaceId::parse("target").expect("namespace id");
+    let context = test_context();
+    for namespace_id in [&source, &target] {
+        bootstrap_namespace(&store, namespace_id, &context, false)
+            .await
+            .expect("bootstrap namespace");
+    }
+    for index in 0..2 {
+        pin_named(&store, &source, &format!("pin-{index}"), None, &context).await;
+    }
+    let source_page = list_checkpoints_page(
+        &store,
+        &source,
+        PageRequest {
+            limit: page_limit(1),
+            cursor: None,
+        },
+    )
+    .await
+    .expect("source page");
+
+    let error = list_checkpoints_page(
+        &store,
+        &target,
+        PageRequest {
+            limit: page_limit(1),
+            cursor: source_page.next_cursor,
+        },
+    )
+    .await
+    .expect_err("foreign cursor should fail");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }

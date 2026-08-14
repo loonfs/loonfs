@@ -8,13 +8,13 @@ use crate::backend_error::{
 };
 use crate::render::write_stderr_warning;
 use loonfs::{
-    ByteStream, ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    FileContentStream, FsAdmin, FsReader, FsWriter, ListChangesOptions, ListPathEntriesOptions,
-    MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenancePlan,
-    MaintenanceStepConclusion, MoveOptions, PutFileOptions, ReadFileStreamOptions,
-    RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    ByteStream, ChangesResponse, CheckpointPageCursor, CopyOptions, CreateCheckpointOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
+    DeleteNamespaceResponse, DeleteOptions, FileContentStream, FsAdmin, FsReader, FsWriter,
+    ListChangesOptions, ListPathEntriesOptions, MaintenanceHandle, MaintenanceJob,
+    MaintenanceJobId, MaintenancePlan, MaintenanceStepConclusion, MoveOptions, PutFileOptions,
+    ReadFileStreamOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore,
+    StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
 };
 use loonfs_api::{
     v0::{
@@ -797,12 +797,28 @@ impl EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    pub(super) async fn list_checkpoints(
+    pub(super) async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
     ) -> Result<ListCheckpointsResponse, BackendError> {
+        let request = loonfs_api::PageRequest {
+            limit: resolve_cli_page_limit(limit)?,
+            cursor: cursor
+                .map(|cursor| {
+                    loonfs_api::decode_namespace_cursor::<CheckpointPageCursor>(
+                        cursor,
+                        namespace_id,
+                    )
+                })
+                .transpose()
+                .map_err(|error| {
+                    BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                })?,
+        };
         self.admin
-            .list_checkpoints(namespace_id)
+            .list_checkpoints_page(namespace_id, request)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }

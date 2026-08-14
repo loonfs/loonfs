@@ -948,25 +948,48 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
         let prefix_path = match self.list_path(prefix) {
             Ok(prefix_path) => prefix_path,
             Err(err) => return stream::once(async { Err(err) }).boxed(),
         };
+        let offset = match start_after.map(|key| self.to_path(key)).transpose() {
+            Ok(offset) => offset,
+            Err(err) => return stream::once(async { Err(err) }).boxed(),
+        };
         let key_prefix = self.key_prefix.clone();
         let listed_prefix = prefix.to_owned();
-        self.inner
-            .list(prefix_path.as_ref())
+        let start_after = start_after.map(str::to_owned);
+        let listed = match offset.as_ref() {
+            Some(offset) => self.inner.list_with_offset(prefix_path.as_ref(), offset),
+            None => self.inner.list(prefix_path.as_ref()),
+        };
+        listed
             .filter_map(move |result| {
                 let key_prefix = key_prefix.clone();
                 let listed_prefix = listed_prefix.clone();
+                let start_after = start_after.clone();
                 async move {
                     match result {
                         Ok(meta) => {
                             let key = meta.location.as_ref();
-                            match key_prefix.as_deref() {
+                            let key = match key_prefix.as_deref() {
                                 Some(prefix) => unscope_listed_key(Some(prefix), key).map(Ok),
                                 None => Some(Ok(key.to_owned())),
+                            };
+                            match key {
+                                Some(Ok(key))
+                                    if start_after
+                                        .as_deref()
+                                        .is_some_and(|start_after| key.as_str() <= start_after) =>
+                                {
+                                    None
+                                }
+                                other => other,
                             }
                         }
                         Err(err) => Some(Err(map_provider_error(&listed_prefix, err))),

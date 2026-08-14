@@ -1226,21 +1226,48 @@ impl Client {
         self.request_json(self.post(&url), Some(request)).await
     }
 
-    /// Lists the namespace's active checkpoint records, oldest first (admin
-    /// plane).
+    /// Lists every active checkpoint record by following bounded pages
+    /// (admin plane).
     ///
     /// A checkpoint name is a label rather than a key, so this is how a pin
     /// is found again once its creation response is gone. An expired record
     /// that no collection pass has released yet is still listed, with its
     /// expiry in the entry.
-    pub async fn list_checkpoints(
+    pub async fn list_checkpoints_all(
         &self,
         namespace_id: &NamespaceId,
+    ) -> Result<ListCheckpointsResponse> {
+        let first_page = self.list_checkpoints_page(namespace_id, None, None).await?;
+        let mut response = ListCheckpointsResponse {
+            namespace_id: first_page.namespace_id,
+            checkpoints: first_page.checkpoints,
+            next_cursor: None,
+        };
+        let mut next_cursor = first_page.next_cursor;
+        while let Some(cursor) = next_cursor {
+            let page = self
+                .list_checkpoints_page(namespace_id, None, Some(&cursor))
+                .await?;
+            response.checkpoints.extend(page.checkpoints);
+            next_cursor = page.next_cursor;
+        }
+        Ok(response)
+    }
+
+    /// Lists one bounded page of active checkpoint records (admin plane).
+    pub async fn list_checkpoints_page(
+        &self,
+        namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
     ) -> Result<ListCheckpointsResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
             self.base_url
         );
+        let mut url = url;
+        let mut has_query = false;
+        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
         self.request_json::<(), ListCheckpointsResponse>(self.get(&url), None)
             .await
     }

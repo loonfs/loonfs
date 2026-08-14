@@ -6,7 +6,7 @@ use crate::provider_env::{
     GCP_GCS_REQUIRED_VARS,
 };
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use loonfs_api::{Checksum, ContentId, ManifestObjectId};
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
@@ -102,6 +102,7 @@ async fn local_fs_passes_the_store_contract_probe() {
     let temp_dir = test_dir("contract-probe");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_store_contract_probe_passes(&store, false).await;
+    assert_start_after_contract(&store).await;
 }
 
 #[tokio::test]
@@ -325,7 +326,60 @@ async fn azure_abs_streamed_write_round_trips() {
 /// production and for this sweep in one edit, or not at all.
 async fn assert_provider_conformance(store: &dyn ObjectStore, direct_put_proven: bool) {
     assert_store_contract_probe_passes(store, direct_put_proven).await;
+    assert_start_after_contract(store).await;
     assert_rejects_invalid_keys_consistently(store).await;
+}
+
+/// Pins the provider-independent resume contract: the public offset is a
+/// durable key, results are sorted, and the named key is never repeated.
+async fn assert_start_after_contract(store: &dyn ObjectStore) {
+    let run_id = loonfs_api::generated_id("list");
+    let prefix = format!("start-after/{run_id}/");
+    let keys = [
+        format!("{prefix}a"),
+        format!("{prefix}b"),
+        format!("{prefix}c"),
+    ];
+    for key in &keys {
+        store
+            .put_overwrite(key, Bytes::from_static(b"listed"))
+            .await
+            .expect("write start-after fixture");
+    }
+
+    let all = store
+        .list_prefix_from_stream(&prefix, None)
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("list from prefix start");
+    assert_eq!(all, keys);
+
+    let after_exact = store
+        .list_prefix_from_stream(&prefix, Some(&keys[0]))
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("list after exact key");
+    assert_eq!(after_exact, keys[1..]);
+
+    let between = format!("{prefix}bb");
+    let after_gap = store
+        .list_prefix_from_stream(&prefix, Some(&between))
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("list after absent key");
+    assert_eq!(after_gap, keys[2..]);
+
+    let after_end = format!("{prefix}z");
+    let complete = store
+        .list_prefix_from_stream(&prefix, Some(&after_end))
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("list after prefix end");
+    assert!(complete.is_empty());
+
+    for key in &keys {
+        store.delete(key).await.expect("delete start-after fixture");
+    }
 }
 
 /// Requires every probe check to pass, and prints the whole report when one
@@ -463,6 +517,13 @@ async fn assert_rejects_invalid_keys_consistently(store: &dyn ObjectStore) {
         );
         assert_invalid_key(key, store.delete(key).await);
         assert_invalid_key(key, store.list_prefix(key).await);
+        assert_invalid_key(
+            key,
+            store
+                .list_prefix_from_stream("valid/", Some(key))
+                .try_collect::<Vec<_>>()
+                .await,
+        );
     }
 }
 

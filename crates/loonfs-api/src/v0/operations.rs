@@ -521,16 +521,19 @@ pub struct CheckpointSummary {
     pub manifest_id: ManifestId,
 }
 
-/// Every active checkpoint record a namespace currently carries.
+/// One bounded page of active checkpoint records a namespace currently carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListCheckpointsResponse {
     /// Namespace the records belong to.
     pub namespace_id: NamespaceId,
-    /// Active records, oldest first. Released records are absent because a
+    /// Active records in ascending checkpoint-id order. Released records are absent because a
     /// release is what stops a record pinning anything; a released record
     /// that garbage collection has not yet deleted is not reported either.
     pub checkpoints: Vec<CheckpointSummary>,
+    /// Opaque cursor for the next page, omitted when this key enumeration is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// How one WAL flush satisfied its goal.

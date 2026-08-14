@@ -117,7 +117,7 @@
           "admin"
         ],
         "summary": "List checkpoints",
-        "description": "Lists every active checkpoint record on the namespace, oldest first. Each record is a garbage-collection root, and its id is what the release endpoint takes; because a checkpoint name is a label rather than a key, this is the only way to find a pin whose creation response is gone. An expired record that no collection pass has released yet is still active and is listed, with its expiry in the entry — the operator is looking for roots, and a record that still pins its basis is one. Released records are absent: a release is what stops a record pinning anything.",
+        "description": "Lists one bounded page of active checkpoint records in ascending checkpoint-id order. Each record is a garbage-collection root, and its id is what the release endpoint takes; because a checkpoint name is a label rather than a key, this is the only way to find a pin whose creation response is gone. An expired record that no collection pass has released yet is still active and is listed, with its expiry in the entry. Released records are absent. Pagination is a live key-order resume, not a snapshot.",
         "operationId": "list_checkpoints",
         "parameters": [
           {
@@ -125,6 +125,24 @@
             "in": "path",
             "description": "Namespace id",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque checkpoint-list page cursor",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -142,7 +160,7 @@
             }
           },
           "400": {
-            "description": "Invalid namespace id",
+            "description": "Invalid namespace id, limit, or cursor",
             "content": {
               "application/json": {
                 "schema": {
@@ -5342,7 +5360,7 @@
       },
       "ListCheckpointsResponse": {
         "type": "object",
-        "description": "Every active checkpoint record a namespace currently carries.",
+        "description": "One bounded page of active checkpoint records a namespace currently carries.",
         "required": [
           "namespace_id",
           "checkpoints"
@@ -5353,11 +5371,18 @@
             "items": {
               "$ref": "#/components/schemas/CheckpointSummary"
             },
-            "description": "Active records, oldest first. Released records are absent because a\nrelease is what stops a record pinning anything; a released record\nthat garbage collection has not yet deleted is not reported either."
+            "description": "Active records in ascending checkpoint-id order. Released records are absent because a\nrelease is what stops a record pinning anything; a released record\nthat garbage collection has not yet deleted is not reported either."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the records belong to."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, omitted when this key enumeration is complete."
           }
         }
       },

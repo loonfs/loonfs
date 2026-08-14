@@ -137,8 +137,15 @@ impl ObjectStore for AzureAbsStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
-        self.inner.list_prefix_stream(prefix)
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String>> {
+        // Azure exposes continuation markers but no key offset. The
+        // provider adapter therefore walks marker pages from the prefix
+        // start and filters keys through `start_after` locally.
+        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
