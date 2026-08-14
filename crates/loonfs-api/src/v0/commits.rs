@@ -54,7 +54,7 @@ pub enum FilesystemChange {
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
     },
-    /// A file was created with its required first revision.
+    /// A file and its first revision were created.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
     FileCreated {
         /// Newly allocated namespace-scoped inode identity.

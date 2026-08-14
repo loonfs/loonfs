@@ -2117,12 +2117,30 @@ Event kinds:
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 
-Creation events have distinct shapes, so a directory cannot carry file
-content and every new file necessarily carries its first revision:
+Directory and file creation use separate event shapes. A file creation always
+includes its first revision and content reference:
 
 ```json
-{"kind":"directory_created","inode_id":42,"parent_inode_id":1,"display_name":"docs"}
-{"kind":"file_created","inode_id":43,"parent_inode_id":1,"display_name":"report.txt","revision_no":1,"content_ref":{"kind":"blob_v1","content_id":"con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41","size_bytes":20591,"checksum":{"algorithm":"sha256","value":"7ab..."}}}
+{
+  "kind": "directory_created",
+  "inode_id": 42,
+  "parent_inode_id": 1,
+  "display_name": "docs"
+}
+
+{
+  "kind": "file_created",
+  "inode_id": 43,
+  "parent_inode_id": 1,
+  "display_name": "report.txt",
+  "revision_no": 1,
+  "content_ref": {
+    "kind": "blob_v1",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 20591,
+    "checksum": { "algorithm": "sha256", "value": "7ab..." }
+  }
+}
 ```
 
 Events name inodes and their parent-directory bindings rather than full

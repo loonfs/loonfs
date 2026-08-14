@@ -1,8 +1,7 @@
-//! Change-feed projections for every operation that creates or republishes
-//! file content.
+//! Change-feed behavior for operations that create or replace file content.
 
 #![allow(clippy::panic)]
-// These integration tests use panic in unexpected match arms for precise diagnostics.
+// Unexpected variants include the full event in the failure message.
 
 use crate::common::commit_split_support::*;
 use loonfs_api::v0::{ChangesResponse, FilesystemChange};
