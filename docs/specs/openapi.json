@@ -3730,7 +3730,7 @@
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Durable verified content selected by the completed session."
+            "description": "Verified content selected by the completed session."
           },
           "content_token": {
             "oneOf": [
@@ -3739,7 +3739,7 @@
               },
               {
                 "$ref": "#/components/schemas/ContentToken",
-                "description": "Short-lived proof authorizing the same `content_ref` for a later\ncommit, or `None` when the session no longer mints one.\n\nThe duplicated content reference is deliberate: `content_ref` is\ndurable upload state, while this object is a transferable proof."
+                "description": "Short-lived proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
               }
             ]
           },
@@ -3818,7 +3818,7 @@
       },
       "ContentToken": {
         "type": "object",
-        "description": "This opaque token authorizes this exact `content_ref` for a later commit.\n\nA content token exists only after validation has occurred. The proof is\nself-contained, so unknown fields are rejected wherever it crosses the\npublic API.",
+        "description": "Proof that a specific `content_ref` may be used in a later commit.",
         "required": [
           "content_ref",
           "token"
@@ -3826,7 +3826,7 @@
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Exact content identity this token authorizes."
+            "description": "Content authorized by this token."
           },
           "token": {
             "type": "string",
@@ -6224,7 +6224,7 @@
               },
               "content_ref": {
                 "$ref": "#/components/schemas/ContentRef",
-                "description": "Durable verified content this session settled on."
+                "description": "Verified content selected by this session."
               },
               "content_token": {
                 "oneOf": [
@@ -6233,7 +6233,7 @@
                   },
                   {
                     "$ref": "#/components/schemas/ContentToken",
-                    "description": "Freshly minted proof authorizing the same `content_ref` for a\nfollowing commit, or `None` once the session has stopped minting\nthem.\n\nThe duplicated content reference is deliberate: `content_ref` is\ndurable upload state, while this object is a transferable proof."
+                    "description": "Fresh proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
                   }
                 ]
               },
