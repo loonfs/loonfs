@@ -6,13 +6,12 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
-use loonfs_api::v0::UploadContentClaim;
+use loonfs_api::v0::{CompleteMultipartUploadRequest, UploadContentClaim};
 use loonfs_api::{
-    v0::CompleteUploadRequest,
     wire::control::{ControlObjectKind, UploadSessionState, UploadSessionTransport},
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
-use loonfs_api::{Checksum, ChecksumAlgorithm, ContentId};
+use loonfs_api::{Checksum, ChecksumAlgorithm};
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
 };
@@ -71,11 +70,10 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    request: &CompleteUploadRequest,
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::CompleteUploadResponse, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .complete_upload(upload_id, request)
+        .complete_upload(upload_id)
         .await
 }
 
@@ -267,57 +265,17 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         .expect("upload content");
 
     store.reset();
-    let completed = complete_upload(
-        &store,
-        &namespace_id,
-        begin.upload_id(),
-        &CompleteUploadRequest::for_content_ref(uploaded.content_ref.clone()),
-        &context,
-    )
-    .await
-    .expect("complete upload");
+    let completed = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
+        .await
+        .expect("complete upload");
     assert_eq!(completed.content_ref, uploaded.content_ref);
     assert_eq!(store.count(OperationClass::Read), 0);
 
     store.reset();
-    let completed_again = complete_upload(
-        &store,
-        &namespace_id,
-        begin.upload_id(),
-        &CompleteUploadRequest::for_content_ref(uploaded.content_ref),
-        &context,
-    )
-    .await
-    .expect("complete upload idempotently");
-    assert_eq!(completed_again.content_ref, completed.content_ref);
-    assert_eq!(store.count(OperationClass::Read), 0);
-
-    let mismatch_begin = begin_upload(&store, &namespace_id, &context)
+    let completed_again = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
         .await
-        .expect("begin mismatch");
-    let mismatch_uploaded = upload_content(
-        &store,
-        &namespace_id,
-        mismatch_begin.upload_id(),
-        b"staged",
-        &context,
-    )
-    .await
-    .expect("upload mismatch content");
-    let wrong_ref = ContentRef::blob_v1(ContentId::generate(), b"different");
-    assert_ne!(wrong_ref, mismatch_uploaded.content_ref);
-
-    store.reset();
-    let mismatch = complete_upload(
-        &store,
-        &namespace_id,
-        mismatch_begin.upload_id(),
-        &CompleteUploadRequest::for_content_ref(wrong_ref),
-        &context,
-    )
-    .await
-    .expect_err("mismatched content ref");
-    assert_eq!(mismatch.code(), ErrorCode::InvalidRequest);
+        .expect("complete upload idempotently");
+    assert_eq!(completed_again.content_ref, completed.content_ref);
     assert_eq!(store.count(OperationClass::Read), 0);
 }
 
@@ -414,15 +372,9 @@ mod streamed_content {
         );
 
         // Completion is unchanged: it trusts what the server already checked.
-        let completed = complete_upload(
-            &store,
-            &namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
-            &context,
-        )
-        .await
-        .expect("complete a streamed upload");
+        let completed = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
+            .await
+            .expect("complete a streamed upload");
         assert_eq!(completed.content_ref, staged.content_ref);
     }
 
@@ -703,8 +655,23 @@ mod direct_multipart {
     fn complete_request(
         session: &Session,
         parts: Vec<CompletedUploadPart>,
-    ) -> CompleteUploadRequest {
-        CompleteUploadRequest::for_multipart(session.claim.clone(), parts)
+    ) -> CompleteMultipartUploadRequest {
+        CompleteMultipartUploadRequest {
+            content: session.claim.clone(),
+            parts,
+        }
+    }
+
+    async fn complete_upload<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        request: &CompleteMultipartUploadRequest,
+        context: &MutationContext,
+    ) -> Result<loonfs_api::v0::CompleteUploadResponse, CoreError> {
+        namespace_engine(store, namespace_id, context)
+            .complete_multipart_upload(upload_id, request)
+            .await
     }
 
     /// The whole point of the transport: parts go straight to the provider,
@@ -756,6 +723,26 @@ mod direct_multipart {
             Bytes::from(session.payload.clone())
         );
         assert_eq!(store.open_uploads(), 0, "completion consumes the upload");
+    }
+
+    #[tokio::test]
+    async fn a_multipart_completion_rejects_an_empty_part_list() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &complete_request(&session, Vec::new()),
+            &context,
+        )
+        .await
+        .expect_err("a multipart completion needs at least one part");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        assert!(error.to_string().contains("at least one uploaded part"));
     }
 
     /// Re-uploading a part is how a client retries one. The last write wins
@@ -1124,62 +1111,5 @@ mod direct_multipart {
                 .expect_err("a part size no provider accepts is refused");
             assert_eq!(error.code(), ErrorCode::InvalidRequest);
         }
-    }
-
-    /// The two completion shapes are not interchangeable, and which one is
-    /// right depends on the durable record. That is the one thing decoding
-    /// a completion body cannot settle — the client's request is well
-    /// formed either way — so it is settled here, against the session.
-    #[tokio::test]
-    async fn each_mode_completes_with_the_shape_it_was_opened_for() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = mutation_context();
-        let session = open_session(&store, &context).await;
-
-        // A multipart session's client never learned an identity, so naming
-        // one back is a mistake worth reporting rather than a value worth
-        // checking.
-        let error = complete_upload(
-            &store,
-            &session.namespace_id,
-            &session.upload_id,
-            &CompleteUploadRequest::for_content_ref(ContentRef::blob_v1(
-                ContentId::generate(),
-                PART,
-            )),
-            &context,
-        )
-        .await
-        .expect_err("a multipart completion cannot name the identity");
-        assert_eq!(error.code(), ErrorCode::InvalidRequest);
-
-        // And the proxied direction: a session that was handed a reference
-        // has no assembly to claim.
-        let begin = begin_upload(&store, &session.namespace_id, &context)
-            .await
-            .expect("begin a proxied session");
-        upload_content(
-            &store,
-            &session.namespace_id,
-            begin.upload_id(),
-            PART,
-            &context,
-        )
-        .await
-        .expect("stage bytes");
-        let error = complete_upload(
-            &store,
-            &session.namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::for_multipart(
-                session.claim.clone(),
-                upload_every_part(&store, &session),
-            ),
-            &context,
-        )
-        .await
-        .expect_err("a proxied completion carries no multipart claim");
-        assert_eq!(error.code(), ErrorCode::InvalidRequest);
     }
 }

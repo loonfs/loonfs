@@ -15,7 +15,7 @@ use crate::path::read::{
 };
 use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
-    MultipartPartTargets,
+    MultipartPartTargets, ResolvedUploadCompletion,
 };
 use crate::storage::content::FileContentStream;
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
@@ -23,8 +23,9 @@ use crate::time::current_time_ms;
 use loonfs_api::options::{ListPathEntriesOptions, StatPathOptions};
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, DirectMultipartUploadOptions,
-    UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
+    CompleteMultipartUploadRequest, CompleteUploadResponse, DirectMultipartUploadOptions,
+    UploadContentClaim, UploadContentResponse, UploadMode, UploadPartChecksumClaim,
+    UploadStatusResponse,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
 use loonfs_api::EffectiveLimit;
@@ -560,14 +561,19 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Completes an upload session when the expected content ref matches.
-    pub async fn complete_upload(
+    /// Completes a service-proxied or direct-PUT upload session.
+    pub async fn complete_upload(&self, upload_id: &UploadId) -> Result<CompleteUploadResponse> {
+        Ok(self.complete_upload_prepared(upload_id).await?.response)
+    }
+
+    /// Completes a direct-multipart upload session.
+    pub async fn complete_multipart_upload(
         &self,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
+        request: &CompleteMultipartUploadRequest,
     ) -> Result<CompleteUploadResponse> {
         Ok(self
-            .complete_upload_prepared(upload_id, request)
+            .complete_multipart_upload_prepared(upload_id, request)
             .await?
             .response)
     }
@@ -576,17 +582,35 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ///
     /// Service-proxied completion performs no content-blob I/O. Direct-put
     /// completion performs one content-blob HEAD and no content-blob GET.
-    pub async fn complete_upload_prepared(
+    pub async fn complete_upload_prepared(&self, upload_id: &UploadId) -> Result<CompletedUpload> {
+        self.complete_upload_prepared_inner(upload_id, ResolvedUploadCompletion::KnownContent)
+            .await
+    }
+
+    /// Completes a multipart upload and returns proof for later publication.
+    pub async fn complete_multipart_upload_prepared(
         &self,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
+        request: &CompleteMultipartUploadRequest,
+    ) -> Result<CompletedUpload> {
+        self.complete_upload_prepared_inner(
+            upload_id,
+            ResolvedUploadCompletion::Multipart(request.clone()),
+        )
+        .await
+    }
+
+    async fn complete_upload_prepared_inner(
+        &self,
+        upload_id: &UploadId,
+        completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
         let catalog = crate::namespace::catalog::load_namespace_catalog_entry(
             &self.store,
             &self.namespace_id,
         )
         .await?;
-        self.complete_upload_prepared_with_catalog(&catalog, upload_id, request)
+        self.complete_upload_prepared_with_catalog(&catalog, upload_id, completion)
             .await
     }
 
@@ -596,7 +620,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
+        completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
         let catalog = self.own_catalog(catalog)?;
         crate::protocol::complete_upload(
@@ -604,7 +628,33 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             catalog.content_store_id(),
             upload_id,
-            request,
+            completion,
+            &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Completes an upload after its durable mode selects a request decoder.
+    ///
+    /// Server integrations use this to decode raw request bytes without a
+    /// second upload-session read. A resolver failure is classified as an
+    /// invalid upload request.
+    pub async fn complete_upload_prepared_with_catalog_for_mode<F>(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        upload_id: &UploadId,
+        resolve: F,
+    ) -> Result<CompletedUpload>
+    where
+        F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
+    {
+        let catalog = self.own_catalog(catalog)?;
+        crate::protocol::complete_upload_for_mode(
+            &self.store,
+            &self.namespace_id,
+            catalog.content_store_id(),
+            upload_id,
+            resolve,
             &self.mutation_context()?,
         )
         .await

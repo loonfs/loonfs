@@ -7,9 +7,9 @@ use loonfs::publish::{
     FilesystemOperation, PreparedContent,
 };
 use loonfs::{
-    BeginUploadRequest, CommitId, CompleteUploadRequest, CoreError, CreateDirectoryOptions,
-    CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter, NamespaceId, PutFileOptions,
-    RevisionNo, RuntimeError, SharedObjectStore,
+    BeginUploadRequest, CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions,
+    DestinationBehavior, ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo,
+    RuntimeError, SharedObjectStore,
 };
 use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
 use loonfs_api::{ContentId, ContentStoreId};
@@ -494,7 +494,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .expect("begin upload");
     harness.recording.reset();
 
-    let staged = harness
+    harness
         .writer
         .upload_content(&harness.namespace_id, begin.upload_id(), bytes)
         .await
@@ -514,11 +514,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
 
     let completed = harness
         .writer
-        .complete_upload_prepared(
-            &harness.namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::for_content_ref(staged.content_ref),
-        )
+        .complete_upload_prepared(&harness.namespace_id, begin.upload_id())
         .await
         .expect("complete upload with proof");
     let prepared = completed.prepared;
@@ -568,11 +564,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
 
     let completed = harness
         .writer
-        .complete_upload_prepared(
-            &harness.namespace_id,
-            &begin.upload_id,
-            &CompleteUploadRequest::for_content_ref(content_ref.clone()),
-        )
+        .complete_upload_prepared(&harness.namespace_id, &begin.upload_id)
         .await
         .expect("complete direct put with proof");
     let prepared = completed.prepared;

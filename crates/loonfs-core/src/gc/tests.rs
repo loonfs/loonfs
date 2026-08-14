@@ -797,22 +797,12 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
         crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
             .await
             .expect("content store id");
-    let session = read_upload_session(store, namespace_id, upload_id)
-        .await
-        .expect("open session");
-    let content_ref = match session.transport {
-        UploadSessionTransport::ServiceProxied {
-            staging: ProxiedStaging::Staged(content_ref),
-        } => Some(content_ref),
-        _ => None,
-    }
-    .expect("a staged session carries the reference it wrote");
     crate::protocol::complete_upload(
         store,
         namespace_id,
         &content_store_id,
         upload_id,
-        &loonfs_api::v0::CompleteUploadRequest::for_content_ref(content_ref),
+        crate::protocol::ResolvedUploadCompletion::KnownContent,
         context,
     )
     .await
@@ -869,7 +859,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
             &namespace_id,
             &content_store_id,
             &upload_id,
-            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(content_ref.clone()),
+            crate::protocol::ResolvedUploadCompletion::KnownContent,
             &aged,
         )
         .await;
@@ -908,13 +898,12 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let content_key =
         loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCompleted);
-    let request = loonfs_api::v0::CompleteUploadRequest::for_content_ref(content_ref.clone());
     let completion = crate::protocol::complete_upload(
         &store,
         &namespace_id,
         &content_store_id,
         &upload_id,
-        &request,
+        crate::protocol::ResolvedUploadCompletion::KnownContent,
         &aged,
     );
     let abort = async {
@@ -975,7 +964,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
         namespace_id,
         &content_store_id,
         begin.upload_id(),
-        &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
+        crate::protocol::ResolvedUploadCompletion::KnownContent,
         context,
     )
     .await

@@ -2,11 +2,10 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::ContentId;
 use loonfs_api::{
     v0::{
-        AbortUploadResponse, BeginUploadRequest, CompleteUploadRequest, FilesystemChange,
-        UploadSessionStatus, UploadStatusResponse,
+        AbortUploadResponse, BeginUploadRequest, FilesystemChange, UploadSessionStatus,
+        UploadStatusResponse,
     },
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, InodeKind, RevisionNo,
@@ -106,6 +105,78 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stored_proxied_mode_rejects_multipart_and_retired_completion_fields_precisely() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-completion-shape",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let begin = harness
+        .client
+        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .await
+        .expect("begin upload");
+
+    let completion_url = format!(
+        "{}/v0/namespaces/{namespace}/uploads/{}/complete",
+        harness.server_url,
+        begin.upload_id()
+    );
+    for (body, wrong) in [
+        (
+            r#"{"content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"parts":[]}"#,
+            "unknown field `content`",
+        ),
+        (
+            r#"{"completion":"content_ref"}"#,
+            "unknown field `completion`",
+        ),
+        (r#"{"content_ref":{}}"#, "unknown field `content_ref`"),
+    ] {
+        let result = raw_agent()
+            .post(&completion_url)
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string(body);
+        let ureq::Error::Status(status, response) =
+            result.expect_err("wrong completion shape should fail")
+        else {
+            unreachable!("a rejected completion body returns an HTTP status");
+        };
+        assert_eq!(status, 400);
+        let error: ApiError =
+            serde_json::from_reader(response.into_reader()).expect("API error envelope");
+        assert_eq!(error.code, "invalid_request");
+        assert!(
+            error.message.contains(wrong),
+            "completion error should name `{wrong}` verbatim: {}",
+            error.message
+        );
+        assert!(error.message.contains("service_proxied completion"));
+    }
+
+    harness
+        .client
+        .upload_content(&namespace, begin.upload_id(), b"hello")
+        .await
+        .expect("stage content");
+    harness
+        .client
+        .complete_upload(&namespace, begin.upload_id())
+        .await
+        .expect("empty completion succeeds for proxied mode");
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completion_content_token_passes_unchanged_into_http_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -147,36 +218,6 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
         other => unreachable!("expected upload_content_conflict, got {other:?}"),
-    }
-
-    let mismatch_upload = harness
-        .client
-        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
-        .await
-        .expect("begin mismatch upload");
-    let staged = harness
-        .client
-        .upload_content(&namespace, mismatch_upload.upload_id(), file_bytes)
-        .await
-        .expect("stage mismatch upload content");
-    assert_ne!(
-        staged.content_ref,
-        ContentRef::blob_v1(ContentId::generate(), b"other bytes")
-    );
-    match harness
-        .client
-        .complete_upload(
-            &namespace,
-            mismatch_upload.upload_id(),
-            &CompleteUploadRequest::for_content_ref(ContentRef::blob_v1(
-                ContentId::generate(),
-                b"other bytes",
-            )),
-        )
-        .await
-    {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "invalid_request"),
-        other => unreachable!("expected upload content rejection, got {other:?}"),
     }
 
     let completed = stage_uploaded_content(&harness.client, &namespace, file_bytes).await;
@@ -306,14 +347,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     // deletion will.
     let completion = harness
         .client
-        .complete_upload(
-            &namespace,
-            open.upload_id(),
-            &CompleteUploadRequest::for_content_ref(ContentRef::blob_v1(
-                ContentId::generate(),
-                b"never staged",
-            )),
-        )
+        .complete_upload(&namespace, open.upload_id())
         .await
         .expect_err("an aborted session cannot complete");
     assert_eq!(completion.code(), Some(ErrorCode::UploadNotFound));
@@ -452,18 +486,14 @@ async fn complete_upload_session(
         .begin_upload(namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
-    let staged = harness
+    harness
         .client
         .upload_content(namespace, begin.upload_id(), bytes)
         .await
         .expect("upload content");
     let completed = harness
         .client
-        .complete_upload(
-            namespace,
-            begin.upload_id(),
-            &CompleteUploadRequest::for_content_ref(staged.content_ref),
-        )
+        .complete_upload(namespace, begin.upload_id())
         .await
         .expect("complete upload");
     (begin.upload_id().clone(), completed.content_ref)

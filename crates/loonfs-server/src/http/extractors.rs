@@ -8,6 +8,7 @@ use axum::extract::{FromRequest, FromRequestParts, Path as AxumPath, Query};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode};
 use loonfs_api::NamespaceId;
@@ -208,6 +209,42 @@ where
         extract_json(req, state, json_body_too_large_error)
             .await
             .map(AppJson)
+    }
+}
+
+/// An authorized JSON-sized request body whose schema is selected later.
+///
+/// Completion uses this extractor because its durable upload session chooses
+/// the body type. Authorization still runs before a byte is read, and body
+/// failures remain inside the API error envelope.
+pub(super) struct UploadBodyBytes(Bytes);
+
+impl UploadBodyBytes {
+    pub(super) fn into_bytes(self) -> Bytes {
+        self.0
+    }
+}
+
+const MAX_UPLOAD_CONTROL_BODY_BYTES: usize = 1024 * 1024;
+
+impl FromRequest<AppState> for UploadBodyBytes {
+    type Rejection = ApiResponseError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        authorize(state.config.auth_policy(), req.headers())?;
+        axum::body::to_bytes(req.into_body(), MAX_UPLOAD_CONTROL_BODY_BYTES)
+            .await
+            .map(Self)
+            .map_err(|error| {
+                ApiResponseError::new(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidRequest,
+                    &format!("request body unreadable: {error}"),
+                )
+            })
     }
 }
 

@@ -3004,6 +3004,7 @@ mod direct_download {
     use super::*;
     use crate::http::app_with_store_and_direct_transfers;
     use loonfs_api::{
+        v0::{CompleteMultipartUploadRequest, UploadContentClaim},
         Checksum, ChecksumAlgorithm, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
         FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
         FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC32C, FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256,
@@ -3500,6 +3501,67 @@ mod direct_download {
             Some(&PROXY_CAP_BYTES),
             "the proxy cap stays advertised: it is what tells a client which reads need a grant"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_direct_put_session_rejects_multipart_completion_fields_precisely() {
+        let temp_dir = tempdir().expect("tempdir");
+        let issuer = LoopbackIssuer::at("http://object.invalid");
+        let transfers = DirectTransferIssuers::read_only(issuer.clone()).with_put(issuer);
+        let client = start(
+            temp_dir.path(),
+            "direct-put-completion-shape",
+            Some(transfers),
+        )
+        .await;
+        let namespace_id =
+            NamespaceId::parse("direct-put-completion-shape").expect("valid namespace id");
+        client
+            .create_namespace(&namespace_id)
+            .await
+            .expect("create namespace");
+        let begin = client
+            .begin_direct_put(
+                &namespace_id,
+                UploadContentClaim {
+                    size_bytes: 5,
+                    checksum: Checksum::sha256(b"hello"),
+                },
+            )
+            .await
+            .expect("begin direct put");
+
+        let error = client
+            .complete_multipart_upload(
+                &namespace_id,
+                begin.upload_id(),
+                &CompleteMultipartUploadRequest {
+                    content: UploadContentClaim {
+                        size_bytes: 5,
+                        checksum: Checksum::sha256(b"hello"),
+                    },
+                    parts: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("multipart completion body does not belong to direct put");
+        match error {
+            ClientError::Api {
+                status,
+                code,
+                message,
+                ..
+            } => {
+                assert_eq!(status, 400);
+                assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+                assert_eq!(
+                    message,
+                    "invalid upload content: request body is not valid JSON for direct_put \
+                     completion: unknown field `content`, there are no fields at line 1 column 10"
+                );
+            }
+            other => panic!("expected a typed invalid_request, got {other:?}"),
+        }
     }
 
     /// The GCS shape, end to end, with no GCS-specific code anywhere above

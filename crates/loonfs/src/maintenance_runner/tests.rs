@@ -6,9 +6,7 @@
 // The drain test injects a step panic to assert it is surfaced.
 
 use super::*;
-use crate::{
-    BeginUploadRequest, CompleteUploadRequest, CreateNamespaceOptions, FsWriter, SharedObjectStore,
-};
+use crate::{BeginUploadRequest, CreateNamespaceOptions, FsWriter, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, nonzero_usize};
 use std::collections::VecDeque;
@@ -893,16 +891,12 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
         "an open session's lease schedules the pass that may abort it"
     );
 
-    let uploaded = writer
+    writer
         .upload_content(&namespace_id, begun.upload_id(), b"body")
         .await
         .expect("upload content");
     writer
-        .complete_upload(
-            &namespace_id,
-            begun.upload_id(),
-            &CompleteUploadRequest::for_content_ref(uploaded.content_ref),
-        )
+        .complete_upload(&namespace_id, begun.upload_id())
         .await
         .expect("complete upload");
     // The session's own lease comes due first, so it stays the next wake;

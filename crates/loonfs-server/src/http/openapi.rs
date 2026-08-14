@@ -10,9 +10,9 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
         BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
-        ChangesResponse, CommitResponse as ApiCommitResponse, CompleteUploadRequest,
-        CompleteUploadResponse, ContentToken, DirectPutUpload, ObjectTransferAccess,
-        UploadContentResponse,
+        ChangesResponse, CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
+        CompleteMultipartUploadRequest, CompleteUploadResponse, ContentToken, DirectPutUpload,
+        ObjectTransferAccess, UploadContentResponse,
     },
     AdvanceRetentionResponse, ApiError, CheckpointOwnerSummary, CheckpointSummary, CommitRequest,
     ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
@@ -29,6 +29,34 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
 
 pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&openapi_document())
+}
+
+/// Manual completion request schema: the durable session mode, not a field in
+/// the body, selects one of the two strict wire objects.
+pub(super) struct CompleteUploadRequestSchema;
+
+impl utoipa::PartialSchema for CompleteUploadRequestSchema {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::OneOfBuilder::new()
+            .item(utoipa::openapi::Ref::from_schema_name(
+                "CompleteKnownContentUploadRequest",
+            ))
+            .item(utoipa::openapi::Ref::from_schema_name(
+                "CompleteMultipartUploadRequest",
+            ))
+            .description(Some(
+                "The stored upload session mode selects the accepted variant: service_proxied \
+                 and direct_put use the empty object; direct_multipart uses the content claim \
+                 and completed parts.",
+            ))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for CompleteUploadRequestSchema {
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("CompleteUploadRequest")
+    }
 }
 
 #[derive(utoipa::OpenApi)]
@@ -132,7 +160,9 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         BeginUploadRequest,
         BeginUploadResponse,
         UploadContentResponse,
-        CompleteUploadRequest,
+        CompleteUploadRequestSchema,
+        CompleteKnownContentUploadRequest,
+        CompleteMultipartUploadRequest,
         CompleteUploadResponse,
         DirectPutUpload,
         loonfs_api::v0::DirectMultipartUpload,

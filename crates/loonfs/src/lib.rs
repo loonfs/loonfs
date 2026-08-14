@@ -82,8 +82,9 @@ use thiserror::Error;
 
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse, CommittedChange,
-    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, FilesystemChange,
-    ObjectTransferAccess, UploadContentClaim, UploadContentResponse, UploadMode,
+    CompleteKnownContentUploadRequest, CompleteMultipartUploadRequest, CompleteUploadResponse,
+    DirectPutUpload, FilesystemChange, ObjectTransferAccess, UploadContentClaim,
+    UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     ActorId, ActorKind, ActorRef, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo,
@@ -159,7 +160,7 @@ pub mod uploads {
     pub use loonfs_core::{
         BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
         DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget,
-        MultipartPartTargets,
+        MultipartPartTargets, ResolvedUploadCompletion,
     };
 }
 

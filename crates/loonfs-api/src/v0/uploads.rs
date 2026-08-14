@@ -320,51 +320,31 @@ pub struct UploadContentResponse {
     pub content_ref: ContentRef,
 }
 
-/// Request to complete an upload.
+/// Request to complete a service-proxied or `direct_put` upload.
 ///
-/// A service-proxied or `direct_put` session receives its content reference
-/// before the upload and returns that reference at completion. A
-/// `direct_multipart` session instead provides the completed parts and a
-/// claim describing the assembled object.
+/// The durable session already owns the content reference and selects this
+/// schema, so the caller has nothing to repeat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CompleteKnownContentUploadRequest {}
+
+/// Request to complete a `direct_multipart` upload.
 ///
-/// The variants share no fields, so fields from one completion type are
-/// rejected when used with the other type. The server also checks that the
-/// completion type matches the transport stored in the upload session.
+/// The durable session selects this schema and owns the content object's
+/// identity. The caller supplies only what became known while uploading the
+/// parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "completion", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CompleteUploadRequest {
-    /// Completes a session the server named a content object for: the
-    /// caller names it back and the server proves the object matches.
-    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadContentRef"))]
-    ContentRef {
-        /// Content identity the caller expects the session to have settled
-        /// on.
-        content_ref: ContentRef,
-    },
-    /// Completes a `direct_multipart` session with what it uploaded.
-    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadMultipart"))]
-    Multipart {
-        /// The assembled object's length and checksum, which completion
-        /// verifies against the provider's own reading of the object.
-        content: UploadContentClaim,
-        /// Every part the client uploaded, in ascending part order. The
-        /// server holds no part records of its own, so this list is what it
-        /// assembles the object from.
-        parts: Vec<CompletedUploadPart>,
-    },
-}
-
-impl CompleteUploadRequest {
-    /// Completes a session that already knows its content reference.
-    pub fn for_content_ref(content_ref: ContentRef) -> Self {
-        Self::ContentRef { content_ref }
-    }
-
-    /// Completes a `direct_multipart` session with what it assembled.
-    pub fn for_multipart(content: UploadContentClaim, parts: Vec<CompletedUploadPart>) -> Self {
-        Self::Multipart { content, parts }
-    }
+#[serde(deny_unknown_fields)]
+pub struct CompleteMultipartUploadRequest {
+    /// The assembled object's length and checksum, which completion verifies
+    /// against the provider's own reading of the object.
+    pub content: UploadContentClaim,
+    /// Every part the client uploaded, in ascending part order. The server
+    /// holds no part records of its own, so this list is what it assembles the
+    /// object from.
+    pub parts: Vec<CompletedUploadPart>,
 }
 
 /// Response after an upload session is completed.
@@ -448,9 +428,10 @@ pub struct AbortUploadResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-        ContentToken, DirectMultipartUpload, DirectPutUpload, ObjectTransferAccess,
-        UploadContentClaim, UploadMode, UploadSessionStatus,
+        BeginUploadRequest, BeginUploadResponse, CompleteKnownContentUploadRequest,
+        CompleteMultipartUploadRequest, CompleteUploadResponse, ContentToken,
+        DirectMultipartUpload, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
+        UploadMode, UploadSessionStatus,
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -493,21 +474,46 @@ mod tests {
         }
     }
 
-    /// A completion carries one shape's fields under that shape's tag.
+    /// Each completion body is strict even though the stored session, rather
+    /// than a request tag, chooses which one the server decodes.
     #[test]
-    fn a_completion_mixing_its_two_shapes_does_not_decode() {
+    fn completion_request_shapes_reject_fields_the_session_did_not_select() {
+        assert_eq!(
+            serde_json::from_str::<CompleteKnownContentUploadRequest>("{}")
+                .expect("decode known-content completion"),
+            CompleteKnownContentUploadRequest {}
+        );
+        assert_eq!(
+            serde_json::to_string(&CompleteKnownContentUploadRequest {})
+                .expect("encode known-content completion"),
+            "{}"
+        );
         for body in [
-            r#"{"completion":"multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}},"parts":[],"content_ref":{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
-            // Neither multipart-completion field stands without the other.
-            r#"{"completion":"multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#,
-            r#"{"completion":"multipart","parts":[]}"#,
             r#"{"completion":"content_ref"}"#,
+            r#"{"content_ref":{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            r#"{"content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}},"parts":[]}"#,
         ] {
             assert!(
-                serde_json::from_str::<CompleteUploadRequest>(body).is_err(),
-                "decoded a completion that mixes shapes: {body}"
+                serde_json::from_str::<CompleteKnownContentUploadRequest>(body).is_err(),
+                "decoded a known-content completion carrying fields: {body}"
             );
         }
+
+        let missing_parts = r#"{"content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#;
+        let error = serde_json::from_str::<CompleteMultipartUploadRequest>(missing_parts)
+            .expect_err("multipart parts are required");
+        assert!(error.to_string().contains("missing field `parts`"));
+
+        let multipart = CompleteMultipartUploadRequest {
+            content: UploadContentClaim {
+                size_bytes: 5,
+                checksum: Checksum::crc64nvme(b"hello"),
+            },
+            parts: Vec::new(),
+        };
+        let encoded = serde_json::to_string(&multipart).expect("encode multipart completion");
+        assert!(!encoded.contains("completion"));
+        assert!(!encoded.contains("content_ref"));
     }
 
     #[test]

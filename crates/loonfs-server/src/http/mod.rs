@@ -30,7 +30,7 @@ pub use self::tls::TlsConfigError;
 use self::error::ApiResponseError;
 use self::extractors::{
     authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
-    UploadBodyStream,
+    UploadBodyBytes, UploadBodyStream,
 };
 use self::handlers_downloads::begin_download;
 use self::handlers_filesystem::{
