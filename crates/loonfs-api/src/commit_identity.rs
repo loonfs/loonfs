@@ -436,7 +436,7 @@ where
 /// file.
 fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&ContentRef> {
     let mut content = change.events.iter().filter_map(|event| match event {
-        crate::v0::FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
+        crate::v0::FilesystemChange::FileCreated { content_ref, .. } => Some(content_ref),
         crate::v0::FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
         _ => None,
     });
@@ -447,7 +447,9 @@ fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActorId, AttributeKey, AttributeValue, Checksum, ContentId, ContentRefKind};
+    use crate::{
+        ActorId, AttributeKey, AttributeValue, Checksum, ContentId, ContentRefKind, DisplayName,
+    };
 
     fn test_actor() -> ActorRef {
         ActorRef::user(ActorId::parse("test-actor").expect("valid test actor id"))
@@ -1131,8 +1133,10 @@ mod tests {
                 actor: test_actor(),
                 committed_at_ms: 1,
                 message: None,
-                events: vec![crate::v0::FilesystemChange::ContentChanged {
+                events: vec![crate::v0::FilesystemChange::FileCreated {
                     inode_id: InodeId(2),
+                    parent_inode_id: InodeId(1),
+                    display_name: DisplayName::parse("report.txt").expect("valid display name"),
                     revision_no: RevisionNo(1),
                     content_ref,
                 }],

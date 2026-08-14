@@ -1101,12 +1101,12 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
         .events
         .iter()
         .map(|event| match event {
-            FilesystemChange::Created { .. } => "created",
+            FilesystemChange::FileCreated { .. } => "file_created",
             FilesystemChange::AttributesChanged { .. } => "attributes_changed",
             other => panic!("unexpected event: {other:?}"),
         })
         .collect();
-    assert_eq!(copy_events, vec!["created", "attributes_changed"]);
+    assert_eq!(copy_events, vec!["file_created", "attributes_changed"]);
 }
 
 /// A copy with nothing to inherit publishes no attribute event at all.

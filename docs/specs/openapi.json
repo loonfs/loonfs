@@ -4309,26 +4309,51 @@
         "oneOf": [
           {
             "type": "object",
-            "title": "FilesystemChangeCreated",
-            "description": "A file or directory was created.",
+            "title": "FilesystemChangeDirectoryCreated",
+            "description": "A directory was created.",
             "required": [
               "inode_id",
-              "inode_kind",
               "parent_inode_id",
               "display_name",
               "kind"
             ],
             "properties": {
-              "content_ref": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/ContentRef",
-                    "description": "Content of the first revision, for file creations."
-                  }
+              "display_name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "User-facing spelling of the new entry."
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Newly allocated namespace-scoped inode identity."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "directory_created"
                 ]
+              },
+              "parent_inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory the new entry was bound under."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "FilesystemChangeFileCreated",
+            "description": "A file was created with its required first revision.",
+            "required": [
+              "inode_id",
+              "parent_inode_id",
+              "display_name",
+              "revision_no",
+              "content_ref",
+              "kind"
+            ],
+            "properties": {
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Content of the first revision."
               },
               "display_name": {
                 "$ref": "#/components/schemas/DisplayName",
@@ -4338,14 +4363,10 @@
                 "$ref": "#/components/schemas/InodeId",
                 "description": "Newly allocated namespace-scoped inode identity."
               },
-              "inode_kind": {
-                "$ref": "#/components/schemas/InodeKind",
-                "description": "File-or-directory classification fixed at creation."
-              },
               "kind": {
                 "type": "string",
                 "enum": [
-                  "created"
+                  "file_created"
                 ]
               },
               "parent_inode_id": {
@@ -4353,15 +4374,8 @@
                 "description": "Directory the new entry was bound under."
               },
               "revision_no": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/RevisionNo",
-                    "description": "First revision number, for file creations."
-                  }
-                ]
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "First revision number."
               }
             }
           },

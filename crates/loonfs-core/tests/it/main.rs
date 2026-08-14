@@ -4,6 +4,7 @@
 
 mod attributes;
 mod batch_publish;
+mod change_feed;
 mod commit_validation;
 mod common;
 mod differential;
