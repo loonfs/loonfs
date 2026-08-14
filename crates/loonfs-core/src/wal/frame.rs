@@ -34,7 +34,9 @@ pub enum WalBuildError {
     },
     #[error("WAL codec error: {0}")]
     Codec(String),
-    #[error("sequence counter overflow")]
+    #[error(
+        "sequence calculation falls outside the public integer range 0 through 9007199254740991"
+    )]
     SeqOverflow,
 }
 
@@ -234,6 +236,8 @@ pub enum WalReplayError {
         object_key: String,
         required_seq: ChangeSeq,
     },
-    #[error("sequence counter overflow")]
+    #[error(
+        "sequence calculation falls outside the public integer range 0 through 9007199254740991"
+    )]
     SeqOverflow,
 }

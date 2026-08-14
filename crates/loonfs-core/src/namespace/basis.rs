@@ -20,8 +20,8 @@ use crate::namespace::control::{
     read_head_and_metadata_root_if_present, read_wal_floor_object, LoadedHeadObject,
 };
 use loonfs_api::wire::control::HeadState;
+use loonfs_api::NamespaceId;
 use loonfs_api::{manifest_object_id_manifest_id, ChangeSeq, ManifestId, ManifestObjectId};
-use loonfs_api::{NamespaceId, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 
 /// The materialized starting point every read and flush builds on.
@@ -156,7 +156,7 @@ pub(crate) fn metadata_basis_without_root(
 /// The genesis head fields a synthesized basis replays from: sequence zero,
 /// the genesis commit, and the root inode already reserved.
 pub(crate) fn genesis_next_inode_id() -> loonfs_api::InodeId {
-    loonfs_api::InodeId(ROOT_INODE_ID.0 + 1)
+    loonfs_api::FIRST_ALLOCATABLE_INODE_ID
 }
 
 /// The sequence a namespace's own history begins at: zero for a created

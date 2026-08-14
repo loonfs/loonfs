@@ -10,8 +10,8 @@ use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::{
-    ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey,
-    RevisionNo,
+    next_public_ordinal, ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, DisplayName,
+    InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -407,9 +407,7 @@ fn next_revision_no(
     base_revision_no: RevisionNo,
     overflow: impl FnOnce(InodeId, RevisionNo) -> CommitValidationError,
 ) -> Result<RevisionNo, CommitValidationError> {
-    base_revision_no
-        .0
-        .checked_add(1)
+    next_public_ordinal(base_revision_no.0)
         .map(RevisionNo)
         .ok_or_else(|| overflow(inode_id, base_revision_no))
 }
@@ -418,9 +416,7 @@ fn next_attributes_revision_no(
     inode_id: InodeId,
     base_attributes_revision_no: AttributeRevisionNo,
 ) -> Result<AttributeRevisionNo, CommitValidationError> {
-    base_attributes_revision_no
-        .0
-        .checked_add(1)
+    next_public_ordinal(base_attributes_revision_no.0)
         .map(AttributeRevisionNo)
         .ok_or(CommitValidationError::UpdateAttributesRevisionOverflow {
             inode_id,
@@ -887,4 +883,55 @@ async fn validate_rename_does_not_cycle<S: ObjectStore + ?Sized>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    use super::*;
+    use loonfs_api::MAX_PUBLIC_INTEGER;
+
+    #[test]
+    fn revision_advancement_accepts_the_maximum_and_rejects_the_next_value() {
+        let at_maximum = next_revision_no(
+            InodeId(2),
+            RevisionNo(MAX_PUBLIC_INTEGER - 1),
+            |inode_id, base_revision_no| CommitValidationError::RestoreRevisionOverflow {
+                inode_id,
+                base_revision_no,
+            },
+        )
+        .expect("advance to public maximum");
+        assert_eq!(at_maximum, RevisionNo(MAX_PUBLIC_INTEGER));
+
+        assert!(matches!(
+            next_revision_no(
+                InodeId(2),
+                RevisionNo(MAX_PUBLIC_INTEGER),
+                |inode_id, base_revision_no| CommitValidationError::RestoreRevisionOverflow {
+                    inode_id,
+                    base_revision_no,
+                },
+            ),
+            Err(CommitValidationError::RestoreRevisionOverflow {
+                inode_id: InodeId(2),
+                base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
+            })
+        ));
+    }
+
+    #[test]
+    fn attribute_revision_advancement_accepts_the_maximum_and_rejects_the_next_value() {
+        assert_eq!(
+            next_attributes_revision_no(InodeId(2), AttributeRevisionNo(MAX_PUBLIC_INTEGER - 1),)
+                .expect("advance to public maximum"),
+            AttributeRevisionNo(MAX_PUBLIC_INTEGER)
+        );
+        assert!(matches!(
+            next_attributes_revision_no(InodeId(2), AttributeRevisionNo(MAX_PUBLIC_INTEGER),),
+            Err(CommitValidationError::UpdateAttributesRevisionOverflow {
+                inode_id: InodeId(2),
+                base_attributes_revision_no: AttributeRevisionNo(MAX_PUBLIC_INTEGER),
+            })
+        ));
+    }
 }

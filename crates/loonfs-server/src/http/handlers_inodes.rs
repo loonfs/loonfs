@@ -3,7 +3,7 @@
 use super::error::ApiResponseError;
 use super::handlers_filesystem::{
     buffered_download_response, decode_file_revisions_page_cursor, parse_include_attributes,
-    resolve_page_limit, PageQuery,
+    parse_revision_no, resolve_page_limit, PageQuery,
 };
 use super::{authorize, AppPath, AppQuery, AppState, NamespaceIdPath};
 use axum::extract::State;
@@ -13,9 +13,7 @@ use axum::Json;
 use loonfs::StatPathOptions;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
-use loonfs_api::{
-    FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, PageRequest, RevisionNo,
-};
+use loonfs_api::{FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, PageRequest};
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct InodePathParams {
@@ -25,7 +23,7 @@ pub(super) struct InodePathParams {
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct InodeRevisionPathParams {
     pub(super) inode_id: u64,
-    pub(super) revision_no: u64,
+    pub(super) revision_no: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -141,7 +139,7 @@ pub(super) async fn list_file_revisions_by_inode(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = InodeId, Path, description = "File inode id"),
-            ("revision_no" = RevisionNo, Path, description = "Revision number")
+            ("revision_no" = loonfs_api::RevisionNo, Path, description = "Revision number")
         ),
         responses(
             (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
@@ -164,6 +162,7 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let path = path.into_params()?;
+    let revision_no = parse_revision_no(&path.revision_no)?;
     let permit = state
         .download_permits
         .clone()
@@ -174,11 +173,7 @@ pub(super) async fn get_file_revision_bytes_by_inode(
         })?;
     let bytes = state
         .reader
-        .get_file_revision_bytes_by_inode(
-            &namespace_id,
-            InodeId(path.inode_id),
-            RevisionNo(path.revision_no),
-        )
+        .get_file_revision_bytes_by_inode(&namespace_id, InodeId(path.inode_id), revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(buffered_download_response(bytes, permit))

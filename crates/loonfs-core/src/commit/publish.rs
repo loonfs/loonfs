@@ -8,7 +8,7 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, WalSegmentPointer,
 };
-use loonfs_api::ChangeSeq;
+use loonfs_api::{next_public_ordinal, ChangeSeq};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
@@ -66,11 +66,7 @@ pub(crate) fn prepare_commit_head_publish(
     }
 
     let expected_start_seq = ChangeSeq(
-        current_head
-            .seq
-            .0
-            .checked_add(1)
-            .ok_or(CommitHeadPublishError::SeqOverflow)?,
+        next_public_ordinal(current_head.seq.0).ok_or(CommitHeadPublishError::SeqOverflow)?,
     );
     if wal_payload.start_seq != expected_start_seq {
         return Err(CommitHeadPublishError::WalSegmentStartSeqMismatch {
@@ -332,6 +328,58 @@ mod tests {
             prepared.write.encoded_bytes,
             encode_control_object(&expected_envelope).expect("encoded head"),
         );
+    }
+
+    #[test]
+    fn head_publish_accepts_the_public_sequence_maximum() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let current_head = head(
+            namespace_id.clone(),
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER - 1),
+        );
+        let plan = plan(
+            namespace_id.clone(),
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
+        );
+        let wal = wal_segment(
+            namespace_id,
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER - 1),
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
+            1,
+        );
+
+        let prepared =
+            prepare_commit_head_publish(&current_head, &plan, &wal).expect("maximum sequence");
+        assert_eq!(
+            prepared.resulting_head.seq,
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER)
+        );
+    }
+
+    #[test]
+    fn head_publish_rejects_advancing_past_the_public_sequence_maximum() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let current_head = head(
+            namespace_id.clone(),
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
+        );
+        let plan = plan(
+            namespace_id.clone(),
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
+        );
+        let wal = wal_segment(
+            namespace_id,
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
+            ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
+            1,
+        );
+
+        assert!(matches!(
+            prepare_commit_head_publish(&current_head, &plan, &wal),
+            Err(CommitHeadPublishError::SeqOverflow)
+        ));
     }
 
     #[test]

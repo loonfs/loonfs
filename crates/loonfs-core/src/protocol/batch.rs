@@ -402,3 +402,101 @@ fn fail_outcomes_contingent_on_unpublished_batch(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::writer_epoch::acquire_writer_epoch;
+    use crate::path::write::{CommitRequest, FilesystemOperation};
+    use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
+    use crate::timing::StdMonotonicTimer;
+    use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
+    use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::ObjectStore;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn sequence_exhaustion_writes_neither_wal_nor_head() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let context = MutationContext {
+            writer_id: "writer".to_owned(),
+            now_ms: 1_000,
+        };
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap namespace");
+        let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
+            .await
+            .expect("acquire writer");
+        let (mut view, _projection) = load_publish_metadata_view(
+            &store,
+            None,
+            &namespace_id,
+            acquired_writer,
+            None,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .expect("load publish view");
+
+        let head_key = wal_head(&namespace_id);
+        let head_before = store
+            .get(&head_key, None)
+            .await
+            .expect("read head")
+            .expect("head exists");
+        let wal_before = store
+            .list_prefix(&wal_segment_prefix(&namespace_id))
+            .await
+            .expect("list WAL before");
+
+        // The loaded metadata remains a valid read basis. Only the in-memory
+        // publish head is moved to exhaustion, which drives the same planning
+        // guard a real namespace at the limit reaches before any write.
+        view.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
+        let candidate = CommitCandidate::new(CommitRequest::single(
+            CommitId::parse("past-sequence-limit").expect("commit id"),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/blocked").expect("path"),
+                parents: false,
+            },
+        ));
+        let result = publish_namespace_commits_batch_against_publish_view(
+            &store,
+            &namespace_id,
+            &[candidate],
+            &context,
+            &view,
+            &StdMonotonicTimer::default(),
+        )
+        .await;
+
+        let error = result.results[0]
+            .as_ref()
+            .expect_err("exhausted sequence must reject the commit");
+        assert_eq!(error.code(), loonfs_api::ErrorCode::ServerError);
+        assert!(error.to_string().contains("public integer range"));
+        assert!(matches!(result.effect, PublishViewEffect::Unchanged));
+        assert_eq!(
+            store
+                .get(&head_key, None)
+                .await
+                .expect("read head after")
+                .expect("head exists"),
+            head_before
+        );
+        assert_eq!(
+            store
+                .list_prefix(&wal_segment_prefix(&namespace_id))
+                .await
+                .expect("list WAL after"),
+            wal_before
+        );
+    }
+}

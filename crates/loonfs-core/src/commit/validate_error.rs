@@ -226,14 +226,14 @@ pub enum CommitValidationError {
         active_seq: ChangeSeq,
     },
     #[error(
-        "revision counter overflow restoring inode `{inode_id}` at base revision `{base_revision_no}`"
+        "revision counter cannot advance beyond the public integer range 0 through 9007199254740991 restoring inode `{inode_id}` at base revision `{base_revision_no}`"
     )]
     RestoreRevisionOverflow {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
     },
     #[error(
-        "revision counter overflow replacing inode `{inode_id}` at base revision `{base_revision_no}`"
+        "revision counter cannot advance beyond the public integer range 0 through 9007199254740991 replacing inode `{inode_id}` at base revision `{base_revision_no}`"
     )]
     ReplaceFileRevisionOverflow {
         inode_id: InodeId,
@@ -258,7 +258,7 @@ pub enum CommitValidationError {
         tombstone_seq: ChangeSeq,
     },
     #[error(
-        "attribute revision counter overflow updating inode `{inode_id}` at base revision `{base_attributes_revision_no}`"
+        "attribute revision counter cannot advance beyond the public integer range 0 through 9007199254740991 updating inode `{inode_id}` at base revision `{base_attributes_revision_no}`"
     )]
     UpdateAttributesRevisionOverflow {
         inode_id: InodeId,
@@ -271,7 +271,9 @@ pub enum CommitValidationError {
     },
     #[error("validated preview apply failed: {0}")]
     ValidatedPreviewApplyFailed(String),
-    #[error("sequence counter overflow")]
+    #[error(
+        "sequence counter cannot advance beyond the public integer range 0 through 9007199254740991"
+    )]
     SeqOverflow,
     #[error("next inode id counter overflow")]
     NextInodeOverflow,

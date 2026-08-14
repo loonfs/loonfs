@@ -6,7 +6,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
 use crate::error::StoreFailureClass;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState, WriterBlock};
-use loonfs_api::{NamespaceId, WriterEpoch};
+use loonfs_api::{next_public_ordinal, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -22,7 +22,9 @@ pub enum WriterEpochAcquireError {
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error("empty writer id")]
     EmptyWriterId,
-    #[error("writer epoch overflow from `{active}`")]
+    #[error(
+        "writer epoch cannot advance beyond the public integer range 0 through 9007199254740991 from `{active}`"
+    )]
     WriterEpochOverflow { active: WriterEpoch },
     #[error("failed to write head object `{object_key}` during writer epoch acquire: {message}")]
     HeadWrite {
@@ -86,9 +88,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
 }
 
 fn next_writer_epoch(active: WriterEpoch) -> Result<WriterEpoch, WriterEpochAcquireError> {
-    active
-        .0
-        .checked_add(1)
+    next_public_ordinal(active.0)
         .map(WriterEpoch)
         .ok_or(WriterEpochAcquireError::WriterEpochOverflow { active })
 }
@@ -182,7 +182,7 @@ mod tests {
         decode_control_object, encode_control_object, ControlObjectKind, HeadStateEnvelope,
         NamespaceState,
     };
-    use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
+    use loonfs_api::{ChangeSeq, CommitId, NamespaceId, MAX_PUBLIC_INTEGER};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{
@@ -235,6 +235,21 @@ mod tests {
             .expect("head exists")
             .etag
             .expect("head etag")
+    }
+
+    #[test]
+    fn writer_epoch_advancement_accepts_the_maximum_and_rejects_the_next_value() {
+        assert_eq!(
+            next_writer_epoch(WriterEpoch(MAX_PUBLIC_INTEGER - 1))
+                .expect("advance to public maximum"),
+            WriterEpoch(MAX_PUBLIC_INTEGER)
+        );
+        assert!(matches!(
+            next_writer_epoch(WriterEpoch(MAX_PUBLIC_INTEGER)),
+            Err(WriterEpochAcquireError::WriterEpochOverflow {
+                active: WriterEpoch(MAX_PUBLIC_INTEGER),
+            })
+        ));
     }
 
     #[tokio::test]

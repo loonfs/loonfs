@@ -2,7 +2,7 @@
 //! handlers.
 
 use super::error::ApiResponseError;
-use super::handlers_filesystem::resolve_page_limit;
+use super::handlers_filesystem::{parse_public_ordinal, resolve_page_limit};
 use super::{authorize, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, OptionalAppJson};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -295,13 +295,7 @@ pub(super) async fn delete_namespace(
 }
 
 fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
-    value.parse::<u64>().map(ChangeSeq).map_err(|error| {
-        ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            &format!("invalid expected_head_seq `{value}`: {error}"),
-        )
-    })
+    parse_public_ordinal("expected_head_seq", value).map(ChangeSeq)
 }
 
 #[cfg_attr(

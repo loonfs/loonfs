@@ -251,7 +251,9 @@ numeric_id! {
     /// when the inode has moved past it. The counter is not an index into a
     /// history. LoonFS keeps the current map and this number, and promises no
     /// queryable record of earlier maps.
-    AttributeRevisionNo
+    AttributeRevisionNo,
+    public_ordinal,
+    schema_description = "Monotonically increasing attribute revision counter within one inode.\n\nEvery inode starts at revision 0 with an empty attribute map, and every\neffective update — one that changes the map — advances the counter by\none. The counter is the optimistic-concurrency token for attribute\nwrites: a writer states the revision it expects, and the write fails\nwhen the inode has moved past it. The counter is not an index into a\nhistory. LoonFS keeps the current map and this number, and promises no\nqueryable record of earlier maps."
 }
 
 #[cfg(test)]

@@ -206,6 +206,62 @@ macro_rules! string_id {
 macro_rules! numeric_id {
     (
         $(#[$meta:meta])*
+        $name:ident,
+        public_ordinal,
+        schema_description = $schema_description:literal
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+        pub struct $name(pub u64);
+
+        #[cfg(feature = "openapi")]
+        impl utoipa::PartialSchema for $name {
+            fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+                utoipa::openapi::schema::Object::builder()
+                    .schema_type(utoipa::openapi::schema::Type::Integer)
+                    .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
+                        utoipa::openapi::KnownFormat::Int64,
+                    )))
+                    .minimum(Some(0u64))
+                    .maximum(Some($crate::MAX_PUBLIC_INTEGER))
+                    .description(Some($schema_description))
+                    .into()
+            }
+        }
+
+        #[cfg(feature = "openapi")]
+        impl utoipa::ToSchema for $name {}
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <u64 as serde::Deserialize>::deserialize(deserializer)?;
+                if value > $crate::MAX_PUBLIC_INTEGER {
+                    return Err(serde::de::Error::custom(format_args!(
+                        "must be an integer from 0 through {}",
+                        $crate::MAX_PUBLIC_INTEGER
+                    )));
+                }
+                Ok(Self(value))
+            }
+        }
+
+        impl From<u64> for $name {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+    };
+    (
+        $(#[$meta:meta])*
         $name:ident
     ) => {
         $(#[$meta])*
@@ -666,6 +722,17 @@ impl NameKey {
 // Numeric ids
 // ---------------------------------------------------------------------------
 
+/// Largest integer a JSON client can represent exactly (2^53 - 1). No
+/// API-visible ordinal may durably advance beyond it.
+pub const MAX_PUBLIC_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Advances one API-visible ordinal without crossing [`MAX_PUBLIC_INTEGER`].
+pub fn next_public_ordinal(current: u64) -> Option<u64> {
+    current
+        .checked_add(1)
+        .filter(|next| *next <= MAX_PUBLIC_INTEGER)
+}
+
 numeric_id! {
     /// Numeric identity of a file or directory within a namespace.
     ///
@@ -676,16 +743,23 @@ numeric_id! {
 /// Inode 1 is always the root directory of a namespace.
 pub const ROOT_INODE_ID: InodeId = InodeId(1);
 
+/// First inode id available to a namespace allocator after reserving the root.
+pub const FIRST_ALLOCATABLE_INODE_ID: InodeId = InodeId(ROOT_INODE_ID.0 + 1);
+
 numeric_id! {
     /// Monotonically increasing file revision counter within one file inode.
-    RevisionNo
+    RevisionNo,
+    public_ordinal,
+    schema_description = "Monotonically increasing file revision counter within one file inode."
 }
 
 numeric_id! {
     /// Monotonically increasing namespace commit sequence number.
     ///
     /// This is the global visibility order for a namespace.
-    ChangeSeq
+    ChangeSeq,
+    public_ordinal,
+    schema_description = "Monotonically increasing namespace commit sequence number.\n\nThis is the global visibility order for a namespace."
 }
 
 numeric_id! {
@@ -695,12 +769,16 @@ numeric_id! {
     /// Initial/fork manifests may be seeded from the current head sequence, but
     /// later manifest ids can advance for checkpoint metadata, compaction, or
     /// fork/index metadata without a new namespace commit.
-    ManifestId
+    ManifestId,
+    public_ordinal,
+    schema_description = "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit."
 }
 
 numeric_id! {
     /// Monotonically increasing writer epoch for namespace write fencing.
-    WriterEpoch
+    WriterEpoch,
+    public_ordinal,
+    schema_description = "Monotonically increasing writer epoch for namespace write fencing."
 }
 
 // ---------------------------------------------------------------------------
@@ -734,10 +812,53 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeSeq, CheckpointId, CommitId, ContentId, ContentStoreId, ManifestId, ManifestObjectId,
-        MetadataTableId, NameKey, NamespaceId, UploadId, WalSegmentId,
+        next_public_ordinal, ChangeSeq, CheckpointId, CommitId, ContentId, ContentStoreId, InodeId,
+        ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo, UploadId,
+        WalSegmentId, WriterEpoch, MAX_PUBLIC_INTEGER,
     };
+    use crate::AttributeRevisionNo;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn public_ordinal_advancement_accepts_the_maximum_and_rejects_the_next_value() {
+        assert_eq!(
+            next_public_ordinal(MAX_PUBLIC_INTEGER - 1),
+            Some(MAX_PUBLIC_INTEGER)
+        );
+        assert_eq!(next_public_ordinal(MAX_PUBLIC_INTEGER), None);
+    }
+
+    #[test]
+    fn public_ordinal_deserialization_enforces_the_json_safe_integer_range() {
+        macro_rules! assert_range {
+            ($type:ty) => {{
+                let maximum = serde_json::from_str::<$type>(&MAX_PUBLIC_INTEGER.to_string())
+                    .expect("maximum public ordinal");
+                assert_eq!(maximum.0, MAX_PUBLIC_INTEGER);
+
+                let error = serde_json::from_str::<$type>(&(MAX_PUBLIC_INTEGER + 1).to_string())
+                    .expect_err("ordinal above the public range");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("must be an integer from 0 through 9007199254740991"),
+                    "unexpected range error: {error}"
+                );
+            }};
+        }
+
+        assert_range!(RevisionNo);
+        assert_range!(ChangeSeq);
+        assert_range!(AttributeRevisionNo);
+        assert_range!(ManifestId);
+        assert_range!(WriterEpoch);
+
+        assert_eq!(
+            serde_json::from_str::<InodeId>(&(MAX_PUBLIC_INTEGER + 1).to_string())
+                .expect("inode ids retain the full u64 range"),
+            InodeId(MAX_PUBLIC_INTEGER + 1)
+        );
+    }
 
     #[test]
     fn namespace_id_parse_accepts_allowed_grammar() {

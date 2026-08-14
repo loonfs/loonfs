@@ -8,7 +8,7 @@ use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::ChangeSeq;
+use loonfs_api::{next_public_ordinal, ChangeSeq};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn validate_commit_for_publish<S: ObjectStore + ?Sized>(
@@ -18,10 +18,7 @@ pub(crate) async fn validate_commit_for_publish<S: ObjectStore + ?Sized>(
     metadata_view: MetadataView<'_, '_, S>,
     accepted_rows: &MetadataState,
 ) -> Result<ValidatedCommitPlan, CoreError> {
-    let committed_seq = head
-        .seq
-        .0
-        .checked_add(1)
+    let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
         .ok_or(CommitValidationError::SeqOverflow)?;
     build_commit_plan(

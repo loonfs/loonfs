@@ -7,6 +7,7 @@
 //! advertised together.
 
 use super::error::ApiResponseError;
+use super::handlers_filesystem::parse_revision_no;
 use super::handlers_inodes::InodeRevisionPathParams;
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::{AppJson, AppPath, AppState, NamespaceIdPath};
@@ -19,7 +20,7 @@ use loonfs_api::{
         BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
         BeginDownloadResponse, ObjectTransferAccess,
     },
-    InodeId, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
+    InodeId, FEATURE_DOWNLOADS_DIRECT_GET,
 };
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use std::time::Duration;
@@ -105,7 +106,7 @@ pub(super) async fn begin_download(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = InodeId, Path, description = "File inode id"),
-            ("revision_no" = RevisionNo, Path, description = "Revision number")
+            ("revision_no" = loonfs_api::RevisionNo, Path, description = "Revision number")
         ),
         request_body = BeginDownloadByInodeRequest,
         responses(
@@ -130,7 +131,7 @@ pub(super) async fn begin_download_by_inode(
     let namespace_id = namespace_id_path.into_id()?;
     let path = path.into_params()?;
     let inode_id = InodeId(path.inode_id);
-    let revision_no = RevisionNo(path.revision_no);
+    let revision_no = parse_revision_no(&path.revision_no)?;
     let issuer = direct_get_issuer(&state)?;
     let target = state
         .reader
