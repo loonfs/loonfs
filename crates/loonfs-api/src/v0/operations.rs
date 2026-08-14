@@ -277,11 +277,10 @@ pub enum FilesystemOperation {
         #[serde(default)]
         behavior: DestinationBehavior,
     },
-    /// Recover a deleted file or subtree: revoke the deletion of
-    /// `inode_id` recorded at `deletion_seq` (both reported by the
-    /// delete and by the change feed) and re-bind it. Answers
-    /// `not_deleted` when that generation is not the live one, so a stale
-    /// request never cancels a later delete.
+    /// Restore a deleted file or subtree.
+    ///
+    /// `inode_id` and `deletion_seq` identify one exact deletion. A stale
+    /// sequence returns `not_deleted` and cannot undo a later deletion.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
     Undelete {
         /// Deleted inode to make reachable again.

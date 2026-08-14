@@ -2114,7 +2114,7 @@ Event kinds:
 | `created` | A file or directory was created. | `inode_id`, `inode_kind`, `parent_inode_id`, `display_name`; file creations also carry `revision_no` and `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`. |
-| `deleted` | A file or directory subtree was deleted. The enclosing change's `committed_seq` **is** the `deletion_seq` used by trash and undelete; the event does not duplicate it. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
+| `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 

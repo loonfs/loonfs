@@ -643,9 +643,7 @@ impl FsWriter {
         .await
     }
 
-    /// Recovers a deleted file or subtree: clears the tombstone rooted at
-    /// `inode_id` and binds it at `absolute_path`. The inode id is the one
-    /// the delete reported (also visible in the change feed).
+    /// Restores a deleted file or subtree, optionally at a new path.
     pub async fn undelete(
         &self,
         namespace_id: &NamespaceId,

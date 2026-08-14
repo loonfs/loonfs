@@ -232,10 +232,9 @@ History and recovery
     Recover a deleted file or directory; --inode and --deletion-seq come from
     `loonfs trash` or the `rm` output and name one exact deletion, so a
     stale command cannot cancel a later delete. Omit <path> to restore in
-    place — the entry re-binds under the parent and name its deletion
-    recorded, which lands correctly even if the enclosing directories were
-    renamed since. Pass <path> to recover somewhere else, or when the
-    deletion recorded no binding
+    place under the parent and name recorded with the deletion. This still
+    works if an enclosing directory was renamed. Pass <path> to restore it
+    somewhere else, or when the deletion did not record a binding
 
   loonfs changes [--after <seq>] [--limit <n>]
     List committed changes after a sequence number, from the start of

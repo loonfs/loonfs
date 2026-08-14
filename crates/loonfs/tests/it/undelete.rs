@@ -522,9 +522,7 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
             }
         }
     }
-    // The `Deleted` event's enclosing sequence is the deletion generation an
-    // undelete passes as `deletion_seq`, so a feed projection can drive a
-    // recovery without guessing at "newest".
+    // The change sequence can be copied directly into an undelete request.
     assert_eq!(deleted_seq, Some(deletion));
     assert_eq!(undeleted.as_deref(), Some("report.txt"));
 }

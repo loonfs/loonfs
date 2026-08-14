@@ -63,21 +63,16 @@ fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
     NamespaceId::parse(&value).map_err(ApiResponseError::invalid_namespace_id)
 }
 
-/// The decoded `namespace_id` path segment, deserialized by name so routes with
-/// additional path parameters can share the extractor.
+/// The `namespace_id` path segment shared by namespace-scoped routes.
 #[derive(Debug, serde::Deserialize)]
 struct NamespaceSegment {
     namespace_id: String,
 }
 
-/// Extractor for the `{namespace_id}` path segment of namespace-scoped routes.
+/// Parses the `{namespace_id}` path segment.
 ///
-/// The segment is parsed into a [`NamespaceId`] at extraction time, but the
-/// outcome is surfaced through [`NamespaceIdPath::into_id`] inside the
-/// handler body rather than as an extractor rejection: every handler
-/// authorizes before validating the namespace id, and rejecting during
-/// extraction would let a malformed id short-circuit `authorize` and turn
-/// today's 401 into a 400 for unauthorized requests.
+/// The handler reads the result after authorization. This keeps malformed
+/// namespace ids from changing an unauthorized response from 401 to 400.
 pub(super) struct NamespaceIdPath(Result<NamespaceId, ApiResponseError>);
 
 impl NamespaceIdPath {

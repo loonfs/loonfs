@@ -2406,9 +2406,7 @@ impl Client {
         Ok(response)
     }
 
-    /// Recovers a deleted file or subtree: clears the tombstone rooted at
-    /// `inode_id` (the id the delete reported) and re-binds it at the spec's
-    /// path.
+    /// Restores a deleted file or subtree, optionally at a new path.
     pub async fn undelete(
         &self,
         namespace: &NamespaceId,

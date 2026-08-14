@@ -731,19 +731,15 @@ the generation as `tombstone_seq` and `tombstone_delta_index` beside
 independent optional `parent_inode_id`, `name_key`, and `display_name`
 fields does not decode.
 
-Which deletions are recoverable *right now* is a separate question from the
-event history that decides it, and it has its own family. Materialization
-derives an `active-deletions` row from every tombstone event: a `set` adds a
-`listed` row keyed durably by `(deleted_at_seq, root_inode_id)`. The API projects
-that pair as `(deletion_seq, inode_id)`, the exact handle `undelete` takes. The
-row carries the deletion's wall-clock stamp and a copy of
-its `deleted_direntry`, and a `revoke` adds a `removed` row repeating its
-target's key. The two rows for one deletion sort together with `removed` first, so an
-ascending scan sees a removal before the row it removes and reorganization
-drops the pair. Reading the recoverable set is therefore a range scan in
-deletion order, not a walk over every deletion the namespace ever recorded.
-Because the family is derived, the tombstone rows stay authoritative: a
-disagreement between the two is corruption of the derived family.
+The `active-deletions` family tracks which deletions can still be restored. A
+`set` tombstone adds a `listed` row keyed by `(deleted_at_seq, root_inode_id)`.
+The API exposes that pair as `(deletion_seq, inode_id)`. The row also stores
+the deletion time and `deleted_direntry`. A `revoke` tombstone adds a
+`removed` row with the same key. The two rows sort together with `removed`
+first, so reorganization can discard both.
+
+The recoverable set is read as a range scan in deletion order. Tombstone rows
+remain authoritative because this family is derived from them.
 
 A namespace head has exactly two recorded states: `active` (the default; an
 absent field reads as active) and terminal `deleted`. There is no

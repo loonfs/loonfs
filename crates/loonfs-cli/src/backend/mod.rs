@@ -772,10 +772,8 @@ impl ResolvedTarget {
         }
     }
 
-    /// Recovers a deleted file or subtree; `inode_id` and `deletion_seq`
-    /// are the identity and committed sequence the delete reported. An
-    /// absent `path` restores in place, under the parent and name the
-    /// deletion recorded.
+    /// Restores the deletion identified by `inode_id` and `deletion_seq`.
+    /// When `path` is absent, the original parent and name are used.
     pub(crate) async fn undelete(
         &self,
         namespace: &NamespaceId,

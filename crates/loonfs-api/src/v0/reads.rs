@@ -465,16 +465,16 @@ mod tests {
     }
 }
 
-/// One recoverable deletion: an active subtree tombstone plus the identity
-/// of the binding it deleted, when the delete recorded one. Entries with no
-/// recorded name predate the enriched tombstone rows; their inode and
-/// sequence still form a complete `undelete` handle.
+/// One deletion that can still be restored.
+///
+/// `inode_id` and `deletion_seq` are sufficient to restore it. The original
+/// parent and name are included when they were recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
-    /// Inode the deletion hid; half of the recovery handle.
+    /// Inode hidden by the deletion.
     pub inode_id: InodeId,
-    /// Commit sequence of the deletion; the other half of the handle.
+    /// Commit sequence that identifies this deletion.
     pub deletion_seq: ChangeSeq,
     /// Time of the deletion, in Unix milliseconds.
     pub deleted_at_ms: u64,
