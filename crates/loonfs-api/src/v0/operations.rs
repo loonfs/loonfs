@@ -440,18 +440,9 @@ pub struct CreateCheckpointRequest {
 pub struct CreateCheckpointResponse {
     /// Namespace that was checkpointed.
     pub namespace_id: NamespaceId,
-    /// Durable checkpoint id.
-    pub checkpoint_id: CheckpointId,
-    /// Sequence covered by the checkpoint.
-    pub checkpoint_seq: ChangeSeq,
-    /// Manifest pinned by the checkpoint.
-    pub manifest_id: ManifestId,
-    /// Manifest `metadata/root.json` references after the operation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_manifest_id: Option<ManifestId>,
-    /// Expiry recorded on the record, when the request carried a `ttl_ms`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at_ms: Option<u64>,
+    /// Checkpoint that was created.
+    #[serde(flatten)]
+    pub checkpoint: Checkpoint,
 }
 
 /// Result of releasing a checkpoint pin.
@@ -462,10 +453,6 @@ pub struct ReleaseCheckpointResponse {
     pub namespace_id: NamespaceId,
     /// Checkpoint the release targeted.
     pub checkpoint_id: CheckpointId,
-    /// True when this call flipped an active record to released; false when
-    /// the record was already released or no longer exists. Release is
-    /// idempotent — the end state is the same either way.
-    pub was_active: bool,
 }
 
 /// Who a checkpoint record answers to, as the record durably records it.
@@ -494,16 +481,15 @@ pub enum CheckpointOwnerSummary {
     },
 }
 
-/// One active checkpoint record, reported from what the record carries.
+/// One checkpoint resource, reported from what its durable record carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CheckpointSummary {
-    /// Durable checkpoint id, as the creation response returned it. This is
-    /// what the release endpoint takes.
+pub struct Checkpoint {
+    /// Durable checkpoint id used to address the checkpoint for release.
     pub checkpoint_id: CheckpointId,
-    /// Who the record answers to, and the label a user pin carries.
+    /// Who owns the checkpoint, including the label carried by a user pin.
     pub owner: CheckpointOwnerSummary,
-    /// When the record was written, in Unix milliseconds.
+    /// Time the checkpoint record was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// When garbage collection may release the record without being asked,
     /// in Unix milliseconds. Absent means the pin holds until it is
@@ -512,10 +498,9 @@ pub struct CheckpointSummary {
     /// a root, so it is still listed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
-    /// Sequence the pinned basis covers — the same number the creation
-    /// response reported as `checkpoint_seq`.
+    /// Sequence covered by the checkpoint's pinned basis.
     pub checkpoint_seq: ChangeSeq,
-    /// Manifest the record pins.
+    /// Manifest pinned by the checkpoint.
     pub manifest_id: ManifestId,
 }
 
@@ -527,7 +512,7 @@ pub struct ListCheckpointsResponse {
     pub namespace_id: NamespaceId,
     /// Active records in ascending checkpoint-id order. Released records are
     /// omitted even if garbage collection has not deleted them yet.
-    pub checkpoints: Vec<CheckpointSummary>,
+    pub checkpoints: Vec<Checkpoint>,
     /// Opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -1530,22 +1515,80 @@ mod tests {
     }
 
     #[test]
-    fn optional_response_fields_are_omitted_and_default_when_absent() {
-        let checkpoint = CreateCheckpointResponse {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+    fn checkpoint_responses_use_one_checkpoint_wire_object() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let checkpoint = Checkpoint {
             checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
                 .expect("checkpoint id"),
+            owner: CheckpointOwnerSummary::User {
+                name: "release".to_owned(),
+            },
+            created_at_ms: 1_752_623_000_000,
+            expires_at_ms: Some(1_752_626_600_000),
+            checkpoint_seq: ChangeSeq(12),
+            manifest_id: ManifestId(9),
+        };
+        let checkpoint_json = serde_json::json!({
+            "checkpoint_id": "chk_00000000000000000000000000000001",
+            "owner": {"kind": "user", "name": "release"},
+            "created_at_ms": 1_752_623_000_000_u64,
+            "expires_at_ms": 1_752_626_600_000_u64,
+            "checkpoint_seq": 12,
+            "manifest_id": 9,
+        });
+        let mut create_json = checkpoint_json.clone();
+        create_json["namespace_id"] = serde_json::json!("demo");
+        assert_eq!(
+            serde_json::to_value(CreateCheckpointResponse {
+                namespace_id: namespace_id.clone(),
+                checkpoint: checkpoint.clone(),
+            })
+            .expect("serialize create checkpoint response"),
+            create_json,
+        );
+        assert_eq!(
+            serde_json::to_value(ListCheckpointsResponse {
+                namespace_id: namespace_id.clone(),
+                checkpoints: vec![checkpoint.clone()],
+                next_cursor: None,
+            })
+            .expect("serialize list checkpoints response"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "checkpoints": [checkpoint_json],
+            }),
+        );
+        assert_eq!(
+            serde_json::to_value(ReleaseCheckpointResponse {
+                namespace_id,
+                checkpoint_id: checkpoint.checkpoint_id,
+            })
+            .expect("serialize release checkpoint response"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "checkpoint_id": "chk_00000000000000000000000000000001",
+            }),
+        );
+    }
+
+    #[test]
+    fn optional_response_fields_are_omitted_and_default_when_absent() {
+        let checkpoint_json = serde_json::to_value(Checkpoint {
+            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
+                .expect("checkpoint id"),
+            owner: CheckpointOwnerSummary::User {
+                name: "release".to_owned(),
+            },
+            created_at_ms: 1_752_623_000_000,
+            expires_at_ms: None,
             checkpoint_seq: ChangeSeq(3),
             manifest_id: ManifestId(3),
-            current_manifest_id: None,
-            expires_at_ms: None,
-        };
-        let checkpoint_json =
-            serde_json::to_value(checkpoint).expect("serialize checkpoint response");
-        assert!(checkpoint_json.get("current_manifest_id").is_none());
-        let checkpoint: CreateCheckpointResponse = serde_json::from_value(checkpoint_json)
-            .expect("decode checkpoint response without optional fields");
-        assert_eq!(checkpoint.current_manifest_id, None);
+        })
+        .expect("serialize checkpoint");
+        assert!(checkpoint_json.get("expires_at_ms").is_none());
+        let checkpoint: Checkpoint = serde_json::from_value(checkpoint_json)
+            .expect("decode checkpoint without optional fields");
+        assert_eq!(checkpoint.expires_at_ms, None);
 
         let gc = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
         let gc_json = serde_json::to_value(gc).expect("serialize gc response");

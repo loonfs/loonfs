@@ -87,3 +87,18 @@ pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{Readahead, VerifiedMetadataTables};
 pub(crate) use self::streaming_compaction::run_metadata_compaction_job;
+
+fn checkpoint_owner_summary(
+    owner: loonfs_api::wire::control::CheckpointOwner,
+) -> loonfs_api::CheckpointOwnerSummary {
+    match owner {
+        loonfs_api::wire::control::CheckpointOwner::User { name } => {
+            loonfs_api::CheckpointOwnerSummary::User { name }
+        }
+        loonfs_api::wire::control::CheckpointOwner::Fork {
+            target_namespace_id,
+        } => loonfs_api::CheckpointOwnerSummary::Fork {
+            target_namespace_id,
+        },
+    }
+}

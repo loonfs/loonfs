@@ -455,7 +455,7 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
     );
     let recreate = create_checkpoint(&store, &namespace_id, &context);
     let (release, second) = tokio::join!(release, recreate);
-    assert!(release.expect("release").was_active);
+    assert_eq!(release.expect("release").checkpoint_id, first.checkpoint_id);
     let second = second.expect("a concurrent create takes a fresh pin");
     assert_ne!(
         second.checkpoint_id, first.checkpoint_id,
@@ -493,7 +493,7 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
     )
     .await
     .expect("repeat release");
-    assert!(!again.was_active);
+    assert_eq!(again.checkpoint_id, first.checkpoint_id);
     assert_eq!(
         read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
@@ -536,7 +536,8 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let first =
         super::create::create_checkpoint(&store, &namespace_id, owner(), Some(10_000), &context)
             .await
-            .expect("create checkpoint");
+            .expect("create checkpoint")
+            .checkpoint;
     assert_eq!(first.expires_at_ms, Some(10_000));
 
     let mut later_context = test_context();
@@ -551,7 +552,8 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             &later_context,
         )
         .await
-        .expect("create checkpoint");
+        .expect("create checkpoint")
+        .checkpoint;
         assert!(
             minted.insert(next.checkpoint_id.clone()),
             "each pin gets an id of its own"
@@ -618,7 +620,8 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
         &context,
     )
     .await
-    .expect("create checkpoint whose expiry has already passed");
+    .expect("create checkpoint whose expiry has already passed")
+    .checkpoint;
     assert_eq!(
         read_checkpoint_record(&store, &namespace_id, &already_expired.checkpoint_id)
             .await

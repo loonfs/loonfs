@@ -812,7 +812,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn list_checkpoints_page(
         &self,
         request: PageRequest<CheckpointPageCursor>,
-    ) -> Result<Page<loonfs_api::CheckpointSummary, CheckpointPageCursor>> {
+    ) -> Result<Page<loonfs_api::Checkpoint, CheckpointPageCursor>> {
         crate::checkpoint::list_checkpoints_page(&self.store, &self.namespace_id, request).await
     }
 

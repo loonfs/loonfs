@@ -1323,10 +1323,11 @@ impl Client {
             .await
     }
 
-    /// Creates or reuses a named, user-owned checkpoint pinning the
-    /// namespace's current view (admin plane). This is a maintenance
-    /// operation, not a file mutation. The record is a garbage-collection
-    /// root until released or expired.
+    /// Creates a named, user-owned checkpoint pinning the namespace's
+    /// current view (admin plane). Every call creates a new checkpoint; the
+    /// name is a label, not a key. This is a maintenance operation, not a
+    /// file mutation. The record is a garbage-collection root until released
+    /// or expired.
     pub async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,

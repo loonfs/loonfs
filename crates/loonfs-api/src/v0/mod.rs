@@ -28,7 +28,7 @@ pub use downloads::{
     BeginDownloadResponse,
 };
 pub use operations::{
-    AdvanceRetentionResponse, ApiError, CheckpointOwnerSummary, CheckpointSummary, CommitRequest,
+    AdvanceRetentionResponse, ApiError, Checkpoint, CheckpointOwnerSummary, CommitRequest,
     CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, ErrorDetails,
     FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,

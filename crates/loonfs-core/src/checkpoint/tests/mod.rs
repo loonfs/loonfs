@@ -108,7 +108,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> crate::error::Result<loonfs_api::CreateCheckpointResponse> {
+) -> crate::error::Result<loonfs_api::Checkpoint> {
     super::create::create_checkpoint(
         store,
         namespace_id,
@@ -119,6 +119,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         context,
     )
     .await
+    .map(|response| response.checkpoint)
 }
 
 pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {

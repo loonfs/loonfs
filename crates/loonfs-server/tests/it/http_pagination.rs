@@ -72,6 +72,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
                 )
                 .await
                 .expect("create checkpoint")
+                .checkpoint
                 .checkpoint_id,
         );
     }

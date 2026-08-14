@@ -8,8 +8,8 @@ use loonfs::publish::CommitRequest;
 use loonfs::UploadContentClaim;
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
-    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadResponse,
-    ContentRef, CopyOptions, CreateCheckpointOptions, CreateCheckpointResponse,
+    BeginUploadResponse, ChangeSeq, ChangesResponse, Checkpoint, CommitResponse,
+    CompleteUploadResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
     CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode,
     FsAdmin, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, MaintenancePlan,
     MaintenanceStepResponse, MetadataMaintenanceResponse, MoveOptions, NamespaceId,
@@ -190,7 +190,7 @@ impl TestRuntime {
     pub(crate) async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<CreateCheckpointResponse> {
+    ) -> loonfs::Result<Checkpoint> {
         self.admin
             .create_checkpoint(
                 namespace_id,
@@ -200,6 +200,7 @@ impl TestRuntime {
                 },
             )
             .await
+            .map(|response| response.checkpoint)
     }
 
     pub(crate) async fn begin_direct_put_upload_target(
@@ -327,10 +328,7 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ChangesResponse>;
-    fn create_checkpoint_blocking(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> loonfs::Result<CreateCheckpointResponse>;
+    fn create_checkpoint_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Checkpoint>;
     fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -536,10 +534,7 @@ impl RuntimeTestExt for TestRuntime {
         )
     }
 
-    fn create_checkpoint_blocking(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> loonfs::Result<CreateCheckpointResponse> {
+    fn create_checkpoint_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Checkpoint> {
         block_on(self.admin.create_checkpoint(
             namespace_id,
             CreateCheckpointOptions {
@@ -547,6 +542,7 @@ impl RuntimeTestExt for TestRuntime {
                 ttl_ms: None,
             },
         ))
+        .map(|response| response.checkpoint)
     }
 
     fn advance_retention_floor_blocking(

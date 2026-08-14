@@ -801,7 +801,7 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() 
 
     let released = block_on(admin.release_checkpoint(&source, &user_checkpoint.checkpoint_id))
         .expect("release user checkpoint on deleted namespace");
-    assert!(released.was_active);
+    assert_eq!(released.checkpoint_id, user_checkpoint.checkpoint_id);
     assert_core_error_kind(
         block_on(admin.release_checkpoint(&source, &fork_checkpoint)),
         ErrorCode::InvalidRequest,

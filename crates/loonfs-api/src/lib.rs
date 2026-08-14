@@ -149,7 +149,7 @@ pub use secret::SecretString;
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
     AdvanceRetentionResponse, ApiError, AttributesProjection, AuthoritativeFileBytes,
-    AuthoritativePathEntry, AuthoritativePathEntryKind, CheckpointOwnerSummary, CheckpointSummary,
+    AuthoritativePathEntry, AuthoritativePathEntryKind, Checkpoint, CheckpointOwnerSummary,
     CommitRequest, CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,

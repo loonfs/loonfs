@@ -477,7 +477,8 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
         "the fork target's basis manifest should still name source-owned metadata files"
     );
 
-    let enumerated = checkpoint_files(&fs.reader, &target, &checkpoint.checkpoint_id, 1).await;
+    let enumerated =
+        checkpoint_files(&fs.reader, &target, &checkpoint.checkpoint.checkpoint_id, 1).await;
     assert_eq!(
         enumerated
             .iter()

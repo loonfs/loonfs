@@ -15,11 +15,8 @@ use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::read_head_object;
 use futures::StreamExt;
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
-use loonfs_api::{
-    CheckpointOwnerSummary, CheckpointSummary, NamespaceCursor, NamespaceId, Page, PageCursor,
-    PageRequest,
-};
+use loonfs_api::wire::control::CheckpointRecordLifecycle;
+use loonfs_api::{Checkpoint, NamespaceCursor, NamespaceId, Page, PageCursor, PageRequest};
 use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -82,7 +79,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: PageRequest<CheckpointPageCursor>,
-) -> Result<Page<CheckpointSummary, CheckpointPageCursor>> {
+) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
     read_head_object(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
@@ -118,16 +115,9 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
             continue;
         }
         let record = loaded.state;
-        checkpoints.push(CheckpointSummary {
+        checkpoints.push(Checkpoint {
             checkpoint_id: record.checkpoint_id,
-            owner: match record.owner {
-                CheckpointOwner::User { name } => CheckpointOwnerSummary::User { name },
-                CheckpointOwner::Fork {
-                    target_namespace_id,
-                } => CheckpointOwnerSummary::Fork {
-                    target_namespace_id,
-                },
-            },
+            owner: super::checkpoint_owner_summary(record.owner),
             created_at_ms: record.created_at_ms,
             expires_at_ms: record.expires_at_ms,
             checkpoint_seq: record.manifest_head_seq,

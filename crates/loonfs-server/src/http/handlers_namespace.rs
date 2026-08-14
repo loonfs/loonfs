@@ -342,7 +342,7 @@ pub(super) async fn fork_namespace(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
-            (status = 200, description = "Checkpoint created", body = CreateCheckpointResponse),
+            (status = 200, description = "Namespace envelope containing the created checkpoint", body = CreateCheckpointResponse),
             (status = 400, description = "Invalid namespace id, name, or lifetime", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -383,7 +383,7 @@ pub(super) async fn create_checkpoint(
             ("cursor" = Option<String>, Query, description = "Opaque checkpoint-list page cursor")
         ),
         responses(
-            (status = 200, description = "Active checkpoint records", body = ListCheckpointsResponse),
+            (status = 200, description = "Active checkpoint objects", body = ListCheckpointsResponse),
             (status = 400, description = "Invalid namespace id, limit, or cursor", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -439,7 +439,7 @@ pub(super) async fn list_checkpoints(
             ("checkpoint_id" = String, Path, description = "Checkpoint id")
         ),
         responses(
-            (status = 200, description = "Checkpoint released (or already gone)", body = ReleaseCheckpointResponse),
+            (status = 200, description = "Checkpoint release accepted (including an already released or reaped checkpoint)", body = ReleaseCheckpointResponse),
             (status = 400, description = "Invalid id, or the checkpoint is fork-owned", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
