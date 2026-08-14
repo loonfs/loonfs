@@ -283,7 +283,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
     let paths = response
         .matches
         .iter()
-        .map(|found| found.absolute_path.as_str())
+        .map(|found| found.path.as_str())
         .collect::<Vec<_>>();
     assert_eq!(paths.len(), 2);
     assert_eq!(
@@ -350,7 +350,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
     scan.allow_scan = true;
     let response = harness.success("overlapping inode sources", &scan).await;
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].absolute_path, "/overlap.txt");
+    assert_eq!(response.matches[0].path, "/overlap.txt");
     assert_eq!(response.matches[0].revision_no.0, 2);
     assert_eq!(response.matches[0].line, "x WAL revision");
 
@@ -485,7 +485,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     assert!(indexed.built_through_seq < indexed.head_seq);
     assert!(indexed.tail_scanned);
     assert_eq!(indexed.matches.len(), 1);
-    assert_eq!(indexed.matches[0].absolute_path, "/docs/indexed.txt");
+    assert_eq!(indexed.matches[0].path, "/docs/indexed.txt");
     assert_eq!(indexed.matches[0].line_number, 1);
     assert_eq!(indexed.matches[0].byte_offset, 0);
     assert_eq!(indexed.matches[0].line, "indexed-needle");
@@ -498,7 +498,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     assert_eq!(tail.matches.len(), 1);
     assert!(tail.tail_scanned);
     assert!(tail.built_through_seq < tail.head_seq);
-    assert_eq!(tail.matches[0].absolute_path, "/tail/tail-hit.txt");
+    assert_eq!(tail.matches[0].path, "/tail/tail-hit.txt");
 
     let mut scan_off = request("ab");
     harness
@@ -525,7 +525,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             scanned
                 .matches
                 .iter()
-                .map(|found| found.absolute_path.as_str().to_owned()),
+                .map(|found| found.path.as_str().to_owned()),
         );
         let Some(cursor) = scanned.next_cursor else {
             break;
@@ -545,13 +545,13 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     case_folded.case_insensitive = true;
     let case_folded = harness.success("case folding", &case_folded).await;
     assert_eq!(case_folded.matches.len(), 1);
-    assert_eq!(case_folded.matches[0].absolute_path, "/docs/case.txt");
+    assert_eq!(case_folded.matches[0].path, "/docs/case.txt");
 
     let visible = harness
         .success("deleted and moved visibility", &request("visibility-token"))
         .await;
     assert_eq!(visible.matches.len(), 1);
-    assert_eq!(visible.matches[0].absolute_path, "/archive/moved.txt");
+    assert_eq!(visible.matches[0].path, "/archive/moved.txt");
 
     let mut binary = request("ry");
     binary.allow_scan = true;
@@ -580,11 +580,11 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         assert!(page.tail_scanned);
         assert!(page.matches.len() <= 17);
         for found in &page.matches {
-            assert!(found.absolute_path.starts_with("/budget/candidate-"));
+            assert!(found.path.starts_with("/budget/candidate-"));
             assert_eq!(found.line_number, 1);
             assert_eq!(found.byte_offset, 0);
             assert_eq!(found.line, "budget-needle without the final letter");
-            assert!(matched_paths.insert(found.absolute_path.clone()));
+            assert!(matched_paths.insert(found.path.clone()));
         }
         let Some(cursor) = page.next_cursor else {
             break;

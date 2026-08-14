@@ -32,11 +32,11 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/filesystem/downloads",
+        path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
         description = "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = BeginDownloadRequest,
         responses(
             (status = 200, description = "Download authorized", body = BeginDownloadResponse),
@@ -65,10 +65,10 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
 /// come here at all, which is the entire point.
 pub(super) async fn begin_download(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<BeginDownloadRequest>,
 ) -> Result<Json<BeginDownloadResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     // A store either authorizes direct transfers or it does not, and one
     // that does can always sign a read — so this asks for the bundle, not
     // for a direction within it.
@@ -102,7 +102,7 @@ pub(super) async fn begin_download(
 
     Ok(Json(BeginDownloadResponse {
         namespace_id,
-        absolute_path: target.absolute_path,
+        path: target.absolute_path,
         revision_no: target.revision_no,
         content_ref: target.content_ref,
         access: ObjectTransferAccess::PresignedUrl {

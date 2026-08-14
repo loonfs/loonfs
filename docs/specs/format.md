@@ -731,18 +731,15 @@ the generation as `tombstone_seq` and `tombstone_delta_index` beside
 independent optional `parent_inode_id`, `name_key`, and `display_name`
 fields does not decode.
 
-Which deletions are recoverable *right now* is a separate question from the
-event history that decides it, and it has its own family. Materialization
-derives an `active-deletions` row from every tombstone event: a `set` adds a
-`listed` row keyed by `(deleted_at_seq, root_inode_id)` — the exact handle
-`undelete` takes — carrying the deletion's wall-clock stamp and a copy of
-its `deleted_direntry`, and a `revoke` adds a `removed` row repeating its
-target's key. The two rows for one deletion sort together with `removed` first, so an
-ascending scan sees a removal before the row it removes and reorganization
-drops the pair. Reading the recoverable set is therefore a range scan in
-deletion order, not a walk over every deletion the namespace ever recorded.
-Because the family is derived, the tombstone rows stay authoritative: a
-disagreement between the two is corruption of the derived family.
+The `active-deletions` family tracks which deletions can still be restored. A
+`set` tombstone adds a `listed` row keyed by `(deleted_at_seq, root_inode_id)`.
+The API exposes that pair as `(deletion_seq, inode_id)`. The row also stores
+the deletion time and `deleted_direntry`. A `revoke` tombstone adds a
+`removed` row with the same key. The two rows sort together with `removed`
+first, so reorganization can discard both.
+
+The recoverable set is read as a range scan in deletion order. Tombstone rows
+remain authoritative because this family is derived from them.
 
 A namespace head has exactly two recorded states: `active` (the default; an
 absent field reads as active) and terminal `deleted`. There is no
@@ -1404,9 +1401,9 @@ The first standard lower-level mutation set includes:
 - `replace_file(inode_id, base_revision_no, content_ref)`
 - `rename(inode_id, new_parent_inode_id, new_display_name)`
 - `delete_file(inode_id)`
-- `delete_subtree(root_inode_id)`
+- `delete_subtree(inode_id)`
 - `restore_revision(inode_id, source_revision_no, base_revision_no)`
-- `undelete(inode_id, deleted_at_seq, parent_inode_id, display_name)`
+- `undelete(inode_id, deletion_seq, parent_inode_id, display_name)`
 - `update_attributes(inode_id, base_attributes_revision_no, attributes_revision_no, attributes)`
 
 The path-oriented filesystem surface may compile higher-level operations into
@@ -2506,7 +2503,7 @@ authorization can arrive without a format break:
 1. Authorization state is control-plane state. ACL or share changes never
    advance namespace `seq` and never appear in the change feed.
 2. An access grant targets durable identity — a whole namespace or a subtree
-   identified by `(namespace_id, root_inode_id)` — never path text. Paths are
+   identified by `(namespace_id, inode_id)` — never path text. Paths are
    presentation; inode-rooted identity is durable.
 
 ## 8. Optional commit metadata, resource properties, and timestamps

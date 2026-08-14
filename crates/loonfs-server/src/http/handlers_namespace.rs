@@ -196,11 +196,11 @@ pub(super) async fn create_namespace(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/namespaces/{namespace}",
+        path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Get namespace status",
         description = "Returns the current head, manifest, checkpoint, WAL tail, and retention state for a namespace.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Namespace status", body = loonfs_api::NamespaceStatusResponse),
             (status = 400, description = "Invalid namespace id", body = ApiError),
@@ -213,11 +213,11 @@ pub(super) async fn create_namespace(
 )]
 pub(super) async fn namespace_status(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::NamespaceStatusResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let status = state
         .admin
         .namespace_status(&namespace_id)
@@ -230,12 +230,12 @@ pub(super) async fn namespace_status(
     feature = "openapi",
     utoipa::path(
         delete,
-        path = "/v0/namespaces/{namespace}",
+        path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Delete namespace",
         description = "Marks a namespace as deleted.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("expected_head_seq" = Option<String>, Query, description = "Delete only if the namespace head is still at this sequence")
         ),
         responses(
@@ -251,12 +251,12 @@ pub(super) async fn namespace_status(
 )]
 pub(super) async fn delete_namespace(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     query: AppQuery<DeleteNamespaceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::DeleteNamespaceResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
     let options = DeleteNamespaceOptions {
         expected_head_seq: query
@@ -288,11 +288,11 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/forks",
+        path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
         summary = "Fork namespace",
         description = "Creates a new namespace as a fork from the source namespace's current durable view.",
-        params(("namespace" = String, Path, description = "Source namespace id")),
+        params(("namespace_id" = String, Path, description = "Source namespace id")),
         request_body = ForkNamespaceRequest,
         responses(
             (status = 200, description = "Namespace forked", body = loonfs_api::NamespaceSummary),
@@ -307,10 +307,10 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
 )]
 pub(super) async fn fork_namespace(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
-    let source_namespace_id = namespace.into_id()?;
+    let source_namespace_id = namespace_id_path.into_id()?;
     let summary = state
         .writer
         .fork_namespace(&source_namespace_id, &request.new_namespace_id)
@@ -323,11 +323,11 @@ pub(super) async fn fork_namespace(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/checkpoints",
+        path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
         summary = "Create checkpoint",
         description = "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is released, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
             (status = 200, description = "Checkpoint created", body = CreateCheckpointResponse),
@@ -342,10 +342,10 @@ pub(super) async fn fork_namespace(
 )]
 pub(super) async fn create_checkpoint(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<CreateCheckpointRequest>,
 ) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let response = state
         .admin
         .create_checkpoint(
@@ -361,11 +361,11 @@ pub(super) async fn create_checkpoint(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/admin/namespaces/{namespace}/checkpoints",
+        path = "/v0/admin/namespaces/{namespace_id}/checkpoints",
         tag = "admin",
         summary = "List checkpoints",
         description = "Lists every active checkpoint record on the namespace, oldest first. Each record is a garbage-collection root, and its id is what the release endpoint takes; because a checkpoint name is a label rather than a key, this is the only way to find a pin whose creation response is gone. An expired record that no collection pass has released yet is still active and is listed, with its expiry in the entry — the operator is looking for roots, and a record that still pins its basis is one. Released records are absent: a release is what stops a record pinning anything.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Active checkpoint records", body = ListCheckpointsResponse),
             (status = 400, description = "Invalid namespace id", body = ApiError),
@@ -377,11 +377,11 @@ pub(super) async fn create_checkpoint(
 )]
 pub(super) async fn list_checkpoints(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let response = state
         .admin
         .list_checkpoints(&namespace_id)
@@ -394,12 +394,12 @@ pub(super) async fn list_checkpoints(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",
+        path = "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
         tag = "admin",
         summary = "Release checkpoint",
         description = "Releases a user-owned checkpoint pin by id. Idempotent: releasing an already-released or reaped record succeeds. The record is reaped by a later garbage-collection pass; its pinned data becomes collectable only on the pass after that.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("checkpoint_id" = String, Path, description = "Checkpoint id")
         ),
         responses(
@@ -413,12 +413,12 @@ pub(super) async fn list_checkpoints(
 )]
 pub(super) async fn release_checkpoint(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     path: AppPath<CheckpointPathParams>,
     headers: HeaderMap,
 ) -> Result<Json<ReleaseCheckpointResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let CheckpointPathParams { checkpoint_id } = path.into_params()?;
     let checkpoint_id = parse_checkpoint_id(&checkpoint_id)?;
     let response = state
@@ -448,11 +448,11 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/maintenance/step",
+        path = "/v0/admin/namespaces/{namespace_id}/maintenance/step",
         tag = "admin",
         summary = "Run maintenance step",
         description = "Runs one bounded maintenance step. The body selects the actions by naming them: `metadata` folds the WAL tail once it reaches the threshold and merges one bounded reorganization unit, `advance_retention: true` advances the retention floor, and `gc` runs one bounded garbage-collection pass. Selected actions run in that order, each reports separately, and an absent report means the body did not select that action. A body that selects nothing is rejected. Nothing surrenders replay history or sweeps objects unless the body asked for it. A deleted namespace accepts a step that selects `gc` alone, which is how its reclaimable state is collected; any other selection is refused. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body(content = MaintenanceStepRequest, description = "The actions this step selects"),
         responses(
             (status = 200, description = "Maintenance step completed", body = MaintenanceStepResponse),
@@ -465,10 +465,10 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
 )]
 pub(super) async fn maintenance_step(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     OptionalAppJson(request): OptionalAppJson<MaintenanceStepRequest>,
 ) -> Result<Json<MaintenanceStepResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let plan = loonfs::MaintenancePlan::from_request(request.unwrap_or_default())
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let result = state

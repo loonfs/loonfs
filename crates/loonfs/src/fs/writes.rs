@@ -643,14 +643,12 @@ impl FsWriter {
         .await
     }
 
-    /// Recovers a deleted file or subtree: clears the tombstone rooted at
-    /// `inode_id` and binds it at `absolute_path`. The inode id is the one
-    /// the delete reported (also visible in the change feed).
+    /// Restores a deleted file or subtree, optionally at a new path.
     pub async fn undelete(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         absolute_path: Option<&str>,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
@@ -671,7 +669,7 @@ impl FsWriter {
                 options.commit.message.clone(),
                 FilesystemOperation::Undelete {
                     inode_id,
-                    deleted_at_seq,
+                    deletion_seq,
                     path,
                 },
             ),

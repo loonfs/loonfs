@@ -112,7 +112,7 @@ async fn a_capability_failure_is_not_reported_as_no_direct_download() {
 fn grant(content_ref: ContentRef, url: &str) -> BeginDownloadResponse {
     BeginDownloadResponse {
         namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-        absolute_path: AbsolutePath::parse("/big.bin").expect("absolute path"),
+        path: AbsolutePath::parse("/big.bin").expect("absolute path"),
         revision_no: RevisionNo(1),
         content_ref,
         access: ObjectTransferAccess::PresignedUrl {

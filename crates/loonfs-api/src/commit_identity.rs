@@ -229,11 +229,11 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         },
         FilesystemOperation::Undelete {
             inode_id,
-            deleted_at_seq,
+            deletion_seq,
             path,
         } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
-            deleted_at_seq: *deleted_at_seq,
+            deleted_at_seq: *deletion_seq,
             absolute_path: path.as_ref().map(|path| path.as_str()),
         },
         FilesystemOperation::UpdateAttributes {
@@ -688,7 +688,7 @@ mod tests {
             None,
             &[FilesystemOperation::Undelete {
                 inode_id: InodeId(42),
-                deleted_at_seq: ChangeSeq(17),
+                deletion_seq: ChangeSeq(17),
                 path: Some(AbsolutePath::parse("/docs/report.txt").expect("path")),
             }],
         )
@@ -720,7 +720,7 @@ mod tests {
             None,
             &[FilesystemOperation::Undelete {
                 inode_id: InodeId(42),
-                deleted_at_seq: ChangeSeq(17),
+                deletion_seq: ChangeSeq(17),
                 path: None,
             }],
         )

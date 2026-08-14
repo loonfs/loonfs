@@ -24,7 +24,7 @@ pub struct AuthoritativePathEntry {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// Absolute path as rendered from stored display names.
-    pub absolute_path: AbsolutePath,
+    pub path: AbsolutePath,
     /// Stable inode identity for this item.
     pub inode_id: InodeId,
     /// Actor that created this inode, as supplied by the application.
@@ -171,7 +171,7 @@ pub struct ListPathEntriesResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// Absolute path of the listed directory.
-    pub absolute_path: AbsolutePath,
+    pub path: AbsolutePath,
     /// Namespace head sequence this listing was read from.
     pub head_seq: ChangeSeq,
     /// Directory entries for this page.
@@ -205,7 +205,7 @@ mod tests {
     ) -> AuthoritativePathEntry {
         AuthoritativePathEntry {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            absolute_path: AbsolutePath::parse(path).expect("absolute path"),
+            path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if parent_inode_id.is_some() { 2 } else { 1 }),
             created_by: ActorRef::loonfs_system(),
             created_at_ms: 1_752_624_000_000,
@@ -224,7 +224,7 @@ mod tests {
             serde_json::to_value(&named).expect("serialize named entry"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "absolute_path": "/docs",
+                "path": "/docs",
                 "inode_id": 2,
                 "created_by": { "kind": "system", "id": "loonfs" },
                 "created_at_ms": 1_752_624_000_000_u64,
@@ -237,7 +237,7 @@ mod tests {
 
         let response = ListPathEntriesResponse {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            absolute_path: AbsolutePath::parse("/").expect("absolute path"),
+            path: AbsolutePath::parse("/").expect("absolute path"),
             head_seq: ChangeSeq(3),
             entries: vec![named],
             next_cursor: None,
@@ -246,11 +246,11 @@ mod tests {
             serde_json::to_value(response).expect("serialize listing"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "absolute_path": "/",
+                "path": "/",
                 "head_seq": 3,
                 "entries": [{
                     "namespace_id": "demo",
-                    "absolute_path": "/docs",
+                    "path": "/docs",
                     "inode_id": 2,
                     "created_by": { "kind": "system", "id": "loonfs" },
                     "created_at_ms": 1_752_624_000_000_u64,
@@ -279,7 +279,7 @@ mod tests {
             serde_json::to_value(file).expect("serialize file entry"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "absolute_path": "/report.txt",
+                "path": "/report.txt",
                 "inode_id": 2,
                 "created_by": { "kind": "system", "id": "loonfs" },
                 "created_at_ms": 1_752_624_000_000_u64,
@@ -419,19 +419,63 @@ mod tests {
         let projected_json = serde_json::to_value(projected).expect("serialize projected entry");
         assert!(projected_json.pointer("/attributes/attributes").is_none());
     }
+
+    #[test]
+    fn trash_handle_copies_directly_into_an_undelete_operation() {
+        let trash = TrashEntry {
+            inode_id: InodeId(42),
+            deletion_seq: ChangeSeq(417),
+            deleted_at_ms: 1_752_625_000_000,
+            deleted_by: ActorRef::loonfs_system(),
+            parent_inode_id: Some(InodeId(7)),
+            name_key: Some(NameKey::parse("report.txt").expect("name key")),
+            display_name: Some(DisplayName::parse("Report.txt").expect("display name")),
+        };
+        let trash_json = serde_json::to_value(trash).expect("serialize trash entry");
+        assert_eq!(trash_json["inode_id"], serde_json::json!(42));
+        assert_eq!(trash_json["deletion_seq"], serde_json::json!(417));
+        assert!(trash_json.get("root_inode_id").is_none());
+        assert!(trash_json.get("deleted_at_seq").is_none());
+
+        let operation_json = serde_json::json!({
+            "kind": "undelete",
+            "inode_id": trash_json["inode_id"].clone(),
+            "deletion_seq": trash_json["deletion_seq"].clone()
+        });
+        let operation: crate::v0::FilesystemOperation =
+            serde_json::from_value(operation_json).expect("decode copied trash handle");
+        assert!(matches!(
+            operation,
+            crate::v0::FilesystemOperation::Undelete {
+                inode_id: InodeId(42),
+                deletion_seq: ChangeSeq(417),
+                path: None,
+            }
+        ));
+
+        assert!(
+            serde_json::from_value::<crate::v0::FilesystemOperation>(serde_json::json!({
+                "kind": "undelete",
+                "inode_id": 42,
+                "deleted_at_seq": 417
+            }))
+            .is_err(),
+            "the retired deletion handle must not decode"
+        );
+    }
 }
 
-/// One recoverable deletion: an active subtree tombstone plus the identity
-/// of the binding it deleted, when the delete recorded one. Entries with no
-/// recorded name predate the enriched tombstone rows; their inode and
-/// sequence still form a complete `undelete` handle.
+/// One deletion that can still be restored.
+///
+/// `inode_id` and `deletion_seq` are sufficient to restore it. The original
+/// parent and name are included when they were recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
-    /// Root inode the deletion hid; half of the recovery handle.
-    pub root_inode_id: InodeId,
-    /// Commit sequence of the deletion; the other half of the handle.
-    pub deleted_at_seq: ChangeSeq,
+    /// Inode hidden by the deletion.
+    pub inode_id: InodeId,
+    /// Commit sequence that identifies this deletion.
+    pub deletion_seq: ChangeSeq,
     /// Time of the deletion, in Unix milliseconds.
     pub deleted_at_ms: u64,
     /// Actor responsible for the deletion.

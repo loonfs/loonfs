@@ -766,14 +766,14 @@ impl EmbeddedBackend {
         namespace: &NamespaceId,
         path: Option<&AbsolutePath>,
         inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         options: &UndeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(namespace, || {
             self.writer.undelete(
                 namespace,
                 inode_id,
-                deleted_at_seq,
+                deletion_seq,
                 path.map(|path| path.as_str()),
                 options.clone(),
             )

@@ -36,7 +36,6 @@ use std::path::Path;
 
 const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "aborted_at_ms",
-    "absolute_path",
     "active_acquired_at_ms",
     "active_deletion_seq",
     "active_writer",
@@ -80,7 +79,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "cursor_inode_id",
     "degraded_retention",
     "degraded_roots",
-    "deleted_at_seq",
+    "deletion_seq",
     "deleted_by",
     "deleted_direntry",
     "destination_exists",
@@ -523,7 +522,7 @@ async fn every_deadline_exemption_names_a_served_route() {
 
     for route in super::DEADLINE_EXEMPT_ROUTES {
         let uri = route
-            .replace("{namespace}", "deadline-exempt")
+            .replace("{namespace_id}", "deadline-exempt")
             .replace("{upload_id}", "upl_deadline_exempt");
         let response = router
             .clone()
@@ -1330,7 +1329,7 @@ async fn runtime_created_state_is_readable_through_http() {
         .stat_path(&target, &Default::default())
         .await
         .expect("stat file");
-    assert_eq!(stat.absolute_path, "/notes/hello.txt");
+    assert_eq!(stat.path, "/notes/hello.txt");
     assert_eq!(stat.size_bytes(), Some(18));
     let bytes = harness
         .client
@@ -3352,7 +3351,7 @@ mod direct_download {
             .begin_download(&target, None)
             .await
             .expect("download grant");
-        assert_eq!(grant.absolute_path.as_str(), "/big.bin");
+        assert_eq!(grant.path.as_str(), "/big.bin");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
 
         let mut received = Vec::new();

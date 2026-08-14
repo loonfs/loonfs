@@ -1082,7 +1082,7 @@ mod tests {
     fn test_entry() -> AuthoritativePathEntry {
         AuthoritativePathEntry {
             namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-            absolute_path: loonfs_api::AbsolutePath::parse("/file.bin").expect("absolute path"),
+            path: loonfs_api::AbsolutePath::parse("/file.bin").expect("absolute path"),
             inode_id: loonfs_api::InodeId(1),
             created_by: loonfs_api::ActorRef::loonfs_system(),
             created_at_ms: 1,

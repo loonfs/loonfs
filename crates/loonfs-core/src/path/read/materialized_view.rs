@@ -357,7 +357,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             AuthoritativePathEntryKind::File { content_ref, .. } => content_ref.clone(),
             AuthoritativePathEntryKind::Directory {} => {
                 return Err(CoreError::ExpectedFile {
-                    path: entry.absolute_path.to_string(),
+                    path: entry.path.to_string(),
                     kind: InodeKind::Directory,
                 });
             }
@@ -395,7 +395,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             } => (*revision_no, content_ref.clone()),
             AuthoritativePathEntryKind::Directory {} => {
                 return Err(CoreError::ExpectedFile {
-                    path: entry.absolute_path.to_string(),
+                    path: entry.path.to_string(),
                     kind: InodeKind::Directory,
                 });
             }
@@ -410,7 +410,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let object_key = content_object_key_for_ref(&self.content_store_id, &content_ref)?;
 
         Ok(DirectDownloadTarget {
-            absolute_path: entry.absolute_path,
+            absolute_path: entry.path,
             revision_no,
             content_ref,
             object_key,
@@ -427,7 +427,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?;
         if matches!(entry.kind, AuthoritativePathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
-                path: entry.absolute_path.to_string(),
+                path: entry.path.to_string(),
                 kind: InodeKind::Directory,
             });
         }
@@ -489,8 +489,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entries = deletions
             .into_iter()
             .map(|deletion| TrashEntry {
-                root_inode_id: deletion.root_inode_id,
-                deleted_at_seq: deletion.deleted_at_seq,
+                inode_id: deletion.root_inode_id,
+                deletion_seq: deletion.deleted_at_seq,
                 deleted_at_ms: deletion.deleted_at_ms,
                 deleted_by: deletion.deleted_by,
                 parent_inode_id: deletion
@@ -592,7 +592,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?;
         if matches!(entry.kind, AuthoritativePathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
-                path: entry.absolute_path.to_string(),
+                path: entry.path.to_string(),
                 kind: InodeKind::Directory,
             });
         }
@@ -829,7 +829,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .transpose()?;
         Ok(AuthoritativePathEntry {
             namespace_id: self.namespace_id.clone(),
-            absolute_path,
+            path: absolute_path,
             inode_id: resolved.inode_id,
             created_by: resolved.created_by.clone(),
             created_at_ms: resolved.created_at_ms,

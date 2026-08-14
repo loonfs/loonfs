@@ -850,7 +850,7 @@ impl GrepService {
                     continue;
                 }
                 if let Some(scope) = &scope {
-                    if !path_within_scope(&path, &scope.absolute_path) {
+                    if !path_within_scope(&path, &scope.path) {
                         rejected_frontier = Some(inode_id);
                         continue;
                     }
@@ -921,7 +921,7 @@ impl GrepService {
                     }
                     resume_cursor = Some((inode_id, found.byte_offset));
                     matches.push(GrepMatch {
-                        absolute_path: candidate.path.clone(),
+                        path: candidate.path.clone(),
                         inode_id,
                         revision_no: candidate.revision_no,
                         line_number: found.line_number,
@@ -993,7 +993,7 @@ async fn scan_candidate_inodes(
             inodes.insert(entry.inode_id);
             return Ok(inodes);
         }
-        Some(entry) => entry.absolute_path.clone(),
+        Some(entry) => entry.path.clone(),
         None => AbsolutePath::root(),
     };
     let mut directories = vec![root];
@@ -1007,7 +1007,7 @@ async fn scan_candidate_inodes(
                 .await?;
             for entry in page.items {
                 match entry.inode_kind() {
-                    InodeKind::Directory => directories.push(entry.absolute_path),
+                    InodeKind::Directory => directories.push(entry.path),
                     InodeKind::File => {
                         inodes.insert(entry.inode_id);
                     }

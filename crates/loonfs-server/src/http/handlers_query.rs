@@ -19,11 +19,11 @@ use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceRea
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/query/grep",
+        path = "/v0/namespaces/{namespace_id}/query/grep",
         tag = "query",
         summary = "Content search",
         description = "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized steady-state grep root.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = GrepRequest,
         responses(
             (status = 200, description = "One page of matches", body = GrepResponse),
@@ -41,10 +41,10 @@ use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceRea
 )]
 pub(super) async fn grep(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<GrepRequest>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     // First touch: on a deployment that maintains this index, a search is
     // also the hint that someone cares about this namespace again — after a
     // restart, nothing else has said so.
@@ -98,11 +98,11 @@ pub(super) async fn grep_index_not_maintained(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/grep/index/enable",
+        path = "/v0/admin/namespaces/{namespace_id}/grep/index/enable",
         tag = "admin",
         summary = "Enable the grep index",
         description = "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. The response reports the durable lifecycle it published or found: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with whichever phase it is in. Idempotent. Requires this deployment to maintain the grep index.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep root enabled or already enabled", body = EnableGrepIndexResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
@@ -117,11 +117,11 @@ pub(super) async fn grep_index_not_maintained(
 )]
 pub(super) async fn enable_grep_index(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<EnableGrepIndexResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let outcome = state
         .grep_worker
         .as_ref()
@@ -160,11 +160,11 @@ pub(super) async fn enable_grep_index(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/admin/namespaces/{namespace}/grep/index",
+        path = "/v0/admin/namespaces/{namespace_id}/grep/index",
         tag = "admin",
         summary = "Read the grep index's lifecycle",
         description = "Reports where the namespace's grep index is: `disabled`, `backfilling` with the sequence it walks toward and how far the walk got, or `steady` with the watermark it has built through. One grep root read, no side effects. A namespace that never enabled the index reads as `disabled`. Requires this deployment to maintain the grep index.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "The index's lifecycle and bookkeeping", body = GrepIndexStatusResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
@@ -177,11 +177,11 @@ pub(super) async fn enable_grep_index(
 )]
 pub(super) async fn grep_index_status(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let root = state
         .grep_worker
         .as_ref()
@@ -211,11 +211,11 @@ pub(super) async fn grep_index_status(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/grep/index/disable",
+        path = "/v0/admin/namespaces/{namespace_id}/grep/index/disable",
         tag = "admin",
         summary = "Disable the grep index",
         description = "Disables the namespace's grep root and clears its segment references with one durable compare-and-swap; index maintenance stops on its own once a step reads the disabled root. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep root disabled or already disabled", body = DisableGrepIndexResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
@@ -230,11 +230,11 @@ pub(super) async fn grep_index_status(
 )]
 pub(super) async fn disable_grep_index(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
 ) -> Result<Json<DisableGrepIndexResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     // Disabling is one durable compare-and-swap and nothing else. A step
     // already running loses its own publication race to this one and
     // retries; the retry reads a disabled root, concludes there is nothing
@@ -272,11 +272,11 @@ pub(super) async fn disable_grep_index(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/grep/index/gc",
+        path = "/v0/admin/namespaces/{namespace_id}/grep/index/gc",
         tag = "admin",
         summary = "Collect grep-index garbage",
         description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. `max_objects` bounds the reads the pass spends and returns a `next_cursor` when keys remain; resuming re-reads liveness and the grep root, so a cursor only skips enumeration. Requires this deployment to maintain the grep index.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = Option<GrepGcRequest>,
         responses(
             (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
@@ -290,12 +290,12 @@ pub(super) async fn disable_grep_index(
 )]
 pub(super) async fn gc_grep_index(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     OptionalAppJson(request): OptionalAppJson<GrepGcRequest>,
 ) -> Result<Json<GrepGcResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let request = request.unwrap_or_default();
     let report = state
         .grep_worker

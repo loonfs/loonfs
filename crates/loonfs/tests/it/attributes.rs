@@ -239,7 +239,7 @@ fn read_options_project_grouped_attributes_or_none() {
     assert_eq!(projected.entries.len(), 2);
     for entry in &projected.entries {
         let projection = entry.attributes.as_ref().expect("projected attributes");
-        match entry.absolute_path.as_str() {
+        match entry.path.as_str() {
             "/docs/report.txt" => {
                 assert_eq!(projection.attributes_revision_no, AttributeRevisionNo(1));
                 assert_eq!(

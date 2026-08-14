@@ -76,7 +76,7 @@ pub(super) async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
 
 pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
-    deleted_at_seq: ChangeSeq,
+    deletion_seq: ChangeSeq,
     absolute_path: Option<&AbsolutePath>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<PlannedOperation> {
@@ -114,7 +114,7 @@ pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
         None => {
             let Some(deletion) = view
                 .metadata_state
-                .recoverable_deletion(deleted_at_seq, inode_id)
+                .recoverable_deletion(deletion_seq, inode_id)
                 .await?
             else {
                 return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
@@ -136,7 +136,7 @@ pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
     Ok(PlannedOperation::new(
         vec![ApiCommitOp::Undelete {
             inode_id,
-            deleted_at_seq,
+            deletion_seq,
             parent_inode_id,
             display_name: display_name.clone(),
         }],

@@ -86,14 +86,14 @@ fn filesystem_operations_match_core_semantics() {
     let stat = fs
         .stat_path_blocking(&namespace_id, "/docs/hello.txt")
         .expect("stat file");
-    assert_eq!(stat.absolute_path, "/docs/hello.txt");
+    assert_eq!(stat.path, "/docs/hello.txt");
     assert_eq!(stat.size_bytes(), Some(5));
 
     let entries = fs
         .list_path_blocking(&namespace_id, "/docs")
         .expect("list docs");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].absolute_path, "/docs/hello.txt");
+    assert_eq!(entries[0].path, "/docs/hello.txt");
 
     let read = fs
         .get_file_bytes_blocking(&namespace_id, "/docs/hello.txt")
@@ -170,7 +170,7 @@ async fn async_runtime_methods_are_the_engine_boundary() {
     .await
     .expect("async stat");
 
-    assert_eq!(async_stat.absolute_path, "/docs/hello.txt");
+    assert_eq!(async_stat.path, "/docs/hello.txt");
     assert_eq!(async_stat.size_bytes(), Some(5));
 }
 

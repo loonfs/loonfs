@@ -1013,7 +1013,7 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
         "undelete",
         FilesystemOperation::Undelete {
             inode_id: file_inode,
-            deleted_at_seq: deleted.committed_seq,
+            deletion_seq: deleted.committed_seq,
             path: None,
         },
         &context,

@@ -53,7 +53,7 @@ async fn listed_files(
         for entry in entries {
             match entry.kind {
                 loonfs::AuthoritativePathEntryKind::Directory {} => {
-                    directories.push(entry.absolute_path.as_str().to_owned());
+                    directories.push(entry.path.as_str().to_owned());
                 }
                 loonfs::AuthoritativePathEntryKind::File {
                     revision_no,
@@ -64,7 +64,7 @@ async fn listed_files(
                     found.insert(
                         entry.inode_id,
                         ListedFile {
-                            absolute_path: entry.absolute_path.as_str().to_owned(),
+                            absolute_path: entry.path.as_str().to_owned(),
                             revision_no,
                             size_bytes,
                             content_ref,

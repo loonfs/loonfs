@@ -75,7 +75,7 @@ impl GrepRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepMatch {
     /// The file's absolute path, derived at the snapshot.
-    pub absolute_path: AbsolutePath,
+    pub path: AbsolutePath,
     /// Durable identity of the matched file.
     pub inode_id: InodeId,
     /// The matched revision (the newest visible one at the snapshot).
@@ -278,7 +278,7 @@ mod tests {
         );
 
         let found = GrepMatch {
-            absolute_path: AbsolutePath::parse("/docs/a.txt").expect("match path"),
+            path: AbsolutePath::parse("/docs/a.txt").expect("match path"),
             inode_id: InodeId(2),
             revision_no: RevisionNo(3),
             line_number: 4,
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(found).expect("serialize grep match"),
             serde_json::json!({
-                "absolute_path": "/docs/a.txt",
+                "path": "/docs/a.txt",
                 "inode_id": 2,
                 "revision_no": 3,
                 "line_number": 4,

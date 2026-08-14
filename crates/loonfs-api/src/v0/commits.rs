@@ -84,9 +84,8 @@ pub enum FilesystemChange {
         /// Spelling of the new binding.
         to_display_name: DisplayName,
     },
-    /// A file or directory subtree was deleted. The enclosing change's
-    /// `committed_seq` is the deletion generation an undelete request passes
-    /// as `deleted_at_seq`.
+    /// A file or directory subtree was deleted. Use the enclosing change's
+    /// `committed_seq` as `deletion_seq` when restoring it.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
     Deleted {
         /// Inode at the root of the deleted subtree.

@@ -198,7 +198,7 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
     let stat = reader
         .stat_path_blocking(&namespace_id, "/docs/new")
         .expect("reader should observe external head advance");
-    assert_eq!(stat.absolute_path, "/docs/new");
+    assert_eq!(stat.path, "/docs/new");
     assert_eq!(stat.head_seq, ChangeSeq(2));
     assert!(raw_store.wal_get_count() > 0);
 }
@@ -484,10 +484,10 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     let stat = stat.expect("stat file");
     let list = list.expect("list docs");
 
-    assert_eq!(stat.absolute_path, "/docs/file.txt");
+    assert_eq!(stat.path, "/docs/file.txt");
     assert_eq!(stat.size_bytes(), Some(4));
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].absolute_path, "/docs/file.txt");
+    assert_eq!(list[0].path, "/docs/file.txt");
 
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.latest_metadata_view_reads, 2);
@@ -664,7 +664,7 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
     let root = fs
         .stat_path_blocking(&namespace_id, "/")
         .expect("stat root after create");
-    assert_eq!(root.absolute_path, "/");
+    assert_eq!(root.path, "/");
     assert_eq!(root.inode_id, InodeId(1));
     assert_eq!(root.inode_kind(), InodeKind::Directory);
     assert_eq!(root.head_seq, ChangeSeq(0));

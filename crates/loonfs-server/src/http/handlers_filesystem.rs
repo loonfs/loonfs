@@ -100,12 +100,12 @@ pub(super) struct ChangesQuery {
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/namespaces/{namespace}/filesystem/list",
+        path = "/v0/namespaces/{namespace_id}/filesystem/list",
         tag = "filesystem",
         summary = "List directory",
         description = "Lists a directory at the current namespace head.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
             ("limit" = Option<String>, Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor"),
@@ -123,12 +123,12 @@ pub(super) struct ChangesQuery {
 )]
 pub(super) async fn list_path_entries(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<ListPathPageQuery>,
 ) -> Result<Json<loonfs_api::ListPathEntriesResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
     let path = query.path;
     // An absent parameter leaves the option type's own default in place, so
@@ -157,12 +157,12 @@ pub(super) async fn list_path_entries(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/namespaces/{namespace}/filesystem/stat",
+        path = "/v0/namespaces/{namespace_id}/filesystem/stat",
         tag = "filesystem",
         summary = "Stat path",
         description = "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
             ("include_attributes" = Option<String>, Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
         ),
@@ -178,12 +178,12 @@ pub(super) async fn list_path_entries(
 )]
 pub(super) async fn stat_path(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<PathQuery>,
 ) -> Result<Json<loonfs_api::AuthoritativePathEntry>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
     let path = query.path;
     let mut options = StatPathOptions::default();
@@ -202,12 +202,12 @@ pub(super) async fn stat_path(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/namespaces/{namespace}/filesystem/content",
+        path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
         description = "Returns file bytes for the current revision at a path, or for a specific retained revision when `revision_no` is provided.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
             ("revision_no" = Option<String>, Query, description = "Optional prior revision number")
         ),
@@ -224,12 +224,12 @@ pub(super) async fn stat_path(
 )]
 pub(super) async fn get_file_bytes(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
     // Content reads buffer the whole file, so the permit must follow those
     // bytes through the response body rather than ending with this handler.
@@ -273,12 +273,12 @@ pub(super) async fn get_file_bytes(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/namespaces/{namespace}/filesystem/trash",
+        path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
         description = "Returns the namespace's recoverable deletions, oldest deletion first. Entries never age out at the retention floor; each carries the inode id and deletion sequence undelete needs, plus the deleted name when the delete recorded one.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("limit" = Option<String>, Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque trash page cursor")
         ),
@@ -293,12 +293,12 @@ pub(super) async fn get_file_bytes(
 )]
 pub(super) async fn list_trash(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<PageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
     let response = state
         .reader
@@ -318,12 +318,12 @@ pub(super) async fn list_trash(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/namespaces/{namespace}/filesystem/revisions",
+        path = "/v0/namespaces/{namespace_id}/filesystem/revisions",
         tag = "filesystem",
         summary = "List file revisions",
         description = "Resolves the current path to a file inode and returns revisions for that file. If the file could be renamed, use the inode revision API for stable identity.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
             ("limit" = Option<String>, Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
@@ -340,12 +340,12 @@ pub(super) async fn list_trash(
 )]
 pub(super) async fn list_file_revisions(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
     let path = query.path;
     let response = state
@@ -367,11 +367,11 @@ pub(super) async fn list_file_revisions(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/commits",
+        path = "/v0/namespaces/{namespace_id}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
         description = "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = ApiCommitRequest,
         responses(
             (status = 200, description = "Commit applied", body = ApiCommitResponse),
@@ -388,10 +388,10 @@ pub(super) async fn list_file_revisions(
 /// The server stores the actor from the request; the shared token does not verify it.
 pub(super) async fn apply_commit(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<ApiCommitRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let ApiCommitRequest {
         commit_id,
         actor,
@@ -484,12 +484,12 @@ pub(super) async fn apply_commit(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/namespaces/{namespace}/changes",
+        path = "/v0/namespaces/{namespace_id}/changes",
         tag = "filesystem",
         summary = "List changes after a sequence",
         description = "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("after_seq" = String, Query, description = "Return committed changes after this sequence"),
             ("limit" = Option<String>, Query, description = "Maximum page size")
         ),
@@ -505,12 +505,12 @@ pub(super) async fn apply_commit(
 )]
 pub(super) async fn list_changes(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
     query: AppQuery<ChangesQuery>,
 ) -> Result<Json<ChangesResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
     let after_seq = parse_after_seq(&query.after_seq)?;
     let limit = resolve_page_limit(query.limit)?;

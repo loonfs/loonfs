@@ -33,5 +33,9 @@ Key each change by `(namespace_id, committed_seq)`. Identify files and
 directories by `inode_id`, because paths can change. Store `commit_id` for
 correlation only; it is unique only while its receipt remains in LoonFS.
 
+For a `deleted` event, the enclosing `committed_seq` is the `deletion_seq`
+used with the event's `inode_id` by trash and undelete. The event does not
+duplicate the sequence inside its payload.
+
 If LoonFS returns `rebootstrap_required`, a checkpoint can rebuild the current
 filesystem state, but it cannot recover activity history that was discarded.

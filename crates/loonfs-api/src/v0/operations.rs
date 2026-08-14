@@ -277,17 +277,16 @@ pub enum FilesystemOperation {
         #[serde(default)]
         behavior: DestinationBehavior,
     },
-    /// Recover a deleted file or subtree: revoke the deletion of
-    /// `inode_id` recorded at `deleted_at_seq` (both reported by the
-    /// delete and by the change feed) and re-bind it. Answers
-    /// `not_deleted` when that generation is not the live one, so a stale
-    /// request never cancels a later delete.
+    /// Restore a deleted file or subtree.
+    ///
+    /// `inode_id` and `deletion_seq` identify one exact deletion. A stale
+    /// sequence returns `not_deleted` and cannot undo a later deletion.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
     Undelete {
         /// Deleted inode to make reachable again.
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         /// Optional destination for the restored inode.
         ///
         /// When absent, the inode is rebound to the parent and name recorded by the
@@ -411,7 +410,7 @@ pub struct ListFileRevisionsResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// Absolute file path requested by the caller.
-    pub absolute_path: AbsolutePath,
+    pub path: AbsolutePath,
     /// File inode whose revisions were returned.
     pub inode_id: InodeId,
     /// Namespace head sequence used for the read.
@@ -1358,13 +1357,13 @@ mod tests {
             (
                 FilesystemOperation::Undelete {
                     inode_id: InodeId(7),
-                    deleted_at_seq: ChangeSeq(8),
+                    deletion_seq: ChangeSeq(8),
                     path: Some(path("/docs/restored")),
                 },
                 serde_json::json!({
                     "kind": "undelete",
                     "inode_id": 7,
-                    "deleted_at_seq": 8,
+                    "deletion_seq": 8,
                     "path": "/docs/restored"
                 }),
             ),
@@ -1426,7 +1425,7 @@ mod tests {
             serde_json::json!({
                 "kind": "undelete",
                 "inode_id": 7,
-                "deleted_at_seq": 8,
+                "deletion_seq": 8,
                 "path": "relative"
             }),
             serde_json::json!({

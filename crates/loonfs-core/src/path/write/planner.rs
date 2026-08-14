@@ -154,9 +154,9 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         } => plan_publish_restore_revision(path, *source_revision_no, view).await,
         FilesystemOperation::Undelete {
             inode_id,
-            deleted_at_seq,
+            deletion_seq,
             path,
-        } => plan_publish_undelete(*inode_id, *deleted_at_seq, path.as_ref(), view).await,
+        } => plan_publish_undelete(*inode_id, *deletion_seq, path.as_ref(), view).await,
         FilesystemOperation::UpdateAttributes {
             path,
             set,
