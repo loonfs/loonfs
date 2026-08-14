@@ -353,6 +353,26 @@ impl ResolvedTarget {
             .await
     }
 
+    /// Describes one currently visible inode, attributes included.
+    pub(crate) async fn stat_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<AuthoritativePathEntry, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .stat_inode(namespace_id, inode_id, &StatPathOptions::default())
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .stat_inode(namespace_id, inode_id, &StatPathOptions::default())
+                .await?),
+        }
+    }
+
     /// Describes a single path entry without its attributes: the shape a
     /// command that only needs the kind or the inode id asks for, so it pays
     /// neither the extra lookup nor the extra bytes over the wire.

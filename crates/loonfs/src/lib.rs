@@ -167,7 +167,7 @@ pub mod uploads {
 /// Direct-download target type used by servers to create a presigned
 /// object-read URL. Most embedded applications do not need this module.
 pub mod downloads {
-    pub use loonfs_core::DirectDownloadTarget;
+    pub use loonfs_core::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 }
 
 /// Typed loaders for inspecting durable namespace control objects.

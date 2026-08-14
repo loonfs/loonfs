@@ -8,7 +8,7 @@
 //! send this method to this URL with these headers, before this instant.
 
 use super::ObjectTransferAccess;
-use crate::{AbsolutePath, ContentRef, NamespaceId, RevisionNo};
+use crate::{AbsolutePath, ContentRef, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 /// What a client names when it asks to read a file directly.
@@ -75,9 +75,37 @@ pub struct BeginDownloadResponse {
     pub access: ObjectTransferAccess,
 }
 
+/// Strict empty body for a download already addressed by route identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct BeginDownloadByInodeRequest {}
+
+/// A short-lived capability to read one inode revision's content object.
+///
+/// Historical inode identity is deliberately path-free: the inode may have
+/// moved since the revision was written or may have no current binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BeginDownloadByInodeResponse {
+    /// Namespace that was read.
+    pub namespace_id: NamespaceId,
+    /// File inode whose revision is authorized.
+    pub inode_id: InodeId,
+    /// Revision the capability reads.
+    pub revision_no: RevisionNo,
+    /// Identity, byte length, and checksum evidence for the authorized object.
+    pub content_ref: ContentRef,
+    /// Short-lived read capability the client uses without learning the raw object key.
+    pub access: ObjectTransferAccess,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BeginDownloadRequest, BeginDownloadResponse};
+    use super::{
+        BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
+        BeginDownloadResponse,
+    };
     use crate::v0::ObjectTransferAccess;
     use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, RevisionNo};
     use std::collections::BTreeMap;
@@ -127,5 +155,29 @@ mod tests {
         let json = serde_json::to_string(&response).expect("serialize response");
         assert!(json.contains(r#""kind":"presigned_url""#));
         assert!(!json.contains("object_key"));
+    }
+
+    #[test]
+    fn an_inode_download_request_is_strictly_empty_and_its_grant_is_path_free() {
+        let request: BeginDownloadByInodeRequest =
+            serde_json::from_str("{}").expect("decode empty request");
+        assert_eq!(request, BeginDownloadByInodeRequest {});
+        assert!(serde_json::from_str::<BeginDownloadByInodeRequest>(r#"{"path":"/old"}"#).is_err());
+
+        let response = BeginDownloadByInodeResponse {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            inode_id: crate::InodeId(42),
+            revision_no: RevisionNo(7),
+            content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
+            access: ObjectTransferAccess::PresignedUrl {
+                method: "GET".to_owned(),
+                url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
+                headers: BTreeMap::new(),
+                expires_at_ms: 1,
+            },
+        };
+        let json = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(json["inode_id"], 42);
+        assert!(json.get("path").is_none());
     }
 }

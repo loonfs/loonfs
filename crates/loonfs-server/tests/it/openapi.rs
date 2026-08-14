@@ -43,6 +43,19 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace_id}/filesystem/content", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/downloads", "post"),
         ("/v0/namespaces/{namespace_id}/filesystem/revisions", "get"),
+        ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", "get"),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            "get",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+            "get",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+            "post",
+        ),
         ("/v0/namespaces/{namespace_id}/commits", "post"),
         ("/v0/namespaces/{namespace_id}/uploads", "post"),
         (
@@ -128,7 +141,82 @@ fn openapi_documents_current_server_paths() {
             assert!(!path_parameter_names.contains("namespace"));
         }
     }
-    assert_eq!(namespace_scoped_operations, 26);
+    assert_eq!(namespace_scoped_operations, 30);
+
+    for (path, method, parameter, schema_name) in [
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
+            "get",
+            "inode_id",
+            "InodeId",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+            "get",
+            "inode_id",
+            "InodeId",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            "get",
+            "inode_id",
+            "InodeId",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+            "get",
+            "revision_no",
+            "RevisionNo",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+            "post",
+            "inode_id",
+            "InodeId",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+            "post",
+            "revision_no",
+            "RevisionNo",
+        ),
+    ] {
+        assert_path_parameter_schema(paths, path, method, parameter, schema_name);
+    }
+
+    for (path, method, operation_id) in [
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
+            "get",
+            "stat_inode",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            "get",
+            "list_file_revisions_by_inode",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+            "get",
+            "get_file_revision_bytes_by_inode",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+            "post",
+            "begin_download_by_inode",
+        ),
+    ] {
+        let actual = paths
+            .get(path)
+            .and_then(|path_item| path_item.get(method))
+            .and_then(|operation| operation.get("operationId"))
+            .and_then(Value::as_str);
+        assert_eq!(
+            actual,
+            Some(operation_id),
+            "unexpected operation id for `{method} {path}`"
+        );
+    }
 }
 
 #[test]
@@ -509,4 +597,35 @@ fn assert_query_params(
             "missing query parameter `{name}` for `{method} {path}`"
         );
     }
+}
+
+fn assert_path_parameter_schema(
+    paths: &serde_json::Map<String, Value>,
+    path: &str,
+    method: &str,
+    parameter_name: &str,
+    schema_name: &str,
+) {
+    let operation = paths
+        .get(path)
+        .and_then(|path_item| path_item.get(method))
+        .unwrap_or_else(|| panic!("missing OpenAPI operation `{method} {path}`"));
+    let parameter = operation
+        .get("parameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|parameter| {
+            parameter.get("in").and_then(Value::as_str) == Some("path")
+                && parameter.get("name").and_then(Value::as_str) == Some(parameter_name)
+        })
+        .unwrap_or_else(|| {
+            panic!("missing path parameter `{parameter_name}` for `{method} {path}`")
+        });
+    let expected_ref = format!("#/components/schemas/{schema_name}");
+    assert_eq!(
+        parameter.pointer("/schema/$ref").and_then(Value::as_str),
+        Some(expected_ref.as_str()),
+        "path parameter `{parameter_name}` for `{method} {path}` does not use `{schema_name}`",
+    );
 }

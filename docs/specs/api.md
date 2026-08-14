@@ -24,7 +24,7 @@ within a plane is expressed as **named features** (section 2).
 
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
-| `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
+| `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
 | `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace_id}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
@@ -130,7 +130,7 @@ Registered limit keys:
 | `pagination.max_limit` | Largest accepted page size for paged requests. A `limit` greater than this value is rejected with 400 `invalid_request`. |
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `core.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
 | `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds what the service buffers on a client's behalf; this one is the provider's own single-request ceiling and is typically far larger. A claim above it answers `content_too_large` at begin, rather than being signed into a write the provider would refuse. Advertised only alongside `core.uploads.direct_put`. |
-| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through a download grant (`POST .../filesystem/downloads`) when `core.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
+| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through the corresponding path or inode download grant when `core.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
@@ -159,7 +159,7 @@ hoc.
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the deployment's provider can sign a write that binds a whole-object checksum and a create-only precondition, on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
-| `core.downloads.direct_get` | Taking download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`). | The server returns a short-lived presigned GET capability for the content object behind one path and revision. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
+| `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0`'s only feature key is `admin.grep.index`; the rest of that plane
@@ -251,6 +251,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `namespace_not_found` | 404 | The namespace has no head, so it does not exist. |
 | `namespace_deleted` | 410 | The namespace's head records the terminal deleted state. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
 | `path_not_found` | 404 | No visible entry at the path. |
+| `inode_not_found` | 404 | No currently visible inode for an inode-addressed current-state read, or no retained inode row for an identity-addressed history read. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id, or one that was aborted: an aborted session will never select content, so it reports the absence that its deletion will. |
 | `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
@@ -659,11 +660,15 @@ A representative v0 binding is shown below.
 | Create a namespace | `POST /v0/namespaces` |
 | Read one namespace's status | `GET /v0/namespaces/{ns}` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
+| Stat an inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
 | List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
+| List file revisions by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
+| Read prior file content by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
 | Take a download grant for one file | `POST /v0/namespaces/{ns}/filesystem/downloads` |
+| Take a download grant by inode | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with strict empty body `{}` |
 | List recoverable deletions | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Apply a commit | `POST /v0/namespaces/{ns}/commits` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
@@ -1322,7 +1327,7 @@ its queue in admission order — requests admitted before the delete publish fir
 after it fail with `namespace_deleted`, and nothing is rejected for a delete
 that ends up failing its precondition.
 
-### 6.4 `GET /filesystem/stat`
+### 6.4 `GET /filesystem/stat` and `GET /inodes/{inode_id}`
 
 The response is one authoritative path entry. Enum values are snake_case per
 the durable naming rules (`format.md`, "Durable naming conventions").
@@ -1381,6 +1386,15 @@ projection never means "no attributes".
 The namespace root is nameless: its entry omits both `parent_inode_id` and
 `display_name`. Every non-root entry carries a validated `display_name`; the
 empty string is not a spelling for the root or for any named path component.
+
+The inode form returns this exact entry shape, including the inode's current
+`path`. It resolves identity through the child-keyed current-binding index;
+it never searches directory listings. A rename therefore changes `path`,
+`parent_inode_id`, and `display_name` as applicable while preserving
+`inode_id`, creation attribution, attributes, and file revision metadata.
+An unknown or not-currently-visible inode answers `inode_not_found`. The root
+inode answers `/` under the same nameless-root rule. `include_attributes`
+has the same syntax and default as path stat.
 
 ### 6.5 `GET /filesystem/list`
 
@@ -1511,17 +1525,25 @@ end of the road: the download transport in section 6.10 reads the same bytes
 without the server holding them, and every deployment that could have let a
 client create such a file offers it.
 
-Revision listing returns newest revisions first and uses the same
-`limit` / `cursor` pattern as directory listing, resolving the current path
-to its current inode. The response echoes that requested path as `path`.
-Responses include `next_cursor` only when another page is
-available. Revision history is never pruned — paging to the end always
+Revision listing returns newest revisions first and uses the standard
+`limit` / `cursor` pattern. The path route resolves the current path to its
+current inode; the inode route addresses that inode directly. The response is
+path-free for both forms: a path is not historical identity, and an inode may
+move while a cursor is held. Responses include `next_cursor` only when another
+page is available. Revision history is never pruned — paging to the end always
 reaches revision 1, regardless of how far the retention floor has advanced.
+
+`GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content`
+likewise resolves the pair directly and verifies the selected `ContentRef`;
+it never re-enters through a current path. A deleted file remains listable and
+readable by inode while its retained rows exist. A directory inode follows the
+existing not-a-file convention (`path_conflict`), an unknown inode answers
+`inode_not_found`, and a missing revision under a valid file inode answers
+`revision_not_found`. Inode routes never answer `path_not_found`.
 
 ```json
 {
   "namespace_id": "demo",
-  "path": "/docs/report.txt",
   "inode_id": 42,
   "head_seq": 418,
   "revisions": [
@@ -2039,6 +2061,36 @@ checks the arriving bytes against:
   }
 }
 ```
+
+The identity-addressed form is
+`POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`.
+Its body is strictly `{}`. Its response deliberately does not invent a path
+for a historical or unbound revision:
+
+```json
+{
+  "namespace_id": "demo",
+  "inode_id": 42,
+  "revision_no": 3,
+  "content_ref": {
+    "kind": "blob_v1",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 314572800,
+    "checksum": { "algorithm": "sha256", "value": "42d..." }
+  },
+  "access": {
+    "kind": "presigned_url",
+    "method": "GET",
+    "url": "https://bucket.s3.us-east-1.amazonaws.com/...&X-Amz-Signature=...",
+    "expires_at_ms": 1780000000000
+  }
+}
+```
+
+Both grant routes use the same proven-provider gate and access shape. The
+inode form resolves the retained `(inode_id, revision_no)` pair directly, so
+it remains available after rename or deletion exactly when the proxied inode
+revision read does.
 
 Four properties follow from the shape, and clients may rely on all of them.
 

@@ -240,6 +240,18 @@ impl EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
+    pub(super) async fn stat_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &StatPathOptions,
+    ) -> Result<AuthoritativePathEntry, BackendError> {
+        self.reader
+            .stat_inode(namespace_id, inode_id, options.clone())
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+    }
+
     pub(super) async fn get_file_bytes(
         &self,
         spec: &NamespacePath,

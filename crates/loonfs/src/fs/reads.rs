@@ -3,7 +3,7 @@
 //! own data from the filesystem walks.
 
 use super::core::{default_page_limit, file_revisions_page_response};
-use crate::downloads::DirectDownloadTarget;
+use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::FsReader;
 use crate::Result;
 use crate::{
@@ -45,6 +45,38 @@ impl FsReader {
         let entry = engine
             .resolve_path(absolute_path, options, &read_context)
             .await?;
+        tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_TABLES);
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
+        Ok(entry)
+    }
+
+    /// Resolves a currently visible inode to its canonical entry at the
+    /// current head, projecting what `options` asks for.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.stat_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "stat_inode",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            cache_path = tracing::field::Empty,
+        )
+    )]
+    pub async fn stat_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: StatPathOptions,
+    ) -> Result<AuthoritativePathEntry> {
+        let span = tracing::Span::current();
+        self.core.record_trace_context(&span);
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let entry = engine.stat_inode(inode_id, options, &read_context).await?;
         tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_TABLES);
         self.core
             .inner
@@ -245,6 +277,26 @@ impl FsReader {
         Ok(target)
     }
 
+    /// Resolves one retained inode revision to the content object a direct
+    /// read would fetch. The answer is path-free and does not require the
+    /// inode to be currently visible.
+    pub async fn direct_download_target_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let target = engine
+            .direct_download_target_by_inode(inode_id, revision_no, &read_context)
+            .await?;
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
+        Ok(target)
+    }
+
     /// Reads one page of the files visible in the state a checkpoint pins,
     /// in ascending inode-id order.
     ///
@@ -367,10 +419,34 @@ impl FsReader {
             .record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
-            absolute_path,
             read_context.head.seq,
             page,
             fallback_inode_id,
+        )?)
+    }
+
+    /// Lists one page of a file inode's retained revision history. The
+    /// response is path-free because the inode may have moved or been
+    /// deleted since those revisions were written.
+    pub async fn list_file_revisions_by_inode_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> Result<ListFileRevisionsResponse> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let page = engine
+            .list_file_revisions_for_inode_page(inode_id, request, &read_context)
+            .await?;
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
+        Ok(file_revisions_page_response(
+            namespace_id.clone(),
+            read_context.head.seq,
+            page,
+            Some(inode_id),
         )?)
     }
 
@@ -395,6 +471,30 @@ impl FsReader {
             .cache_stats
             .record_latest_metadata_view_read();
         Ok(read)
+    }
+
+    /// Reads and verifies one retained file revision by inode identity.
+    /// Current visibility and path are not required.
+    pub async fn get_file_revision_bytes_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let bytes = engine
+            .read_file_revision_for_inode(
+                inode_id,
+                revision_no,
+                &read_context,
+                self.core.inner.config.max_read_content_bytes,
+            )
+            .await?;
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
+        Ok(bytes)
     }
 
     /// Reads the ordered change feed after the `after_seq` cursor.

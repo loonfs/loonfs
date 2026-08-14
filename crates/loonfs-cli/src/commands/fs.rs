@@ -14,8 +14,8 @@ use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
 use crate::args::{
     CommandKind, FilesystemAnnotateArgs, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs,
-    FilesystemLsArgs, FilesystemMkdirArgs, FilesystemPathArgs, FilesystemPutArgs,
-    FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemTransferArgs,
+    FilesystemLsArgs, FilesystemMkdirArgs, FilesystemPutArgs, FilesystemRestoreArgs,
+    FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemStatArgs, FilesystemTransferArgs,
     FilesystemUndeleteArgs, RuntimeBehavior, TrashArgs,
 };
 use crate::backend::FileDownload;
@@ -209,17 +209,28 @@ pub(crate) async fn run_filesystem_ls(
 pub(crate) async fn run_filesystem_stat(
     kind: CommandKind,
     config_path: &Path,
-    args: FilesystemPathArgs,
+    args: FilesystemStatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let allow_root = true;
-    let spec = namespace_path(&context.namespace, &args.path, allow_root)
-        .map_err(|error| context.fail(kind, error))?;
-    let entry = context
-        .target
-        .stat_path(&spec)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let entry = match args.inode {
+        Some(inode_id) => {
+            context
+                .target
+                .stat_inode(&context.namespace, InodeId(inode_id))
+                .await
+        }
+        None => {
+            let path = args
+                .path
+                .as_deref()
+                .expect("clap requires either path or --inode");
+            let allow_root = true;
+            let spec = namespace_path(&context.namespace, path, allow_root)
+                .map_err(|error| context.fail(kind, error))?;
+            context.target.stat_path(&spec).await
+        }
+    }
+    .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,

@@ -537,7 +537,6 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         .list_file_revisions_page(&target, None, None)
         .await
         .expect("path revisions");
-    assert_eq!(revisions.path, target.absolute_path().clone());
     assert_eq!(revisions.inode_id, entry.inode_id);
     assert_eq!(revisions.revisions.len(), 2);
     assert_eq!(
@@ -576,7 +575,6 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         .list_file_revisions_page(&moved, None, None)
         .await
         .expect("moved-path revisions");
-    assert_eq!(moved_revisions.path, moved.absolute_path().clone());
     assert_eq!(moved_revisions.inode_id, entry.inode_id);
     assert_eq!(moved_revisions.revisions.len(), 2);
 

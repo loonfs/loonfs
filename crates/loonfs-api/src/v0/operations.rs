@@ -409,8 +409,6 @@ pub struct FileRevision {
 pub struct ListFileRevisionsResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
-    /// Absolute file path requested by the caller.
-    pub path: AbsolutePath,
     /// File inode whose revisions were returned.
     pub inode_id: InodeId,
     /// Namespace head sequence used for the read.

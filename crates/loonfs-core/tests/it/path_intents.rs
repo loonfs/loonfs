@@ -200,7 +200,7 @@ async fn list_file_revisions<S: ObjectStore + ?Sized>(
 async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    absolute_path: &str,
+    _absolute_path: &str,
     inode_id: InodeId,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
     let context = read_context(store, namespace_id).await;
@@ -223,7 +223,6 @@ async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
         if cursor.is_none() {
             return Ok(loonfs_api::ListFileRevisionsResponse {
                 namespace_id: namespace_id.clone(),
-                path: loonfs_api::AbsolutePath::parse(absolute_path).expect("valid test path"),
                 inode_id,
                 head_seq: context.head.seq,
                 revisions,

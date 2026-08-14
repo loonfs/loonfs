@@ -3259,6 +3259,114 @@ fn embedded_and_remote_profiles_emit_the_same_error_codes() {
 }
 
 #[test]
+fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "stat-inode-parity"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+    let payload = harness.temp_dir.path().join("inode-stat.txt");
+    fs::write(&payload, b"inode stat").expect("write payload");
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            "--namespace",
+            "demo",
+            payload.to_str().expect("utf-8 path"),
+            "/before.txt",
+        ]));
+        let by_path = harness.run(&[
+            "--json",
+            "stat",
+            "--profile",
+            profile,
+            "--namespace",
+            "demo",
+            "/before.txt",
+        ]);
+        assert_success(&by_path);
+        let inode_id = json_data(&by_path)["inode_id"]
+            .as_u64()
+            .expect("stat reports inode id");
+        let by_inode = harness.run(&[
+            "--json",
+            "stat",
+            "--profile",
+            profile,
+            "--namespace",
+            "demo",
+            "--inode",
+            &inode_id.to_string(),
+        ]);
+        assert_success(&by_inode);
+        assert_eq!(json_data(&by_inode), json_data(&by_path));
+
+        assert_success(&harness.run(&[
+            "mv",
+            "--profile",
+            profile,
+            "--namespace",
+            "demo",
+            "/before.txt",
+            "/after.txt",
+        ]));
+        let renamed = harness.run(&[
+            "--json",
+            "stat",
+            "--profile",
+            profile,
+            "--namespace",
+            "demo",
+            "--inode",
+            &inode_id.to_string(),
+        ]);
+        assert_success(&renamed);
+        assert_eq!(json_data(&renamed)["inode_id"], inode_id);
+        assert_eq!(json_data(&renamed)["path"], "/after.txt");
+
+        let missing = harness.run(&[
+            "--json",
+            "stat",
+            "--profile",
+            profile,
+            "--namespace",
+            "demo",
+            "--inode",
+            &u64::MAX.to_string(),
+        ]);
+        assert_failure(&missing);
+        assert_eq!(json_error(&missing)["code"], "inode_not_found");
+    }
+
+    let neither = harness.run(&["stat", "--profile", "embedded"]);
+    assert_failure(&neither);
+    let both = harness.run(&[
+        "stat",
+        "--profile",
+        "embedded",
+        "/after.txt",
+        "--inode",
+        "2",
+    ]);
+    assert_failure(&both);
+}
+
+#[test]
 fn filesystem_requires_default_namespace_when_omitted() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

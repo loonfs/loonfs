@@ -124,7 +124,6 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
         },
     ))
     .expect("first revision page");
-    assert_eq!(first.path.as_str(), "/doc.txt");
     assert_eq!(
         first
             .revisions
@@ -145,7 +144,6 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
         },
     ))
     .expect("second revision page");
-    assert_eq!(second.path.as_str(), "/doc.txt");
     assert_eq!(
         second
             .revisions
@@ -336,7 +334,6 @@ fn revisions_cursor_resumes_after_later_writes() {
         },
     ))
     .expect("first revisions page");
-    assert_eq!(first.path.as_str(), "/docs/report.txt");
     assert_eq!(
         first
             .revisions
@@ -371,7 +368,6 @@ fn revisions_cursor_resumes_after_later_writes() {
         },
     ))
     .expect("second revisions page resumes after head drift");
-    assert_eq!(second.path.as_str(), "/docs/report.txt");
     assert_eq!(
         second
             .revisions

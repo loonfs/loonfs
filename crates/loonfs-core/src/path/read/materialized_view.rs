@@ -1,6 +1,7 @@
 //! [`LoadedMetadataView`]: a verified, seq-pinned view of one namespace
 //! that answers core reads.
 
+use super::current_files::resolve_visible_inode;
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
 use crate::checkpoint::{
     head_from_manifest, load_basis_metadata_tables, MetadataTableCache, VerifiedMetadataTables,
@@ -27,6 +28,7 @@ use loonfs_api::{
     NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -164,6 +166,23 @@ pub struct DirectDownloadTarget {
     /// Absolute path as rendered from stored display names.
     pub absolute_path: AbsolutePath,
     /// Revision this target reads, resolved from the request.
+    pub revision_no: RevisionNo,
+    /// Identity, byte length, and checksum evidence for those bytes.
+    pub content_ref: ContentRef,
+    /// Logical unscoped object key an issuer signs a read of.
+    pub object_key: String,
+}
+
+/// Where one inode revision's bytes live for direct-download authorization.
+///
+/// Unlike [`DirectDownloadTarget`], this identity-addressed target carries no
+/// path because a retained revision remains readable after its inode moves or
+/// loses its current binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectDownloadByInodeTarget {
+    /// File inode that owns the revision.
+    pub inode_id: InodeId,
+    /// Revision this target reads.
     pub revision_no: RevisionNo,
     /// Identity, byte length, and checksum evidence for those bytes.
     pub content_ref: ContentRef,
@@ -327,6 +346,23 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await
     }
 
+    /// Resolves a currently visible inode to the canonical entry returned by
+    /// path stat, using the child-keyed binding index rather than a directory
+    /// listing scan.
+    pub(crate) async fn stat_inode(
+        &self,
+        inode_id: InodeId,
+        attributes: AttributeProjection,
+    ) -> Result<AuthoritativePathEntry> {
+        let mut session = self.metadata_view().session();
+        let mut ancestor_paths = HashMap::new();
+        let resolved = resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
+            .await?
+            .ok_or(CoreError::InodeNotFound(inode_id))?;
+        self.build_authoritative_path_entry_with_session(&mut session, &resolved, attributes)
+            .await
+    }
+
     pub(crate) async fn read_file_bytes(
         &self,
         store: &S,
@@ -413,6 +449,23 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             absolute_path: entry.path,
             revision_no,
             content_ref,
+            object_key,
+        })
+    }
+
+    /// Resolves one retained inode revision to the object a direct read would
+    /// fetch. Current visibility and path are intentionally irrelevant.
+    pub(crate) async fn direct_download_target_by_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        let revision = self.revision_for_inode(inode_id, revision_no).await?;
+        let object_key = content_object_key_for_ref(&self.content_store_id, &revision.content_ref)?;
+        Ok(DirectDownloadByInodeTarget {
+            inode_id,
+            revision_no: revision.revision_no,
+            content_ref: revision.content_ref,
             object_key,
         })
     }
@@ -521,7 +574,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .metadata_view()
             .inode_at_seq(inode_id)
             .await?
-            .ok_or_else(|| CoreError::PathNotFound(inode_id.to_string()))?;
+            .ok_or(CoreError::InodeNotFound(inode_id))?;
         if inode.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
                 path: inode_id.to_string(),

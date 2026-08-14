@@ -23,14 +23,15 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_api::{
     v0::{
-        AbortUploadResponse, BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest,
-        BeginUploadResponse, ChangesResponse, CommitResponse as ApiCommitResponse,
-        CompleteKnownContentUploadRequest, CompleteMultipartUploadRequest, CompleteUploadResponse,
-        CompletedUploadPart, ContentToken, DirectMultipartUploadOptions, DisableGrepIndexResponse,
-        EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse,
-        ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart,
-        StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadContentResponse,
-        UploadPartChecksumClaim, UploadStatusResponse,
+        AbortUploadResponse, BeginDownloadByInodeRequest, BeginDownloadByInodeResponse,
+        BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
+        ChangesResponse, CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
+        CompleteMultipartUploadRequest, CompleteUploadResponse, CompletedUploadPart, ContentToken,
+        DirectMultipartUploadOptions, DisableGrepIndexResponse, EnableGrepIndexResponse,
+        GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess,
+        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest,
+        StoreProbeResponse, UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim,
+        UploadStatusResponse,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
@@ -137,7 +138,7 @@ pub struct Client {
 pub struct DirectDownloadStream {
     body: payload::PayloadStream,
     expected: ContentRef,
-    path: AbsolutePath,
+    target: String,
     /// The checksum the complete object must produce, folded so far. The
     /// grant's reference names it, so an object nobody hashed for us — a
     /// provider-assembled multipart, or a direct transfer described only by
@@ -177,7 +178,7 @@ impl DirectDownloadStream {
                 "a download of `{}` resumed at offset {} was given {} bytes of what it \
                  skipped; verification covers the whole object, so all of them are needed \
                  first",
-                self.path, self.resumed_from, self.prefix_folded
+                self.target, self.resumed_from, self.prefix_folded
             )));
         }
         if self.finished {
@@ -190,7 +191,7 @@ impl DirectDownloadStream {
                     self.finished = true;
                     return Err(ClientError::Protocol(format!(
                         "direct download of `{}` sent more than the {} bytes the grant named",
-                        self.path, self.expected.size_bytes
+                        self.target, self.expected.size_bytes
                     )));
                 }
                 self.digest.update(&chunk);
@@ -200,7 +201,7 @@ impl DirectDownloadStream {
                 self.finished = true;
                 Err(ClientError::Io(format!(
                     "read of `{}` failed: {error}",
-                    self.path
+                    self.target
                 )))
             }
             None => {
@@ -208,7 +209,7 @@ impl DirectDownloadStream {
                 if self.size_bytes != self.expected.size_bytes {
                     return Err(ClientError::Protocol(format!(
                         "direct download of `{}` ended after {} bytes, not the {} the grant named",
-                        self.path, self.size_bytes, self.expected.size_bytes
+                        self.target, self.size_bytes, self.expected.size_bytes
                     )));
                 }
                 let expected = &self.expected.checksum;
@@ -222,7 +223,7 @@ impl DirectDownloadStream {
                 if observed != *expected {
                     return Err(ClientError::Protocol(format!(
                         "direct download of `{}` produced {}:{}, not the {}:{} the grant named",
-                        self.path,
+                        self.target,
                         observed.algorithm,
                         observed.value,
                         expected.algorithm,
@@ -694,6 +695,27 @@ impl Client {
         self.request_json::<(), _>(self.get(&url), None).await
     }
 
+    /// Stats one currently visible inode, projecting what `options` asks for.
+    pub async fn stat_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &StatPathOptions,
+    ) -> Result<AuthoritativePathEntry> {
+        let mut url = format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}",
+            self.base_url
+        );
+        let mut has_query = false;
+        append_query_param(
+            &mut url,
+            &mut has_query,
+            "include_attributes",
+            &options.include_attributes.to_string(),
+        );
+        self.request_json::<(), _>(self.get(&url), None).await
+    }
+
     /// Reads the file's current contents into memory.
     pub async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
         let url = format!(
@@ -717,6 +739,20 @@ impl Client {
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str()),
             revision_no.0
+        );
+        self.request_bytes(&url).await
+    }
+
+    /// Reads and verifies one retained file revision by inode identity.
+    pub async fn get_file_revision_bytes_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+            self.base_url
         );
         self.request_bytes(&url).await
     }
@@ -766,6 +802,25 @@ impl Client {
             .await
     }
 
+    /// Asks for one short-lived capability to read a retained inode revision
+    /// straight from the store.
+    pub async fn begin_download_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<BeginDownloadByInodeResponse> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+            self.base_url
+        );
+        self.request_json::<_, BeginDownloadByInodeResponse>(
+            self.post(&url),
+            Some(&BeginDownloadByInodeRequest {}),
+        )
+        .await
+    }
+
     /// Opens the response body authorized by a download grant as a bounded,
     /// verified stream.
     pub async fn open_direct_download(
@@ -789,21 +844,63 @@ impl Client {
         download: &BeginDownloadResponse,
         start_offset: u64,
     ) -> Result<DirectDownloadStream> {
+        self.open_direct_download_target(
+            &download.access,
+            &download.content_ref,
+            download.path.to_string(),
+            start_offset,
+        )
+        .await
+    }
+
+    /// Opens an inode-addressed download grant as a bounded, verified stream.
+    pub async fn open_direct_download_by_inode(
+        &self,
+        download: &BeginDownloadByInodeResponse,
+    ) -> Result<DirectDownloadStream> {
+        self.open_direct_download_by_inode_at(download, 0).await
+    }
+
+    /// Opens an inode-addressed download grant from `start_offset`.
+    pub async fn open_direct_download_by_inode_at(
+        &self,
+        download: &BeginDownloadByInodeResponse,
+        start_offset: u64,
+    ) -> Result<DirectDownloadStream> {
+        self.open_direct_download_target(
+            &download.access,
+            &download.content_ref,
+            format!(
+                "inode {} revision {}",
+                download.inode_id, download.revision_no
+            ),
+            start_offset,
+        )
+        .await
+    }
+
+    async fn open_direct_download_target(
+        &self,
+        access: &ObjectTransferAccess,
+        content_ref: &ContentRef,
+        target: String,
+        start_offset: u64,
+    ) -> Result<DirectDownloadStream> {
         let ObjectTransferAccess::PresignedUrl {
             method,
             url,
             headers,
             ..
-        } = &download.access;
+        } = access;
         if method != "GET" {
             return Err(ClientError::Protocol(format!(
                 "unsupported presigned download method `{method}`"
             )));
         }
-        if start_offset > download.content_ref.size_bytes {
+        if start_offset > content_ref.size_bytes {
             return Err(ClientError::Http(format!(
-                "cannot resume a download of `{}` at offset {start_offset} of {} bytes",
-                download.path, download.content_ref.size_bytes
+                "cannot resume a download of `{target}` at offset {start_offset} of {} bytes",
+                content_ref.size_bytes
             )));
         }
         let mut request = WireRequest::presigned(reqwest::Method::GET, url);
@@ -816,9 +913,9 @@ impl Client {
         let body = self.call_for_response_stream(&request).await?;
         Ok(DirectDownloadStream {
             body,
-            expected: download.content_ref.clone(),
-            path: download.path.clone(),
-            digest: StreamingChecksum::for_algorithm(download.content_ref.checksum.algorithm),
+            expected: content_ref.clone(),
+            target,
+            digest: StreamingChecksum::for_algorithm(content_ref.checksum.algorithm),
             // The counter measures the whole object, not this response, so
             // the length check at the end lands where it always did.
             size_bytes: start_offset,
@@ -882,6 +979,24 @@ impl Client {
             urlencoding::encode(spec.absolute_path().as_str())
         );
         let mut has_query = true;
+        append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
+        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None)
+            .await
+    }
+
+    /// Returns one path-free page of retained revisions for a file inode.
+    pub async fn list_file_revisions_by_inode_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListFileRevisionsResponse> {
+        let mut url = format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            self.base_url
+        );
+        let mut has_query = false;
         append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None)
             .await

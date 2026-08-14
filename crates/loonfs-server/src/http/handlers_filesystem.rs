@@ -62,8 +62,8 @@ pub(super) struct ListPathPageQuery {
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct PageQuery {
-    limit: Option<String>,
-    cursor: Option<String>,
+    pub(super) limit: Option<String>,
+    pub(super) cursor: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -80,6 +80,19 @@ pub(super) struct ContentQuery {
 struct DownloadBodyStream {
     bytes: Option<bytes::Bytes>,
     _permit: OwnedSemaphorePermit,
+}
+
+pub(super) fn buffered_download_response(bytes: Vec<u8>, permit: OwnedSemaphorePermit) -> Response {
+    let body = Body::from_stream(DownloadBodyStream {
+        bytes: Some(bytes.into()),
+        _permit: permit,
+    });
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        body,
+    )
+        .into_response()
 }
 
 impl Stream for DownloadBodyStream {
@@ -257,16 +270,7 @@ pub(super) async fn get_file_bytes(
         None => state.reader.get_file_bytes(&namespace_id, &path).await,
     }
     .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    let body = Body::from_stream(DownloadBodyStream {
-        bytes: Some(file.bytes.into()),
-        _permit: permit,
-    });
-    Ok((
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        body,
-    )
-        .into_response())
+    Ok(buffered_download_response(file.bytes, permit))
 }
 
 #[cfg_attr(
@@ -539,7 +543,7 @@ fn parse_after_seq(value: &str) -> Result<loonfs_api::ChangeSeq, ApiResponseErro
         })
 }
 
-fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {
+pub(super) fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {
     match value {
         "true" => Ok(true),
         "false" => Ok(false),
@@ -600,7 +604,7 @@ fn decode_optional_cursor<C: loonfs_api::PageCursor>(
         .map_err(page_cursor_response_error)
 }
 
-fn decode_file_revisions_page_cursor(
+pub(super) fn decode_file_revisions_page_cursor(
     cursor: Option<String>,
 ) -> Result<Option<FileRevisionsPageCursor>, ApiResponseError> {
     cursor

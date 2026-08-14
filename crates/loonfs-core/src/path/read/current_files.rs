@@ -8,7 +8,7 @@
 
 use super::materialized_view::LoadedMetadataView;
 use crate::error::{CoreError, Result};
-use crate::metadata::MetadataViewSession;
+use crate::metadata::{MetadataViewSession, ResolvedVisiblePath};
 use loonfs_api::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet};
@@ -81,13 +81,10 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
     inode_id: InodeId,
 ) -> Result<CurrentFileState> {
-    let Some(inode) = session.visible_inode(inode_id).await? else {
+    let Some(resolved) = resolve_visible_inode(session, ancestor_paths, inode_id).await? else {
         return Ok(missing(inode_id));
     };
-    let Some(current_path) = current_path(session, ancestor_paths, inode_id).await? else {
-        return Ok(missing(inode_id));
-    };
-    let current_revision_no = if inode.inode_kind == InodeKind::File {
+    let current_revision_no = if resolved.inode_kind == InodeKind::File {
         session
             .latest_revision_head_of_visible(inode_id)
             .await?
@@ -99,8 +96,52 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
         inode_id,
         visible: true,
         current_revision_no,
-        current_path: Some(current_path),
+        current_path: Some(
+            AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {
+                CoreError::NamespaceCorrupt(format!(
+                    "resolved inode `{inode_id}` to invalid path `{}`: {error}",
+                    resolved.absolute_path
+                ))
+            })?,
+        ),
     })
+}
+
+/// Resolves one currently visible inode through the child-keyed binding
+/// index, returning the same canonical identity projection a path walk
+/// produces. No directory listing is involved.
+pub(super) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
+    session: &mut MetadataViewSession<'_, '_, S>,
+    ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
+    inode_id: InodeId,
+) -> Result<Option<ResolvedVisiblePath>> {
+    let Some(inode) = session.visible_inode(inode_id).await? else {
+        return Ok(None);
+    };
+    let Some(current_path) = current_path(session, ancestor_paths, inode_id).await? else {
+        return Ok(None);
+    };
+    let current_binding = if inode_id == ROOT_INODE_ID {
+        None
+    } else {
+        let Some(binding) = session.current_parent_binding_for_child(inode_id).await? else {
+            return Ok(None);
+        };
+        Some(binding)
+    };
+    Ok(Some(ResolvedVisiblePath {
+        absolute_path: current_path.to_string(),
+        inode_id,
+        inode_kind: inode.inode_kind,
+        created_by: inode.created_by,
+        created_at_ms: inode.created_at_ms,
+        parent_inode_id: current_binding
+            .as_ref()
+            .map(|binding| binding.parent_inode_id),
+        display_name: current_binding
+            .map(|binding| binding.display_name.to_string())
+            .unwrap_or_default(),
+    }))
 }
 
 fn missing(inode_id: InodeId) -> CurrentFileState {
