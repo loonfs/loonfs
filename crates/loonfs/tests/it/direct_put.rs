@@ -11,15 +11,15 @@ use loonfs::{
     CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions,
     RuntimeCacheConfig, SharedObjectStore,
 };
-use loonfs_api::v0::{DirectPutContentClaim, UploadSessionStatus};
-use loonfs_api::StorageChecksum;
+use loonfs_api::v0::{UploadContentClaim, UploadSessionStatus};
+use loonfs_api::Checksum;
 use loonfs_objectstore::keys::wal_head;
 
 /// What a direct-put client declares about bytes it already holds.
-fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
-    DirectPutContentClaim {
+fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
+    UploadContentClaim {
         size_bytes: bytes.len() as u64,
-        storage_checksum: StorageChecksum::sha256(bytes),
+        checksum: Checksum::sha256(bytes),
     }
 }
 use loonfs_objectstore::local_fs_store::LocalFsStore;

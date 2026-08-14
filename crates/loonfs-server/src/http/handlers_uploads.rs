@@ -17,12 +17,13 @@ use loonfs_api::{
     v0::{
         AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
         CompleteUploadResponse, DirectMultipartUpload, DirectMultipartUploadOptions,
-        DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest,
-        SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadSessionStatus,
+        DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
+        SignedUploadPart, UploadContentClaim, UploadContentResponse, UploadSessionStatus,
         UploadStatusResponse, ValidatedContentToken,
     },
-    ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
 };
 use loonfs_objectstore::{
     presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
@@ -141,7 +142,7 @@ pub(super) async fn begin_upload(
 async fn begin_direct_put_upload(
     state: AppState,
     namespace_id: NamespaceId,
-    claim: DirectPutContentClaim,
+    claim: UploadContentClaim,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     let Some(issuer) = state
         .direct_transfers
@@ -157,16 +158,13 @@ async fn begin_direct_put_upload(
     // The issuer is the one authority on both: it is what the capability
     // document was built from, and what will sign this write.
     let advertised = issuer.checksum_algorithm();
-    if claim.storage_checksum.algorithm != advertised {
+    if let Err(message) =
+        validate_direct_put_checksum_algorithm(claim.checksum.algorithm, advertised)
+    {
         return Err(ApiResponseError::new(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
-            &format!(
-                "direct_put here enforces a {advertised} checksum, not {}; \
-                 the advertised algorithm is the `{}` capability feature",
-                claim.storage_checksum.algorithm,
-                direct_put_checksum_feature(advertised),
-            ),
+            &message,
         ));
     }
     let max_content_bytes = issuer.max_content_bytes();
@@ -217,6 +215,20 @@ async fn begin_direct_put_upload(
     }))
 }
 
+fn validate_direct_put_checksum_algorithm(
+    actual: ChecksumAlgorithm,
+    advertised: ChecksumAlgorithm,
+) -> Result<(), String> {
+    if actual == advertised {
+        return Ok(());
+    }
+    Err(format!(
+        "direct_put here enforces a {advertised} checksum, not {actual}; \
+         the advertised algorithm is the `{}` capability feature",
+        direct_put_checksum_feature(advertised),
+    ))
+}
+
 async fn begin_direct_multipart_upload(
     state: AppState,
     namespace_id: NamespaceId,
@@ -249,6 +261,7 @@ async fn begin_direct_multipart_upload(
         upload_id: prepared.upload_id,
         direct_multipart: DirectMultipartUpload {
             part_size_bytes: prepared.target.part_size_bytes,
+            checksum_algorithm: prepared.target.checksum_algorithm,
         },
     }))
 }
@@ -327,7 +340,7 @@ fn sign_parts(
                         object_key: &targets.object_key,
                         provider_upload_id: &targets.provider_upload_id,
                         part_number: part.part_number,
-                        part_checksum: &part.checksum,
+                        checksum: &part.checksum,
                         expires_in: MULTIPART_PART_URL_TTL,
                     },
                     signing_time,
@@ -504,9 +517,8 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
 /// The body is never held: it is hashed and written a piece at a time, so
 /// the server's memory cost tracks the transfer's part size rather than the
 /// object's length. The reference this produces is the same one the
-/// buffered path produced — `storage_checksum` is the SHA-256 this server
-/// computed over the complete payload, and `whole_file_sha256` carries it —
-/// because this server is the trusted party that hashed the bytes.
+/// buffered path produced: its `checksum` is the SHA-256 this server
+/// computed over the complete payload.
 ///
 /// A failure has two possible authors. The store may have refused the
 /// write, or the body may have ended early — past the byte cap, or with a
@@ -680,4 +692,23 @@ fn parse_upload_id(value: &str) -> Result<UploadId, ApiResponseError> {
             &error.to_string(),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_put_rejects_an_algorithm_other_than_the_issuers() {
+        assert!(validate_direct_put_checksum_algorithm(
+            ChecksumAlgorithm::Sha256,
+            ChecksumAlgorithm::Sha256
+        )
+        .is_ok());
+        assert!(validate_direct_put_checksum_algorithm(
+            ChecksumAlgorithm::Crc32c,
+            ChecksumAlgorithm::Sha256
+        )
+        .is_err());
+    }
 }

@@ -173,6 +173,67 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
 }
 
 #[test]
+fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
+    let raw = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
+    for dead_name in [
+        "StorageChecksum",
+        "storage_checksum",
+        "whole_file_sha256",
+        "DirectPutContentClaim",
+        "DirectMultipartContentClaim",
+    ] {
+        assert!(
+            !raw.contains(dead_name),
+            "dead public checksum name `{dead_name}` remains in OpenAPI"
+        );
+    }
+
+    let spec: Value = serde_json::from_str(&raw).expect("parse openapi json");
+    let schemas = spec
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+    assert!(schemas.contains_key("Checksum"));
+    assert!(schemas.contains_key("UploadContentClaim"));
+
+    let checksum_ref = Value::String("#/components/schemas/Checksum".to_owned());
+    let checksum_ref_count = values_named(&spec, "$ref")
+        .filter(|reference| *reference == &checksum_ref)
+        .count();
+    assert!(
+        checksum_ref_count >= 4,
+        "public checksum-bearing shapes should reuse Checksum; found {checksum_ref_count} refs"
+    );
+
+    let multipart = schemas
+        .get("DirectMultipartUpload")
+        .expect("DirectMultipartUpload schema");
+    assert!(required_fields(multipart).contains("checksum_algorithm"));
+
+    let completion_variants = schemas
+        .get("CompleteUploadRequest")
+        .and_then(|schema| schema.get("oneOf"))
+        .and_then(Value::as_array)
+        .expect("completion variants");
+    let multipart_completion = completion_variants
+        .iter()
+        .find(|schema| {
+            schema.get("title").and_then(Value::as_str) == Some("CompleteUploadMultipart")
+        })
+        .expect("multipart completion variant");
+    let required = required_fields(multipart_completion);
+    assert!(required.contains("content"));
+    assert!(!required.contains("multipart"));
+
+    for properties in values_named(&spec, "properties").filter_map(Value::as_object) {
+        assert!(
+            !properties.contains_key("crc64nvme"),
+            "crc64nvme must be an algorithm value, never a raw public field"
+        );
+    }
+}
+
+#[test]
 fn openapi_documents_delete_path_behavior() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -216,6 +277,34 @@ fn assert_path_method(paths: &serde_json::Map<String, Value>, path: &str, method
         path_item.get(method).is_some(),
         "missing OpenAPI method `{method}` for `{path}`"
     );
+}
+
+fn values_named<'a>(value: &'a Value, name: &'a str) -> Box<dyn Iterator<Item = &'a Value> + 'a> {
+    match value {
+        Value::Object(object) => Box::new(
+            object.get(name).into_iter().chain(
+                object
+                    .values()
+                    .flat_map(move |value| values_named(value, name)),
+            ),
+        ),
+        Value::Array(values) => Box::new(
+            values
+                .iter()
+                .flat_map(move |value| values_named(value, name)),
+        ),
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+fn required_fields(schema: &Value) -> BTreeSet<&str> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
 }
 
 fn one_of_titles<'a>(

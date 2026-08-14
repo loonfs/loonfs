@@ -1,7 +1,7 @@
 //! Checkpoint secondary-index parity and manifest descriptor validation.
 
 use super::*;
-use loonfs_api::{ContentId, StorageChecksum};
+use loonfs_api::{Checksum, ContentId};
 
 pub(super) async fn rewrite_manifest_segment(
     store: &LocalFsStore,
@@ -631,15 +631,15 @@ async fn base_rebuild_retains_revisions_superseded_below_floor() {
         &materialized.metadata_state,
         ApiMetadataTableFamily::Revisions,
     );
-    let checksum_one = StorageChecksum::sha256(b"one\n");
-    let checksum_two = StorageChecksum::sha256(b"two\n");
+    let checksum_one = Checksum::sha256(b"one\n");
+    let checksum_two = Checksum::sha256(b"two\n");
     assert!(revisions.iter().any(|row| matches!(
         row,
-        MetadataRow::Revision { content_ref, .. } if content_ref.storage_checksum == checksum_one
+        MetadataRow::Revision { content_ref, .. } if content_ref.checksum == checksum_one
     )));
     assert!(revisions.iter().any(|row| matches!(
         row,
-        MetadataRow::Revision { content_ref, .. } if content_ref.storage_checksum == checksum_two
+        MetadataRow::Revision { content_ref, .. } if content_ref.checksum == checksum_two
     )));
     let index_rows = manifest_rows_for_family(
         &materialized.metadata_state,

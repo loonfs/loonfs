@@ -10,8 +10,8 @@
 
 use crate::backend::FileDownload;
 use crate::error::CliError;
-use loonfs_api::{ContentRef, RevisionNo, StorageChecksum};
-use serde::{Deserialize, Serialize};
+use loonfs_api::{Checksum, ContentRef, RevisionNo};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
@@ -33,21 +33,24 @@ const FOLD_CHUNK_BYTES: usize = 1024 * 1024;
 /// with any of it is not worth resuming either, and because a note this
 /// build cannot read at all is the same answer — start over.
 ///
-/// The storage checksum is the reference's own evidence whatever produced
-/// it, which is the only thing an object nobody hashed for us carries. The
-/// whole-file SHA-256 is recorded beside it when there is one rather than
-/// instead of it, because the two are different claims about the same
-/// bytes and a note that dropped either would be a weaker match.
+/// The checksum is the reference's complete-payload evidence whatever
+/// produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PartialMeta {
     content_id: String,
     size_bytes: u64,
-    storage_checksum: StorageChecksum,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    whole_file_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checksum: Checksum,
+    #[serde(deserialize_with = "required_option")]
     revision_no: Option<u64>,
+}
+
+fn required_option<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 impl PartialMeta {
@@ -56,8 +59,7 @@ impl PartialMeta {
         Self {
             content_id: content_ref.content_id.to_string(),
             size_bytes: content_ref.size_bytes,
-            storage_checksum: content_ref.storage_checksum.clone(),
-            whole_file_sha256: content_ref.whole_file_sha256.clone(),
+            checksum: content_ref.checksum.clone(),
             revision_no: revision_no.map(|revision_no| revision_no.0),
         }
     }
@@ -244,8 +246,7 @@ mod tests {
             kind: ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc32c(bytes),
-            whole_file_sha256: None,
+            checksum: Checksum::crc32c(bytes),
         }
     }
 
@@ -314,7 +315,7 @@ mod tests {
     /// nobody hashed for us is still identified on disk rather than being
     /// content a rerun has to start over on.
     #[test]
-    fn a_crc32c_only_note_describes_and_resumes_its_partial() {
+    fn a_crc32c_note_describes_and_resumes_its_partial() {
         let dir = tempfile::tempdir().expect("tempdir");
         let destination = dir.path().join("file.bin");
         let content_ref = crc32c_content_ref(b"0123456789");
@@ -323,11 +324,8 @@ mod tests {
         let encoded = serde_json::to_vec(&meta).expect("encode the note");
         let document: serde_json::Value =
             serde_json::from_slice(&encoded).expect("decode the note as a document");
-        assert_eq!(document["storage_checksum"]["algorithm"], "crc32c");
-        assert!(
-            document.get("whole_file_sha256").is_none(),
-            "a digest nobody computed is absent, not null: {document}"
-        );
+        assert_eq!(document["checksum"]["algorithm"], "crc32c");
+        assert!(document.get("revision_no").is_some());
 
         std::fs::write(
             sibling(&destination, PARTIAL_SUFFIX).expect("partial path"),
@@ -345,11 +343,43 @@ mod tests {
         // different digest is not the content this run resolved.
         let other = PartialMeta::describe(
             &ContentRef {
-                storage_checksum: StorageChecksum::crc32c(b"9876543210"),
+                checksum: Checksum::crc32c(b"9876543210"),
                 ..content_ref
             },
             None,
         );
         assert_eq!(resumable_bytes(&destination, &other), 0);
+    }
+
+    #[test]
+    fn an_old_partial_sidecar_cleanly_restarts_from_byte_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("file.bin");
+        let partial_path = sibling(&destination, PARTIAL_SUFFIX).expect("partial path");
+        let meta_path = sibling(&destination, META_SUFFIX).expect("meta path");
+        let expected = meta_for(b"0123456789");
+
+        std::fs::write(&partial_path, b"0123").expect("write partial");
+        std::fs::write(
+            &meta_path,
+            serde_json::json!({
+                "content_id": expected.content_id,
+                "size_bytes": expected.size_bytes,
+                "checksum": expected.checksum
+            })
+            .to_string(),
+        )
+        .expect("write old sidecar");
+
+        assert_eq!(resumable_bytes(&destination, &expected), 0);
+        let restarted = PartialDownload::open(&destination, Some(&expected), 0)
+            .expect("restart partial download");
+        assert_eq!(restarted.resumed_from, 0);
+        assert_eq!(
+            std::fs::metadata(partial_path)
+                .expect("partial metadata")
+                .len(),
+            0
+        );
     }
 }

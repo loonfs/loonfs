@@ -279,15 +279,7 @@ async fn prepare_file_bytes_performs_one_content_put_and_no_reads() {
 
     let content_ref = prepared.content_ref();
     assert_eq!(content_ref.size_bytes, bytes.len() as u64);
-    assert_eq!(
-        content_ref.storage_checksum,
-        loonfs_api::StorageChecksum::sha256(bytes)
-    );
-    assert_eq!(
-        content_ref.whole_file_sha256.as_deref(),
-        Some(content_ref.storage_checksum.value.as_str()),
-        "the write path hashed these bytes itself, so the digest is trusted"
-    );
+    assert_eq!(content_ref.checksum, loonfs_api::Checksum::sha256(bytes));
     assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
 }
 
@@ -556,9 +548,9 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .writer
         .begin_direct_put_upload_target(
             &harness.namespace_id,
-            loonfs::DirectPutContentClaim {
+            loonfs::UploadContentClaim {
                 size_bytes: bytes.len() as u64,
-                storage_checksum: loonfs_api::StorageChecksum::sha256(bytes),
+                checksum: loonfs_api::Checksum::sha256(bytes),
             },
         )
         .await

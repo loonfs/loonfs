@@ -223,58 +223,60 @@ The metadata log has six rules.
 The content model has six rules.
 
 1. **Identity and integrity are separate.** A content object's identity is a
-   random `content_id`; its integrity evidence is the checksums carried
-   beside that id. Nothing about a content object's name describes its bytes,
-   so a reference's checksums are the only thing that ever does.
+   random `content_id`; its integrity evidence is the checksum carried beside
+   that id. Nothing about a content object's name describes its bytes, so a
+   reference's checksum is the only thing that ever does.
 2. A `content_ref` describes one complete file revision.
 3. Immutable content objects are written with create-if-absent semantics.
    Random ids cannot collide, so a create that finds the key occupied is
    corruption and must fail rather than overwrite.
 4. A metadata commit may reference a `content_ref` only after the referenced
    object is already durable.
-5. **Every reference carries a mandatory full-object checksum.** There is no
-   checksum-*type* field: full-object coverage is an invariant of this
-   format, established when the object is written and never read back from a
-   provider. (Cloudflare R2 does not report a checksum type at all, so a type
-   read back would be missing exactly where it would matter.)
+5. **Every reference carries a mandatory full-object checksum.** Coverage
+   comes from the enclosing `ContentRef`, not the algorithm. The operation
+   defines which algorithms it accepts.
 6. **Read verification uses the reference's own evidence.** A read recomputes
-   the reference's whole-file SHA-256 over the bytes it fetched. A reference
-   whose evidence this implementation cannot recompute fails the read; no
-   read is served unverified. A HEAD may prevalidate existence and size so a
-   wrong-sized object fails fast.
+   `content_ref.checksum.algorithm` over the complete bytes it fetched. A
+   reference whose evidence this implementation cannot recompute fails the
+   read; no read is served unverified. A HEAD may prevalidate existence and
+   size so a wrong-sized object fails fast.
 
-##### Checksum provenance
+##### Checksum shape and provenance
 
-`whole_file_sha256` present means **a trusted party computed it over the
-complete stream**: either the LoonFS write path hashed the whole payload
-itself, or a provider validated a signed whole-object SHA-256 on the write it
-accepted. There are no client-claimed digests in this format. A client's
+Every checksum has one canonical shape:
+
+```json
+{ "algorithm": "sha256", "value": "<64 lowercase hex>" }
+```
+
+`checksum.algorithm` is one of `sha256`, `crc64nvme`, or `crc32c`, and
+`checksum.value` is the lowercase hex of the raw checksum bytes (the
+algorithm is its own field, so the value carries no prefix; provider APIs that
+report base64 are converted at the adapter). Their exact value widths are 64,
+16, and 8 hex characters respectively. Unknown algorithms, wrong widths, and
+non-lowercase-hex values fail validation.
+
+The enclosing value defines coverage: a `ContentRef.checksum` covers the
+complete content object, an upload part's `checksum` covers that part, and an
+`UploadContentClaim.checksum` covers the complete upload. Algorithm
+requirements are named `checksum_algorithm`. Direct PUT accepts the algorithm
+advertised by `core.uploads.direct_put.checksum.<algorithm>`; direct multipart
+accepts the `checksum_algorithm` frozen into its upload session (currently
+`crc64nvme`); service-proxied upload produces `sha256`.
+
+There are no unverified client-claimed checksums in this format. A client's
 declared digest becomes trusted evidence only by being signed into a write the
 provider refuses to accept unless the bytes match, and by being checked again
 against the stored object at completion.
-
-Absent therefore means *nobody trustworthy hashed these bytes* — never "the
-client did not tell us". That single meaning is what lets a reader treat the
-field as a decision rather than a hint.
-
-`storage_checksum.algorithm` is one of `sha256`, `crc64nvme`, or `crc32c`, and
-`storage_checksum.value` is the lowercase hex of the raw checksum bytes (the
-algorithm is its own field, so the value carries no prefix; provider APIs that
-report base64 are converted at the adapter).
 
 Every algorithm in that list is producible, and the list is closed: an
 algorithm spelling a reader does not know fails to decode rather than
 decoding into a value nothing can recompute. Every path that moves bytes
 through LoonFS hashes them and produces `sha256`. Direct multipart upload
-produces `crc64nvme`: an S3-compatible provider assembles a multipart object
-without any party hashing the whole stream, and the CRC-64/NVME it computes
-over the assembly is the only full-object evidence that will ever exist for
-those bytes. `crc32c` is the full-object checksum Google Cloud Storage
-computes and reports, and is likewise the only evidence for an object
-transferred straight to it. A reference produced either way carries no
-`whole_file_sha256`, by the provenance rule above, and reads verify it by
-recomputing that CRC. A reference carrying a checksum an implementation
-cannot recompute must fail its reads rather than pass them unverified.
+produces `crc64nvme`, and Google Cloud Storage direct PUT produces `crc32c`.
+Reads verify all three by recomputing the reference's algorithm over the
+complete payload. A reference carrying a checksum an implementation cannot
+recompute must fail its reads rather than pass them unverified.
 
 Metadata materialization tables include canonical metadata families and
 validated derived families. The canonical families are `inodes`,
@@ -530,8 +532,7 @@ The revision row for the current file contents:
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
-    "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
-    "whole_file_sha256": "42d..."
+    "checksum": { "algorithm": "sha256", "value": "42d..." }
   }
 }
 ```
@@ -670,9 +671,7 @@ The core rules are:
   byte is read, and an object that was never published belongs to exactly one
   upload;
 - `content_ref.size_bytes` records the complete byte length;
-- `content_ref.storage_checksum` is mandatory and covers the complete object;
-- `content_ref.whole_file_sha256` is present exactly when a trusted party
-  hashed the whole stream (section 1.6);
+- `content_ref.checksum` is mandatory and covers the complete object;
 - all content-object access resolves `namespace_id` through the namespace
   head to its `content_store_id`;
 - future content strategies must use a new `content_ref.kind` and name their
@@ -686,8 +685,7 @@ not define is corruption, not a future extension:
   "kind": "blob_v1",
   "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
   "size_bytes": 19482,
-  "storage_checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" },
-  "whole_file_sha256": "<64 lowercase hex>"
+  "checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" }
 }
 ```
 
@@ -1082,8 +1080,7 @@ Content must be durable before any metadata change can reference it.
      "kind": "blob_v1",
      "content_id": "con_<32hex>",
      "size_bytes": 123,
-     "storage_checksum": { "algorithm": "sha256", "value": "<64hex>" },
-     "whole_file_sha256": "<64hex>"
+     "checksum": { "algorithm": "sha256", "value": "<64hex>" }
    }
    ```
 
@@ -1281,9 +1278,10 @@ Given a visible file inode at seq N:
 3. Verify that `content_ref.kind` is supported by the reader.
 4. For `blob_v1`, fetch the object at
    `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}`.
-5. Verify that the fetched bytes match `content_ref.size_bytes` and the
-   reference's `whole_file_sha256`. A reference whose evidence the reader
-   cannot recompute fails the read; nothing is served unverified.
+5. Verify that the fetched bytes match `content_ref.size_bytes` and recompute
+   `content_ref.checksum.algorithm` over the complete payload. A reference
+   whose evidence the reader cannot recompute fails the read; nothing is
+   served unverified.
 
 A **file revision** is an immutable content state for one file inode,
 identified by that inode's monotonic `revision_no`. A namespace commit `seq`
@@ -1366,11 +1364,11 @@ A content reference enters the preimage as exactly:
 { "kind": "blob_v1", "content_id": "con_<32hex>", "size_bytes": 123 }
 ```
 
-The checksums are excluded on purpose. They are evidence about the object,
+The checksum is excluded on purpose. It is evidence about the object,
 pinned to its id by the verification every write and read performs — not part
-of *which* object the request attaches. Including them would make a reference
-that named the same object with a differently spelled checksum read as a
-different mutation.
+of *which* object the request attaches. Including it would make a reference
+that named the same object with different checksum evidence read as a different
+mutation.
 
 The visible consequence is a retry rule. Re-uploading bytes mints a new
 content object, so a request that re-runs its upload is a genuinely different
@@ -1753,14 +1751,15 @@ The `transport` is settled when the session opens and never changes. Each
   once the bytes have passed validation. The claim has no separate expiry;
   the upload-session lease bounds one left behind by cancellation.
 - `direct_put`: `promised_content`, the content reference the presigned write
-  is signed against. Its `storage_checksum` is given to the provider, which
+  is signed against. Its `checksum` is given to the provider, which
   refuses any body that does not match, so the reference has to exist before
   the session does; completion reads the stored object back against this same
   reference. The reference already names its own algorithm, so a provider
   that enforces something other than SHA-256 needs no new durable shape.
 - `direct_multipart`: `provider_upload_id`, the handle the provider's
-  multipart upload is addressed by, and `part_size_bytes`, the geometry the
-  session was opened with, which is a non-zero integer.
+  multipart upload is addressed by; `part_size_bytes`, the geometry the
+  session was opened with, which is a non-zero integer; and
+  `checksum_algorithm`, the algorithm frozen for part signing and completion.
 
 A `direct_multipart` transport carries no content reference, and this is the
 enforcement of section 6.9's rule that a multipart upload claims its payload
@@ -1772,7 +1771,9 @@ exactly as they are in the provider's own API, so there is no durable record
 per part and none is permitted. The geometry is recorded because it is
 settled at begin and the client may not be told it twice — a session resumed
 after a lost begin response reads it back rather than being handed a second,
-possibly different, one. Cleanup reads the upload id to abandon what a
+possibly different, one. The recorded checksum algorithm is likewise the
+only authority for every resumed part and completion; process-global defaults
+cannot change an existing session. Cleanup reads the upload id to abandon what a
 terminated session left open, under rule 2 above — after the durable
 transition, never before it. Aborting an upload that already assembled its
 object is safe on every supported provider: it succeeds and leaves the object

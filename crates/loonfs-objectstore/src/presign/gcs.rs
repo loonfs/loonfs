@@ -19,7 +19,7 @@ use crate::presign::v4::{
 use crate::ObjectStoreError;
 use base64::Engine as _;
 use loonfs_api::wire::hex::{hex_decode_bytes, hex_encode_bytes};
-use loonfs_api::{ChecksumAlgorithm, ContentRef, ContentRefKind, StorageChecksum};
+use loonfs_api::{Checksum, ChecksumAlgorithm, ContentRef, ContentRefKind};
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use sha2::{Digest, Sha256};
@@ -372,15 +372,12 @@ fn gcs_hash_header(content_ref: &ContentRef) -> Result<String> {
             "direct_put only supports blob_v1 content refs",
         ));
     }
-    if content_ref.storage_checksum.algorithm != ChecksumAlgorithm::Crc32c {
+    if content_ref.checksum.algorithm != ChecksumAlgorithm::Crc32c {
         return Err(invalid_direct_put_content(
-            "direct_put on GCS requires a crc32c storage checksum",
+            "direct_put on GCS requires a crc32c checksum",
         ));
     }
-    Ok(format!(
-        "crc32c={}",
-        base64_crc32c(&content_ref.storage_checksum)?
-    ))
+    Ok(format!("crc32c={}", base64_crc32c(&content_ref.checksum)?))
 }
 
 /// Converts a CRC-32C from the lowercase hex this format stores into the
@@ -388,14 +385,12 @@ fn gcs_hash_header(content_ref: &ContentRef) -> Result<String> {
 ///
 /// The two spellings meet here and nowhere else: every layer above holds the
 /// hex form, and the provider's is confined to this adapter.
-fn base64_crc32c(checksum: &StorageChecksum) -> Result<String> {
+fn base64_crc32c(checksum: &Checksum) -> Result<String> {
+    checksum
+        .validate()
+        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
     let raw = hex_decode_bytes(&checksum.value)
-        .map_err(|_| invalid_direct_put_content("crc32c must be lowercase hex"))?;
-    if raw.len() != ChecksumAlgorithm::Crc32c.value_bytes() {
-        return Err(invalid_direct_put_content(
-            "crc32c must be 8 hex characters",
-        ));
-    }
+        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
@@ -406,7 +401,7 @@ fn base64_crc32c(checksum: &StorageChecksum) -> Result<String> {
 /// the CRC-32C is selected rather than positioned. An absent or unusable
 /// crc32c answers `None`, and the caller treats that as a failure: an object
 /// GCS will not describe is never completed on its size alone.
-pub(crate) fn stored_crc32c(header_value: &str) -> Option<StorageChecksum> {
+pub(crate) fn stored_crc32c(header_value: &str) -> Option<Checksum> {
     for pair in header_value.split(',') {
         let Some(encoded) = pair.trim().strip_prefix("crc32c=") else {
             continue;
@@ -417,7 +412,7 @@ pub(crate) fn stored_crc32c(header_value: &str) -> Option<StorageChecksum> {
         if raw.len() != ChecksumAlgorithm::Crc32c.value_bytes() {
             continue;
         }
-        return Some(StorageChecksum {
+        return Some(Checksum {
             algorithm: ChecksumAlgorithm::Crc32c,
             value: hex_encode_bytes(&raw),
         });
@@ -465,7 +460,7 @@ mod tests {
     };
     use crate::test_support::{gcs_fixture_service_account_key_file, GCS_FIXTURE_CLIENT_EMAIL};
     use crate::ObjectStoreError;
-    use loonfs_api::{ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, StorageChecksum};
+    use loonfs_api::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CONTENT_KEY: &str =
@@ -514,7 +509,7 @@ mod tests {
         .expect("signer")
     }
 
-    /// A reference whose storage checksum is the CRC-32C GCS enforces, which
+    /// A reference whose checksum is the CRC-32C GCS enforces, which
     /// is what a `direct_put` claim carries on this provider.
     fn crc32c_content_ref() -> ContentRef {
         ContentRef {
@@ -522,11 +517,10 @@ mod tests {
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("valid content id"),
             size_bytes: 5,
-            storage_checksum: StorageChecksum {
+            checksum: Checksum {
                 algorithm: ChecksumAlgorithm::Crc32c,
                 value: HELLO_CRC32C_HEX.to_owned(),
             },
-            whole_file_sha256: None,
         }
     }
 
@@ -767,12 +761,11 @@ mod tests {
             ..crc32c_content_ref()
         };
         let sha256_only = ContentRef {
-            storage_checksum: StorageChecksum::sha256(b"hello"),
-            whole_file_sha256: Some(StorageChecksum::sha256(b"hello").value),
+            checksum: Checksum::sha256(b"hello"),
             ..crc32c_content_ref()
         };
         let malformed_crc = ContentRef {
-            storage_checksum: StorageChecksum {
+            checksum: Checksum {
                 algorithm: ChecksumAlgorithm::Crc32c,
                 value: "nothex!!".to_owned(),
             },

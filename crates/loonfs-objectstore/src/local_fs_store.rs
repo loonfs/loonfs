@@ -19,7 +19,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
-use loonfs_api::{sha256_digest, StorageChecksum};
+use loonfs_api::{sha256_digest, Checksum};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -484,7 +484,7 @@ impl ObjectStore for LocalFsStore {
         };
         Ok(Some(StoredObjectChecksum {
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::sha256(&bytes),
+            checksum: Checksum::sha256(&bytes),
         }))
     }
 

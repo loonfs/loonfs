@@ -6,12 +6,12 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
     v0::{
-        BeginUploadResponse, CompleteUploadRequest, DirectMultipartContentClaim,
-        DirectMultipartUpload, DirectMultipartUploadOptions, DirectPutContentClaim,
-        DirectPutUpload, ObjectTransferAccess, UploadPartChecksumClaim, ValidatedContentToken,
+        BeginUploadResponse, CompleteUploadRequest, DirectMultipartUpload,
+        DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
+        UploadPartChecksumClaim, ValidatedContentToken,
     },
-    ChangeSeq, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse, DestinationBehavior,
-    FilesystemOperation, NamespaceId, StorageChecksum,
+    ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse,
+    DestinationBehavior, FilesystemOperation, NamespaceId,
 };
 use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
 use loonfs_objectstore::ObjectStore;
@@ -66,10 +66,10 @@ const GCS_SIGNED_WRITE: SignedWriteHeaders = SignedWriteHeaders {
 
 /// What a direct-put client declares about bytes it is holding, in the
 /// algorithm this deployment advertised.
-fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> DirectPutContentClaim {
-    DirectPutContentClaim {
+fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> UploadContentClaim {
+    UploadContentClaim {
         size_bytes: bytes.len() as u64,
-        storage_checksum: StorageChecksum::compute(algorithm, bytes),
+        checksum: Checksum::compute(algorithm, bytes),
     }
 }
 
@@ -187,15 +187,9 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
     let content_ref = direct_put.content_ref.clone();
     assert_eq!(content_ref.size_bytes, bytes.len() as u64);
     assert_eq!(
-        content_ref.storage_checksum.algorithm,
+        content_ref.checksum.algorithm,
         signed_write.checksum_algorithm
     );
-    // A trusted whole-file SHA-256 exists only where the provider validated
-    // one. On a CRC-32C provider nobody hashed these bytes with SHA-256, and
-    // the ref says so rather than repeating the CRC under a second name.
-    let expected_sha256 = (signed_write.checksum_algorithm == ChecksumAlgorithm::Sha256)
-        .then(|| content_ref.storage_checksum.value.clone());
-    assert_eq!(content_ref.whole_file_sha256, expected_sha256);
 
     harness
         .client
@@ -384,7 +378,7 @@ async fn assert_direct_put_requires_its_signed_headers(
 ) {
     let bytes = b"direct put bytes with the signed headers meddled with\n";
     let other_bytes = b"some other object entirely\n";
-    let other_checksum = StorageChecksum::compute(signed_write.checksum_algorithm, other_bytes);
+    let other_checksum = Checksum::compute(signed_write.checksum_algorithm, other_bytes);
 
     for (label, meddle) in [
         (
@@ -487,10 +481,7 @@ async fn assert_direct_put_is_no_replace(
 /// the S3 family names the algorithm in the header and spells the digest in
 /// base64 too. Both are produced here so a tampering proof can offer a
 /// well-formed value for the wrong object rather than a malformed one.
-fn provider_checksum_header_value(
-    signed_write: SignedWriteHeaders,
-    checksum: &StorageChecksum,
-) -> String {
+fn provider_checksum_header_value(signed_write: SignedWriteHeaders, checksum: &Checksum) -> String {
     let raw = loonfs_api::wire::hex::hex_decode_bytes(&checksum.value).expect("checksum is hex");
     let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
     if signed_write.checksum.starts_with("x-goog") {
@@ -809,7 +800,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
         ..content_ref.clone()
     };
     let wrong_checksum = loonfs_api::ContentRef {
-        storage_checksum: StorageChecksum::crc32c(b"some other object entirely\n"),
+        checksum: Checksum::crc32c(b"some other object entirely\n"),
         ..content_ref.clone()
     };
     for (label, claimed) in [
@@ -838,13 +829,9 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
     assert_eq!(complete.content_ref, content_ref);
     assert!(complete.validated_content_token.is_some());
     assert_eq!(
-        content_ref.storage_checksum,
-        StorageChecksum::crc32c(bytes),
+        content_ref.checksum,
+        Checksum::crc32c(bytes),
         "the readback and the promise met on the crc32c GCS actually stored"
-    );
-    assert_eq!(
-        content_ref.whole_file_sha256, None,
-        "no trustworthy party hashed these bytes with SHA-256"
     );
 }
 
@@ -1109,7 +1096,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // satisfies that rule without the client knowing what it is.
     let part_size = MULTIPART_PART_SIZE;
     let payload = multipart_payload(part_size, 2);
-    let whole_object = StorageChecksum::crc64nvme(&payload);
+    let whole_object = Checksum::crc64nvme(&payload);
     // Begin declares nothing about the payload. A one-pass uploader could
     // not fill in a length or a digest here, and this session proves it does
     // not have to: the claim arrives with the completion below.
@@ -1124,6 +1111,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         multipart.part_size_bytes as usize, part_size,
         "the deployment's part geometry is the one this payload was cut to"
     );
+    assert_eq!(multipart.checksum_algorithm, ChecksumAlgorithm::Crc64nvme);
 
     let chunks: Vec<&[u8]> = payload.chunks(part_size).collect();
     let claims: Vec<UploadPartChecksumClaim> = chunks
@@ -1131,7 +1119,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .enumerate()
         .map(|(index, chunk)| UploadPartChecksumClaim {
             part_number: index as u32 + 1,
-            crc64nvme: StorageChecksum::crc64nvme(chunk).value,
+            checksum: Checksum::compute(multipart.checksum_algorithm, chunk),
         })
         .collect();
     let signed = harness
@@ -1148,11 +1136,11 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     for part in signed.parts.iter().cloned() {
         let index = part.part_number as usize - 1;
         let client = harness.client.clone();
-        let crc64nvme = claims[index].crc64nvme.clone();
+        let checksum = claims[index].checksum.clone();
         let chunk = Bytes::copy_from_slice(chunks[index]);
         in_flight.spawn(async move {
             client
-                .upload_part_via_presigned_url(part.part_number, &part.access, crc64nvme, chunk)
+                .upload_part_via_presigned_url(part.part_number, &part.access, checksum, chunk)
                 .await
         });
     }
@@ -1166,7 +1154,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .upload_part_via_presigned_url(
             repeated.part_number,
             &repeated.access,
-            claims[1].crc64nvme.clone(),
+            claims[1].checksum.clone(),
             Bytes::copy_from_slice(chunks[1]),
         )
         .await
@@ -1178,9 +1166,9 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // The claim rides with the completion, and the identity comes back with
     // the answer: the client never named the object it wrote.
     let request = CompleteUploadRequest::for_multipart(
-        DirectMultipartContentClaim {
+        UploadContentClaim {
             size_bytes: payload.len() as u64,
-            crc64nvme: whole_object.value.clone(),
+            checksum: whole_object.clone(),
         },
         parts,
     );
@@ -1191,11 +1179,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .expect("complete the multipart upload");
     let content_ref = complete.content_ref.clone();
     assert_eq!(content_ref.size_bytes, payload.len() as u64);
-    assert_eq!(content_ref.storage_checksum, whole_object);
-    assert!(
-        content_ref.whole_file_sha256.is_none(),
-        "a provider-assembled object carries no whole-file sha256"
-    );
+    assert_eq!(content_ref.checksum, whole_object);
 
     // The lost completion. The providers disagree completely about what a
     // replayed completion means — AWS S3 replays a success with no checksum
@@ -1243,18 +1227,12 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     assert_eq!(loaded, payload);
 
     // The direct read of an object the client assembled directly — the
-    // symmetry this deployment owes. A provider-assembled object carries no
-    // whole-file sha256, so its length is the whole check, and the grant
-    // says as much rather than claiming a digest nobody computed.
+    // symmetry this deployment owes.
     let grant = harness
         .client
         .begin_download(&target, None)
         .await
         .expect("begin download of the assembled object");
-    assert!(
-        grant.content_ref.whole_file_sha256.is_none(),
-        "the grant repeats the reference, which for a multipart object has no sha256"
-    );
     let mut received = Vec::new();
     let written = harness
         .client

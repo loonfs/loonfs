@@ -14,7 +14,7 @@ use crate::transport::test_transport::{self, Outcome};
 use futures::stream::StreamExt;
 use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload};
 use loonfs_api::{
-    direct_put_checksum_feature, CapabilityDocument, ContentId, ContentRef,
+    direct_put_checksum_feature, CapabilityDocument, ContentId, ContentRef, ContentRefKind,
     FEATURE_UPLOADS_DIRECT_PUT, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -231,6 +231,7 @@ fn begin_multipart() -> Outcome {
         upload_id: upload_id(),
         direct_multipart: DirectMultipartUpload {
             part_size_bytes: TEST_PART_BYTES,
+            checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
         },
     })
 }
@@ -309,17 +310,19 @@ fn multipart_script(parts: u32, uploaded: ContentRef) -> Vec<Outcome> {
 /// record of an interrupted run.
 #[derive(Debug, Default)]
 struct RecordingJournal {
-    began: Mutex<Option<(UploadId, u64)>>,
+    began: Mutex<Option<(UploadId, u64, ChecksumAlgorithm)>>,
     parts: Mutex<Vec<CompletedUploadPart>>,
 }
 
 impl RecordingJournal {
     fn resume(&self) -> MultipartUploadResume {
         let began = self.began.lock().expect("journal lock").clone();
-        let (upload_id, part_size_bytes) = began.expect("the session was opened");
+        let (upload_id, part_size_bytes, checksum_algorithm) =
+            began.expect("the session was opened");
         MultipartUploadResume {
             upload_id,
             part_size_bytes,
+            checksum_algorithm,
             parts: self.parts.lock().expect("journal lock").clone(),
         }
     }
@@ -332,11 +335,26 @@ impl RecordingJournal {
             .map(|part| part.part_number)
             .collect()
     }
+
+    fn part_algorithms(&self) -> Vec<ChecksumAlgorithm> {
+        self.parts
+            .lock()
+            .expect("journal lock")
+            .iter()
+            .map(|part| part.checksum.algorithm)
+            .collect()
+    }
 }
 
 impl MultipartUploadJournal for RecordingJournal {
-    fn began(&self, upload_id: &UploadId, part_size_bytes: u64) {
-        *self.began.lock().expect("journal lock") = Some((upload_id.clone(), part_size_bytes));
+    fn began(
+        &self,
+        upload_id: &UploadId,
+        part_size_bytes: u64,
+        checksum_algorithm: ChecksumAlgorithm,
+    ) {
+        *self.began.lock().expect("journal lock") =
+            Some((upload_id.clone(), part_size_bytes, checksum_algorithm));
     }
 
     fn part_completed(&self, part: &CompletedUploadPart) {
@@ -445,6 +463,50 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     // capabilities + one signing request + one PUT per missing part +
     // completion + commit, and no `begin`: the session was rejoined.
     assert_eq!(transport.attempts(), 1 + 1 + missing.len() + 2);
+}
+
+/// A resumed upload obeys the algorithm recorded beside its durable session,
+/// even when it differs from the algorithm a new multipart session receives
+/// today. The payload is still read once while that recorded digest is folded.
+#[tokio::test]
+async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
+    let payload = payload(TEST_PAYLOAD_BYTES);
+    let uploaded = ContentRef {
+        kind: ContentRefKind::BlobV1,
+        content_id: ContentId::generate(),
+        size_bytes: payload.len() as u64,
+        checksum: Checksum::crc32c(&payload),
+    };
+    let missing: Vec<u32> = (1..=TEST_PAYLOAD_PARTS).collect();
+    let transport = test_transport::script(resumed_script(&missing, uploaded));
+    let resume = MultipartUploadResume {
+        upload_id: upload_id(),
+        part_size_bytes: TEST_PART_BYTES,
+        checksum_algorithm: ChecksumAlgorithm::Crc32c,
+        parts: Vec::new(),
+    };
+    let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
+    let journal = RecordingJournal::default();
+
+    client()
+        .put_file_stream_resumable(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+            &journal,
+            Some(&resume),
+        )
+        .await
+        .expect("the resumed multipart put should land");
+
+    assert_eq!(journal.part_numbers(), missing);
+    assert!(journal
+        .part_algorithms()
+        .into_iter()
+        .all(|algorithm| algorithm == ChecksumAlgorithm::Crc32c));
+    assert_eq!(retention.total_bytes(), TEST_PAYLOAD_BYTES as u64);
+    let signing_waves = missing.len().div_ceil(DIRECT_MULTIPART_PARTS_IN_FLIGHT);
+    assert_eq!(transport.attempts(), 1 + signing_waves + missing.len() + 2);
 }
 
 /// A large put reads its source once and never holds more of it than the

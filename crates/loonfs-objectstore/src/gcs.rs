@@ -10,7 +10,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::StorageChecksum;
+use loonfs_api::Checksum;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::GoogleCloudStorageBuilder;
 use std::sync::Arc;
@@ -211,7 +211,7 @@ impl ObjectStore for GcpGcsStore {
         }
 
         let headers = response.headers();
-        let storage_checksum = stored_crc32c_from_headers(headers).ok_or_else(|| {
+        let checksum = stored_crc32c_from_headers(headers).ok_or_else(|| {
             ObjectStoreError::StoredChecksumMissing {
                 object_key: key.to_owned(),
             }
@@ -226,7 +226,7 @@ impl ObjectStore for GcpGcsStore {
 
         Ok(Some(StoredObjectChecksum {
             size_bytes,
-            storage_checksum,
+            checksum,
         }))
     }
 
@@ -286,7 +286,7 @@ impl ObjectStore for GcpGcsStore {
 /// value is searched, so which spelling arrives cannot decide whether the
 /// checksum is found — reading only the first header line would miss a
 /// crc32c that happened to follow an md5.
-fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<StorageChecksum> {
+fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {
     headers
         .get_all("x-goog-hash")
         .iter()

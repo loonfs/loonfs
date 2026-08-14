@@ -659,8 +659,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
             .expect("prepared put content ref");
         assert_ne!(simple_ref.content_id, prepared_ref.content_id);
         assert_eq!(simple_ref.size_bytes, prepared_ref.size_bytes);
-        assert_eq!(simple_ref.storage_checksum, prepared_ref.storage_checksum);
-        assert_eq!(simple_ref.whole_file_sha256, prepared_ref.whole_file_sha256);
+        assert_eq!(simple_ref.checksum, prepared_ref.checksum);
 
         let simple_read = reader
             .get_file_bytes(&simple_namespace, "/file.txt")

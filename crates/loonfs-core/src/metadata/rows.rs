@@ -570,10 +570,5 @@ fn content_ref_decoded_bytes(content_ref: &ContentRef) -> usize {
 /// Heap bytes a content reference owns beyond its struct: the identity and
 /// the checksum strings.
 pub(crate) fn content_ref_evidence_bytes(content_ref: &ContentRef) -> usize {
-    content_ref.content_id.as_str().len()
-        + content_ref.storage_checksum.value.len()
-        + content_ref
-            .whole_file_sha256
-            .as_ref()
-            .map_or(0, String::len)
+    content_ref.content_id.as_str().len() + content_ref.checksum.value.len()
 }

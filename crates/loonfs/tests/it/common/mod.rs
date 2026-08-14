@@ -5,7 +5,7 @@
 // Fixture assertions panic for precise diagnostics, as the test modules do.
 
 use loonfs::publish::CommitRequest;
-use loonfs::DirectPutContentClaim;
+use loonfs::UploadContentClaim;
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
     BeginUploadResponse, ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadRequest,
@@ -205,7 +205,7 @@ impl TestRuntime {
     pub(crate) async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        claim: DirectPutContentClaim,
+        claim: UploadContentClaim,
     ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
         self.writer
             .begin_direct_put_upload_target(namespace_id, claim)

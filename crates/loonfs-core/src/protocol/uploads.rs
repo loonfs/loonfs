@@ -33,17 +33,17 @@ use crate::storage::content_admission::{
 use bytes::Bytes;
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
-    CompleteUploadResponse, CompletedUploadPart, DirectMultipartContentClaim,
-    DirectMultipartUploadOptions, DirectPutContentClaim, UploadContentResponse, UploadMode,
-    UploadPartChecksumClaim, UploadSessionStatus, UploadStatusResponse,
+    CompleteUploadResponse, CompletedUploadPart, DirectMultipartUploadOptions, UploadContentClaim,
+    UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
+    UploadStatusResponse,
 };
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, NamespaceState, ProxiedStaging,
     UploadSessionEnvelope, UploadSessionLifecycle, UploadSessionState, UploadSessionTransport,
 };
 use loonfs_api::{
-    ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId, NamespaceId,
-    StorageChecksum, UploadId,
+    Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId,
+    NamespaceId, UploadId,
 };
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
@@ -74,7 +74,10 @@ pub struct BeginDirectPutUploadTargetResponse {
 pub struct DirectMultipartUploadTarget {
     pub object_key: String,
     pub part_size_bytes: u64,
+    pub checksum_algorithm: ChecksumAlgorithm,
 }
+
+const DIRECT_MULTIPART_CHECKSUM_ALGORITHM: ChecksumAlgorithm = ChecksumAlgorithm::Crc64nvme;
 
 /// Internal response for preparing a direct_multipart session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +91,7 @@ pub struct BeginDirectMultipartUploadTargetResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultipartPartTarget {
     pub part_number: u32,
-    pub checksum: StorageChecksum,
+    pub checksum: Checksum,
 }
 
 /// Everything a server integration needs to sign one wave of part uploads.
@@ -143,7 +146,7 @@ fn upload_mode_name(mode: UploadMode) -> &'static str {
 pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    claim: DirectPutContentClaim,
+    claim: UploadContentClaim,
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse> {
     ensure_upload_namespace_available(store, namespace_id).await?;
@@ -194,6 +197,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
         content_id.clone(),
         &provider_upload_id,
         part_size_bytes,
+        DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
     );
     let upload_id = match create_upload_session(store, namespace_id, session, context).await {
         Ok(upload_id) => upload_id,
@@ -215,6 +219,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
         target: DirectMultipartUploadTarget {
             object_key,
             part_size_bytes: part_size_bytes.get(),
+            checksum_algorithm: DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
         },
     })
 }
@@ -260,7 +265,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     if let Some(error) = terminal_session_error(&session.state, upload_id.clone()) {
         return Err(error);
     }
-    let provider_upload_id = multipart_session_upload(&session)?;
+    let (provider_upload_id, checksum_algorithm) = multipart_session_upload(&session)?;
 
     let mut parts = Vec::with_capacity(requested.len());
     for claim in requested {
@@ -275,7 +280,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
         }
         parts.push(MultipartPartTarget {
             part_number: claim.part_number,
-            checksum: crc64nvme_claim(&claim.crc64nvme)?,
+            checksum: validate_upload_checksum(&claim.checksum, checksum_algorithm)?.clone(),
         });
     }
 
@@ -289,11 +294,13 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
 /// Returns the provider upload ID for a direct multipart session.
 ///
 /// Other upload modes return an invalid-upload error.
-fn multipart_session_upload(session: &UploadSessionState) -> Result<&str> {
+fn multipart_session_upload(session: &UploadSessionState) -> Result<(&str, ChecksumAlgorithm)> {
     match &session.transport {
         UploadSessionTransport::DirectMultipart {
-            provider_upload_id, ..
-        } => Ok(provider_upload_id),
+            provider_upload_id,
+            checksum_algorithm,
+            ..
+        } => Ok((provider_upload_id, *checksum_algorithm)),
         UploadSessionTransport::ServiceProxied { .. }
         | UploadSessionTransport::DirectPut { .. } => Err(CoreError::InvalidUploadContent(
             "this upload session is not a direct_multipart upload".to_owned(),
@@ -303,19 +310,18 @@ fn multipart_session_upload(session: &UploadSessionState) -> Result<&str> {
 
 /// Builds the content reference for a completed multipart upload.
 ///
-/// Completion verifies the provider-reported CRC-64/NVME checksum. No
-/// trusted whole-file SHA-256 is available, so `whole_file_sha256` remains
-/// `None`.
+/// Completion verifies the provider-reported CRC-64/NVME checksum, which the
+/// resulting content reference records as its one full-object checksum.
 fn direct_multipart_content_ref(
     content_id: ContentId,
-    claim: &DirectMultipartContentClaim,
+    claim: &UploadContentClaim,
+    checksum_algorithm: ChecksumAlgorithm,
 ) -> Result<ContentRef> {
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
         content_id,
         size_bytes: claim.size_bytes,
-        storage_checksum: crc64nvme_claim(&claim.crc64nvme)?,
-        whole_file_sha256: None,
+        checksum: validate_upload_checksum(&claim.checksum, checksum_algorithm)?.clone(),
     };
     content_ref
         .validate()
@@ -323,27 +329,27 @@ fn direct_multipart_content_ref(
     Ok(content_ref)
 }
 
-fn crc64nvme_claim(value: &str) -> Result<StorageChecksum> {
-    let checksum = StorageChecksum {
-        algorithm: ChecksumAlgorithm::Crc64nvme,
-        value: value.to_owned(),
-    };
-    let width = ChecksumAlgorithm::Crc64nvme.value_bytes() * 2;
-    if checksum.value.len() != width
-        || !checksum
-            .value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+fn validate_upload_checksum(
+    checksum: &Checksum,
+    required_algorithm: ChecksumAlgorithm,
+) -> Result<&Checksum> {
+    if checksum.algorithm != required_algorithm {
         return Err(CoreError::InvalidUploadContent(format!(
-            "crc64nvme must be {width} lowercase hex characters"
+            "checksum algorithm `{}` does not match the session requirement `{required_algorithm}`",
+            checksum.algorithm
         )));
     }
+    checksum
+        .validate()
+        .map_err(|error| CoreError::InvalidUploadContent(error.to_string()))?;
     Ok(checksum)
 }
 
 /// Turns a client's part bookkeeping into what the provider assembles from.
-fn multipart_parts(parts: &[CompletedUploadPart]) -> Result<Vec<MultipartPart>> {
+fn multipart_parts(
+    parts: &[CompletedUploadPart],
+    checksum_algorithm: ChecksumAlgorithm,
+) -> Result<Vec<MultipartPart>> {
     let mut previous = 0;
     parts
         .iter()
@@ -363,7 +369,7 @@ fn multipart_parts(parts: &[CompletedUploadPart]) -> Result<Vec<MultipartPart>> 
             Ok(MultipartPart {
                 part_number: part.part_number,
                 etag: part.etag.clone(),
-                checksum: crc64nvme_claim(&part.crc64nvme)?,
+                checksum: validate_upload_checksum(&part.checksum, checksum_algorithm)?.clone(),
             })
         })
         .collect()
@@ -371,22 +377,14 @@ fn multipart_parts(parts: &[CompletedUploadPart]) -> Result<Vec<MultipartPart>> 
 
 /// Builds the content reference for a direct PUT claim.
 ///
-/// The provider enforces the supplied storage checksum, and completion
-/// verifies the stored object against it. `whole_file_sha256` is included
-/// only when the enforced checksum algorithm is SHA-256.
-fn direct_put_content_ref(
-    content_id: ContentId,
-    claim: &DirectPutContentClaim,
-) -> Result<ContentRef> {
-    let storage_checksum = claim.storage_checksum.clone();
-    let whole_file_sha256 = (storage_checksum.algorithm == ChecksumAlgorithm::Sha256)
-        .then(|| storage_checksum.value.clone());
+/// The provider enforces the supplied checksum, and completion verifies the
+/// stored object against it.
+fn direct_put_content_ref(content_id: ContentId, claim: &UploadContentClaim) -> Result<ContentRef> {
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
         content_id,
         size_bytes: claim.size_bytes,
-        whole_file_sha256,
-        storage_checksum,
+        checksum: claim.checksum.clone(),
     };
     content_ref
         .validate()
@@ -430,12 +428,14 @@ impl NewUploadSession {
         content_id: ContentId,
         provider_upload_id: &str,
         part_size_bytes: NonZeroU64,
+        checksum_algorithm: ChecksumAlgorithm,
     ) -> Self {
         Self {
             content_id,
             transport: UploadSessionTransport::DirectMultipart {
                 provider_upload_id: provider_upload_id.to_owned(),
                 part_size_bytes,
+                checksum_algorithm,
             },
         }
     }
@@ -1372,6 +1372,7 @@ enum CompletionPlan<'a> {
     DirectMultipart {
         requested: ContentRef,
         provider_upload_id: &'a str,
+        checksum_algorithm: ChecksumAlgorithm,
         parts: &'a [CompletedUploadPart],
     },
 }
@@ -1418,12 +1419,19 @@ fn completion_plan<'a>(
         }),
         (
             UploadSessionTransport::DirectMultipart {
-                provider_upload_id, ..
+                provider_upload_id,
+                checksum_algorithm,
+                ..
             },
-            CompleteUploadRequest::Multipart { multipart, parts },
+            CompleteUploadRequest::Multipart { content, parts },
         ) => Ok(CompletionPlan::DirectMultipart {
-            requested: direct_multipart_content_ref(session.content_id.clone(), multipart)?,
+            requested: direct_multipart_content_ref(
+                session.content_id.clone(),
+                content,
+                *checksum_algorithm,
+            )?,
             provider_upload_id,
+            checksum_algorithm: *checksum_algorithm,
             parts,
         }),
         (
@@ -1486,12 +1494,14 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
         CompletionPlan::DirectMultipart {
             requested,
             provider_upload_id,
+            checksum_algorithm,
             parts,
         } => {
             assemble_multipart_upload(
                 store,
                 content_store_id,
                 provider_upload_id,
+                checksum_algorithm,
                 parts,
                 &requested,
             )
@@ -1514,19 +1524,15 @@ async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     provider_upload_id: &str,
+    checksum_algorithm: ChecksumAlgorithm,
     parts: &[CompletedUploadPart],
     expected: &ContentRef,
 ) -> Result<CompletionOutcome> {
-    let parts = multipart_parts(parts)?;
+    let parts = multipart_parts(parts, checksum_algorithm)?;
     let object_key = content_blob(content_store_id, &expected.content_id);
 
     match store
-        .complete_multipart_upload(
-            &object_key,
-            provider_upload_id,
-            &parts,
-            &expected.storage_checksum,
-        )
+        .complete_multipart_upload(&object_key, provider_upload_id, &parts, &expected.checksum)
         .await
     {
         // Either the provider assembled the object on this call, or it had
@@ -1633,6 +1639,76 @@ mod tests {
         .await
     }
 
+    /// The durable session decision, rather than today's process default,
+    /// governs both part signing and completion after a restart.
+    #[test]
+    fn multipart_validation_uses_the_algorithm_frozen_in_the_session() {
+        let session = UploadSessionState {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            upload_id: UploadId::parse("upl_00000000000000000000000000000001").expect("upload id"),
+            content_id: ContentId::parse("con_00000000000000000000000000000001")
+                .expect("content id"),
+            created_at_ms: 1,
+            transport: UploadSessionTransport::DirectMultipart {
+                provider_upload_id: "provider-upload".to_owned(),
+                part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
+                // Deliberately not the process default. This models a
+                // session reopened after that default changed.
+                checksum_algorithm: ChecksumAlgorithm::Crc32c,
+            },
+            state: UploadSessionLifecycle::Open { expires_at_ms: 2 },
+        };
+        let (_, required_algorithm) =
+            multipart_session_upload(&session).expect("multipart session");
+        assert_eq!(required_algorithm, ChecksumAlgorithm::Crc32c);
+
+        let content = UploadContentClaim {
+            size_bytes: 7,
+            checksum: Checksum::crc32c(b"payload"),
+        };
+        let content_ref =
+            direct_multipart_content_ref(session.content_id.clone(), &content, required_algorithm)
+                .expect("the stored algorithm accepts the content claim");
+        assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Crc32c);
+
+        let part = CompletedUploadPart {
+            part_number: 1,
+            etag: "etag".to_owned(),
+            checksum: Checksum::crc32c(b"payload"),
+        };
+        assert_eq!(
+            multipart_parts(&[part], required_algorithm)
+                .expect("the stored algorithm accepts the part")[0]
+                .checksum
+                .algorithm,
+            ChecksumAlgorithm::Crc32c
+        );
+
+        let wrong_part = CompletedUploadPart {
+            part_number: 1,
+            etag: "etag".to_owned(),
+            checksum: Checksum::sha256(b"payload"),
+        };
+        assert!(multipart_parts(&[wrong_part], required_algorithm).is_err());
+        let wrong_signing_claim = UploadPartChecksumClaim {
+            part_number: 1,
+            checksum: Checksum::sha256(b"payload"),
+        };
+        assert!(
+            validate_upload_checksum(&wrong_signing_claim.checksum, required_algorithm).is_err()
+        );
+        let wrong_content = UploadContentClaim {
+            size_bytes: 7,
+            checksum: Checksum::sha256(b"payload"),
+        };
+        assert!(direct_multipart_content_ref(
+            session.content_id,
+            &wrong_content,
+            required_algorithm
+        )
+        .is_err());
+    }
+
     /// An aborted session is logically absent: it will never select content,
     /// which is the same thing the eventual physical deletion says. A
     /// completion arriving afterwards must not resurrect it — and must not
@@ -1692,9 +1768,9 @@ mod tests {
         let begin = begin_direct_put_upload_target(
             &store,
             &namespace_id,
-            DirectPutContentClaim {
+            UploadContentClaim {
                 size_bytes: BYTES.len() as u64,
-                storage_checksum: StorageChecksum::sha256(BYTES),
+                checksum: Checksum::sha256(BYTES),
             },
             &setup,
         )

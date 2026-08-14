@@ -121,7 +121,7 @@ impl FsWriter {
     /// its payload: the stream is hashed as it is forwarded to object
     /// storage and never held whole, so a large file costs one transfer
     /// part of memory rather than its own size. Everything after the bytes
-    /// land is identical — same trusted whole-file SHA-256, same
+    /// land is identical — same full-object checksum, same
     /// publication, same retry reconciliation — so a caller that already
     /// holds its bytes has no reason to come here.
     ///
@@ -278,8 +278,8 @@ impl FsWriter {
     /// The stream is hashed as it is forwarded to object storage and never
     /// held whole, so a large file costs one transfer part of memory rather
     /// than its own size. What comes back is the same [`PreparedContent`]
-    /// [`Self::prepare_file_bytes`] produces — same trusted whole-file
-    /// SHA-256, same publication path, same guarantees — so callers that
+    /// [`Self::prepare_file_bytes`] produces — same full-object checksum,
+    /// same publication path, same guarantees — so callers that
     /// already hold their bytes have no reason to come here.
     #[tracing::instrument(
         level = "debug",

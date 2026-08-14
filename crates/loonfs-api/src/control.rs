@@ -5,9 +5,9 @@
 use crate::envelope::EnvelopeCodecError;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
-    ContentStoreId, InodeId, ManifestId, ManifestObjectId, MetadataCompactionId, NamespaceId,
-    StorageChecksum, UploadId, WalSegmentId, ROOT_INODE_ID,
+    ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
+    ContentRefKind, ContentStoreId, InodeId, ManifestId, ManifestObjectId, MetadataCompactionId,
+    NamespaceId, UploadId, WalSegmentId, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -58,7 +58,7 @@ impl ControlObjectKind {
             Self::WalFloor => 1,
             Self::MetadataRoot => 1,
             Self::CheckpointRecord => 1,
-            Self::UploadSession => 2,
+            Self::UploadSession => 1,
             Self::CompactionLease => 1,
         }
     }
@@ -743,6 +743,9 @@ pub enum UploadSessionTransport {
         /// from here rather than being told a second, possibly different,
         /// one. Zero is not a geometry, so it is not representable.
         part_size_bytes: NonZeroU64,
+        /// Checksum algorithm frozen when the session began. Part signing
+        /// and completion must use this decision after any process restart.
+        checksum_algorithm: ChecksumAlgorithm,
     },
 }
 
@@ -872,6 +875,12 @@ impl UploadSessionState {
             .into_iter()
             .chain(self.state.content_ref())
         {
+            content_ref.validate().map_err(|error| {
+                format!(
+                    "upload session `{}` holds an invalid content ref: {error}",
+                    self.upload_id
+                )
+            })?;
             if content_ref.content_id != self.content_id {
                 return Err(format!(
                     "upload session `{}` owns content `{}` but holds a reference to `{}`",
@@ -917,6 +926,7 @@ enum StrictUploadSessionTransport {
     DirectMultipart {
         provider_upload_id: String,
         part_size_bytes: NonZeroU64,
+        checksum_algorithm: ChecksumAlgorithm,
     },
 }
 
@@ -932,9 +942,11 @@ impl From<StrictUploadSessionTransport> for UploadSessionTransport {
             StrictUploadSessionTransport::DirectMultipart {
                 provider_upload_id,
                 part_size_bytes,
+                checksum_algorithm,
             } => Self::DirectMultipart {
                 provider_upload_id,
                 part_size_bytes,
+                checksum_algorithm,
             },
         }
     }
@@ -1000,31 +1012,13 @@ struct StrictContentRef {
     kind: MutableContentRefKind,
     content_id: ContentId,
     size_bytes: u64,
-    storage_checksum: StrictStorageChecksum,
-    #[serde(default)]
-    whole_file_sha256: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictStorageChecksum {
-    algorithm: ChecksumAlgorithm,
-    value: String,
+    checksum: Checksum,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MutableContentRefKind {
     BlobV1,
-}
-
-impl From<StrictStorageChecksum> for StorageChecksum {
-    fn from(checksum: StrictStorageChecksum) -> Self {
-        Self {
-            algorithm: checksum.algorithm,
-            value: checksum.value,
-        }
-    }
 }
 
 impl From<StrictContentRef> for ContentRef {
@@ -1036,8 +1030,7 @@ impl From<StrictContentRef> for ContentRef {
             kind,
             content_id: content_ref.content_id,
             size_bytes: content_ref.size_bytes,
-            storage_checksum: content_ref.storage_checksum.into(),
-            whole_file_sha256: content_ref.whole_file_sha256,
+            checksum: content_ref.checksum,
         }
     }
 }

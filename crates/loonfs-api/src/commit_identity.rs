@@ -144,8 +144,8 @@ enum OperationFingerprintInput<'a> {
 /// Canonical preimage for the content a put attaches.
 ///
 /// Identity is *which object*, so the id and its length are the whole of it.
-/// The checksums are evidence about those bytes, pinned to the id by the
-/// verification every write and read already performs, and they are left out
+/// The checksum is evidence about those bytes, pinned to the id by the
+/// verification every write and read already performs, and it is left out
 /// deliberately: a reference that named the same object with a differently
 /// spelled checksum would otherwise read as a different mutation.
 ///
@@ -447,9 +447,7 @@ fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ActorId, AttributeKey, AttributeValue, ContentId, ContentRefKind, StorageChecksum,
-    };
+    use crate::{ActorId, AttributeKey, AttributeValue, Checksum, ContentId, ContentRefKind};
 
     fn test_actor() -> ActorRef {
         ActorRef::user(ActorId::parse("test-actor").expect("valid test actor id"))
@@ -789,15 +787,13 @@ mod tests {
                 kind: ContentRefKind::BlobV1,
                 content_id: content_id.clone(),
                 size_bytes: bytes.len() as u64,
-                storage_checksum: StorageChecksum::crc32c(bytes),
-                whole_file_sha256: None,
+                checksum: Checksum::crc32c(bytes),
             },
             ContentRef {
                 kind: ContentRefKind::BlobV1,
                 content_id: content_id.clone(),
                 size_bytes: bytes.len() as u64,
-                storage_checksum: StorageChecksum::crc64nvme(bytes),
-                whole_file_sha256: None,
+                checksum: Checksum::crc64nvme(bytes),
             },
         ] {
             assert_eq!(
@@ -834,7 +830,7 @@ mod tests {
 
     /// Two references to the same object with different checksum evidence
     /// are the same mutation: identity is which object a put attaches, and
-    /// the checksums are pinned to that object by verification elsewhere.
+    /// the checksum is pinned to that object by verification elsewhere.
     #[test]
     fn checksum_evidence_is_outside_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -842,8 +838,8 @@ mod tests {
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"pinned put bytes",
         );
-        let without_trusted_digest = ContentRef {
-            whole_file_sha256: None,
+        let crc_reference = ContentRef {
+            checksum: Checksum::crc32c(b"pinned put bytes"),
             ..content_ref.clone()
         };
 
@@ -859,7 +855,7 @@ mod tests {
                 &namespace_id,
                 &test_actor(),
                 None,
-                &[put("/docs/report.txt", without_trusted_digest)]
+                &[put("/docs/report.txt", crc_reference)]
             )
             .expect("fingerprint")
         );

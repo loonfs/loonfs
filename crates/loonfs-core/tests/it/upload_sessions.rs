@@ -6,13 +6,13 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
-use loonfs_api::v0::DirectPutContentClaim;
+use loonfs_api::v0::UploadContentClaim;
 use loonfs_api::{
     v0::CompleteUploadRequest,
     wire::control::{ControlObjectKind, UploadSessionState, UploadSessionTransport},
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
-use loonfs_api::{ChecksumAlgorithm, ContentId, StorageChecksum};
+use loonfs_api::{Checksum, ChecksumAlgorithm, ContentId};
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
 };
@@ -39,7 +39,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
 async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    claim: DirectPutContentClaim,
+    claim: UploadContentClaim,
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
     namespace_engine(store, namespace_id, context)
@@ -48,10 +48,10 @@ async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
 }
 
 /// What a well-behaved direct-put client would send for these bytes.
-fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
-    DirectPutContentClaim {
+fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
+    UploadContentClaim {
         size_bytes: bytes.len() as u64,
-        storage_checksum: StorageChecksum::sha256(bytes),
+        checksum: Checksum::sha256(bytes),
     }
 }
 
@@ -155,13 +155,9 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
     let content_ref = &first.target.content_ref;
     assert_eq!(content_ref.size_bytes, bytes.len() as u64);
     assert_eq!(
-        content_ref.storage_checksum,
-        StorageChecksum::sha256(bytes),
+        content_ref.checksum,
+        Checksum::sha256(bytes),
         "the signed checksum is the client's claim, verified again at completion"
-    );
-    assert_eq!(
-        content_ref.whole_file_sha256.as_deref(),
-        Some(content_ref.storage_checksum.value.as_str())
     );
     assert!(first
         .target
@@ -188,9 +184,9 @@ async fn begin_direct_put_rejects_a_malformed_claim_without_creating_a_session()
 
     // The client no longer names an object, so the only thing left to
     // reject is a malformed claim about its own bytes.
-    let claim = DirectPutContentClaim {
+    let claim = UploadContentClaim {
         size_bytes: 5,
-        storage_checksum: StorageChecksum {
+        checksum: Checksum {
             algorithm: ChecksumAlgorithm::Sha256,
             value: "not-a-sha256".to_owned(),
         },
@@ -412,14 +408,9 @@ mod streamed_content {
 
         assert_eq!(staged.content_ref.size_bytes, bytes.len() as u64);
         assert_eq!(
-            staged.content_ref.storage_checksum,
-            StorageChecksum::sha256(&bytes),
+            staged.content_ref.checksum,
+            Checksum::sha256(&bytes),
             "the server hashed the whole stream itself"
-        );
-        assert_eq!(
-            staged.content_ref.whole_file_sha256.as_deref(),
-            Some(staged.content_ref.storage_checksum.value.as_str()),
-            "every proxied write carries a trusted whole-file digest"
         );
 
         // Completion is unchanged: it trusts what the server already checked.
@@ -604,9 +595,7 @@ mod streamed_content {
 /// providers' actual multipart behaviour.
 mod direct_multipart {
     use super::*;
-    use loonfs_api::v0::{
-        CompletedUploadPart, DirectMultipartContentClaim, DirectMultipartUploadOptions,
-    };
+    use loonfs_api::v0::{CompletedUploadPart, DirectMultipartUploadOptions, UploadContentClaim};
     use loonfs_api::wire::control::{decode_control_object, UploadSessionLifecycle};
     use loonfs_core::{gc_namespace, GcConfig};
     use loonfs_objectstore::keys::content_blob;
@@ -622,7 +611,7 @@ mod direct_multipart {
         /// What the client will claim at completion, and therefore what the
         /// server will build the reference from. The session itself knows
         /// none of it yet.
-        claim: DirectMultipartContentClaim,
+        claim: UploadContentClaim,
         object_key: String,
         provider_upload_id: String,
         payload: Vec<u8>,
@@ -647,6 +636,7 @@ mod direct_multipart {
         let UploadSessionTransport::DirectMultipart {
             provider_upload_id,
             part_size_bytes,
+            checksum_algorithm,
         } = state.transport.clone()
         else {
             panic!("a multipart begin opens a multipart session");
@@ -656,6 +646,7 @@ mod direct_multipart {
             begin.target.part_size_bytes,
             "the geometry it handed out is the geometry it recorded"
         );
+        assert_eq!(checksum_algorithm, begin.target.checksum_algorithm);
         let catalog = loonfs_core::control::load_namespace_catalog_entry(store, &namespace_id)
             .await
             .expect("catalog");
@@ -664,9 +655,9 @@ mod direct_multipart {
         Session {
             namespace_id,
             upload_id: begin.upload_id,
-            claim: DirectMultipartContentClaim {
+            claim: UploadContentClaim {
                 size_bytes: payload.len() as u64,
-                crc64nvme: StorageChecksum::crc64nvme(&payload).value,
+                checksum: Checksum::crc64nvme(&payload),
             },
             object_key,
             provider_upload_id,
@@ -703,7 +694,7 @@ mod direct_multipart {
             parts.push(CompletedUploadPart {
                 part_number,
                 etag,
-                crc64nvme: StorageChecksum::crc64nvme(chunk).value,
+                checksum: Checksum::crc64nvme(chunk),
             });
         }
         parts
@@ -752,13 +743,9 @@ mod direct_multipart {
             session.payload.len() as u64
         );
         assert_eq!(
-            completed.content_ref.storage_checksum,
-            StorageChecksum::crc64nvme(&session.payload),
+            completed.content_ref.checksum,
+            Checksum::crc64nvme(&session.payload),
             "a provider-assembled object's evidence is the crc it computed"
-        );
-        assert!(
-            completed.content_ref.whole_file_sha256.is_none(),
-            "nobody trustworthy hashed these bytes, so no sha256 is claimed"
         );
         assert_eq!(
             store
@@ -872,7 +859,7 @@ mod direct_multipart {
         parts[2] = CompletedUploadPart {
             part_number: 3,
             etag,
-            crc64nvme: StorageChecksum::crc64nvme(short).value,
+            checksum: Checksum::crc64nvme(short),
         };
 
         let error = complete_upload(
@@ -908,7 +895,7 @@ mod direct_multipart {
         let parts = vec![CompletedUploadPart {
             part_number: 1,
             etag: "\"whatever\"".to_owned(),
-            crc64nvme: StorageChecksum::crc64nvme(PART).value,
+            checksum: Checksum::crc64nvme(PART),
         }];
         let error = complete_upload(
             &store,
@@ -945,7 +932,7 @@ mod direct_multipart {
         parts[2] = CompletedUploadPart {
             part_number: 3,
             etag,
-            crc64nvme: StorageChecksum::crc64nvme(short).value,
+            checksum: Checksum::crc64nvme(short),
         };
         let request = complete_request(&session, parts);
 
@@ -1052,8 +1039,8 @@ mod direct_multipart {
         .await
         .expect("the retried completion verifies the assembled object");
         assert_eq!(
-            completed.content_ref.storage_checksum,
-            StorageChecksum::crc64nvme(&session.payload)
+            completed.content_ref.checksum,
+            Checksum::crc64nvme(&session.payload)
         );
     }
 
