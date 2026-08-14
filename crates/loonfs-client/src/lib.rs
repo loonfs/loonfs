@@ -1143,11 +1143,9 @@ impl Client {
 
     /// Reads one upload session back.
     ///
-    /// A completed session answers with the exact content reference it
-    /// settled on and a freshly minted content token, so a caller that
-    /// lost its completion response — or the whole process — can commit
-    /// that content without re-uploading a byte. The upload id is the only
-    /// thing it has to have kept.
+    /// A completed session returns its content reference and a fresh content
+    /// token. A caller that kept the upload id can therefore recover from a
+    /// lost completion response without uploading the content again.
     pub async fn read_upload_status(
         &self,
         namespace_id: &NamespaceId,

@@ -222,16 +222,12 @@ pub struct CompletedUploadPart {
     pub checksum: Checksum,
 }
 
-/// This opaque token authorizes this exact `content_ref` for a later commit.
-///
-/// A content token exists only after validation has occurred. The proof is
-/// self-contained, so unknown fields are rejected wherever it crosses the
-/// public API.
+/// Proof that a specific `content_ref` may be used in a later commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContentToken {
-    /// Exact content identity this token authorizes.
+    /// Content authorized by this token.
     pub content_ref: ContentRef,
     /// Opaque, server-signed token. Clients must not parse it.
     pub token: String,
@@ -379,13 +375,10 @@ pub struct CompleteUploadResponse {
     pub namespace_id: NamespaceId,
     /// Session whose result is now frozen for idempotent completion retries.
     pub upload_id: UploadId,
-    /// Durable verified content selected by the completed session.
+    /// Verified content selected by the completed session.
     pub content_ref: ContentRef,
-    /// Short-lived proof authorizing the same `content_ref` for a later
-    /// commit, or `None` when the session no longer mints one.
-    ///
-    /// The duplicated content reference is deliberate: `content_ref` is
-    /// durable upload state, while this object is a transferable proof.
+    /// Short-lived proof for a later commit. This is absent after the token
+    /// minting window closes, while `content_ref` remains available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_token: Option<ContentToken>,
 }
@@ -412,14 +405,10 @@ pub enum UploadSessionStatus {
     Completed {
         /// Unix-millisecond stamp of the completion.
         completed_at_ms: u64,
-        /// Durable verified content this session settled on.
+        /// Verified content selected by this session.
         content_ref: ContentRef,
-        /// Freshly minted proof authorizing the same `content_ref` for a
-        /// following commit, or `None` once the session has stopped minting
-        /// them.
-        ///
-        /// The duplicated content reference is deliberate: `content_ref` is
-        /// durable upload state, while this object is a transferable proof.
+        /// Fresh proof for a later commit. This is absent after the token
+        /// minting window closes, while `content_ref` remains available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_token: Option<ContentToken>,
     },

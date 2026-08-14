@@ -1172,11 +1172,10 @@ upload along with the object it was writing. Aborting an upload that already
 assembled its object is safe on every supported provider: it succeeds and
 leaves the object alone.
 
-A server may return a short-lived `content_token` for the completed content
-ref; the token is opaque to clients, and reading the session mints another
-one for as long as the session is minting them. The response keeps the durable
-`content_ref` independently and repeats it inside the transferable proof on
-purpose: a completed session can outlive its token-minting window.
+A server may return a short-lived `content_token` for completed content.
+Clients treat the token as opaque and can copy it directly into a commit
+request. Reading a completed session returns a fresh token while its minting
+window remains open. The separate `content_ref` remains available afterward.
 
 ```json
 {

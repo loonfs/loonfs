@@ -456,9 +456,8 @@ async fn every_upload_session_route_requires_the_bearer_token() {
         harness.server_url
     );
 
-    // Reading a session mints a fresh content token, and aborting
-    // one destroys another client's in-flight upload. Neither is reachable
-    // without the deployment's token.
+    // Both operations require deployment authorization because they expose
+    // or modify another client's upload session.
     for (method, url) in [("GET", base.clone()), ("POST", format!("{base}/abort"))] {
         match raw_agent().request(method, &url).call() {
             Err(ureq::Error::Status(401, response)) => {

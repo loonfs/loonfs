@@ -182,8 +182,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     let completed = stage_uploaded_content(&harness.client, &namespace, file_bytes).await;
     let content_ref = completed.content_ref.clone();
 
-    // The staged upload publishes through a put that references the
-    // uploaded ref with the exact content-token object completion returned.
+    // Copy the completion token directly into the commit request.
     let put_request = CommitRequest {
         commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),

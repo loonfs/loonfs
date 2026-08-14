@@ -621,9 +621,8 @@ pub(super) async fn read_upload_status(
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
 ) -> Result<Json<UploadStatusResponse>, ApiResponseError> {
-    // A completed session answers with a freshly minted content
-    // token, which is a capability to commit that content. Authorization
-    // runs before the id is even parsed, as everywhere else.
+    // Completed sessions return a fresh token when they are still allowed to
+    // mint one. Authorization runs before the upload id is parsed.
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
