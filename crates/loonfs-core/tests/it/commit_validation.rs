@@ -241,15 +241,12 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
-    let staged = engine
+    engine
         .upload_content(upload.upload_id(), b"admitted")
         .await
         .expect("stage content");
     let completed = engine
-        .complete_upload_prepared(
-            upload.upload_id(),
-            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
-        )
+        .complete_upload_prepared(upload.upload_id())
         .await
         .expect("complete upload");
     let content_ref = completed.response.content_ref.clone();
@@ -971,10 +968,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .await
         .expect("stage content");
     let completed = engine
-        .complete_upload_prepared(
-            upload.upload_id(),
-            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
-        )
+        .complete_upload_prepared(upload.upload_id())
         .await
         .expect("complete upload");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)

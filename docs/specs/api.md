@@ -1059,10 +1059,10 @@ A browser calling a presigned URL is talking to the provider, not to LoonFS,
 so cross-origin access is governed by the bucket's or container's own CORS
 configuration rather than by anything this API sets.
 
-After the client uploads bytes to the presigned URL, it calls complete with the
-`content_ref` returned when the session began. The server reads the stored
-object's size and checksum from the provider and compares them with that
-reference. A mismatch fails the completion and deletes the unpublished object.
+After uploading to the presigned URL, the client completes the session with
+`{}`. The server loads the expected content reference from the session and
+compares it with the object's size and checksum at the provider. A mismatch
+fails completion and deletes the unpublished object.
 If the provider metadata request fails, the server returns `server_error`
 without changing the object or session, so the client can retry. The server
 does not download the object during this check.
@@ -1126,7 +1126,6 @@ resulting content reference stores that complete-object checksum.
 
 ```json
 {
-  "completion": "multipart",
   "content": {
     "size_bytes": 17301504,
     "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" }
@@ -1139,10 +1138,9 @@ resulting content reference stores that complete-object checksum.
 }
 ```
 
-The request lists every part once in ascending order. It does not include a
-content reference; the server returns the reference after completion.
-Service-proxied and direct-PUT completion requests instead send the content
-reference under `"completion": "content_ref"` and do not include parts.
+The request lists every part once in ascending order. The server returns the
+content reference after completion. Service-proxied and direct-PUT sessions
+use `{}` because the session already stores the required content information.
 
 The server asks the provider to assemble the object, then reads its stored size
 and checksum and compares them with the completion request. This read is
@@ -1801,8 +1799,8 @@ The semantic rule is:
 
 - `PUT /content` stores the immutable whole-file object and records the staged
   `content_ref`;
-- `complete` finalizes the upload session only when the expected `content_ref`
-  exactly matches the service-computed staged ref; and
+- `complete` finalizes the upload session from the content facts frozen in the
+  durable session; and
 - the returned `content_ref` is then safe to reference from a commit. Remote
   servers may also return an opaque `content_token` that remote
   create/replace mutations carry back as their content-preparation proof.
@@ -1820,10 +1818,9 @@ only the fields for that mode:
 `direct_multipart` accepts an optional `multipart` object and otherwise uses
 the default part size.
 
-Completion requests use `completion` in the same way. Service-proxied and
-direct-PUT sessions use `content_ref`; multipart sessions use `content` and
-`parts`. Missing tags, mixed fields, and a completion shape that does not match
-the session fail with `invalid_request`.
+The stored upload mode determines the completion body. Service-proxied and
+direct-PUT sessions accept only `{}`. Multipart sessions require `content` and
+`parts`. Unknown, missing, or mode-specific fields return `invalid_request`.
 
 The begin-upload *response* is tagged the same way, in the same `mode`, and
 carries its transport's field and no other's: `service_proxied` carries
@@ -1836,9 +1833,8 @@ An upload session allocates its content object when it begins, so repeating
 object and is idempotent. Repeating it with different bytes is a conflict.
 Two *different* sessions carrying identical bytes get their own objects:
 content is never shared across uploads, so retry idempotency belongs to the
-session and nothing else. Completing an
-upload fails if no content was staged or if the expected `content_ref` differs
-from the staged one. Publication never downloads an arbitrary external ref to
+session and nothing else. Completing a service-proxied upload fails if no
+content was staged. Publication never downloads an arbitrary external ref to
 rescue a missing proof.
 
 A session is `open`, then `completed` or `aborted`, and both of those are
@@ -1971,14 +1967,7 @@ Representative content-upload response:
 Representative complete-upload request:
 
 ```json
-{
-  "content_ref": {
-    "kind": "blob_v1",
-    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
-    "size_bytes": 20591,
-    "checksum": { "algorithm": "sha256", "value": "7ab..." }
-  }
-}
+{}
 ```
 
 Representative complete-upload response:

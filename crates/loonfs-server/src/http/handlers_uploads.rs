@@ -2,7 +2,9 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::{authorize, AppJson, AppPath, AppState, NamespaceIdPath, UploadBodyStream};
+use super::{
+    authorize, AppJson, AppPath, AppState, NamespaceIdPath, UploadBodyBytes, UploadBodyStream,
+};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -10,6 +12,7 @@ use loonfs::content_tokens::{
     mint_content_token, CompletedUploadReceipt, ContentToken, ContentTokenError,
 };
 use loonfs::publish::PreparedContent;
+use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::FsWriter;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -17,11 +20,11 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     direct_put_checksum_feature,
     v0::{
-        AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
-        CompleteUploadResponse, DirectMultipartUpload, DirectMultipartUploadOptions,
-        DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
-        SignedUploadPart, UploadContentClaim, UploadContentResponse, UploadSessionStatus,
-        UploadStatusResponse,
+        AbortUploadResponse, BeginUploadRequest, BeginUploadResponse,
+        CompleteKnownContentUploadRequest, CompleteMultipartUploadRequest, CompleteUploadResponse,
+        DirectMultipartUpload, DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess,
+        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentClaim,
+        UploadContentResponse, UploadMode, UploadSessionStatus, UploadStatusResponse,
     },
     ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
@@ -556,12 +559,15 @@ pub(super) async fn upload_content(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
-        description = "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived content token for a following file write.",
+        description = "Completes an upload using the body required by its stored mode. Service-proxied and direct-put sessions accept `{}`. Direct-multipart sessions require the content claim and completed parts.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
-        request_body = CompleteUploadRequest,
+        request_body(
+            content = crate::http::openapi::CompleteUploadRequestSchema,
+            description = "The stored upload mode determines which body is accepted."
+        ),
         responses(
             (status = 200, description = "Upload completed", body = CompleteUploadResponse),
             (status = 400, description = "Invalid completion request", body = ApiError),
@@ -577,20 +583,109 @@ pub(super) async fn complete_upload(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
-    AppJson(request): AppJson<CompleteUploadRequest>,
+    body: UploadBodyBytes,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
+    let body = body.into_bytes();
     let completed = state
         .writer
-        .complete_upload_prepared(&namespace_id, &upload_id, &request)
+        .complete_upload_prepared_for_mode(&namespace_id, &upload_id, |mode| {
+            decode_completion_body(mode, &body)
+        })
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let mut response = completed.response;
     response.content_token = ContentTokenVerifier::new(state.config.content_token_secret())
         .mint_receipt(completed.receipt.as_ref())?;
     Ok(Json(response))
+}
+
+fn decode_completion_body(
+    mode: UploadMode,
+    body: &[u8],
+) -> std::result::Result<ResolvedUploadCompletion, String> {
+    let invalid = |error: serde_json::Error| {
+        format!(
+            "request body is not valid JSON for {} completion: {error}",
+            upload_mode_name(mode)
+        )
+    };
+    match mode {
+        UploadMode::ServiceProxied | UploadMode::DirectPut => {
+            serde_json::from_slice::<CompleteKnownContentUploadRequest>(body)
+                .map(|_| ResolvedUploadCompletion::KnownContent)
+                .map_err(invalid)
+        }
+        UploadMode::DirectMultipart => {
+            serde_json::from_slice::<CompleteMultipartUploadRequest>(body)
+                .map(ResolvedUploadCompletion::Multipart)
+                .map_err(invalid)
+        }
+    }
+}
+
+fn upload_mode_name(mode: UploadMode) -> &'static str {
+    match mode {
+        UploadMode::ServiceProxied => "service_proxied",
+        UploadMode::DirectPut => "direct_put",
+        UploadMode::DirectMultipart => "direct_multipart",
+    }
+}
+
+#[cfg(test)]
+mod completion_body_tests {
+    use super::*;
+
+    const CONTENT: &str =
+        r#"{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}"#;
+
+    #[test]
+    fn stored_mode_selects_a_precise_completion_schema_error() {
+        let multipart_body = format!(r#"{{"content":{CONTENT},"parts":[]}}"#);
+        let direct_put_error =
+            decode_completion_body(UploadMode::DirectPut, multipart_body.as_bytes())
+                .expect_err("multipart fields do not belong to direct put");
+        assert_eq!(
+            direct_put_error,
+            "request body is not valid JSON for direct_put completion: unknown field `content`, \
+             there are no fields at line 1 column 10"
+        );
+
+        let multipart_error = decode_completion_body(UploadMode::DirectMultipart, b"{}")
+            .expect_err("multipart completion needs its claim and parts");
+        assert_eq!(
+            multipart_error,
+            "request body is not valid JSON for direct_multipart completion: missing field \
+             `content` at line 1 column 2"
+        );
+
+        let missing_parts = format!(r#"{{"content":{CONTENT}}}"#);
+        let missing_parts_error =
+            decode_completion_body(UploadMode::DirectMultipart, missing_parts.as_bytes())
+                .expect_err("multipart completion needs parts");
+        assert_eq!(
+            missing_parts_error,
+            "request body is not valid JSON for direct_multipart completion: missing field \
+             `parts` at line 1 column 92"
+        );
+    }
+
+    #[test]
+    fn retired_completion_fields_are_unknown_in_known_content_bodies() {
+        for (body, field) in [
+            (r#"{"completion":"content_ref"}"#, "completion"),
+            (r#"{"content_ref":{}}"#, "content_ref"),
+        ] {
+            let error = decode_completion_body(UploadMode::ServiceProxied, body.as_bytes())
+                .expect_err("retired completion field");
+            assert!(
+                error.contains(&format!("unknown field `{field}`")),
+                "wrong error for {field}: {error}"
+            );
+        }
+    }
 }
 
 #[cfg_attr(

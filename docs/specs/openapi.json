@@ -2439,7 +2439,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
-        "description": "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived content token for a following file write.",
+        "description": "Completes an upload using the body required by its stored mode. Service-proxied and direct-put sessions accept `{}`. Direct-multipart sessions require the content claim and completed parts.",
         "operationId": "complete_upload",
         "parameters": [
           {
@@ -2462,6 +2462,7 @@
           }
         ],
         "requestBody": {
+          "description": "The stored upload mode determines which body is accepted.",
           "content": {
             "application/json": {
               "schema": {
@@ -3664,60 +3665,43 @@
           }
         }
       },
+      "CompleteKnownContentUploadRequest": {
+        "type": "object",
+        "description": "Empty request used when the upload session already contains the content\nreference.",
+        "additionalProperties": false
+      },
+      "CompleteMultipartUploadRequest": {
+        "type": "object",
+        "description": "Information required to complete a `direct_multipart` upload.",
+        "required": [
+          "content",
+          "parts"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Expected length and checksum of the assembled object."
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompletedUploadPart"
+            },
+            "description": "Uploaded parts in ascending part order."
+          }
+        },
+        "additionalProperties": false
+      },
       "CompleteUploadRequest": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "CompleteUploadContentRef",
-            "description": "Completes a session the server named a content object for: the\ncaller names it back and the server proves the object matches.",
-            "required": [
-              "content_ref",
-              "completion"
-            ],
-            "properties": {
-              "completion": {
-                "type": "string",
-                "enum": [
-                  "content_ref"
-                ]
-              },
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Content identity the caller expects the session to have settled\non."
-              }
-            }
+            "$ref": "#/components/schemas/CompleteKnownContentUploadRequest"
           },
           {
-            "type": "object",
-            "title": "CompleteUploadMultipart",
-            "description": "Completes a `direct_multipart` session with what it uploaded.",
-            "required": [
-              "content",
-              "parts",
-              "completion"
-            ],
-            "properties": {
-              "completion": {
-                "type": "string",
-                "enum": [
-                  "multipart"
-                ]
-              },
-              "content": {
-                "$ref": "#/components/schemas/UploadContentClaim",
-                "description": "The assembled object's length and checksum, which completion\nverifies against the provider's own reading of the object."
-              },
-              "parts": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/CompletedUploadPart"
-                },
-                "description": "Every part the client uploaded, in ascending part order. The\nserver holds no part records of its own, so this list is what it\nassembles the object from."
-              }
-            }
+            "$ref": "#/components/schemas/CompleteMultipartUploadRequest"
           }
         ],
-        "description": "Request to complete an upload.\n\nA service-proxied or `direct_put` session receives its content reference\nbefore the upload and returns that reference at completion. A\n`direct_multipart` session instead provides the completed parts and a\nclaim describing the assembled object.\n\nThe variants share no fields, so fields from one completion type are\nrejected when used with the other type. The server also checks that the\ncompletion type matches the transport stored in the upload session."
+        "description": "The stored upload mode determines the accepted body. Service-proxied and direct-put sessions use an empty object. Direct-multipart sessions provide the content claim and completed parts."
       },
       "CompleteUploadResponse": {
         "type": "object",

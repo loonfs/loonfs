@@ -170,6 +170,7 @@ pub use engine::RuntimeReadContext;
 pub use protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
+    ResolvedUploadCompletion,
 };
 // The builder pair is reachable through `NamespaceEngine::builder()` and its
 // `build()`, so both stay public even though no caller names them directly.

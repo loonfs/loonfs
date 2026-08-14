@@ -259,15 +259,50 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         .and_then(|schema| schema.get("oneOf"))
         .and_then(Value::as_array)
         .expect("completion variants");
-    let multipart_completion = completion_variants
-        .iter()
-        .find(|schema| {
-            schema.get("title").and_then(Value::as_str) == Some("CompleteUploadMultipart")
-        })
-        .expect("multipart completion variant");
+    assert_eq!(
+        completion_variants,
+        &[
+            serde_json::json!({
+                "$ref": "#/components/schemas/CompleteKnownContentUploadRequest"
+            }),
+            serde_json::json!({
+                "$ref": "#/components/schemas/CompleteMultipartUploadRequest"
+            }),
+        ]
+    );
+    let completion_description = schemas["CompleteUploadRequest"]["description"]
+        .as_str()
+        .expect("completion schema description");
+    assert!(completion_description.contains("stored upload session mode selects"));
+
+    let known_completion = schemas
+        .get("CompleteKnownContentUploadRequest")
+        .expect("known-content completion schema");
+    assert!(known_completion
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_none_or(serde_json::Map::is_empty));
+
+    let multipart_completion = schemas
+        .get("CompleteMultipartUploadRequest")
+        .expect("multipart completion schema");
     let required = required_fields(multipart_completion);
     assert!(required.contains("content"));
-    assert!(!required.contains("multipart"));
+    assert!(required.contains("parts"));
+
+    for request_schema in [known_completion, multipart_completion] {
+        let properties = request_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for retired_name in ["completion", "content_ref"] {
+            assert!(
+                !properties.contains_key(retired_name),
+                "retired completion request field `{retired_name}` remains in OpenAPI"
+            );
+        }
+    }
 
     for properties in values_named(&spec, "properties").filter_map(Value::as_object) {
         for retired_name in [

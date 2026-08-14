@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
     v0::{
-        BeginUploadResponse, CompleteUploadRequest, DirectMultipartUpload,
+        BeginUploadResponse, CompleteMultipartUploadRequest, DirectMultipartUpload,
         DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
         UploadPartChecksumClaim,
     },
@@ -199,11 +199,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     let complete = harness
         .client
-        .complete_upload(
-            &namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::for_content_ref(content_ref.clone()),
-        )
+        .complete_upload(&namespace_id, begin.upload_id())
         .await
         .expect("complete direct-put upload");
     assert_eq!(complete.content_ref, content_ref);
@@ -339,7 +335,6 @@ async fn assert_wrong_direct_put_bytes_rejected(
         .await
         .expect("begin wrong-bytes direct put");
     let direct_put = direct_put_of(&begin);
-    let content_ref = direct_put.content_ref.clone();
 
     expect_client_rejection(
         client
@@ -349,11 +344,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
     );
     expect_client_rejection(
         client
-            .complete_upload(
-                namespace_id,
-                begin.upload_id(),
-                &CompleteUploadRequest::for_content_ref(content_ref),
-            )
+            .complete_upload(namespace_id, begin.upload_id())
             .await,
         "complete wrong-bytes direct put",
     );
@@ -406,7 +397,6 @@ async fn assert_direct_put_requires_its_signed_headers(
             .await
             .expect("begin meddled direct put");
         let direct_put = direct_put_of(&begin);
-        let content_ref = direct_put.content_ref.clone();
 
         expect_client_rejection(
             client
@@ -418,11 +408,7 @@ async fn assert_direct_put_requires_its_signed_headers(
         // find and hands out no token.
         expect_client_rejection(
             client
-                .complete_upload(
-                    namespace_id,
-                    begin.upload_id(),
-                    &CompleteUploadRequest::for_content_ref(content_ref),
-                )
+                .complete_upload(namespace_id, begin.upload_id())
                 .await,
             &format!("complete after {label}"),
         );
@@ -445,7 +431,6 @@ async fn assert_direct_put_is_no_replace(
         .await
         .expect("begin duplicate direct put");
     let direct_put = direct_put_of(&begin);
-    let content_ref = direct_put.content_ref.clone();
 
     client
         .upload_via_presigned_url(&direct_put.access, bytes)
@@ -459,11 +444,7 @@ async fn assert_direct_put_is_no_replace(
     );
 
     let complete = client
-        .complete_upload(
-            namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::for_content_ref(content_ref),
-        )
+        .complete_upload(namespace_id, begin.upload_id())
         .await
         .expect("complete first direct put");
     assert!(
@@ -768,9 +749,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
     harness.server.abort();
 }
 
-/// Completion reads the object back and judges it. A promise that does not
-/// describe what is actually stored fails, and a failed completion hands out
-/// no content token — so nothing unproven can reach a commit.
+/// Completion verifies the stored object before issuing a content token.
 async fn assert_gcs_completion_judges_the_object_that_is_there(
     client: &Client,
     namespace_id: &NamespaceId,
@@ -790,37 +769,9 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
         .await
         .expect("upload the promised bytes");
 
-    // A ref claiming the wrong length, and one claiming the wrong digest,
-    // each describe an object that is not the one stored.
-    let wrong_size = loonfs_api::ContentRef {
-        size_bytes: content_ref.size_bytes + 1,
-        ..content_ref.clone()
-    };
-    let wrong_checksum = loonfs_api::ContentRef {
-        checksum: Checksum::crc32c(b"some other object entirely\n"),
-        ..content_ref.clone()
-    };
-    for (label, claimed) in [
-        ("wrong size", wrong_size),
-        ("wrong checksum", wrong_checksum),
-    ] {
-        let refused = client
-            .complete_upload(
-                namespace_id,
-                begin.upload_id(),
-                &CompleteUploadRequest::for_content_ref(claimed),
-            )
-            .await;
-        expect_client_rejection(refused, &format!("complete with a {label}"));
-    }
-
-    // The honest promise completes, against the very same stored object.
+    // Completion uses the content reference stored in the session.
     let complete = client
-        .complete_upload(
-            namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::for_content_ref(content_ref.clone()),
-        )
+        .complete_upload(namespace_id, begin.upload_id())
         .await
         .expect("complete the honest promise");
     assert_eq!(complete.content_ref, content_ref);
@@ -1162,16 +1113,16 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
 
     // The claim rides with the completion, and the identity comes back with
     // the answer: the client never named the object it wrote.
-    let request = CompleteUploadRequest::for_multipart(
-        UploadContentClaim {
+    let request = CompleteMultipartUploadRequest {
+        content: UploadContentClaim {
             size_bytes: payload.len() as u64,
             checksum: whole_object.clone(),
         },
         parts,
-    );
+    };
     let complete = harness
         .client
-        .complete_upload(&namespace_id, &upload_id, &request)
+        .complete_multipart_upload(&namespace_id, &upload_id, &request)
         .await
         .expect("complete the multipart upload");
     let content_ref = complete.content_ref.clone();
@@ -1184,7 +1135,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // used. Both reconcile from the durable session and the object.
     let replayed = harness
         .client
-        .complete_upload(&namespace_id, &upload_id, &request)
+        .complete_multipart_upload(&namespace_id, &upload_id, &request)
         .await
         .expect("a lost completion is answered, not failed");
     assert_eq!(replayed.content_ref, content_ref);

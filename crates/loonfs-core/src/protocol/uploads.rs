@@ -32,7 +32,7 @@ use crate::storage::content_admission::{
 };
 use bytes::Bytes;
 use loonfs_api::v0::{
-    AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
+    AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest,
     CompleteUploadResponse, CompletedUploadPart, DirectMultipartUploadOptions, UploadContentClaim,
     UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
     UploadStatusResponse,
@@ -85,6 +85,16 @@ pub struct BeginDirectMultipartUploadTargetResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: UploadId,
     pub target: DirectMultipartUploadTarget,
+}
+
+/// Completion data after the request has been decoded for the stored upload
+/// mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedUploadCompletion {
+    /// The session already contains all required content information.
+    KnownContent,
+    /// Multipart content information supplied at completion.
+    Multipart(CompleteMultipartUploadRequest),
 }
 
 /// One part a server integration is about to sign.
@@ -350,6 +360,11 @@ fn multipart_parts(
     parts: &[CompletedUploadPart],
     checksum_algorithm: ChecksumAlgorithm,
 ) -> Result<Vec<MultipartPart>> {
+    if parts.is_empty() {
+        return Err(CoreError::InvalidUploadContent(
+            "completion must include at least one uploaded part".to_owned(),
+        ));
+    }
     let mut previous = 0;
     parts
         .iter()
@@ -847,9 +862,34 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
-    request: &CompleteUploadRequest,
+    completion: ResolvedUploadCompletion,
     context: &MutationContext,
 ) -> Result<CompletedUpload> {
+    complete_upload_for_mode(
+        store,
+        namespace_id,
+        content_store_id,
+        upload_id,
+        |_| Ok(completion),
+        context,
+    )
+    .await
+}
+
+/// Loads the session, decodes completion data for its mode, and completes the
+/// upload. Decoding happens before provider access or durable writes.
+pub(crate) async fn complete_upload_for_mode<S, F>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    upload_id: &UploadId,
+    resolve: F,
+    context: &MutationContext,
+) -> Result<CompletedUpload>
+where
+    S: ObjectStore + ?Sized,
+    F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
+{
     let now_ms = context.now_ms;
     let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
     // An aborted session answers the same absence its physical deletion
@@ -859,13 +899,15 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
             upload_id: upload_id.clone(),
         });
     }
-    let plan = completion_plan(&loaded, request)?;
+    let completion =
+        resolve(upload_mode(&loaded.transport)).map_err(CoreError::InvalidUploadContent)?;
+    let plan = completion_plan(&loaded, &completion)?;
     if let Some(completed) = completed_outcome(
         &loaded.state,
         namespace_id,
         content_store_id,
         upload_id,
-        Some(plan.requested()),
+        plan.expected_completed_content(),
         now_ms,
     )? {
         return Ok(completed);
@@ -1349,26 +1391,13 @@ enum CompletionOutcome {
     Unusable(String),
 }
 
-/// The verification plan derived from the upload transport and completion
-/// request.
-///
-/// Building the plan performs no provider calls or durable writes. Each
-/// variant contains all data needed for the verification step.
+/// Information needed to verify an upload before completion.
 enum CompletionPlan<'a> {
-    /// A proxied session, which wrote and checked its own bytes: what it
-    /// recorded staging is the evidence.
-    Proxied {
-        requested: ContentRef,
-        staged: Option<&'a ContentRef>,
-    },
-    /// A direct-put session, whose bytes went past this server: the object
-    /// that came to rest has to be read back against the promise.
-    DirectPut {
-        requested: ContentRef,
-        promised: &'a ContentRef,
-    },
-    /// A direct-multipart session: the provider still has to assemble the
-    /// object from the parts the client uploaded, and then be proven right.
+    /// Content previously staged through the server.
+    Proxied { staged: Option<&'a ContentRef> },
+    /// Directly uploaded content that must be checked at the provider.
+    DirectPut { promised: &'a ContentRef },
+    /// Parts the provider must assemble and verify.
     DirectMultipart {
         requested: ContentRef,
         provider_upload_id: &'a str,
@@ -1378,13 +1407,20 @@ enum CompletionPlan<'a> {
 }
 
 impl CompletionPlan<'_> {
-    /// The reference this completion is about.
-    fn requested(&self) -> &ContentRef {
+    /// Content a repeated multipart completion must match.
+    fn expected_completed_content(&self) -> Option<&ContentRef> {
         match self {
-            Self::Proxied { requested, .. }
-            | Self::DirectPut { requested, .. }
-            | Self::DirectMultipart { requested, .. } => requested,
+            Self::Proxied { .. } | Self::DirectPut { .. } => None,
+            Self::DirectMultipart { requested, .. } => Some(requested),
         }
+    }
+}
+
+fn upload_mode(transport: &UploadSessionTransport) -> UploadMode {
+    match transport {
+        UploadSessionTransport::ServiceProxied { .. } => UploadMode::ServiceProxied,
+        UploadSessionTransport::DirectPut { .. } => UploadMode::DirectPut,
+        UploadSessionTransport::DirectMultipart { .. } => UploadMode::DirectMultipart,
     }
 }
 
@@ -1397,14 +1433,13 @@ impl CompletionPlan<'_> {
 /// valid.
 fn completion_plan<'a>(
     session: &'a UploadSessionState,
-    request: &'a CompleteUploadRequest,
+    completion: &'a ResolvedUploadCompletion,
 ) -> Result<CompletionPlan<'a>> {
-    match (&session.transport, request) {
+    match (&session.transport, completion) {
         (
             UploadSessionTransport::ServiceProxied { staging },
-            CompleteUploadRequest::ContentRef { content_ref },
+            ResolvedUploadCompletion::KnownContent,
         ) => Ok(CompletionPlan::Proxied {
-            requested: content_ref.clone(),
             staged: match staging {
                 ProxiedStaging::Staged(content_ref) => Some(content_ref),
                 ProxiedStaging::Idle | ProxiedStaging::Claimed { .. } => None,
@@ -1412,9 +1447,8 @@ fn completion_plan<'a>(
         }),
         (
             UploadSessionTransport::DirectPut { promised_content },
-            CompleteUploadRequest::ContentRef { content_ref },
+            ResolvedUploadCompletion::KnownContent,
         ) => Ok(CompletionPlan::DirectPut {
-            requested: content_ref.clone(),
             promised: promised_content,
         }),
         (
@@ -1423,7 +1457,7 @@ fn completion_plan<'a>(
                 checksum_algorithm,
                 ..
             },
-            CompleteUploadRequest::Multipart { content, parts },
+            ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
         ) => Ok(CompletionPlan::DirectMultipart {
             requested: direct_multipart_content_ref(
                 session.content_id.clone(),
@@ -1437,18 +1471,16 @@ fn completion_plan<'a>(
         (
             UploadSessionTransport::ServiceProxied { .. }
             | UploadSessionTransport::DirectPut { .. },
-            CompleteUploadRequest::Multipart { .. },
+            ResolvedUploadCompletion::Multipart(_),
         ) => Err(CoreError::InvalidUploadContent(format!(
             "{} completion carries no multipart claim",
             transport_name(&session.transport)
         ))),
         (
             UploadSessionTransport::DirectMultipart { .. },
-            CompleteUploadRequest::ContentRef { .. },
+            ResolvedUploadCompletion::KnownContent,
         ) => Err(CoreError::InvalidUploadContent(
-            "direct_multipart completion names no content ref: the server owns the identity \
-             and reports it back"
-                .to_owned(),
+            "direct_multipart completion requires a content claim and parts".to_owned(),
         )),
     }
 }
@@ -1466,26 +1498,13 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
     plan: CompletionPlan<'_>,
 ) -> Result<CompletionOutcome> {
     match plan {
-        CompletionPlan::Proxied { requested, staged } => {
+        CompletionPlan::Proxied { staged } => {
             let staged = staged.ok_or_else(|| {
                 CoreError::InvalidUploadContent("upload content has not been staged".to_owned())
             })?;
-            if staged != &requested {
-                return Err(CoreError::InvalidUploadContent(
-                    "completed content ref does not match staged content".to_owned(),
-                ));
-            }
             Ok(CompletionOutcome::Verified(staged.clone()))
         }
-        CompletionPlan::DirectPut {
-            requested,
-            promised,
-        } => {
-            if promised != &requested {
-                return Err(CoreError::InvalidUploadContent(
-                    "completed content ref does not match the direct_put target".to_owned(),
-                ));
-            }
+        CompletionPlan::DirectPut { promised } => {
             match verify_durable_content_checksum(store, content_store_id, promised).await {
                 Ok(()) => Ok(CompletionOutcome::Verified(promised.clone())),
                 Err(err) => Ok(CompletionOutcome::Unusable(content_failure_reason(err)?)),
@@ -1625,7 +1644,6 @@ mod tests {
         namespace_id: &NamespaceId,
         content_store_id: &ContentStoreId,
         upload_id: &UploadId,
-        content_ref: &ContentRef,
         context: &MutationContext,
     ) -> Result<CompletedUpload> {
         complete_upload(
@@ -1633,7 +1651,7 @@ mod tests {
             namespace_id,
             content_store_id,
             upload_id,
-            &CompleteUploadRequest::for_content_ref(content_ref.clone()),
+            ResolvedUploadCompletion::KnownContent,
             context,
         )
         .await
@@ -1718,7 +1736,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let setup = context(1_000);
-        let (namespace_id, content_store_id, upload_id, content_ref, content_key) =
+        let (namespace_id, content_store_id, upload_id, _content_ref, content_key) =
             staged_session(&store, &setup).await;
 
         abort_upload(
@@ -1737,7 +1755,6 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &upload_id,
-            &content_ref,
             &context(3_000),
         )
         .await
@@ -1793,7 +1810,7 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &begin.upload_id,
-            &CompleteUploadRequest::for_content_ref(begin.target.content_ref.clone()),
+            ResolvedUploadCompletion::KnownContent,
             &context(2_000),
         )
         .await
@@ -1819,7 +1836,7 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &begin.upload_id,
-            &CompleteUploadRequest::for_content_ref(begin.target.content_ref),
+            ResolvedUploadCompletion::KnownContent,
             &context(3_000),
         )
         .await
@@ -1835,14 +1852,13 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let setup = context(1_000);
-        let (namespace_id, content_store_id, upload_id, content_ref, content_key) =
+        let (namespace_id, content_store_id, upload_id, _content_ref, content_key) =
             staged_session(&store, &setup).await;
         complete(
             &store,
             &namespace_id,
             &content_store_id,
             &upload_id,
-            &content_ref,
             &context(2_000),
         )
         .await
@@ -1903,14 +1919,13 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let setup = context(1_000);
-        let (namespace_id, content_store_id, upload_id, content_ref, _content_key) =
+        let (namespace_id, content_store_id, upload_id, _content_ref, _content_key) =
             staged_session(&store, &setup).await;
         complete(
             &store,
             &namespace_id,
             &content_store_id,
             &upload_id,
-            &content_ref,
             &context(2_000),
         )
         .await
@@ -1971,7 +1986,6 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &upload_id,
-            &content_ref,
             &context(2_000),
         )
         .await
@@ -2040,7 +2054,6 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &upload_id,
-            &content_ref,
             &context(completed_at_ms),
         )
         .await
@@ -2085,7 +2098,6 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &upload_id,
-            &content_ref,
             &context(past),
         )
         .await

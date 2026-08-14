@@ -17,8 +17,9 @@ use crate::ByteStream;
 use crate::FsWriter;
 use crate::Result;
 use crate::{
-    BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-    MaintenanceJobId, NamespaceId, UploadContentClaim, UploadContentResponse,
+    BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest,
+    CompleteUploadResponse, MaintenanceJobId, NamespaceId, UploadContentClaim,
+    UploadContentResponse, UploadMode,
 };
 use loonfs_api::v0::{
     AbortUploadResponse, DirectMultipartUploadOptions, UploadPartChecksumClaim,
@@ -137,15 +138,27 @@ impl FsWriter {
             .await?)
     }
 
-    /// Completes an upload session when the expected content ref matches.
+    /// Completes a service-proxied or direct-PUT upload session.
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse> {
         Ok(self
-            .complete_upload_prepared(namespace_id, upload_id, request)
+            .complete_upload_prepared(namespace_id, upload_id)
+            .await?
+            .response)
+    }
+
+    /// Completes a direct-multipart upload session.
+    pub async fn complete_multipart_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        request: &CompleteMultipartUploadRequest,
+    ) -> Result<CompleteUploadResponse> {
+        Ok(self
+            .complete_multipart_upload_prepared(namespace_id, upload_id, request)
             .await?
             .response)
     }
@@ -158,14 +171,65 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
+    ) -> Result<CompletedUpload> {
+        self.complete_upload_prepared_inner(
+            namespace_id,
+            upload_id,
+            loonfs_core::ResolvedUploadCompletion::KnownContent,
+        )
+        .await
+    }
+
+    /// Completes a multipart upload and returns its publication proof.
+    pub async fn complete_multipart_upload_prepared(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        request: &CompleteMultipartUploadRequest,
+    ) -> Result<CompletedUpload> {
+        self.complete_upload_prepared_inner(
+            namespace_id,
+            upload_id,
+            loonfs_core::ResolvedUploadCompletion::Multipart(request.clone()),
+        )
+        .await
+    }
+
+    async fn complete_upload_prepared_inner(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        completion: loonfs_core::ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
         let completed = self
             .engine(namespace_id)
-            .complete_upload_prepared_with_catalog(&catalog, upload_id, request)
+            .complete_upload_prepared_with_catalog(&catalog, upload_id, completion)
+            .await?;
+        self.schedule_completed_upload_reclamation(namespace_id);
+        Ok(completed)
+    }
+
+    /// Completes an upload after decoding its request for the stored mode.
+    pub async fn complete_upload_prepared_for_mode<F>(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        resolve: F,
+    ) -> Result<CompletedUpload>
+    where
+        F: FnOnce(
+            UploadMode,
+        ) -> std::result::Result<crate::uploads::ResolvedUploadCompletion, String>,
+    {
+        let catalog = self
+            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .await?;
+        let completed = self
+            .engine(namespace_id)
+            .complete_upload_prepared_with_catalog_for_mode(&catalog, upload_id, resolve)
             .await?;
         self.schedule_completed_upload_reclamation(namespace_id);
         Ok(completed)

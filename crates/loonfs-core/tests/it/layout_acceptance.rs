@@ -97,15 +97,12 @@ async fn reads_commits_and_change_feed_never_list() {
         .begin_upload(BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
-    let uploaded = engine
+    engine
         .upload_content(staged.upload_id(), b"uploaded\n")
         .await
         .expect("upload content");
     engine
-        .complete_upload(
-            staged.upload_id(),
-            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(uploaded.content_ref),
-        )
+        .complete_upload(staged.upload_id())
         .await
         .expect("complete upload");
     put_file(
@@ -201,15 +198,12 @@ async fn maintenance_never_touches_the_wal_head() {
         .begin_upload(BeginUploadRequest::ServiceProxied {})
         .await
         .expect("second upload");
-    let uploaded = engine
+    engine
         .upload_content(staged.upload_id(), b"more\n")
         .await
         .expect("second upload content");
     engine
-        .complete_upload(
-            staged.upload_id(),
-            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(uploaded.content_ref),
-        )
+        .complete_upload(staged.upload_id())
         .await
         .expect("second upload complete");
 

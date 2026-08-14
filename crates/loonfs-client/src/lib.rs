@@ -25,12 +25,12 @@ use loonfs_api::{
     v0::{
         AbortUploadResponse, BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest,
         BeginUploadResponse, ChangesResponse, CommitResponse as ApiCommitResponse,
-        CompleteUploadRequest, CompleteUploadResponse, CompletedUploadPart, ContentToken,
-        DirectMultipartUploadOptions, DisableGrepIndexResponse, EnableGrepIndexResponse,
-        GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest,
-        StoreProbeResponse, UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim,
-        UploadStatusResponse,
+        CompleteKnownContentUploadRequest, CompleteMultipartUploadRequest, CompleteUploadResponse,
+        CompletedUploadPart, ContentToken, DirectMultipartUploadOptions, DisableGrepIndexResponse,
+        EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse,
+        ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart,
+        StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadContentResponse,
+        UploadPartChecksumClaim, UploadStatusResponse,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
@@ -1159,18 +1159,35 @@ impl Client {
             .await
     }
 
-    /// Completes an upload session after verifying the uploaded content.
+    /// Completes a service-proxied or direct-PUT upload session.
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
         );
         // The durable completed-session record replays an identical completion without new effect.
+        self.request_json::<_, CompleteUploadResponse>(
+            self.post(&url),
+            Some(&CompleteKnownContentUploadRequest {}),
+        )
+        .await
+    }
+
+    /// Completes a direct-multipart upload session.
+    pub async fn complete_multipart_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        request: &CompleteMultipartUploadRequest,
+    ) -> Result<CompleteUploadResponse> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
+            self.base_url
+        );
         self.request_json::<_, CompleteUploadResponse>(self.post(&url), Some(request))
             .await
     }
@@ -1671,13 +1688,7 @@ impl Client {
             let _ = self.abort_upload(namespace_id, &upload_id).await;
             return Err(error);
         }
-        let response = self
-            .complete_upload(
-                namespace_id,
-                &upload_id,
-                &CompleteUploadRequest::for_content_ref(direct_put.content_ref),
-            )
-            .await?;
+        let response = self.complete_upload(namespace_id, &upload_id).await?;
         Ok(Self::staged_from_completion(response))
     }
 
@@ -1763,16 +1774,16 @@ impl Client {
         }
 
         let response = self
-            .complete_upload(
+            .complete_multipart_upload(
                 namespace_id,
                 &upload_id,
-                &CompleteUploadRequest::for_multipart(
-                    UploadContentClaim {
+                &CompleteMultipartUploadRequest {
+                    content: UploadContentClaim {
                         size_bytes: uploaded.size_bytes,
                         checksum: uploaded.checksum,
                     },
-                    uploaded.parts,
-                ),
+                    parts: uploaded.parts,
+                },
             )
             .await?;
         Ok(Self::staged_from_completion(response))
@@ -1953,11 +1964,9 @@ impl Client {
         let upload = self
             .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
-        let staged = self
-            .upload_content(namespace_id, upload.upload_id(), bytes)
+        self.upload_content(namespace_id, upload.upload_id(), bytes)
             .await?;
-        self.complete_staged(namespace_id, upload.upload_id(), staged)
-            .await
+        self.complete_staged(namespace_id, upload.upload_id()).await
     }
 
     /// Stages a streamed payload through the server, which hashes it as it
@@ -1976,30 +1985,19 @@ impl Client {
         let staged = self
             .upload_streamed_content(namespace_id, upload.upload_id(), source)
             .await;
-        let staged = match staged {
-            Ok(staged) => staged,
-            Err(error) => {
-                let _ = self.abort_upload(namespace_id, upload.upload_id()).await;
-                return Err(error);
-            }
-        };
-        self.complete_staged(namespace_id, upload.upload_id(), staged)
-            .await
+        if let Err(error) = staged {
+            let _ = self.abort_upload(namespace_id, upload.upload_id()).await;
+            return Err(error);
+        }
+        self.complete_staged(namespace_id, upload.upload_id()).await
     }
 
     async fn complete_staged(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        staged: UploadContentResponse,
     ) -> Result<StagedContent> {
-        let response = self
-            .complete_upload(
-                namespace_id,
-                upload_id,
-                &CompleteUploadRequest::for_content_ref(staged.content_ref),
-            )
-            .await?;
+        let response = self.complete_upload(namespace_id, upload_id).await?;
         Ok(Self::staged_from_completion(response))
     }
 
@@ -2898,11 +2896,7 @@ mod tests {
         let client = retry_policy_client();
 
         let actual = client
-            .complete_upload(
-                &namespace_id,
-                &upload_id,
-                &CompleteUploadRequest::for_content_ref(content_ref),
-            )
+            .complete_upload(&namespace_id, &upload_id)
             .await
             .expect("completed-session replay should retry");
         assert_eq!(actual, response);

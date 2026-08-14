@@ -8,13 +8,13 @@ use loonfs::publish::CommitRequest;
 use loonfs::UploadContentClaim;
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
-    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadRequest,
-    CompleteUploadResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
-    CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
-    ListChangesOptions, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceResponse,
-    MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError,
-    SharedObjectStore, UploadContentResponse, UploadId,
+    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadResponse,
+    ContentRef, CopyOptions, CreateCheckpointOptions, CreateCheckpointResponse,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode,
+    FsAdmin, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, MaintenancePlan,
+    MaintenanceStepResponse, MetadataMaintenanceResponse, MoveOptions, NamespaceId,
+    NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError, SharedObjectStore,
+    UploadContentResponse, UploadId,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -311,7 +311,6 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
     ) -> loonfs::Result<CompleteUploadResponse>;
     fn mutate_blocking(
         &self,
@@ -494,12 +493,8 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
     ) -> loonfs::Result<CompleteUploadResponse> {
-        block_on(
-            self.writer
-                .complete_upload(namespace_id, upload_id, request),
-        )
+        block_on(self.writer.complete_upload(namespace_id, upload_id))
     }
 
     fn mutate_blocking(

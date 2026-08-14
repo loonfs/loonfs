@@ -17,7 +17,7 @@ Encoding conventions used by every durable and wire shape in this specification:
 field names and enum values are `snake_case`; fields holding typed identifiers
 are suffixed `_id`; tagged-union discriminators default to `kind`, but a union
 may use its domain word where that reads better. The current exceptions are
-`mode`, `completion`, `state`, `phase`, and `inode_kind`.
+`mode`, `state`, `phase`, and `inode_kind`.
 
 Unknown fields are tolerated where a reader must accept what a newer writer
 added, and rejected where accepting one would lose information the sender
