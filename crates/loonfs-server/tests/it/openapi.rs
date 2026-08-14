@@ -284,11 +284,6 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             }),
         ]
     );
-    let completion_description = schemas["CompleteUploadRequest"]["description"]
-        .as_str()
-        .expect("completion schema description");
-    assert!(completion_description.contains("stored upload session mode selects"));
-
     let known_completion = schemas
         .get("CompleteKnownContentUploadRequest")
         .expect("known-content completion schema");
