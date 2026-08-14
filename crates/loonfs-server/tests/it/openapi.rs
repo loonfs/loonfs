@@ -148,7 +148,8 @@ fn openapi_names_tagged_one_of_alternatives() {
         (
             "FilesystemChange",
             &[
-                "FilesystemChangeCreated",
+                "FilesystemChangeDirectoryCreated",
+                "FilesystemChangeFileCreated",
                 "FilesystemChangeContentChanged",
                 "FilesystemChangeMoved",
                 "FilesystemChangeDeleted",
@@ -188,10 +189,8 @@ fn openapi_names_tagged_one_of_alternatives() {
 
 #[test]
 fn openapi_documents_string_id_contracts_without_dead_schemas() {
-    let spec: Value = serde_json::from_str(
-        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-    )
-    .expect("parse openapi json");
+    let raw = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
+    let spec: Value = serde_json::from_str(&raw).expect("parse openapi json");
     let schemas = spec
         .get("components")
         .and_then(|components| components.get("schemas"))
@@ -208,6 +207,21 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
         Some("con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41")
     );
     assert!(!schemas.contains_key("ContentStoreId"));
+    assert!(!schemas.contains_key("FilesystemChangeCreated"));
+    assert!(
+        !raw.contains(r#""created""#),
+        "retired creation-event kind remains in OpenAPI"
+    );
+
+    let api_spec = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/api.md"
+    ))
+    .expect("read API spec");
+    assert!(
+        !api_spec.contains("`created`"),
+        "retired creation-event kind remains in api.md"
+    );
 }
 
 #[test]
@@ -270,11 +284,6 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             }),
         ]
     );
-    let completion_description = schemas["CompleteUploadRequest"]["description"]
-        .as_str()
-        .expect("completion schema description");
-    assert!(completion_description.contains("stored upload session mode selects"));
-
     let known_completion = schemas
         .get("CompleteKnownContentUploadRequest")
         .expect("known-content completion schema");

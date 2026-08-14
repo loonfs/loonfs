@@ -540,8 +540,8 @@ day it joins the preimage.
    the row there names some other commit, there is nothing to compare: go
    straight to rule 5.
 2. Take the committed content reference from that row. The row must carry
-   exactly one content-bearing event — a `created` with a `content_ref`, or
-   a `content_changed`. A single put produces exactly one, however many
+   exactly one content-bearing event — a `file_created` or a
+   `content_changed`. A single put produces exactly one, however many
    parent directories it also had to create, because directory creations
    carry no content ref. None, or more than one, means the commit was not
    this put: go to rule 5.
@@ -2109,12 +2109,39 @@ Event kinds:
 
 | Kind | Meaning | Fields |
 | --- | --- | --- |
-| `created` | A file or directory was created. | `inode_id`, `inode_kind`, `parent_inode_id`, `display_name`; file creations also carry `revision_no` and `content_ref`. |
+| `directory_created` | A directory was created. | `inode_id`, `parent_inode_id`, `display_name`. |
+| `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `revision_no`, `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`. |
 | `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
+
+Directory and file creation use separate event shapes. A file creation always
+includes its first revision and content reference:
+
+```json
+{
+  "kind": "directory_created",
+  "inode_id": 42,
+  "parent_inode_id": 1,
+  "display_name": "docs"
+}
+
+{
+  "kind": "file_created",
+  "inode_id": 43,
+  "parent_inode_id": 1,
+  "display_name": "report.txt",
+  "revision_no": 1,
+  "content_ref": {
+    "kind": "blob_v1",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 20591,
+    "checksum": { "algorithm": "sha256", "value": "7ab..." }
+  }
+}
+```
 
 Events name inodes and their parent-directory bindings rather than full
 paths; a consumer that needs paths can stat the inode or maintain its own

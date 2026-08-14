@@ -8,7 +8,7 @@ use loonfs_api::{
         UploadStatusResponse,
     },
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
-    DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, InodeKind, RevisionNo,
+    DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::http::raw_agent;
@@ -285,13 +285,12 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     assert_eq!(change.events.len(), 1);
     assert!(matches!(
         &change.events[0],
-        FilesystemChange::Created {
+        FilesystemChange::FileCreated {
             inode_id: InodeId(2),
-            inode_kind: InodeKind::File,
             parent_inode_id: InodeId(1),
             display_name,
-            revision_no: Some(RevisionNo(1)),
-            content_ref: Some(created_ref),
+            revision_no: RevisionNo(1),
+            content_ref: created_ref,
         } if display_name.as_str() == "uploaded.txt" && *created_ref == content_ref
     ));
 

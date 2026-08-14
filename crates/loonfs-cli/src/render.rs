@@ -205,7 +205,8 @@ pub(crate) fn format_utc_ms(unix_ms: u64) -> String {
 fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
     use loonfs_api::v0::FilesystemChange;
     match event {
-        FilesystemChange::Created { display_name, .. } => {
+        FilesystemChange::DirectoryCreated { display_name, .. }
+        | FilesystemChange::FileCreated { display_name, .. } => {
             format!("create '{display_name}'")
         }
         FilesystemChange::ContentChanged {

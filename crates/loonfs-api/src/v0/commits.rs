@@ -5,7 +5,7 @@
 
 use crate::{
     manifest::DeletedDirentry, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef,
-    DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
+    DisplayName, InodeId, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,23 +41,32 @@ pub struct CommitResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FilesystemChange {
-    /// A file or directory was created.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeCreated"))]
-    Created {
+    /// A directory was created.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemChangeDirectoryCreated")
+    )]
+    DirectoryCreated {
         /// Newly allocated namespace-scoped inode identity.
         inode_id: InodeId,
-        /// File-or-directory classification fixed at creation.
-        inode_kind: InodeKind,
         /// Directory the new entry was bound under.
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
-        /// First revision number, for file creations.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        revision_no: Option<RevisionNo>,
-        /// Content of the first revision, for file creations.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        content_ref: Option<ContentRef>,
+    },
+    /// A file and its first revision were created.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
+    FileCreated {
+        /// Newly allocated namespace-scoped inode identity.
+        inode_id: InodeId,
+        /// Directory the new entry was bound under.
+        parent_inode_id: InodeId,
+        /// User-facing spelling of the new entry.
+        display_name: DisplayName,
+        /// First revision number.
+        revision_no: RevisionNo,
+        /// Content of the first revision.
+        content_ref: ContentRef,
     },
     /// A file received a new current revision — a put over an existing
     /// file, or a revision restore (one durable fact for both).
@@ -164,7 +173,7 @@ pub struct ChangesResponse {
 #[cfg(test)]
 mod tests {
     use super::FilesystemChange;
-    use crate::{InodeId, InodeKind};
+    use crate::InodeId;
 
     #[test]
     fn filesystem_change_events_use_snake_case_kind_tags() {
@@ -175,33 +184,42 @@ mod tests {
         );
         let sample_content_ref_json = r#"{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#;
 
-        let created = FilesystemChange::Created {
+        let directory_created = FilesystemChange::DirectoryCreated {
             inode_id: InodeId(2),
-            inode_kind: InodeKind::Directory,
             parent_inode_id: InodeId(1),
             display_name: crate::DisplayName::parse("Docs").expect("valid display name"),
-            revision_no: None,
-            content_ref: None,
         };
         assert_eq!(
-            serde_json::to_string(&created).expect("serialize created event"),
-            r#"{"kind":"created","inode_id":2,"inode_kind":"dir","parent_inode_id":1,"display_name":"Docs"}"#
+            serde_json::to_string(&directory_created).expect("serialize directory-created event"),
+            r#"{"kind":"directory_created","inode_id":2,"parent_inode_id":1,"display_name":"Docs"}"#
         );
 
-        let created_file = FilesystemChange::Created {
+        let file_created = FilesystemChange::FileCreated {
             inode_id: InodeId(2),
-            inode_kind: InodeKind::File,
             parent_inode_id: InodeId(1),
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
-            revision_no: Some(crate::RevisionNo(1)),
-            content_ref: Some(sample_content_ref.clone()),
+            revision_no: crate::RevisionNo(1),
+            content_ref: sample_content_ref.clone(),
         };
         assert_eq!(
-            serde_json::to_string(&created_file).expect("serialize created file event"),
+            serde_json::to_string(&file_created).expect("serialize file-created event"),
             format!(
-                r#"{{"kind":"created","inode_id":2,"inode_kind":"file","parent_inode_id":1,"display_name":"a.txt","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
+                r#"{{"kind":"file_created","inode_id":2,"parent_inode_id":1,"display_name":"a.txt","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
             )
         );
+
+        let missing_content_ref = r#"{"kind":"file_created","inode_id":2,"parent_inode_id":1,"display_name":"a.txt","revision_no":1}"#;
+        assert!(serde_json::from_str::<FilesystemChange>(missing_content_ref).is_err());
+
+        let retired_creation = serde_json::json!({
+            "kind": (["cre", "ated"].concat()),
+            "inode_id": 2,
+            "inode_kind": "file",
+            "parent_inode_id": 1,
+            "display_name": "a.txt",
+            "revision_no": 1,
+        });
+        assert!(serde_json::from_value::<FilesystemChange>(retired_creation).is_err());
 
         let content_changed = FilesystemChange::ContentChanged {
             inode_id: InodeId(2),

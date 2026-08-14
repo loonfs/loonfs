@@ -139,25 +139,22 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
         // CreateDirectory: allocate + bind.
         [WalDelta::CreateInode {
             inode_id,
-            inode_kind,
+            inode_kind: loonfs_api::InodeKind::Directory,
             ..
         }, WalDelta::BindDirentry {
             parent_inode_id,
             display_name,
             child_inode_id,
             ..
-        }] if child_inode_id == inode_id => FilesystemChange::Created {
+        }] if child_inode_id == inode_id => FilesystemChange::DirectoryCreated {
             inode_id: *inode_id,
-            inode_kind: *inode_kind,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
-            revision_no: None,
-            content_ref: None,
         },
         // CreateFile (and copy-file): allocate + bind + first revision.
         [WalDelta::CreateInode {
             inode_id,
-            inode_kind,
+            inode_kind: loonfs_api::InodeKind::File,
             ..
         }, WalDelta::BindDirentry {
             parent_inode_id,
@@ -170,13 +167,12 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             content_ref,
             ..
         }] if child_inode_id == inode_id && revision_inode_id == inode_id => {
-            FilesystemChange::Created {
+            FilesystemChange::FileCreated {
                 inode_id: *inode_id,
-                inode_kind: *inode_kind,
                 parent_inode_id: *parent_inode_id,
                 display_name: display_name.clone(),
-                revision_no: Some(*revision_no),
-                content_ref: Some(content_ref.clone()),
+                revision_no: *revision_no,
+                content_ref: content_ref.clone(),
             }
         }
         // ReplaceFile or RestoreRevision: one durable fact for both.

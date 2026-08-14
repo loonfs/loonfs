@@ -13,7 +13,7 @@ use loonfs_api::{
     wire::control::{decode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope},
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, ActorId, ActorRef, ChangeSeq, CommitId, DeleteDirectoryBehavior,
-    DestinationBehavior, InodeId, InodeKind, NamespaceId,
+    DestinationBehavior, InodeId, NamespaceId,
 };
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
@@ -500,12 +500,9 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(changes.changes[0].events.len(), 1);
     assert!(matches!(
         &changes.changes[0].events[0],
-        FilesystemChange::Created {
-            inode_kind: InodeKind::Directory,
+        FilesystemChange::DirectoryCreated {
             parent_inode_id: InodeId(1),
             display_name,
-            revision_no: None,
-            content_ref: None,
             ..
         } if display_name.as_str() == "alpha"
     ));
