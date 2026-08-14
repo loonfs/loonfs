@@ -314,6 +314,11 @@ fn assert_api_spec_error_codes_are_registered(spec: &str) {
         if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token) {
             continue;
         }
+        // Inode-id examples (`ino_1`, `ino_27`, ...) are validated by the one
+        // public codec instead of being enumerated here.
+        if loonfs_api::public_inode_id::decode(token).is_ok() {
+            continue;
+        }
         assert!(
             ErrorCode::parse(token).is_some(),
             "api.md uses unregistered error-code-shaped token `{token}`"

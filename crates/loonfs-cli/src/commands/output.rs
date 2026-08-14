@@ -229,7 +229,10 @@ pub(crate) enum CommandData {
         /// Inode the mutation acted on, when the command resolved one —
         /// `rm` reports it so the deletion stays recoverable via
         /// `loonfs undelete`.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            with = "loonfs_api::public_inode_id::option"
+        )]
         inode_id: Option<InodeId>,
         /// The `loonfs undelete` that puts this deletion back, set by `rm`
         /// alone. Human-only, for the reason [`TrashListing`] gives.
@@ -241,6 +244,7 @@ pub(crate) enum CommandData {
     /// caller asked for is simply there.
     DirectoryAlreadyExists {
         target: String,
+        #[serde(with = "loonfs_api::public_inode_id")]
         inode_id: InodeId,
         /// Namespace head the existing directory was observed at.
         head_seq: ChangeSeq,

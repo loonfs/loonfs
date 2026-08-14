@@ -8,7 +8,7 @@
 
 use super::error::ApiResponseError;
 use super::handlers_filesystem::parse_revision_no;
-use super::handlers_inodes::InodeRevisionPathParams;
+use super::handlers_inodes::{parse_inode_id, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::{AppJson, AppPath, AppState, NamespaceIdPath};
 use axum::extract::State;
@@ -20,7 +20,7 @@ use loonfs_api::{
         BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
         BeginDownloadResponse, ObjectTransferAccess,
     },
-    InodeId, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_DOWNLOADS_DIRECT_GET,
 };
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use std::time::Duration;
@@ -105,7 +105,7 @@ pub(super) async fn begin_download(
         description = "Authorizes a direct read of one retained inode revision. The request body is `{}` and the response does not include a path.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = InodeId, Path, description = "File inode id"),
+            ("inode_id" = String, Path, description = "File inode id", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("revision_no" = loonfs_api::RevisionNo, Path, description = "Revision number")
         ),
         request_body = BeginDownloadByInodeRequest,
@@ -130,7 +130,7 @@ pub(super) async fn begin_download_by_inode(
 ) -> Result<Json<BeginDownloadByInodeResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let path = path.into_params()?;
-    let inode_id = InodeId(path.inode_id);
+    let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let issuer = direct_get_issuer(&state)?;
     let target = state

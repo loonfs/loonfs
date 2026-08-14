@@ -14,6 +14,10 @@ use loonfs_api::{
 use serde::Serialize;
 use std::io::{self, Write};
 
+fn public_inode_id(inode_id: loonfs_api::InodeId) -> String {
+    loonfs_api::public_inode_id::encode(inode_id)
+}
+
 /// One line per contract check: its verdict, and what went wrong when the
 /// verdict is that something did.
 fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
@@ -62,7 +66,8 @@ fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
         } => match cursor_inode_id {
             Some(inode_id) => format!(
                 "backfilling toward seq {}, walked through inode {}",
-                target_seq.0, inode_id.0
+                target_seq.0,
+                public_inode_id(*inode_id)
             ),
             None => format!("backfilling toward seq {}, not yet started", target_seq.0),
         },
@@ -213,7 +218,11 @@ fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
             inode_id,
             revision_no,
             ..
-        } => format!("write inode {inode_id} rev #{}", revision_no.0),
+        } => format!(
+            "write inode {} rev #{}",
+            public_inode_id(*inode_id),
+            revision_no.0
+        ),
         FilesystemChange::Moved {
             from_display_name,
             to_display_name,
@@ -224,7 +233,7 @@ fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
             deleted_direntry,
         } => match deleted_direntry {
             Some(direntry) => format!("delete '{}'", direntry.display_name),
-            None => format!("delete inode {inode_id}"),
+            None => format!("delete inode {}", public_inode_id(*inode_id)),
         },
         FilesystemChange::Undeleted { display_name, .. } => {
             format!("undelete '{display_name}'")
@@ -234,7 +243,8 @@ fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
             attributes_revision_no,
             ..
         } => format!(
-            "attributes inode {inode_id} rev #{}",
+            "attributes inode {} rev #{}",
+            public_inode_id(*inode_id),
             attributes_revision_no.0
         ),
     }
@@ -601,7 +611,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     format_utc_ms(entry.deleted_at_ms),
                     render_actor(&entry.deleted_by),
                     name,
-                    entry.inode_id,
+                    public_inode_id(entry.inode_id),
                     entry.deletion_seq.0,
                 ));
             }
@@ -762,7 +772,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 lines.push(format!("name: {display_name}"));
             }
             lines.extend([
-                format!("inode: {}", entry.inode_id),
+                format!("inode: {}", public_inode_id(entry.inode_id)),
                 format!("kind: {}", entry.inode_kind()),
                 format!("seq: {}", entry.head_seq.0),
                 format!("created_by: {}", render_actor(&entry.created_by)),
@@ -1029,13 +1039,13 @@ mod tests {
         let root = stat_output(path_entry("/", None));
         assert_eq!(
             human_success(&root),
-            "path: /\ninode: 1\nkind: dir\nseq: 3\ncreated_by: system:loonfs\ncreated: 2025-07-16 00:00:00Z"
+            "path: /\ninode: ino_1\nkind: dir\nseq: 3\ncreated_by: system:loonfs\ncreated: 2025-07-16 00:00:00Z"
         );
 
         let named = stat_output(path_entry("/docs", Some("docs")));
         assert_eq!(
             human_success(&named),
-            "path: /docs\nname: docs\ninode: 2\nkind: dir\nseq: 3\ncreated_by: system:loonfs\ncreated: 2025-07-16 00:00:00Z"
+            "path: /docs\nname: docs\ninode: ino_2\nkind: dir\nseq: 3\ncreated_by: system:loonfs\ncreated: 2025-07-16 00:00:00Z"
         );
     }
 

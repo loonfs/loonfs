@@ -705,6 +705,7 @@ impl Client {
         inode_id: InodeId,
         options: &StatPathOptions,
     ) -> Result<AuthoritativePathEntry> {
+        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let mut url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}",
             self.base_url
@@ -753,6 +754,7 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
+        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
             self.base_url
@@ -812,6 +814,7 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<BeginDownloadByInodeResponse> {
+        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
             self.base_url
@@ -874,7 +877,8 @@ impl Client {
             &download.content_ref,
             format!(
                 "inode {} revision {}",
-                download.inode_id, download.revision_no
+                loonfs_api::public_inode_id::encode(download.inode_id),
+                download.revision_no
             ),
             start_offset,
         )
@@ -994,6 +998,7 @@ impl Client {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse> {
+        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let mut url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
             self.base_url

@@ -22,7 +22,9 @@ mod reads;
 mod search;
 mod uploads;
 
-pub use commits::{ChangesResponse, CommitResponse, CommittedChange, FilesystemChange};
+pub use commits::{
+    ChangesResponse, CommitResponse, CommittedChange, DeletedDirentry, FilesystemChange,
+};
 pub use downloads::{
     BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
     BeginDownloadResponse,

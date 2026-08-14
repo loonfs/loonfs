@@ -114,8 +114,9 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     let raw: Value = serde_json::from_reader(
         raw_agent()
             .get(&format!(
-                "{}/v0/namespaces/{namespace}/inodes/{inode_id}/revisions",
-                harness.server_url
+                "{}/v0/namespaces/{namespace}/inodes/{}/revisions",
+                harness.server_url,
+                loonfs_api::public_inode_id::encode(inode_id)
             ))
             .set("authorization", "Bearer test-token")
             .call()
@@ -263,8 +264,9 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
 
     let strict_body = raw_agent()
         .post(&format!(
-            "{}/v0/namespaces/{namespace}/inodes/{file_id}/revisions/1/downloads",
-            harness.server_url
+            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/downloads",
+            harness.server_url,
+            loonfs_api::public_inode_id::encode(file_id)
         ))
         .set("authorization", "Bearer test-token")
         .send_json(serde_json::json!({ "path": "/file.txt" }))
@@ -285,6 +287,117 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         501,
         ErrorCode::NotSupported,
     );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inode_routes_reject_noncanonical_ids_after_authorization() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "http-inode-codec",
+        "http-inode-codec",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let actor = loonfs_test_support::test_actor();
+    let mut inode_27_path = None;
+    for index in 0..26 {
+        let path = NamespacePath::parse("demo", &format!("/file-{index}.txt")).expect("seed path");
+        harness
+            .client
+            .put_file_bytes(&path, b"body", &PutFileOptions::new(actor.clone()))
+            .await
+            .expect("seed inode");
+        inode_27_path = Some(path);
+    }
+    let inode_27_path = inode_27_path.expect("seeded file");
+    assert_eq!(
+        harness
+            .client
+            .stat_path(&inode_27_path, &Default::default())
+            .await
+            .expect("stat ino_27")
+            .inode_id,
+        InodeId(27)
+    );
+    for suffix in ["", "/revisions", "/revisions/1/content"] {
+        raw_agent()
+            .get(&format!(
+                "{}/v0/namespaces/demo/inodes/ino_27{suffix}",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .call()
+            .expect("canonical ino_27 route");
+    }
+
+    let routes = [
+        ("GET", ""),
+        ("GET", "/revisions"),
+        ("GET", "/revisions/1/content"),
+        ("POST", "/revisions/1/downloads"),
+    ];
+    for malformed in ["27", "ino_027", "ino_0", "INO_27"] {
+        for (method, suffix) in routes {
+            let url = format!(
+                "{}/v0/namespaces/demo/inodes/{malformed}{suffix}",
+                harness.server_url
+            );
+            let request = raw_agent()
+                .request(method, &url)
+                .set("authorization", "Bearer test-token");
+            let result = if method == "POST" {
+                request.send_json(serde_json::json!({}))
+            } else {
+                request.call()
+            };
+            let ureq::Error::Status(status, response) =
+                result.expect_err("malformed inode route should fail")
+            else {
+                unreachable!("expected status response")
+            };
+            assert_eq!(status, 400, "{method} {url}");
+            let error: ApiError = serde_json::from_reader(response.into_reader())
+                .expect("decode malformed-inode error");
+            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+            assert!(
+                error.message.starts_with("path.inode_id"),
+                "{}",
+                error.message
+            );
+            assert!(
+                error
+                    .message
+                    .contains("must match `ino_<decimal>` with no leading zeroes"),
+                "{}",
+                error.message
+            );
+
+            let unauthorized = raw_agent().request(method, &url);
+            let result = if method == "POST" {
+                unauthorized.send_json(serde_json::json!({}))
+            } else {
+                unauthorized.call()
+            };
+            let ureq::Error::Status(status, response) =
+                result.expect_err("unauthorized malformed inode route should fail")
+            else {
+                unreachable!("expected status response")
+            };
+            assert_eq!(status, 401, "{method} {url}");
+            let error: ApiError =
+                serde_json::from_reader(response.into_reader()).expect("decode unauthorized error");
+            assert_eq!(error.code, ErrorCode::Unauthorized.as_str());
+        }
+    }
 
     harness.server.abort();
 }

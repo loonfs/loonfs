@@ -86,7 +86,15 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_acquired_at_ms: Option<u64>,
     /// Inode the failed precondition or operation targeted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::public_inode_id::option"
+    )]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
     pub inode_id: Option<InodeId>,
     /// Revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,7 +252,15 @@ pub enum FilesystemOperation {
         /// When set, the delete applies only if the path still resolves to
         /// this inode; a raced rebinding fails the request instead of
         /// deleting (and reporting a recovery handle for) the wrong inode.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         expected_inode_id: Option<InodeId>,
     },
     /// Move one path to another path.
@@ -276,6 +292,11 @@ pub enum FilesystemOperation {
     #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
     Undelete {
         /// Deleted inode to make reachable again.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
         deletion_seq: ChangeSeq,
@@ -315,7 +336,15 @@ pub enum FilesystemOperation {
         /// When set, the update applies only if the path still resolves to
         /// this inode; a raced rebinding fails the request instead of
         /// writing attributes onto the wrong inode.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         expected_inode_id: Option<InodeId>,
         /// When set, the update applies only while the inode's attribute
         /// revision is still this one. Absent means the update is applied
@@ -381,6 +410,11 @@ impl CommitRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FileRevision {
     /// File inode that owns this revision.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
     pub inode_id: InodeId,
     /// Revision number within the file inode.
     pub revision_no: RevisionNo,
@@ -402,6 +436,11 @@ pub struct ListFileRevisionsResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// File inode whose revisions were returned.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
     pub inode_id: InodeId,
     /// Namespace head sequence used for the read.
     pub head_seq: ChangeSeq,
@@ -1210,7 +1249,7 @@ mod tests {
                 "path": "/docs/a.txt",
                 "set": {"owner": "ada"},
                 "remove": ["draft"],
-                "expected_inode_id": 7,
+                "expected_inode_id": "ino_7",
                 "expected_attributes_revision_no": 3
             })
         );
@@ -1376,7 +1415,7 @@ mod tests {
                 },
                 serde_json::json!({
                     "kind": "undelete",
-                    "inode_id": 7,
+                    "inode_id": "ino_7",
                     "deletion_seq": 8,
                     "path": "/docs/restored"
                 }),
@@ -1438,7 +1477,7 @@ mod tests {
             }),
             serde_json::json!({
                 "kind": "undelete",
-                "inode_id": 7,
+                "inode_id": "ino_7",
                 "deletion_seq": 8,
                 "path": "relative"
             }),
@@ -1454,6 +1493,46 @@ mod tests {
             }),
         ] {
             assert!(serde_json::from_value::<FilesystemOperation>(encoded).is_err());
+        }
+    }
+
+    #[test]
+    fn inode_request_fields_accept_only_the_public_inode_grammar() {
+        let operations = [
+            serde_json::json!({
+                "kind": "delete_path",
+                "path": "/docs/a.txt",
+                "expected_inode_id": "ino_27"
+            }),
+            serde_json::json!({
+                "kind": "undelete",
+                "inode_id": "ino_27",
+                "deletion_seq": 8
+            }),
+            serde_json::json!({
+                "kind": "update_attributes",
+                "path": "/docs/a.txt",
+                "expected_inode_id": "ino_27"
+            }),
+        ];
+
+        for operation in operations {
+            serde_json::from_value::<FilesystemOperation>(operation.clone())
+                .expect("canonical public inode id");
+
+            let inode_key = if operation["kind"] == "undelete" {
+                "inode_id"
+            } else {
+                "expected_inode_id"
+            };
+            for invalid in [serde_json::json!(27), serde_json::json!("27")] {
+                let mut invalid_operation = operation.clone();
+                invalid_operation[inode_key] = invalid;
+                assert!(
+                    serde_json::from_value::<FilesystemOperation>(invalid_operation).is_err(),
+                    "{inode_key} accepted a non-public inode spelling"
+                );
+            }
         }
     }
 
@@ -1547,7 +1626,7 @@ mod tests {
                     "kind": "update_attributes",
                     "path": "/docs/a.txt",
                     "set": {"owner": "ada"},
-                    "expected_inode_id": 7
+                    "expected_inode_id": "ino_7"
                 }]
             })
         };

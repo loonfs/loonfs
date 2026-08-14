@@ -38,6 +38,9 @@ meant to send:
   read-modify-write and still report a successful guarded update
   (section 1.7).
 
+Durable inode fields remain numeric integers; the API's `ino_...` spelling is
+only a client-visible wire representation and never appears in durable payloads.
+
 ## 1. Object store contract
 
 LoonFS relies on object storage as its only required durable dependency. The

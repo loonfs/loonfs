@@ -4,8 +4,8 @@
 //! [`super::operations`].
 
 use crate::{
-    manifest::DeletedDirentry, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef,
-    DisplayName, InodeId, NamespaceId, RevisionNo,
+    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
+    NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,23 @@ pub struct CommitResponse {
     pub commit_id: CommitId,
     /// Sequence number where the commit became visible.
     pub committed_seq: ChangeSeq,
+}
+
+/// Directory binding removed by a public deletion event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DeletedDirentry {
+    /// Directory that held the binding.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
+    pub parent_inode_id: InodeId,
+    /// Canonical key the binding was reachable under.
+    pub name_key: NameKey,
+    /// User-facing spelling the binding carried.
+    pub display_name: DisplayName,
 }
 
 /// One semantic filesystem change inside a commit.
@@ -48,8 +65,18 @@ pub enum FilesystemChange {
     )]
     DirectoryCreated {
         /// Newly allocated namespace-scoped inode identity.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         inode_id: InodeId,
         /// Directory the new entry was bound under.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
@@ -58,8 +85,18 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
     FileCreated {
         /// Newly allocated namespace-scoped inode identity.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         inode_id: InodeId,
         /// Directory the new entry was bound under.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         parent_inode_id: InodeId,
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
@@ -73,6 +110,11 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeContentChanged"))]
     ContentChanged {
         /// File inode whose history advanced.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         inode_id: InodeId,
         /// New monotonic position in that file's revision history.
         revision_no: RevisionNo,
@@ -83,12 +125,27 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeMoved"))]
     Moved {
         /// Inode whose binding changed.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         inode_id: InodeId,
         /// Directory that held the old binding.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         from_parent_inode_id: InodeId,
         /// Spelling of the old binding.
         from_display_name: DisplayName,
         /// Directory holding the new binding.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         to_parent_inode_id: InodeId,
         /// Spelling of the new binding.
         to_display_name: DisplayName,
@@ -98,6 +155,11 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
     Deleted {
         /// Inode at the root of the deleted subtree.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         inode_id: InodeId,
         /// Directory binding removed by the deletion, when the delete
         /// recorded one.
@@ -108,8 +170,18 @@ pub enum FilesystemChange {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeUndeleted"))]
     Undeleted {
         /// Recovered inode.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         inode_id: InodeId,
         /// Directory the recovered entry was bound under.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         parent_inode_id: InodeId,
         /// Spelling of the recovered binding.
         display_name: DisplayName,
@@ -121,6 +193,11 @@ pub enum FilesystemChange {
     )]
     AttributesChanged {
         /// Inode whose attributes advanced.
+        #[serde(with = "crate::public_inode_id")]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(schema_with = crate::public_inode_id::schema)
+        )]
         inode_id: InodeId,
         /// New attribute revision for that inode.
         attributes_revision_no: AttributeRevisionNo,
@@ -191,7 +268,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&directory_created).expect("serialize directory-created event"),
-            r#"{"kind":"directory_created","inode_id":2,"parent_inode_id":1,"display_name":"Docs"}"#
+            r#"{"kind":"directory_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"Docs"}"#
         );
 
         let file_created = FilesystemChange::FileCreated {
@@ -204,18 +281,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&file_created).expect("serialize file-created event"),
             format!(
-                r#"{{"kind":"file_created","inode_id":2,"parent_inode_id":1,"display_name":"a.txt","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
+                r#"{{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
             )
         );
 
-        let missing_content_ref = r#"{"kind":"file_created","inode_id":2,"parent_inode_id":1,"display_name":"a.txt","revision_no":1}"#;
+        let missing_content_ref = r#"{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","revision_no":1}"#;
         assert!(serde_json::from_str::<FilesystemChange>(missing_content_ref).is_err());
 
         let retired_creation = serde_json::json!({
             "kind": (["cre", "ated"].concat()),
-            "inode_id": 2,
+            "inode_id": "ino_2",
             "inode_kind": "file",
-            "parent_inode_id": 1,
+            "parent_inode_id": "ino_1",
             "display_name": "a.txt",
             "revision_no": 1,
         });
@@ -229,7 +306,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&content_changed).expect("serialize content changed event"),
             format!(
-                r#"{{"kind":"content_changed","inode_id":2,"revision_no":3,"content_ref":{sample_content_ref_json}}}"#
+                r#"{{"kind":"content_changed","inode_id":"ino_2","revision_no":3,"content_ref":{sample_content_ref_json}}}"#
             )
         );
 
@@ -242,12 +319,12 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&moved).expect("serialize moved event"),
-            r#"{"kind":"moved","inode_id":2,"from_parent_inode_id":1,"from_display_name":"a.txt","to_parent_inode_id":3,"to_display_name":"b.txt"}"#
+            r#"{"kind":"moved","inode_id":"ino_2","from_parent_inode_id":"ino_1","from_display_name":"a.txt","to_parent_inode_id":"ino_3","to_display_name":"b.txt"}"#
         );
 
         let deleted = FilesystemChange::Deleted {
             inode_id: InodeId(2),
-            deleted_direntry: Some(crate::manifest::DeletedDirentry {
+            deleted_direntry: Some(super::DeletedDirentry {
                 parent_inode_id: InodeId(1),
                 name_key: crate::NameKey::parse("a.txt").expect("valid name key"),
                 display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
@@ -255,7 +332,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&deleted).expect("serialize deleted event"),
-            r#"{"kind":"deleted","inode_id":2,"deleted_direntry":{"parent_inode_id":1,"name_key":"a.txt","display_name":"a.txt"}}"#
+            r#"{"kind":"deleted","inode_id":"ino_2","deleted_direntry":{"parent_inode_id":"ino_1","name_key":"a.txt","display_name":"a.txt"}}"#
         );
 
         let undeleted = FilesystemChange::Undeleted {
@@ -265,7 +342,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&undeleted).expect("serialize undeleted event"),
-            r#"{"kind":"undeleted","inode_id":2,"parent_inode_id":1,"display_name":"a.txt"}"#
+            r#"{"kind":"undeleted","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt"}"#
         );
 
         let attributes_changed = FilesystemChange::AttributesChanged {
@@ -279,7 +356,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&attributes_changed).expect("serialize attributes event"),
-            r#"{"kind":"attributes_changed","inode_id":2,"attributes_revision_no":4,"attributes":{"owner":"ada"}}"#
+            r#"{"kind":"attributes_changed","inode_id":"ino_2","attributes_revision_no":4,"attributes":{"owner":"ada"}}"#
         );
 
         // A clear is a real event carrying the empty map, not an absence.
@@ -290,7 +367,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&cleared).expect("serialize cleared attributes event"),
-            r#"{"kind":"attributes_changed","inode_id":2,"attributes_revision_no":5,"attributes":{}}"#
+            r#"{"kind":"attributes_changed","inode_id":"ino_2","attributes_revision_no":5,"attributes":{}}"#
         );
     }
 }

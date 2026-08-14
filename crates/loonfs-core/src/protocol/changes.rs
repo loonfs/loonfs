@@ -211,7 +211,13 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             ..
         }] if child_inode_id == root_inode_id => FilesystemChange::Deleted {
             inode_id: *root_inode_id,
-            deleted_direntry: deleted_direntry.clone(),
+            deleted_direntry: deleted_direntry.as_ref().map(|direntry| {
+                loonfs_api::v0::DeletedDirentry {
+                    parent_inode_id: direntry.parent_inode_id,
+                    name_key: direntry.name_key.clone(),
+                    display_name: direntry.display_name.clone(),
+                }
+            }),
         },
         // Undelete: revoke the exact deletion generation, re-bind the root.
         [WalDelta::RevokeSubtreeTombstone { root_inode_id, .. }, WalDelta::BindDirentry {

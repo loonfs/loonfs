@@ -318,6 +318,7 @@ impl UndeleteHint {
         } else {
             format!("{PATH_PLACEHOLDER} ")
         };
+        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         format!(
             "loonfs undelete {destination}--inode {inode_id} --deletion-seq {}{}",
             deletion_seq.0, self.context_flags

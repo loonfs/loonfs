@@ -2095,8 +2095,10 @@
             "description": "Inode id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/InodeId"
-            }
+              "type": "string",
+              "pattern": "^ino_[1-9][0-9]*$"
+            },
+            "example": "ino_123"
           },
           {
             "name": "include_attributes",
@@ -2190,8 +2192,10 @@
             "description": "File inode id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/InodeId"
-            }
+              "type": "string",
+              "pattern": "^ino_[1-9][0-9]*$"
+            },
+            "example": "ino_123"
           },
           {
             "name": "limit",
@@ -2307,8 +2311,10 @@
             "description": "File inode id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/InodeId"
-            }
+              "type": "string",
+              "pattern": "^ino_[1-9][0-9]*$"
+            },
+            "example": "ino_123"
           },
           {
             "name": "revision_no",
@@ -2433,8 +2439,10 @@
             "description": "File inode id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/InodeId"
-            }
+              "type": "string",
+              "pattern": "^ino_[1-9][0-9]*$"
+            },
+            "example": "ino_123"
           },
           {
             "name": "revision_no",
@@ -3529,23 +3537,20 @@
                 "description": "Namespace head sequence this answer was read from."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Stable inode identity for this item."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "namespace_id": {
                 "$ref": "#/components/schemas/NamespaceId",
                 "description": "Namespace that was read."
               },
               "parent_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/InodeId",
-                    "description": "Parent directory inode, or `None` for the root."
-                  }
-                ]
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "path": {
                 "$ref": "#/components/schemas/AbsolutePath",
@@ -3647,8 +3652,10 @@
             "description": "Content identity, size, and checksum."
           },
           "inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "File inode being read."
+            "type": "string",
+            "description": "Namespace-scoped stable inode identity",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -4418,7 +4425,7 @@
       },
       "DeletedDirentry": {
         "type": "object",
-        "description": "Directory binding removed by a path deletion.\n\nTombstones retain this binding after the corresponding unbind row may be\ncollected. Undelete uses it to restore the original parent and name.",
+        "description": "Directory binding removed by a public deletion event.",
         "required": [
           "parent_inode_id",
           "name_key",
@@ -4434,11 +4441,12 @@
             "description": "Canonical key the binding was reachable under."
           },
           "parent_inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "Directory that held the binding."
+            "type": "string",
+            "description": "Namespace-scoped stable inode identity",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           }
-        },
-        "additionalProperties": false
+        }
       },
       "DestinationBehavior": {
         "type": "string",
@@ -4667,15 +4675,10 @@
             ]
           },
           "inode_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Inode the failed precondition or operation targeted."
-              }
-            ]
+            "type": "string",
+            "description": "Namespace-scoped stable inode identity",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           },
           "operation_index": {
             "type": [
@@ -4741,8 +4744,10 @@
             "description": "Content stored for this revision."
           },
           "inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "File inode that owns this revision."
+            "type": "string",
+            "description": "Namespace-scoped stable inode identity",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
@@ -4768,8 +4773,10 @@
                 "description": "User-facing spelling of the new entry."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Newly allocated namespace-scoped inode identity."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -4778,8 +4785,10 @@
                 ]
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory the new entry was bound under."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               }
             }
           },
@@ -4805,8 +4814,10 @@
                 "description": "User-facing spelling of the new entry."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Newly allocated namespace-scoped inode identity."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -4815,8 +4826,10 @@
                 ]
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory the new entry was bound under."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "revision_no": {
                 "$ref": "#/components/schemas/RevisionNo",
@@ -4840,8 +4853,10 @@
                 "description": "Immutable content published by the revision."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "File inode whose history advanced."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -4873,12 +4888,16 @@
                 "description": "Spelling of the old binding."
               },
               "from_parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory that held the old binding."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Inode whose binding changed."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -4891,8 +4910,10 @@
                 "description": "Spelling of the new binding."
               },
               "to_parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory holding the new binding."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               }
             }
           },
@@ -4917,8 +4938,10 @@
                 ]
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Inode at the root of the deleted subtree."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -4944,8 +4967,10 @@
                 "description": "Spelling of the recovered binding."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Recovered inode."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -4954,8 +4979,10 @@
                 ]
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory the recovered entry was bound under."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               }
             }
           },
@@ -4979,8 +5006,10 @@
                 "description": "New attribute revision for that inode."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Inode whose attributes advanced."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -5075,15 +5104,10 @@
                 "description": "Whether a non-empty directory may be tombstoned recursively."
               },
               "expected_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/InodeId",
-                    "description": "When set, the delete applies only if the path still resolves to\nthis inode; a raced rebinding fails the request instead of\ndeleting (and reporting a recovery handle for) the wrong inode."
-                  }
-                ]
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -5172,8 +5196,10 @@
                 "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Deleted inode to make reachable again."
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -5241,15 +5267,10 @@
                 ]
               },
               "expected_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/InodeId",
-                    "description": "When set, the update applies only if the path still resolves to\nthis inode; a raced rebinding fails the request instead of\nwriting attributes onto the wrong inode."
-                  }
-                ]
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "kind": {
                 "type": "string",
@@ -5548,15 +5569,10 @@
                 "description": "Checkpoint pinning the state being walked."
               },
               "cursor_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/InodeId",
-                    "description": "Inode the walk resumes strictly after. Absent before the first\npage."
-                  }
-                ]
+                "type": "string",
+                "description": "Namespace-scoped stable inode identity",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
               },
               "status": {
                 "type": "string",
@@ -5652,8 +5668,10 @@
             "minimum": 0
           },
           "inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "Durable identity of the matched file."
+            "type": "string",
+            "description": "Namespace-scoped stable inode identity",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           },
           "line": {
             "type": "string",
@@ -5775,12 +5793,6 @@
           }
         }
       },
-      "InodeId": {
-        "type": "integer",
-        "format": "int64",
-        "description": "Numeric identity of a file or directory within a namespace.\n\nInodes are stable across renames.",
-        "minimum": 0
-      },
       "InodeKind": {
         "type": "string",
         "description": "Filesystem item kind.",
@@ -5832,8 +5844,10 @@
             "description": "Namespace head sequence used for the read."
           },
           "inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "File inode whose revisions were returned."
+            "type": "string",
+            "description": "Namespace-scoped stable inode identity",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -6516,8 +6530,10 @@
             ]
           },
           "inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "Inode hidden by the deletion."
+            "type": "string",
+            "description": "Namespace-scoped stable inode identity",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           },
           "name_key": {
             "oneOf": [
@@ -6531,15 +6547,10 @@
             ]
           },
           "parent_inode_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory that held the deleted binding, when recorded."
-              }
-            ]
+            "type": "string",
+            "description": "Namespace-scoped stable inode identity",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
           }
         }
       },

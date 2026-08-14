@@ -145,34 +145,10 @@ fn openapi_documents_current_server_paths() {
 
     for (path, method, parameter, schema_name) in [
         (
-            "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
-            "get",
-            "inode_id",
-            "InodeId",
-        ),
-        (
-            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
-            "get",
-            "inode_id",
-            "InodeId",
-        ),
-        (
-            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
-            "get",
-            "inode_id",
-            "InodeId",
-        ),
-        (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
             "get",
             "revision_no",
             "RevisionNo",
-        ),
-        (
-            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
-            "post",
-            "inode_id",
-            "InodeId",
         ),
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
@@ -182,6 +158,36 @@ fn openapi_documents_current_server_paths() {
         ),
     ] {
         assert_path_parameter_schema(paths, path, method, parameter, schema_name);
+    }
+
+    for (path, method) in [
+        ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", "get"),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            "get",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+            "get",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+            "post",
+        ),
+    ] {
+        let parameter = path_parameter(paths, path, method, "inode_id");
+        assert_eq!(
+            parameter.pointer("/schema/type").and_then(Value::as_str),
+            Some("string")
+        );
+        assert_eq!(
+            parameter.pointer("/schema/pattern").and_then(Value::as_str),
+            Some(loonfs_api::public_inode_id::PATTERN)
+        );
+        assert_eq!(
+            parameter.get("example").and_then(Value::as_str),
+            Some(loonfs_api::public_inode_id::EXAMPLE)
+        );
     }
 
     for (path, method, operation_id) in [
@@ -540,7 +546,7 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
 }
 
 #[test]
-fn openapi_limits_public_ordinals_but_not_inode_ids() {
+fn openapi_caps_public_ordinals_and_drops_the_numeric_inode_component() {
     let raw = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
     let spec: Value = serde_json::from_str(&raw).expect("parse openapi json");
     let schemas = spec
@@ -568,12 +574,8 @@ fn openapi_limits_public_ordinals_but_not_inode_ids() {
     }
 
     assert!(
-        schemas
-            .get("InodeId")
-            .expect("InodeId schema")
-            .get("maximum")
-            .is_none(),
-        "InodeId must allow the full u64 range"
+        !schemas.contains_key("InodeId"),
+        "public inode fields use the codec's inline string schema"
     );
 
     assert_eq!(
@@ -588,6 +590,75 @@ fn openapi_limits_public_ordinals_but_not_inode_ids() {
         Some(loonfs_api::MAX_PUBLIC_INTEGER),
         "next_run_ordinal must use the public maximum"
     );
+}
+
+#[test]
+fn openapi_never_types_an_inode_property_or_path_parameter_as_integer() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let schemas = spec
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+
+    fn schema_is_integer(schema: &Value, schemas: &serde_json::Map<String, Value>) -> bool {
+        if schema.get("type").and_then(Value::as_str) == Some("integer") {
+            return true;
+        }
+        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                return schemas
+                    .get(name)
+                    .is_some_and(|schema| schema_is_integer(schema, schemas));
+            }
+        }
+        ["allOf", "anyOf", "oneOf"]
+            .into_iter()
+            .filter_map(|key| schema.get(key).and_then(Value::as_array))
+            .flatten()
+            .any(|schema| schema_is_integer(schema, schemas))
+    }
+
+    fn inspect(value: &Value, schemas: &serde_json::Map<String, Value>, location: &str) {
+        match value {
+            Value::Object(object) => {
+                if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                    for (name, schema) in properties {
+                        if name.ends_with("inode_id") {
+                            assert!(
+                                !schema_is_integer(schema, schemas),
+                                "integer inode property at {location}.{name}: {schema}"
+                            );
+                        }
+                    }
+                }
+                if object.get("in").and_then(Value::as_str) == Some("path") {
+                    if let Some(name) = object.get("name").and_then(Value::as_str) {
+                        if name.ends_with("inode_id") {
+                            let schema = object.get("schema").expect("path parameter schema");
+                            assert!(
+                                !schema_is_integer(schema, schemas),
+                                "integer inode path parameter at {location}: {schema}"
+                            );
+                        }
+                    }
+                }
+                for (key, child) in object {
+                    inspect(child, schemas, &format!("{location}.{key}"));
+                }
+            }
+            Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    inspect(child, schemas, &format!("{location}[{index}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    inspect(&spec, schemas, "openapi");
 }
 
 #[test]
@@ -994,4 +1065,26 @@ fn assert_path_parameter_schema(
         Some(expected_ref.as_str()),
         "path parameter `{parameter_name}` for `{method} {path}` does not use `{schema_name}`",
     );
+}
+
+fn path_parameter<'a>(
+    paths: &'a serde_json::Map<String, Value>,
+    path: &str,
+    method: &str,
+    parameter_name: &str,
+) -> &'a Value {
+    paths
+        .get(path)
+        .and_then(|path_item| path_item.get(method))
+        .and_then(|operation| operation.get("parameters"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|parameter| {
+            parameter.get("in").and_then(Value::as_str) == Some("path")
+                && parameter.get("name").and_then(Value::as_str) == Some(parameter_name)
+        })
+        .unwrap_or_else(|| {
+            panic!("missing path parameter `{parameter_name}` for `{method} {path}`")
+        })
 }
