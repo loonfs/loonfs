@@ -670,7 +670,7 @@ A representative v0 binding is shown below.
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Sign staged upload parts | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
-| Read an upload session | `GET /v0/namespaces/{ns}/uploads/{upload_id}` (a completed session answers with a freshly minted `validated_content_token`) |
+| Read an upload session | `GET /v0/namespaces/{ns}/uploads/{upload_id}` (a completed session answers with a freshly minted `content_token`) |
 | Abort an upload session | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
@@ -1172,9 +1172,11 @@ upload along with the object it was writing. Aborting an upload that already
 assembled its object is safe on every supported provider: it succeeds and
 leaves the object alone.
 
-A server may return a short-lived `validated_content_token` for the completed
-content ref; the token is opaque to clients, and reading the session mints
-another one for as long as the session is minting them.
+A server may return a short-lived `content_token` for the completed content
+ref; the token is opaque to clients, and reading the session mints another
+one for as long as the session is minting them. The response keeps the durable
+`content_ref` independently and repeats it inside the transferable proof on
+purpose: a completed session can outlive its token-minting window.
 
 ```json
 {
@@ -1185,7 +1187,7 @@ another one for as long as the session is minting them.
 ```
 
 Path-oriented `put_file` operations then reference the completed `content_ref`.
-The client includes the matching `validated_content_token` in `content_tokens`;
+The client includes the matching `content_token` in `content_tokens` unchanged;
 the server verifies it before admission and publication checks only the
 resulting in-memory proof. A missing proof answers `content_not_prepared`
 without reading the content object. A malformed or expired token that names
@@ -1803,7 +1805,7 @@ The semantic rule is:
 - `complete` finalizes the upload session only when the expected `content_ref`
   exactly matches the service-computed staged ref; and
 - the returned `content_ref` is then safe to reference from a commit. Remote
-  servers may also return an opaque `validated_content_token` that remote
+  servers may also return an opaque `content_token` that remote
   create/replace mutations carry back as their content-preparation proof.
 
 Begin requests use `mode` to select the upload transport. A request may include
@@ -1845,7 +1847,7 @@ final (format spec, section 3.10). What that means at the API:
 
 - `GET /uploads/{upload_id}` reports the state. An `open` session reports its
   `expires_at_ms`; a `completed` one reports `completed_at_ms`, its
-  `content_ref`, and a **freshly minted** `validated_content_token`; an
+  `content_ref`, and a **freshly minted** `content_token`; an
   `aborted` one reports `aborted_at_ms`.
 - `POST /uploads/{upload_id}/abort` ends an open session and deletes the
   object it was writing. Repeating it succeeds and reports the abort that
@@ -1928,7 +1930,7 @@ source whose length is unknown cannot be checked against any limit up front,
 so it takes `direct_multipart` where that is advertised and `PUT /content`
 otherwise, and both discover the length as they send.
 
-**Receipt expiry and re-minting.** The `validated_content_token` is the
+**Receipt expiry and re-minting.** The `content_token` is the
 upload's receipt: it is minted only from a session the store already says is
 completed, it names one `{namespace, content store, content_ref}` triple, and
 it is short-lived — a commit is expected to follow the upload promptly, and a
@@ -1992,7 +1994,15 @@ Representative complete-upload response:
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }
   },
-  "validated_content_token": "opaque-server-token"
+  "content_token": {
+    "content_ref": {
+      "kind": "blob_v1",
+      "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+      "size_bytes": 20591,
+      "checksum": { "algorithm": "sha256", "value": "7ab..." }
+    },
+    "token": "opaque-server-token"
+  }
 }
 ```
 

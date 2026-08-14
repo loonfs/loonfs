@@ -6,7 +6,9 @@ use super::{authorize, AppJson, AppPath, AppState, NamespaceIdPath, UploadBodySt
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use loonfs::content_tokens::{mint_content_token, CompletedUploadReceipt, ContentTokenError};
+use loonfs::content_tokens::{
+    mint_content_token, CompletedUploadReceipt, ContentToken, ContentTokenError,
+};
 use loonfs::publish::PreparedContent;
 use loonfs::FsWriter;
 #[cfg(feature = "openapi")]
@@ -19,7 +21,7 @@ use loonfs_api::{
         CompleteUploadResponse, DirectMultipartUpload, DirectMultipartUploadOptions,
         DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
         SignedUploadPart, UploadContentClaim, UploadContentResponse, UploadSessionStatus,
-        UploadStatusResponse, ValidatedContentToken,
+        UploadStatusResponse,
     },
     ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
@@ -64,7 +66,7 @@ impl<'a> ContentTokenVerifier<'a> {
         self,
         writer: &FsWriter,
         namespace_id: &NamespaceId,
-        token: &ValidatedContentToken,
+        token: &ContentToken,
         now_ms: u64,
     ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
         writer
@@ -76,7 +78,7 @@ impl<'a> ContentTokenVerifier<'a> {
     fn mint_receipt(
         self,
         receipt: Option<&CompletedUploadReceipt>,
-    ) -> Result<Option<String>, ApiResponseError> {
+    ) -> Result<Option<ContentToken>, ApiResponseError> {
         let Some(receipt) = receipt else {
             return Ok(None);
         };
@@ -393,7 +395,7 @@ pub(super) async fn content_preparation_for_puts(
     verifier: ContentTokenVerifier<'_>,
     namespace_id: &NamespaceId,
     content_refs: &[&ContentRef],
-    tokens: &[ValidatedContentToken],
+    tokens: &[ContentToken],
     now_ms: u64,
 ) -> Result<PutContentPreparation, ApiResponseError> {
     let mut prepared_content = Vec::new();
@@ -554,7 +556,7 @@ pub(super) async fn upload_content(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
-        description = "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived validation token for a following file write.",
+        description = "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived content token for a following file write.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -586,9 +588,8 @@ pub(super) async fn complete_upload(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let mut response = completed.response;
-    response.validated_content_token =
-        ContentTokenVerifier::new(state.config.content_token_secret())
-            .mint_receipt(completed.receipt.as_ref())?;
+    response.content_token = ContentTokenVerifier::new(state.config.content_token_secret())
+        .mint_receipt(completed.receipt.as_ref())?;
     Ok(Json(response))
 }
 
@@ -599,7 +600,7 @@ pub(super) async fn complete_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Read upload session",
-        description = "Reads one upload session. A completed session answers with a freshly minted validation token for its content, so a client that lost a commit response can commit again without re-uploading anything.",
+        description = "Reads one upload session. A completed session answers with a freshly minted content token, so a client that lost a commit response can commit again without re-uploading anything.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -620,7 +621,7 @@ pub(super) async fn read_upload_status(
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
 ) -> Result<Json<UploadStatusResponse>, ApiResponseError> {
-    // A completed session answers with a freshly minted content-validation
+    // A completed session answers with a freshly minted content
     // token, which is a capability to commit that content. Authorization
     // runs before the id is even parsed, as everywhere else.
     authorize(state.config.auth_policy(), &headers)?;
@@ -632,12 +633,8 @@ pub(super) async fn read_upload_status(
         .read_upload_status(&namespace_id, &upload_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    if let UploadSessionStatus::Completed {
-        validated_content_token,
-        ..
-    } = &mut response.status
-    {
-        *validated_content_token = ContentTokenVerifier::new(state.config.content_token_secret())
+    if let UploadSessionStatus::Completed { content_token, .. } = &mut response.status {
+        *content_token = ContentTokenVerifier::new(state.config.content_token_secret())
             .mint_receipt(receipt.as_ref())?;
     }
     Ok(Json(response))

@@ -8,7 +8,7 @@
 use crate::limits::CONTENT_RECEIPT_TTL_MS;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use base64::Engine as _;
-use loonfs_api::v0::ValidatedContentToken;
+use loonfs_api::v0::ContentToken;
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -134,7 +134,7 @@ pub fn mint_content_token(
     secret: &str,
     receipt: &CompletedUploadReceipt,
     now_ms: u64,
-) -> Result<String, ContentTokenError> {
+) -> Result<ContentToken, ContentTokenError> {
     let expires_at_ms = now_ms
         .checked_add(CONTENT_RECEIPT_TTL_MS)
         .ok_or(ContentTokenError::TimeOverflow)?;
@@ -152,13 +152,16 @@ pub fn mint_content_token(
         secret.as_bytes(),
         payload_part.as_bytes(),
     ));
-    Ok(format!("{payload_part}.{signature_part}"))
+    Ok(ContentToken {
+        content_ref: receipt.content_ref.clone(),
+        token: format!("{payload_part}.{signature_part}"),
+    })
 }
 
 pub fn verify_content_token(
     secret: &str,
     catalog: &VerifiedNamespaceCatalogEntry,
-    token: &ValidatedContentToken,
+    token: &ContentToken,
     now_ms: u64,
 ) -> Result<PreparedContent, ContentTokenError> {
     let (payload_part, signature_part) = token
@@ -221,7 +224,7 @@ mod tests {
 
     use super::{mint_content_token, verify_content_token, CompletedUploadReceipt};
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-    use loonfs_api::v0::ValidatedContentToken;
+    use loonfs_api::v0::ContentToken;
     use loonfs_api::wire::control::HeadState;
     use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceId};
 
@@ -251,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn token_round_trips_and_admits_matching_content() {
+    fn minted_content_token_passes_unchanged_into_embedded_verification() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let token = mint_content_token(
@@ -260,10 +263,6 @@ mod tests {
             1_000,
         )
         .expect("mint");
-        let token = ValidatedContentToken {
-            content_ref: content.clone(),
-            token,
-        };
         let catalog = catalog_entry(namespace, CONTENT_STORE);
 
         let prepared =
@@ -273,6 +272,30 @@ mod tests {
         assert!(prepared
             .into_admission()
             .admits(catalog.content_store_id(), &content));
+    }
+
+    #[test]
+    fn public_wrapper_does_not_change_the_signed_payload_encoding() {
+        let namespace = NamespaceId::parse("demo").expect("namespace");
+        let content = ContentRef::blob_v1(
+            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+            b"hello",
+        );
+        let token = mint_content_token(
+            "secret",
+            &receipt(&namespace, CONTENT_STORE, &content),
+            1_000,
+        )
+        .expect("mint");
+        let (payload_part, _) = token.token.split_once('.').expect("signed token");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_part)
+            .expect("decode payload");
+
+        assert_eq!(
+            payload,
+            br#"{"version":"vct0","namespace_id":"demo","content_store_id":"cs_00000000000000000000000000000001","content_ref":{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
+        );
     }
 
     #[test]
@@ -286,10 +309,6 @@ mod tests {
             issued_at_ms,
         )
         .expect("mint");
-        let token = ValidatedContentToken {
-            content_ref: content.clone(),
-            token,
-        };
         let catalog = catalog_entry(namespace, CONTENT_STORE);
         let prepared = verify_content_token(
             "secret",
@@ -320,10 +339,6 @@ mod tests {
             issued_at_ms,
         )
         .expect("mint");
-        let token = ValidatedContentToken {
-            content_ref: content.clone(),
-            token,
-        };
         let catalog = catalog_entry(namespace.clone(), CONTENT_STORE);
         let other_catalog = catalog_entry(other_namespace, CONTENT_STORE);
 
@@ -346,7 +361,7 @@ mod tests {
         assert!(verify_content_token(
             "secret",
             &catalog,
-            &ValidatedContentToken {
+            &ContentToken {
                 content_ref: other_content,
                 token: token.token.clone(),
             },

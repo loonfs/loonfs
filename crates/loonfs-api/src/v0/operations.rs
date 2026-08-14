@@ -4,7 +4,7 @@
 //! shared [`ApiError`] body. Explicit commits and the change feed live in
 //! [`super::commits`]; read-result shapes live in [`super::reads`].
 
-use super::ValidatedContentToken;
+use super::ContentToken;
 use crate::{
     AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CheckpointId,
     CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo, WriterEpoch,
@@ -360,7 +360,7 @@ pub struct CommitRequest {
     /// Proofs for any new external content refs introduced by this request.
     /// One proof covers every operation that names its content ref.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub content_tokens: Vec<ValidatedContentToken>,
+    pub content_tokens: Vec<ContentToken>,
     /// Ordered operations to apply. Must be non-empty; they commit all
     /// together or not at all.
     pub operations: Vec<FilesystemOperation>,

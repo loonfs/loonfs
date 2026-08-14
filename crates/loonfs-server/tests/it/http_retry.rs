@@ -2,7 +2,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::v0::{CreateCheckpointRequest, MaintenanceStepRequest, ValidatedContentToken};
+use loonfs_api::v0::{CreateCheckpointRequest, MaintenanceStepRequest};
 use loonfs_api::{
     AbsolutePath, ActorId, ActorRef, ChangeSeq, CommitId, CommitRequest, DestinationBehavior,
     FilesystemOperation, RevisionNo,
@@ -112,13 +112,10 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     // that same reference twice.
     let staged =
         stage_uploaded_content(&harness.client, &namespace_id("demo"), b"stable bytes\n").await;
-    let token = ValidatedContentToken {
-        content_ref: staged.content_ref.clone(),
-        token: staged
-            .validated_content_token
-            .clone()
-            .expect("completion returns a content token"),
-    };
+    let token = staged
+        .content_token
+        .clone()
+        .expect("completion returns a content token");
     let commit_request = |content_ref, token| CommitRequest {
         commit_id: commit_id.clone(),
         actor: loonfs_test_support::test_actor(),
@@ -534,13 +531,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
                 commit_id: commit_id.clone(),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
-                content_tokens: vec![ValidatedContentToken {
-                    content_ref: staged.content_ref.clone(),
-                    token: staged
-                        .validated_content_token
-                        .clone()
-                        .expect("completion returns a content token"),
-                }],
+                content_tokens: vec![content_token(&staged)],
                 operations: vec![
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/batch.txt").expect("path"),

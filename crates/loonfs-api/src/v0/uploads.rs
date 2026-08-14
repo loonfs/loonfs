@@ -222,15 +222,16 @@ pub struct CompletedUploadPart {
     pub checksum: Checksum,
 }
 
-/// Stateless proof that a LoonFS server already validated a content ref.
+/// This opaque token authorizes this exact `content_ref` for a later commit.
 ///
-/// This travels in a commit request, so it decodes under the request rule:
-/// unknown fields are rejected.
+/// A content token exists only after validation has occurred. The proof is
+/// self-contained, so unknown fields are rejected wherever it crosses the
+/// public API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct ValidatedContentToken {
-    /// Content identity the server attests it already verified.
+pub struct ContentToken {
+    /// Exact content identity this token authorizes.
     pub content_ref: ContentRef,
     /// Opaque, server-signed token. Clients must not parse it.
     pub token: String,
@@ -378,11 +379,15 @@ pub struct CompleteUploadResponse {
     pub namespace_id: NamespaceId,
     /// Session whose result is now frozen for idempotent completion retries.
     pub upload_id: UploadId,
-    /// Verified immutable content selected by the completed session.
+    /// Durable verified content selected by the completed session.
     pub content_ref: ContentRef,
-    /// Opaque server proof for a later commit, or `None` when the backend needs no token.
+    /// Short-lived proof authorizing the same `content_ref` for a later
+    /// commit, or `None` when the session no longer mints one.
+    ///
+    /// The duplicated content reference is deliberate: `content_ref` is
+    /// durable upload state, while this object is a transferable proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validated_content_token: Option<String>,
+    pub content_token: Option<ContentToken>,
 }
 
 /// Observed state of an upload session.
@@ -407,12 +412,16 @@ pub enum UploadSessionStatus {
     Completed {
         /// Unix-millisecond stamp of the completion.
         completed_at_ms: u64,
-        /// Verified immutable content this session settled on.
+        /// Durable verified content this session settled on.
         content_ref: ContentRef,
-        /// Freshly minted proof for a following commit, or `None` once the
-        /// session has stopped minting them.
+        /// Freshly minted proof authorizing the same `content_ref` for a
+        /// following commit, or `None` once the session has stopped minting
+        /// them.
+        ///
+        /// The duplicated content reference is deliberate: `content_ref` is
+        /// durable upload state, while this object is a transferable proof.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        validated_content_token: Option<String>,
+        content_token: Option<ContentToken>,
     },
     /// Final: the session selected no content and its object is gone.
     #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusAborted"))]
@@ -450,8 +459,9 @@ pub struct AbortUploadResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, DirectMultipartUpload,
-        DirectPutUpload, ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSessionStatus,
+        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
+        ContentToken, DirectMultipartUpload, DirectPutUpload, ObjectTransferAccess,
+        UploadContentClaim, UploadMode, UploadSessionStatus,
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -700,13 +710,93 @@ mod tests {
         let completed = serde_json::to_value(UploadSessionStatus::Completed {
             completed_at_ms: 3_000,
             content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
-            validated_content_token: None,
+            content_token: None,
         })
         .expect("serialize completed status");
         assert_eq!(completed["state"], "completed");
         assert!(
-            completed.get("validated_content_token").is_none(),
+            completed.get("content_token").is_none(),
             "a session past its receipt window reports no token at all"
         );
+    }
+
+    #[test]
+    fn completion_status_and_commit_share_the_exact_content_token_shape() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
+        let content_ref = ContentRef::blob_v1(
+            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+            b"hello",
+        );
+        let content_token = ContentToken {
+            content_ref: content_ref.clone(),
+            token: "opaque-server-token".to_owned(),
+        };
+        let completion = serde_json::to_value(CompleteUploadResponse {
+            namespace_id: namespace_id.clone(),
+            upload_id,
+            content_ref: content_ref.clone(),
+            content_token: Some(content_token.clone()),
+        })
+        .expect("serialize completion");
+        let status = serde_json::to_value(UploadSessionStatus::Completed {
+            completed_at_ms: 3_000,
+            content_ref,
+            content_token: Some(content_token),
+        })
+        .expect("serialize completed status");
+
+        let completion_token = completion["content_token"].clone();
+        let status_token = status["content_token"].clone();
+        assert_eq!(completion_token, status_token);
+        assert_eq!(
+            completion_token,
+            serde_json::json!({
+                "content_ref": {
+                    "kind": "blob_v1",
+                    "content_id": "con_0123456789abcdef0123456789abcdef",
+                    "size_bytes": 5,
+                    "checksum": {
+                        "algorithm": "sha256",
+                        "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                    }
+                },
+                "token": "opaque-server-token"
+            })
+        );
+
+        let request: crate::v0::CommitRequest = serde_json::from_value(serde_json::json!({
+            "commit_id": "same-token-shape",
+            "actor": crate::ActorRef::loonfs_system(),
+            "content_tokens": [completion_token],
+            "operations": [{
+                "kind": "create_directory",
+                "path": "/proof",
+                "parents": false
+            }]
+        }))
+        .expect("completion token decodes unchanged in a commit request");
+        assert_eq!(
+            serde_json::to_value(&request.content_tokens[0]).expect("serialize commit token"),
+            status_token
+        );
+    }
+
+    #[test]
+    fn a_content_token_rejects_unknown_fields() {
+        let token = serde_json::json!({
+            "content_ref": {
+                "kind": "blob_v1",
+                "content_id": "con_0123456789abcdef0123456789abcdef",
+                "size_bytes": 5,
+                "checksum": {
+                    "algorithm": "sha256",
+                    "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                }
+            },
+            "token": "opaque-server-token",
+            "expires_at_ms": 1
+        });
+        assert!(serde_json::from_value::<ContentToken>(token).is_err());
     }
 }

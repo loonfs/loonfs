@@ -222,6 +222,8 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         "absolute_path",
         "root_inode_id",
         "deleted_at_seq",
+        "ValidatedContentToken",
+        "validated_content_token",
     ] {
         assert!(
             !raw.contains(dead_name),
@@ -236,6 +238,7 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         .expect("openapi schemas object");
     assert!(schemas.contains_key("Checksum"));
     assert!(schemas.contains_key("UploadContentClaim"));
+    assert!(schemas.contains_key("ContentToken"));
 
     let checksum_ref = Value::String("#/components/schemas/Checksum".to_owned());
     let checksum_ref_count = values_named(&spec, "$ref")
@@ -267,7 +270,12 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     assert!(!required.contains("multipart"));
 
     for properties in values_named(&spec, "properties").filter_map(Value::as_object) {
-        for retired_name in ["absolute_path", "root_inode_id", "deleted_at_seq"] {
+        for retired_name in [
+            "absolute_path",
+            "root_inode_id",
+            "deleted_at_seq",
+            "validated_content_token",
+        ] {
             assert!(
                 !properties.contains_key(retired_name),
                 "retired public field `{retired_name}` remains in an OpenAPI schema"
@@ -278,6 +286,15 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             "crc64nvme must be an algorithm value, never a raw public field"
         );
     }
+
+    let content_token_ref = Value::String("#/components/schemas/ContentToken".to_owned());
+    let content_token_ref_count = values_named(&spec, "$ref")
+        .filter(|reference| *reference == &content_token_ref)
+        .count();
+    assert_eq!(
+        content_token_ref_count, 3,
+        "completion, status, and commit should share one ContentToken schema"
+    );
 }
 
 #[test]

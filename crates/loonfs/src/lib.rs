@@ -145,6 +145,7 @@ pub mod publish {
 /// namespace catalog and returns process-local proof that remains valid.
 /// Most embedded applications do not need this module.
 pub mod content_tokens {
+    pub use loonfs_api::v0::ContentToken;
     pub use loonfs_core::content::{
         mint_content_token, CompletedUpload, CompletedUploadReceipt, ContentTokenError,
     };

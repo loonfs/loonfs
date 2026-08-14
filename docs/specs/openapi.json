@@ -2259,7 +2259,7 @@
           "uploads"
         ],
         "summary": "Read upload session",
-        "description": "Reads one upload session. A completed session answers with a freshly minted validation token for its content, so a client that lost a commit response can commit again without re-uploading anything.",
+        "description": "Reads one upload session. A completed session answers with a freshly minted content token, so a client that lost a commit response can commit again without re-uploading anything.",
         "operationId": "read_upload_status",
         "parameters": [
           {
@@ -2439,7 +2439,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
-        "description": "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived validation token for a following file write.",
+        "description": "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived content token for a following file write.",
         "operationId": "complete_upload",
         "parameters": [
           {
@@ -3575,7 +3575,7 @@
           "content_tokens": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ValidatedContentToken"
+              "$ref": "#/components/schemas/ContentToken"
             },
             "description": "Proofs for any new external content refs introduced by this request.\nOne proof covers every operation that names its content ref."
           },
@@ -3730,7 +3730,18 @@
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Verified immutable content selected by the completed session."
+            "description": "Durable verified content selected by the completed session."
+          },
+          "content_token": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ContentToken",
+                "description": "Short-lived proof authorizing the same `content_ref` for a later\ncommit, or `None` when the session no longer mints one.\n\nThe duplicated content reference is deliberate: `content_ref` is\ndurable upload state, while this object is a transferable proof."
+              }
+            ]
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -3739,13 +3750,6 @@
           "upload_id": {
             "$ref": "#/components/schemas/UploadId",
             "description": "Session whose result is now frozen for idempotent completion retries."
-          },
-          "validated_content_token": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Opaque server proof for a later commit, or `None` when the backend needs no token."
           }
         }
       },
@@ -3808,6 +3812,25 @@
             "format": "int64",
             "description": "Complete byte length of the referenced content.",
             "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ContentToken": {
+        "type": "object",
+        "description": "This opaque token authorizes this exact `content_ref` for a later commit.\n\nA content token exists only after validation has occurred. The proof is\nself-contained, so unknown fields are rejected wherever it crosses the\npublic API.",
+        "required": [
+          "content_ref",
+          "token"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Exact content identity this token authorizes."
+          },
+          "token": {
+            "type": "string",
+            "description": "Opaque, server-signed token. Clients must not parse it."
           }
         },
         "additionalProperties": false
@@ -6201,20 +6224,24 @@
               },
               "content_ref": {
                 "$ref": "#/components/schemas/ContentRef",
-                "description": "Verified immutable content this session settled on."
+                "description": "Durable verified content this session settled on."
+              },
+              "content_token": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ContentToken",
+                    "description": "Freshly minted proof authorizing the same `content_ref` for a\nfollowing commit, or `None` once the session has stopped minting\nthem.\n\nThe duplicated content reference is deliberate: `content_ref` is\ndurable upload state, while this object is a transferable proof."
+                  }
+                ]
               },
               "state": {
                 "type": "string",
                 "enum": [
                   "completed"
                 ]
-              },
-              "validated_content_token": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "Freshly minted proof for a following commit, or `None` once the\nsession has stopped minting them."
               }
             }
           },
@@ -6266,25 +6293,6 @@
             "description": "Session that was read."
           }
         }
-      },
-      "ValidatedContentToken": {
-        "type": "object",
-        "description": "Stateless proof that a LoonFS server already validated a content ref.\n\nThis travels in a commit request, so it decodes under the request rule:\nunknown fields are rejected.",
-        "required": [
-          "content_ref",
-          "token"
-        ],
-        "properties": {
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Content identity the server attests it already verified."
-          },
-          "token": {
-            "type": "string",
-            "description": "Opaque, server-signed token. Clients must not parse it."
-          }
-        },
-        "additionalProperties": false
       },
       "WalFlushStepOutcome": {
         "oneOf": [

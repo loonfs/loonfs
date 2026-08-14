@@ -8,7 +8,7 @@ use loonfs_api::{
     v0::{
         BeginUploadResponse, CompleteUploadRequest, DirectMultipartUpload,
         DirectMultipartUploadOptions, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
-        UploadPartChecksumClaim, ValidatedContentToken,
+        UploadPartChecksumClaim,
     },
     ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse,
     DestinationBehavior, FilesystemOperation, NamespaceId,
@@ -207,8 +207,8 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .await
         .expect("complete direct-put upload");
     assert_eq!(complete.content_ref, content_ref);
-    let validated_content_token = complete
-        .validated_content_token
+    let content_token = complete
+        .content_token
         .expect("completion returns content token");
 
     let response = post_commit(
@@ -218,10 +218,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
             commit_id: CommitId::parse("direct-put-e2e").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: None,
-            content_tokens: vec![ValidatedContentToken {
-                content_ref: content_ref.clone(),
-                token: validated_content_token,
-            }],
+            content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
                 path: target.absolute_path().clone(),
                 content_ref,
@@ -470,7 +467,7 @@ async fn assert_direct_put_is_no_replace(
         .await
         .expect("complete first direct put");
     assert!(
-        complete.validated_content_token.is_some(),
+        complete.content_token.is_some(),
         "the refused replay left the first object exactly as it was written"
     );
 }
@@ -827,7 +824,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
         .await
         .expect("complete the honest promise");
     assert_eq!(complete.content_ref, content_ref);
-    assert!(complete.validated_content_token.is_some());
+    assert!(complete.content_token.is_some());
     assert_eq!(
         content_ref.checksum,
         Checksum::crc32c(bytes),
@@ -1192,8 +1189,8 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .expect("a lost completion is answered, not failed");
     assert_eq!(replayed.content_ref, content_ref);
 
-    let validated_content_token = replayed
-        .validated_content_token
+    let content_token = replayed
+        .content_token
         .expect("completion returns content token");
     let response = post_commit(
         &harness.server_url,
@@ -1202,10 +1199,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             commit_id: CommitId::parse("direct-multipart-e2e").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: None,
-            content_tokens: vec![ValidatedContentToken {
-                content_ref: content_ref.clone(),
-                token: validated_content_token,
-            }],
+            content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
                 path: target.absolute_path().clone(),
                 content_ref,

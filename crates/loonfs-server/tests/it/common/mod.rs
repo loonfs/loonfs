@@ -292,10 +292,7 @@ pub(crate) mod http_split_support {
     #![allow(dead_code)]
 
     use loonfs_api::{
-        v0::{
-            BeginUploadRequest, CompleteUploadRequest, CompleteUploadResponse,
-            ValidatedContentToken,
-        },
+        v0::{BeginUploadRequest, CompleteUploadRequest, CompleteUploadResponse, ContentToken},
         CommitRequest, DestinationBehavior, NamespaceId,
     };
     use loonfs_client::{Client, PutFileOptions};
@@ -376,20 +373,15 @@ pub(crate) mod http_split_support {
         assert_eq!(repeated.namespace_id, complete.namespace_id);
         assert_eq!(repeated.upload_id, complete.upload_id);
         assert_eq!(repeated.content_ref, complete.content_ref);
-        assert!(complete.validated_content_token.is_some());
-        assert!(repeated.validated_content_token.is_some());
+        assert!(complete.content_token.is_some());
+        assert!(repeated.content_token.is_some());
         complete
     }
 
-    pub(crate) fn validated_content_token(
-        completed: &CompleteUploadResponse,
-    ) -> ValidatedContentToken {
-        ValidatedContentToken {
-            content_ref: completed.content_ref.clone(),
-            token: completed
-                .validated_content_token
-                .clone()
-                .expect("completed upload carries token"),
-        }
+    pub(crate) fn content_token(completed: &CompleteUploadResponse) -> ContentToken {
+        completed
+            .content_token
+            .clone()
+            .expect("completed upload carries token")
     }
 }
