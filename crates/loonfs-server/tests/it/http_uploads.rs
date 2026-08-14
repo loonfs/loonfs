@@ -106,7 +106,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_upload_commit_and_change_feed_are_idempotent() {
+async fn completion_content_token_passes_unchanged_into_http_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -182,13 +182,12 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     let completed = stage_uploaded_content(&harness.client, &namespace, file_bytes).await;
     let content_ref = completed.content_ref.clone();
 
-    // The staged upload publishes through a put that references the
-    // uploaded ref with its validated content token.
+    // Copy the completion token directly into the commit request.
     let put_request = CommitRequest {
         commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),
         message: Some("upload over http".to_owned()),
-        content_tokens: vec![validated_content_token(&completed)],
+        content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/uploaded.txt").expect("path"),
             content_ref: content_ref.clone(),
@@ -328,14 +327,14 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     let status = read_upload_status(&harness.server_url, &upload_id);
     let UploadSessionStatus::Completed {
         content_ref: reported_ref,
-        validated_content_token,
+        content_token,
         ..
     } = status.status
     else {
         unreachable!("a completed session reports itself completed");
     };
     assert_eq!(reported_ref, content_ref);
-    let re_minted = validated_content_token.expect("a completed session re-mints");
+    let re_minted = content_token.expect("a completed session re-mints");
     let commit = send_commit(
         &harness.server_url,
         &namespace,
@@ -343,10 +342,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
             commit_id: CommitId::parse("re-minted-receipt-put").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: None,
-            content_tokens: vec![loonfs_api::v0::ValidatedContentToken {
-                content_ref: content_ref.clone(),
-                token: re_minted,
-            }],
+            content_tokens: vec![re_minted],
             operations: vec![FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/re-minted.txt").expect("path"),
                 content_ref,
@@ -405,7 +401,7 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
     assert_eq!(status.upload_id, upload_id);
     let UploadSessionStatus::Completed {
         content_ref: reported_ref,
-        validated_content_token,
+        content_token,
         ..
     } = status.status
     else {
@@ -421,10 +417,7 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
                 commit_id: CommitId::parse("client-read-back-put").expect("valid commit id"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
-                content_tokens: vec![loonfs_api::v0::ValidatedContentToken {
-                    content_ref: content_ref.clone(),
-                    token: validated_content_token.expect("a completed session re-mints"),
-                }],
+                content_tokens: vec![content_token.expect("a completed session re-mints")],
                 operations: vec![FilesystemOperation::PutFile {
                     path: AbsolutePath::parse("/read-back.txt").expect("path"),
                     content_ref,

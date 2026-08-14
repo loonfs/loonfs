@@ -1058,7 +1058,7 @@ async fn commit_a_finished_upload(
     };
     let UploadSessionStatus::Completed {
         content_ref,
-        validated_content_token,
+        content_token,
         ..
     } = status.status
     else {
@@ -1068,7 +1068,7 @@ async fn commit_a_finished_upload(
     progress.phase("committing");
     let result = context
         .target
-        .commit_completed_upload(spec, content_ref, validated_content_token, options)
+        .commit_completed_upload(spec, content_ref, content_token, options)
         .await;
     if result.is_ok() {
         journal.forget();

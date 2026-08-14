@@ -675,14 +675,14 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         content_ref: ContentRef,
-        validated_content_token: Option<String>,
+        content_token: Option<loonfs_api::v0::ContentToken>,
         options: &PutFileOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target
                 .client
-                .commit_completed_upload(spec, content_ref, validated_content_token, options)
+                .commit_completed_upload(spec, content_ref, content_token, options)
                 .await?),
         }
     }

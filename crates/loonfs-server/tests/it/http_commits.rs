@@ -109,10 +109,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
                 commit_id: commit_id("batch-one"),
                 actor: loonfs_test_support::test_actor(),
                 message: Some("import the reports".to_owned()),
-                content_tokens: vec![
-                    validated_content_token(&first),
-                    validated_content_token(&second),
-                ],
+                content_tokens: vec![content_token(&first), content_token(&second)],
                 operations: batch(&first.content_ref, &second.content_ref),
             },
         )
@@ -241,7 +238,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
                 commit_id: commit_id("batch-stops-at-two"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
-                content_tokens: vec![validated_content_token(&staged)],
+                content_tokens: vec![content_token(&staged)],
                 operations: vec![
                     FilesystemOperation::CreateDirectory {
                         path: absolute(REPORTS_DIR),
@@ -764,7 +761,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
                 commit_id: commit_id("guarded-create"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
-                content_tokens: vec![validated_content_token(&first)],
+                content_tokens: vec![content_token(&first)],
                 operations: vec![FilesystemOperation::PutFile {
                     path: absolute(FIRST_FILE),
                     content_ref: first.content_ref.clone(),
@@ -789,7 +786,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
         serde_json::json!({
             "commit_id": commit,
             "actor": loonfs_test_support::test_actor(),
-            "content_tokens": [validated_content_token(&second)],
+            "content_tokens": [content_token(&second)],
             "operations": [put]
         })
     };

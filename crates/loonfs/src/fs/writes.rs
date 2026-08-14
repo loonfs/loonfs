@@ -447,7 +447,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         secret: &str,
-        token: &loonfs_api::v0::ValidatedContentToken,
+        token: &crate::content_tokens::ContentToken,
         now_ms: u64,
     ) -> Result<std::result::Result<PreparedContent, loonfs_core::content::ContentTokenError>> {
         let catalog = self

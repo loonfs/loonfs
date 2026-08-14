@@ -272,7 +272,7 @@ fn completed(content_ref: ContentRef) -> Outcome {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
         content_ref,
-        validated_content_token: None,
+        content_token: None,
     })
 }
 

@@ -25,12 +25,12 @@ use loonfs_api::{
     v0::{
         AbortUploadResponse, BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest,
         BeginUploadResponse, ChangesResponse, CommitResponse as ApiCommitResponse,
-        CompleteUploadRequest, CompleteUploadResponse, CompletedUploadPart,
+        CompleteUploadRequest, CompleteUploadResponse, CompletedUploadPart, ContentToken,
         DirectMultipartUploadOptions, DisableGrepIndexResponse, EnableGrepIndexResponse,
         GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess,
         SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest,
         StoreProbeResponse, UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim,
-        UploadStatusResponse, ValidatedContentToken,
+        UploadStatusResponse,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
@@ -283,7 +283,7 @@ struct UploadContinuity<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StagedContent {
     content_ref: ContentRef,
-    validated_content_token: Option<ValidatedContentToken>,
+    content_token: Option<ContentToken>,
 }
 
 /// Upload path selected from the server capability document.
@@ -1143,11 +1143,9 @@ impl Client {
 
     /// Reads one upload session back.
     ///
-    /// A completed session answers with the exact content reference it
-    /// settled on and a freshly minted validation token, so a caller that
-    /// lost its completion response — or the whole process — can commit
-    /// that content without re-uploading a byte. The upload id is the only
-    /// thing it has to have kept.
+    /// A completed session returns its content reference and a fresh content
+    /// token. A caller that kept the upload id can therefore recover from a
+    /// lost completion response without uploading the content again.
     pub async fn read_upload_status(
         &self,
         namespace_id: &NamespaceId,
@@ -2006,16 +2004,9 @@ impl Client {
     }
 
     fn staged_from_completion(response: CompleteUploadResponse) -> StagedContent {
-        let validated_content_token =
-            response
-                .validated_content_token
-                .map(|token| ValidatedContentToken {
-                    content_ref: response.content_ref.clone(),
-                    token,
-                });
         StagedContent {
             content_ref: response.content_ref,
-            validated_content_token,
+            content_token: response.content_token,
         }
     }
 
@@ -2151,15 +2142,12 @@ impl Client {
         &self,
         spec: &NamespacePath,
         content_ref: ContentRef,
-        validated_content_token: Option<String>,
+        content_token: Option<ContentToken>,
         options: &PutFileOptions,
     ) -> Result<ApiCommitResponse> {
         let uploaded = content_ref.clone();
         let staged = StagedContent {
-            validated_content_token: validated_content_token.map(|token| ValidatedContentToken {
-                content_ref: content_ref.clone(),
-                token,
-            }),
+            content_token,
             content_ref,
         };
         self.commit_staged_file(
@@ -2192,7 +2180,7 @@ impl Client {
                     commit_id: commit_id.clone(),
                     actor: options.commit.actor.clone(),
                     message: options.commit.message.clone(),
-                    content_tokens: staged.validated_content_token.into_iter().collect(),
+                    content_tokens: staged.content_token.into_iter().collect(),
                     operations: vec![FilesystemOperation::PutFile {
                         path: spec.absolute_path().clone(),
                         content_ref: staged.content_ref,
@@ -2902,7 +2890,7 @@ mod tests {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             content_ref: content_ref.clone(),
-            validated_content_token: None,
+            content_token: None,
         };
         let transport = crate::transport::test_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),

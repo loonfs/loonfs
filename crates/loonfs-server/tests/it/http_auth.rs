@@ -4,7 +4,7 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::ContentId;
 use loonfs_api::{
-    v0::{BeginUploadRequest, ValidatedContentToken},
+    v0::{BeginUploadRequest, ContentToken},
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation,
 };
@@ -92,7 +92,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
         commit_id: CommitId::parse("bad-token-put").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),
         message: None,
-        content_tokens: vec![ValidatedContentToken {
+        content_tokens: vec![ContentToken {
             content_ref: completed.content_ref.clone(),
             token: "not.a.valid.token".to_owned(),
         }],
@@ -175,12 +175,7 @@ async fn path_put_with_valid_content_token_succeeds() {
         commit_id: CommitId::parse("valid-token-put").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),
         message: None,
-        content_tokens: vec![ValidatedContentToken {
-            content_ref: completed.content_ref.clone(),
-            token: completed
-                .validated_content_token
-                .expect("completed upload carries token"),
-        }],
+        content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/valid-token.txt").expect("path"),
             content_ref: completed.content_ref,
@@ -228,12 +223,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
         commit_id: CommitId::parse("token-replay-put").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),
         message: None,
-        content_tokens: vec![ValidatedContentToken {
-            content_ref: completed.content_ref.clone(),
-            token: completed
-                .validated_content_token
-                .expect("completed upload carries token"),
-        }],
+        content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/token-replay.txt").expect("path"),
             content_ref: completed.content_ref,
@@ -260,15 +250,17 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
     // closest a test can get to a token the publisher will turn down for a
     // reason other than syntax.
     let other = stage_uploaded_content(&harness.client, &namespace, b"other bytes").await;
-    request.content_tokens = vec![ValidatedContentToken {
+    request.content_tokens = vec![ContentToken {
         content_ref: content_ref.clone(),
         token: other
-            .validated_content_token
+            .content_token
+            .as_ref()
+            .map(|content_token| content_token.token.clone())
             .expect("completed upload carries token"),
     }];
     assert_eq!(send(&request), original);
 
-    request.content_tokens = vec![ValidatedContentToken {
+    request.content_tokens = vec![ContentToken {
         content_ref,
         token: "not.a.valid.token".to_owned(),
     }];
@@ -300,12 +292,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
         commit_id: CommitId::parse("irrelevant-token-put").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),
         message: None,
-        content_tokens: vec![ValidatedContentToken {
-            content_ref: irrelevant.content_ref,
-            token: irrelevant
-                .validated_content_token
-                .expect("completed upload carries token"),
-        }],
+        content_tokens: vec![content_token(&irrelevant)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/irrelevant-token.txt").expect("path"),
             content_ref: target.content_ref,
@@ -347,8 +334,8 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         actor: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: vec![
-            validated_content_token(&first),
-            ValidatedContentToken {
+            content_token(&first),
+            ContentToken {
                 content_ref: ContentRef::blob_v1(ContentId::generate(), b"irrelevant"),
                 token: "irrelevant.garbage".to_owned(),
             },
@@ -372,7 +359,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         commit_id: CommitId::parse("put-repeated-ref").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),
         message: None,
-        content_tokens: vec![validated_content_token(&first)],
+        content_tokens: vec![content_token(&first)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/first-copy.txt").expect("path"),
             content_ref: first.content_ref.clone(),
@@ -469,9 +456,8 @@ async fn every_upload_session_route_requires_the_bearer_token() {
         harness.server_url
     );
 
-    // Reading a session mints a fresh content-validation token, and aborting
-    // one destroys another client's in-flight upload. Neither is reachable
-    // without the deployment's token.
+    // Both operations require deployment authorization because they expose
+    // or modify another client's upload session.
     for (method, url) in [("GET", base.clone()), ("POST", format!("{base}/abort"))] {
         match raw_agent().request(method, &url).call() {
             Err(ureq::Error::Status(401, response)) => {

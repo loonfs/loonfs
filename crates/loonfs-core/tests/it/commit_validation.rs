@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{
-    v0::{FilesystemChange, UploadSessionStatus, ValidatedContentToken},
+    v0::{FilesystemChange, UploadSessionStatus},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
     NamespaceId, RevisionNo,
 };
@@ -253,18 +253,15 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .await
         .expect("complete upload");
     let content_ref = completed.response.content_ref.clone();
-    let token = ValidatedContentToken {
-        content_ref: content_ref.clone(),
-        token: mint_content_token(
-            "test-content-token-secret",
-            completed
-                .receipt
-                .as_ref()
-                .expect("a completed session mints a receipt"),
-            context.now_ms,
-        )
-        .expect("mint token"),
-    };
+    let token = mint_content_token(
+        "test-content-token-secret",
+        completed
+            .receipt
+            .as_ref()
+            .expect("a completed session mints a receipt"),
+        context.now_ms,
+    )
+    .expect("mint token");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("load namespace catalog");
@@ -985,15 +982,12 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .expect("load namespace catalog");
 
     // The receipt the completion handed back, past its life.
-    let first = ValidatedContentToken {
-        content_ref: staged.content_ref.clone(),
-        token: mint_content_token(
-            "test-content-token-secret",
-            completed.receipt.as_ref().expect("completion mints"),
-            0,
-        )
-        .expect("mint"),
-    };
+    let first = mint_content_token(
+        "test-content-token-secret",
+        completed.receipt.as_ref().expect("completion mints"),
+        0,
+    )
+    .expect("mint");
     let refused = verify_content_token(
         "test-content-token-secret",
         &catalog,
@@ -1014,15 +1008,12 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         }
         other => panic!("expected a completed session, got {other:?}"),
     }
-    let re_minted = ValidatedContentToken {
-        content_ref: staged.content_ref.clone(),
-        token: mint_content_token(
-            "test-content-token-secret",
-            receipt.as_ref().expect("the status read re-mints"),
-            CONTENT_RECEIPT_TTL_MS + 1,
-        )
-        .expect("re-mint"),
-    };
+    let re_minted = mint_content_token(
+        "test-content-token-secret",
+        receipt.as_ref().expect("the status read re-mints"),
+        CONTENT_RECEIPT_TTL_MS + 1,
+    )
+    .expect("re-mint");
     let prepared = verify_content_token(
         "test-content-token-secret",
         &catalog,

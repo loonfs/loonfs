@@ -149,7 +149,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "updated_by",
     "upload_session_undecided",
     "upload_session_window",
-    "validated_content_token",
+    "content_token",
     "wal_flush",
 ];
 

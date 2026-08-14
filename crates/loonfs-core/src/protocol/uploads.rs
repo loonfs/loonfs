@@ -1217,7 +1217,7 @@ pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
             UploadSessionStatus::Completed {
                 completed_at_ms,
                 content_ref: content_ref.clone(),
-                validated_content_token: None,
+                content_token: None,
             },
             receipt_within_window(
                 namespace_id,
@@ -1265,7 +1265,7 @@ fn completed_upload(
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             content_ref: content_ref.clone(),
-            validated_content_token: None,
+            content_token: None,
         },
         prepared: PreparedContent::from_admission(ContentAdmission::for_durable_content_write(
             content_store_id.clone(),
@@ -2028,7 +2028,7 @@ mod tests {
     /// out fresh receipts for as long as its content is protected, then
     /// stops.
     #[tokio::test]
-    async fn a_completed_session_re_mints_until_its_receipt_window_closes() {
+    async fn a_completed_session_keeps_its_content_ref_after_token_minting_closes() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let setup = context(1_000);
@@ -2065,7 +2065,15 @@ mod tests {
             read_upload_status(&store, &namespace_id, &content_store_id, &upload_id, past)
                 .await
                 .expect("status past the receipt window");
-        assert!(matches!(status, UploadStatusResponse { .. }));
+        let completed = match status.status {
+            UploadSessionStatus::Completed {
+                content_ref,
+                content_token,
+                ..
+            } => Some((content_ref, content_token)),
+            _ => None,
+        };
+        assert_eq!(completed, Some((content_ref.clone(), None)));
         assert!(
             receipt.is_none(),
             "past the window no receipt exists, which is what lets content GC decide"
@@ -2083,6 +2091,7 @@ mod tests {
         .await
         .expect("replay still succeeds");
         assert_eq!(replay.response.content_ref, content_ref);
+        assert!(replay.response.content_token.is_none());
         assert!(replay.receipt.is_none());
     }
 }
