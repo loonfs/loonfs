@@ -117,7 +117,7 @@
           "admin"
         ],
         "summary": "List checkpoints",
-        "description": "Lists one bounded page of active checkpoint records in ascending checkpoint-id order. Each record is a garbage-collection root, and its id is what the release endpoint takes; because a checkpoint name is a label rather than a key, this is the only way to find a pin whose creation response is gone. An expired record that no collection pass has released yet is still active and is listed, with its expiry in the entry. Released records are absent. Pagination is a live key-order resume, not a snapshot.",
+        "description": "Lists one page of active checkpoints in checkpoint-id order. Expired checkpoints remain visible until collection releases them. Released checkpoints are omitted. The cursor resumes a live listing and does not create a snapshot.",
         "operationId": "list_checkpoints",
         "parameters": [
           {
@@ -5360,7 +5360,7 @@
       },
       "ListCheckpointsResponse": {
         "type": "object",
-        "description": "One bounded page of active checkpoint records a namespace currently carries.",
+        "description": "One page of active checkpoint records.",
         "required": [
           "namespace_id",
           "checkpoints"
@@ -5371,7 +5371,7 @@
             "items": {
               "$ref": "#/components/schemas/CheckpointSummary"
             },
-            "description": "Active records in ascending checkpoint-id order. Released records are absent because a\nrelease is what stops a record pinning anything; a released record\nthat garbage collection has not yet deleted is not reported either."
+            "description": "Active records in ascending checkpoint-id order. Released records are\nomitted even if garbage collection has not deleted them yet."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -5382,7 +5382,7 @@
               "string",
               "null"
             ],
-            "description": "Opaque cursor for the next page, omitted when this key enumeration is complete."
+            "description": "Opaque cursor for the next page."
           }
         }
       },
