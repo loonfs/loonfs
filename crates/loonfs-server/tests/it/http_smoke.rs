@@ -11,7 +11,8 @@ use loonfs_api::{
     DEFAULT_PAGE_LIMIT, LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_DOWNLOAD_MAX_CONCURRENT,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use loonfs_client::{ClientError, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::raw_agent;
@@ -177,6 +178,7 @@ async fn capabilities_endpoint_advertises_capabilities() {
     );
     for (limit, expected) in [
         (LIMIT_UPLOAD_MAX_CONTENT_BYTES, config.max_upload_bytes),
+        (LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, 8 * 1024 * 1024),
         (LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, config.max_download_bytes),
         (
             LIMIT_UPLOAD_MAX_CONCURRENT,

@@ -4,13 +4,13 @@ use super::error::ApiResponseError;
 use super::serve::AppState;
 use crate::config::AuthPolicy;
 use axum::extract::rejection::PathRejection;
-use axum::extract::{FromRequest, FromRequestParts, Path as AxumPath, Query};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, Query};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs::{ByteStream, ErrorCode};
+use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
 use loonfs_api::NamespaceId;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -176,7 +176,7 @@ pub(super) struct AppJson<T>(pub(super) T);
 async fn extract_json<S, T>(
     req: axum::extract::Request,
     state: &S,
-    body_too_large: fn() -> ApiResponseError,
+    body_too_large: ApiResponseError,
 ) -> Result<T, ApiResponseError>
 where
     T: serde::de::DeserializeOwned,
@@ -185,7 +185,7 @@ where
     match Json::<T>::from_request(req, state).await {
         Ok(Json(value)) => Ok(value),
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-            Err(body_too_large())
+            Err(body_too_large)
         }
         Err(rejection) => Err(ApiResponseError::new(
             StatusCode::BAD_REQUEST,
@@ -206,24 +206,110 @@ where
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         authorize(state.config.auth_policy(), req.headers())?;
-        extract_json(req, state, json_body_too_large_error)
+        extract_json(req, state, json_body_too_large_error())
             .await
             .map(AppJson)
     }
 }
 
-/// An authorized request body decoded after the upload mode is loaded.
-pub(super) struct UploadBodyBytes(Bytes);
+/// Begin and part-signing bodies remain small control requests. The largest
+/// part-signing request names [`MAX_SIGNED_PARTS_PER_REQUEST`] (1,000)
+/// claims. A maximal five-digit part number plus the largest full checksum
+/// object serializes to 130 bytes, so `1_000 × 130 + 999 commas + 12 bytes`
+/// for the envelope is 131,011 bytes, comfortably below 1 MiB.
+pub(super) const MAX_UPLOAD_CONTROL_BODY_BYTES: usize = 1024 * 1024;
 
-impl UploadBodyBytes {
+const MAX_SERIALIZED_SIGNING_PART_BYTES: usize = 130;
+const MAX_SIGNING_ENVELOPE_BYTES: usize = 12;
+const _: () = assert!(
+    MAX_SIGNED_PARTS_PER_REQUEST * MAX_SERIALIZED_SIGNING_PART_BYTES
+        + (MAX_SIGNED_PARTS_PER_REQUEST - 1)
+        + MAX_SIGNING_ENVELOPE_BYTES
+        <= MAX_UPLOAD_CONTROL_BODY_BYTES
+);
+
+/// The largest completion body accepted by the multipart completion route.
+///
+/// [`MAX_MULTIPART_PARTS`] is the provider-backed 10,000-part contract. The
+/// completion path currently validates that an ETag is nonempty but does not
+/// bound its length, so this HTTP budget assumes a generous 256-byte provider
+/// ETag including its quotes. Budgeting its JSON string as 260 bytes adds the
+/// JSON delimiters and escapes those provider quotes. With a five-digit part
+/// number and the largest full checksum object (`sha256` plus 64 hex
+/// characters), one serialized part entry is 398 bytes. The maximal content
+/// claim and empty-list envelope is 167 bytes, so the derived request bound is:
+///
+/// `10_000 × 398 + 9_999 commas + 167 = 3_990_166 bytes`.
+///
+/// Four MiB would leave only 204,138 bytes of headroom. Eight MiB is the next
+/// clean power-of-two budget with room for harmless serialization evolution.
+/// If multipart geometry or the ETag assumption changes, re-derive this cap
+/// rather than tuning it empirically.
+pub(super) const MAX_COMPLETION_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+const MAX_SERIALIZED_COMPLETION_PART_BYTES: usize = 398;
+const MAX_COMPLETION_ENVELOPE_BYTES: usize = 167;
+const _: () = assert!(
+    (MAX_MULTIPART_PARTS as usize) * MAX_SERIALIZED_COMPLETION_PART_BYTES
+        + (MAX_MULTIPART_PARTS as usize - 1)
+        + MAX_COMPLETION_ENVELOPE_BYTES
+        <= MAX_COMPLETION_BODY_BYTES
+);
+
+/// JSON for an upload-control route with an explicit per-route body cap.
+pub(super) struct UploadControlJson<T, const MAX_BYTES: usize>(pub(super) T);
+
+impl<T, const MAX_BYTES: usize> FromRequest<AppState> for UploadControlJson<T, MAX_BYTES>
+where
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = ApiResponseError;
+
+    async fn from_request(
+        mut req: axum::extract::Request,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        authorize(state.config.auth_policy(), req.headers())?;
+        DefaultBodyLimit::max(MAX_BYTES).apply(&mut req);
+        extract_json(req, state, upload_control_body_too_large_error(MAX_BYTES))
+            .await
+            .map(Self)
+    }
+}
+
+async fn extract_body_bytes<S>(
+    mut req: axum::extract::Request,
+    state: &S,
+    max_bytes: usize,
+    body_too_large: ApiResponseError,
+) -> Result<Bytes, ApiResponseError>
+where
+    S: Send + Sync,
+{
+    DefaultBodyLimit::max(max_bytes).apply(&mut req);
+    match Bytes::from_request(req, state).await {
+        Ok(body) => Ok(body),
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            Err(body_too_large)
+        }
+        Err(rejection) => Err(ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!("request body unreadable: {}", rejection.body_text()),
+        )),
+    }
+}
+
+/// An authorized request body decoded after the upload mode is loaded.
+pub(super) struct UploadBodyBytes<const MAX_BYTES: usize>(Bytes);
+
+impl<const MAX_BYTES: usize> UploadBodyBytes<MAX_BYTES> {
     pub(super) fn into_bytes(self) -> Bytes {
         self.0
     }
 }
 
-const MAX_UPLOAD_CONTROL_BODY_BYTES: usize = 1024 * 1024;
-
-impl FromRequest<AppState> for UploadBodyBytes {
+impl<const MAX_BYTES: usize> FromRequest<AppState> for UploadBodyBytes<MAX_BYTES> {
     type Rejection = ApiResponseError;
 
     async fn from_request(
@@ -231,16 +317,14 @@ impl FromRequest<AppState> for UploadBodyBytes {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         authorize(state.config.auth_policy(), req.headers())?;
-        axum::body::to_bytes(req.into_body(), MAX_UPLOAD_CONTROL_BODY_BYTES)
-            .await
-            .map(Self)
-            .map_err(|error| {
-                ApiResponseError::new(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::InvalidRequest,
-                    &format!("request body unreadable: {error}"),
-                )
-            })
+        extract_body_bytes(
+            req,
+            state,
+            MAX_BYTES,
+            upload_control_body_too_large_error(MAX_BYTES),
+        )
+        .await
+        .map(Self)
     }
 }
 
@@ -414,6 +498,26 @@ fn json_body_too_large_error() -> ApiResponseError {
     )
 }
 
+/// 413 for upload-control JSON or raw bodies with a route-selected cap.
+fn upload_control_body_too_large_error(max_bytes: usize) -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        ErrorCode::ContentTooLarge,
+        &format!("upload-control request body exceeds this route's limit of {max_bytes} bytes"),
+    )
+}
+
+/// 413 for optional JSON routes with their explicit body cap.
+fn optional_json_body_too_large_error() -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        ErrorCode::ContentTooLarge,
+        &format!(
+            "JSON request body exceeds this route's limit of {MAX_OPTIONAL_JSON_BODY_BYTES} bytes"
+        ),
+    )
+}
+
 /// Like [`AppJson`], but an absent (empty) body is `None` rather than an
 /// error, while a present-but-malformed body still answers 400 in-envelope.
 pub(super) struct OptionalAppJson<T>(pub(super) Option<T>);
@@ -431,15 +535,13 @@ where
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         authorize(state.config.auth_policy(), req.headers())?;
-        let body = axum::body::to_bytes(req.into_body(), MAX_OPTIONAL_JSON_BODY_BYTES)
-            .await
-            .map_err(|error| {
-                ApiResponseError::new(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::InvalidRequest,
-                    &format!("request body unreadable: {error}"),
-                )
-            })?;
+        let body = extract_body_bytes(
+            req,
+            state,
+            MAX_OPTIONAL_JSON_BODY_BYTES,
+            optional_json_body_too_large_error(),
+        )
+        .await?;
         if body.is_empty() {
             return Ok(OptionalAppJson(None));
         }

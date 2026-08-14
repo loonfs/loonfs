@@ -8,7 +8,8 @@ use loonfs_api::{
         UploadStatusResponse,
     },
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
-    DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
+    DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, InodeKind, RevisionNo,
+    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::http::raw_agent;
@@ -173,6 +174,89 @@ async fn stored_proxied_mode_rejects_multipart_and_retired_completion_fields_pre
         .complete_upload(&namespace, begin.upload_id())
         .await
         .expect("empty completion succeeds for proxied mode");
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_body_one_under_reaches_session_validation_and_one_over_answers_413() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-completion-body-cap",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let begin = harness
+        .client
+        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .await
+        .expect("begin upload");
+    let limit = harness
+        .client
+        .capabilities()
+        .await
+        .expect("fetch capabilities")
+        .limits
+        .get(LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES)
+        .copied()
+        .and_then(|limit| usize::try_from(limit).ok())
+        .expect("completion body limit is advertised and fits usize");
+    let completion_url = format!(
+        "{}/v0/namespaces/{namespace}/uploads/{}/complete",
+        harness.server_url,
+        begin.upload_id()
+    );
+
+    let mut just_under = vec![b' '; limit - 1];
+    just_under[..2].copy_from_slice(b"{}");
+    let result = raw_agent()
+        .post(&completion_url)
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_bytes(&just_under);
+    let ureq::Error::Status(status, response) =
+        result.expect_err("unstaged content should fail session validation")
+    else {
+        unreachable!("an unstaged completion returns an HTTP status");
+    };
+    assert_eq!(status, 400);
+    let error: ApiError =
+        serde_json::from_reader(response.into_reader()).expect("API error envelope");
+    assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+    assert!(
+        error.message.contains("upload content has not been staged"),
+        "body below the cap should decode and reach session validation: {}",
+        error.message
+    );
+    drop(just_under);
+
+    let one_over = vec![b' '; limit + 1];
+    let result = raw_agent()
+        .post(&completion_url)
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_bytes(&one_over);
+    let ureq::Error::Status(status, response) =
+        result.expect_err("body above the completion cap should fail")
+    else {
+        unreachable!("an oversized completion returns an HTTP status");
+    };
+    assert_eq!(status, 413);
+    let error: ApiError =
+        serde_json::from_reader(response.into_reader()).expect("API error envelope");
+    assert_eq!(error.code, ErrorCode::ContentTooLarge.as_str());
+    assert!(
+        error.message.contains(&format!("{limit} bytes")),
+        "oversize error should name the enforced limit: {}",
+        error.message
+    );
+
     harness.server.abort();
 }
 

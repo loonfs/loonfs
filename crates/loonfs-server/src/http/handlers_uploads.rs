@@ -3,7 +3,8 @@
 
 use super::error::ApiResponseError;
 use super::{
-    authorize, AppJson, AppPath, AppState, NamespaceIdPath, UploadBodyBytes, UploadBodyStream,
+    authorize, AppPath, AppState, NamespaceIdPath, UploadBodyBytes, UploadBodyStream,
+    UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -112,6 +113,7 @@ pub(super) struct UploadPathParams {
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ApiError),
             (status = 501, description = "Requested upload mode is unsupported", body = ApiError),
             crate::http::openapi::DeadlineExceededResponses
         )
@@ -120,7 +122,10 @@ pub(super) struct UploadPathParams {
 pub(super) async fn begin_upload(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
-    AppJson(request): AppJson<BeginUploadRequest>,
+    UploadControlJson(request): UploadControlJson<
+        BeginUploadRequest,
+        MAX_UPLOAD_CONTROL_BODY_BYTES,
+    >,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     // Decoding the body settled which transport this is and that it carries
@@ -291,6 +296,7 @@ async fn begin_direct_multipart_upload(
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload already completed", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ApiError),
             (status = 501, description = "Direct multipart upload is unsupported", body = ApiError),
             crate::http::openapi::DeadlineExceededResponses
         )
@@ -300,7 +306,10 @@ pub(super) async fn sign_upload_parts(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
-    AppJson(request): AppJson<SignUploadPartsRequest>,
+    UploadControlJson(request): UploadControlJson<
+        SignUploadPartsRequest,
+        MAX_UPLOAD_CONTROL_BODY_BYTES,
+    >,
 ) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
@@ -575,6 +584,7 @@ pub(super) async fn upload_content(
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload completion conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "Completion body exceeds the advertised `upload.completion_max_body_bytes` limit", body = ApiError),
             crate::http::openapi::DeadlineExceededResponses
         )
     )
@@ -583,7 +593,7 @@ pub(super) async fn complete_upload(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
-    body: UploadBodyBytes,
+    body: UploadBodyBytes<MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
@@ -637,6 +647,10 @@ fn upload_mode_name(mode: UploadMode) -> &'static str {
 #[cfg(test)]
 mod completion_body_tests {
     use super::*;
+    use loonfs_api::{
+        v0::{CompletedUploadPart, UploadPartChecksumClaim},
+        Checksum,
+    };
 
     const CONTENT: &str =
         r#"{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}"#;
@@ -685,6 +699,67 @@ mod completion_body_tests {
                 "wrong error for {field}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn maximum_multipart_completion_fits_the_completion_body_cap() {
+        let checksum = Checksum {
+            algorithm: ChecksumAlgorithm::Sha256,
+            value: "f".repeat(64),
+        };
+        let quoted_etag = format!("\"{}\"", "e".repeat(254));
+        assert_eq!(quoted_etag.len(), 256);
+        let request = CompleteMultipartUploadRequest {
+            content: UploadContentClaim {
+                size_bytes: u64::MAX,
+                checksum: checksum.clone(),
+            },
+            parts: (1..=loonfs::MAX_MULTIPART_PARTS)
+                .map(|part_number| CompletedUploadPart {
+                    part_number,
+                    etag: quoted_etag.clone(),
+                    checksum: checksum.clone(),
+                })
+                .collect(),
+        };
+
+        let encoded = serde_json::to_vec(&request).expect("serialize maximal completion");
+        assert!(
+            encoded.len() < MAX_COMPLETION_BODY_BYTES,
+            "{}-byte maximal completion exceeds the {}-byte cap",
+            encoded.len(),
+            MAX_COMPLETION_BODY_BYTES
+        );
+        let decoded = serde_json::from_slice::<CompleteMultipartUploadRequest>(&encoded)
+            .expect("maximal completion decodes");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn maximum_part_signing_request_fits_the_control_body_cap() {
+        let checksum = Checksum {
+            algorithm: ChecksumAlgorithm::Sha256,
+            value: "f".repeat(64),
+        };
+        let request = SignUploadPartsRequest {
+            parts: (1..=loonfs::MAX_SIGNED_PARTS_PER_REQUEST)
+                .map(|part_number| UploadPartChecksumClaim {
+                    part_number: part_number as u32,
+                    checksum: checksum.clone(),
+                })
+                .collect(),
+        };
+
+        let encoded = serde_json::to_vec(&request).expect("serialize maximal part signing");
+        assert!(
+            encoded.len() < MAX_UPLOAD_CONTROL_BODY_BYTES,
+            "{}-byte maximal part-signing request exceeds the {}-byte cap",
+            encoded.len(),
+            MAX_UPLOAD_CONTROL_BODY_BYTES
+        );
+        let decoded = serde_json::from_slice::<SignUploadPartsRequest>(&encoded)
+            .expect("maximal part-signing request decodes");
+        assert_eq!(decoded, request);
     }
 }
 

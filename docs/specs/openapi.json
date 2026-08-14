@@ -2715,6 +2715,16 @@
               }
             }
           },
+          "413": {
+            "description": "Body exceeds the 1 MiB upload-control limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "501": {
             "description": "Requested upload mode is unsupported",
             "content": {
@@ -3010,6 +3020,16 @@
                 }
               }
             }
+          },
+          "413": {
+            "description": "Completion body exceeds the advertised `upload.completion_max_body_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -3235,6 +3255,16 @@
           },
           "410": {
             "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds the 1 MiB upload-control limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -4214,7 +4244,7 @@
             "$ref": "#/components/schemas/CompleteMultipartUploadRequest"
           }
         ],
-        "description": "The stored upload mode determines the accepted body. Service-proxied and direct-put sessions use an empty object. Direct-multipart sessions provide the content claim and completed parts."
+        "description": "The stored upload session mode selects the accepted body. Service-proxied and direct-put sessions use an empty object. Direct-multipart sessions provide the content claim and completed parts."
       },
       "CompleteUploadResponse": {
         "type": "object",
