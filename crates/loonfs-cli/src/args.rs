@@ -347,6 +347,7 @@ pub(crate) struct TargetSelectorArgs {
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ActorSelectorArgs {
     /// Actor kind for this mutation. Must be used with `--actor-id`.
+    /// Overrides actor values from the environment or profile.
     #[arg(long, value_enum)]
     pub actor_kind: Option<ActorKindArg>,
     /// Actor ID for this mutation. Must be used with `--actor-kind`.

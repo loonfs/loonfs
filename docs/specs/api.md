@@ -420,6 +420,28 @@ the requested cursor is older than the retention floor, the caller must
 re-bootstrap instead of expecting older incremental history to remain
 available.
 
+### Actor attribution
+
+Every commit includes an actor with a `kind` and `id`. The application chooses
+this value, and LoonFS stores it on the commit and the metadata created by that
+commit. LoonFS does not authenticate the actor. The application must
+authenticate the user and authorize the operation before sending the request.
+Use a stable internal ID, not an email address or display name.
+
+Actor kind and actor id are part of the semantic commit fingerprint. Reusing a
+`commit_id` with a different actor id or kind fails with
+`commit_id_reuse_conflict`. The commit timestamp is not part of the
+fingerprint.
+
+Responses expose attribution through these fields:
+
+- `created_by` and `created_at_ms` come from the commit that created an inode.
+- `revision_actor` identifies the actor for the current file revision. Each
+  revision-history entry also has an `actor`. Directories have neither field.
+- `attributes.updated_by` identifies who last changed the stored attributes.
+  The initial empty attributes at revision 0 have no updater.
+- `deleted_by` identifies the actor for an active trash entry.
+
 ### 5.2 Commit responses and safe retry
 
 Every commit returns the same response envelope: the `namespace_id` that changed, the
@@ -1565,9 +1587,9 @@ reaches revision 1, regardless of how far the retention floor has advanced.
 
 ### 6.8 `POST /commits`
 
-This is the binding for the commit model in section 5.1: one `commit_id`,
-an optional `message`, and `operations` — an ordered, non-empty array of
-path operations. An empty array is `invalid_request`.
+This is the binding for the commit model in section 5.1: one `commit_id`, one
+required `actor`, an optional `message`, and `operations` — an ordered,
+non-empty array of path operations. An empty array is `invalid_request`.
 
 The root path `/` is readable but never a mutation target. An operation that
 names it — as its own path, or as either end of a move or copy — is
@@ -2104,8 +2126,8 @@ presign writes either, no file it holds can be larger than it will proxy.
 ### 6.11 `GET /changes`
 
 Each change is one commit carrying its identity (`committed_seq`, `commit_id`,
-observational `committed_at_ms`, optional `message`) and `events`: the
-semantic filesystem operations the commit
+`actor`, observational `committed_at_ms`, optional `message`) and `events`:
+the semantic filesystem operations the commit
 applied, in the order it applied them. One request operation may apply
 several — a put creates each missing parent directory, a replacing move
 deletes the file it moves over, a copy carries the source's attributes onto

@@ -23,6 +23,8 @@ helm install loonfs-server crates/loonfs-server/deploy/helm/loonfs-server \
 
 [`docs/self-hosting.md`](../../../docs/self-hosting.md) covers the server
 itself: the config fields, the probes, the logging, and the upgrade rule.
+[`docs/actor-attribution.md`](../../../docs/actor-attribution.md) covers the
+trusted-backend contract for applications that submit user mutations.
 This file covers the chart.
 
 ## Topology

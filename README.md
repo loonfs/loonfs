@@ -55,7 +55,8 @@ loonfs use {namespace_id}
 ## Server deployment
 
 See [Self-hosting LoonFS](crates/loonfs-server/docs/self-hosting.md) for the
-complete deployment guide.
+complete deployment guide. Applications that submit changes on behalf of
+users should also read the [actor attribution partner guide](crates/loonfs-server/docs/actor-attribution.md).
 
 ## Documentation
 

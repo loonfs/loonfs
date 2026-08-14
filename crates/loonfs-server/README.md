@@ -65,6 +65,9 @@ Read [docs/self-hosting.md](docs/self-hosting.md) for the topology, the
 minimal config, the probes, logging, the local cache, upgrades, and what a
 one-writer deployment does not do.
 
+Read [docs/actor-attribution.md](docs/actor-attribution.md) when an application
+submits filesystem changes on behalf of its users.
+
 Every release publishes the Helm chart as
 `oci://ghcr.io/loonfs/charts/loonfs-server`, at the same version as the
 server it runs. [`deploy/helm/loonfs-server`](deploy/helm/loonfs-server) is
