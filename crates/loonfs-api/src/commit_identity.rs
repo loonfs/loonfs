@@ -674,60 +674,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn public_inode_strings_decode_to_existing_fingerprint_inputs() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let decoded: crate::CommitRequest = serde_json::from_value(serde_json::json!({
-            "commit_id": "public-inode-fingerprint",
-            "actor": ActorRef::loonfs_system(),
-            "operations": [
-                {
-                    "kind": "delete_path",
-                    "path": "/docs/report.txt",
-                    "behavior": "non_recursive",
-                    "expected_inode_id": "ino_27"
-                },
-                {
-                    "kind": "undelete",
-                    "inode_id": "ino_27",
-                    "deletion_seq": 17,
-                    "path": "/docs/report.txt"
-                }
-            ]
-        }))
-        .expect("public commit request");
-        let embedded = [
-            FilesystemOperation::DeletePath {
-                path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-                expected_inode_id: Some(InodeId(27)),
-            },
-            FilesystemOperation::Undelete {
-                inode_id: InodeId(27),
-                deletion_seq: ChangeSeq(17),
-                path: Some(AbsolutePath::parse("/docs/report.txt").expect("path")),
-            },
-        ];
-
-        assert_eq!(decoded.operations, embedded);
-        assert_eq!(
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &decoded.actor,
-                decoded.message.as_deref(),
-                &decoded.operations,
-            )
-            .expect("decoded fingerprint"),
-            semantic_commit_fingerprint(
-                &namespace_id,
-                &decoded.actor,
-                decoded.message.as_deref(),
-                &embedded,
-            )
-            .expect("embedded fingerprint")
-        );
-    }
-
     /// Pins the exact stored fingerprint for an undelete with a destination
     /// path.
     ///

@@ -593,7 +593,7 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
 }
 
 #[test]
-fn openapi_uses_strings_for_inode_properties_and_path_parameters() {
+fn openapi_describes_inode_ids_as_strings_with_correct_nullability() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
     )
@@ -603,33 +603,72 @@ fn openapi_uses_strings_for_inode_properties_and_path_parameters() {
         .and_then(Value::as_object)
         .expect("openapi schemas object");
 
-    fn schema_is_integer(schema: &Value, schemas: &serde_json::Map<String, Value>) -> bool {
-        if schema.get("type").and_then(Value::as_str) == Some("integer") {
+    fn schema_matches(
+        schema: &Value,
+        schemas: &serde_json::Map<String, Value>,
+        predicate: fn(&Value) -> bool,
+    ) -> bool {
+        if predicate(schema) {
             return true;
         }
         if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
             if let Some(name) = reference.strip_prefix("#/components/schemas/") {
                 return schemas
                     .get(name)
-                    .is_some_and(|schema| schema_is_integer(schema, schemas));
+                    .is_some_and(|schema| schema_matches(schema, schemas, predicate));
             }
         }
         ["allOf", "anyOf", "oneOf"]
             .into_iter()
             .filter_map(|key| schema.get(key).and_then(Value::as_array))
             .flatten()
-            .any(|schema| schema_is_integer(schema, schemas))
+            .any(|schema| schema_matches(schema, schemas, predicate))
+    }
+
+    fn assert_public_inode_schema(
+        schema: &Value,
+        schemas: &serde_json::Map<String, Value>,
+        nullable: bool,
+        location: &str,
+    ) {
+        assert!(
+            schema_matches(schema, schemas, |schema| {
+                schema.get("type").and_then(Value::as_str) == Some("string")
+                    && schema.get("pattern").and_then(Value::as_str)
+                        == Some(loonfs_api::public_inode_id::PATTERN)
+            }),
+            "inode ID at {location} must use the public string format: {schema}"
+        );
+        assert!(
+            !schema_matches(schema, schemas, |schema| {
+                schema.get("type").and_then(Value::as_str) == Some("integer")
+            }),
+            "inode ID at {location} must not accept integers: {schema}"
+        );
+        assert_eq!(
+            schema_matches(schema, schemas, |schema| {
+                schema.get("type").and_then(Value::as_str) == Some("null")
+            }),
+            nullable,
+            "wrong inode ID nullability at {location}: {schema}"
+        );
     }
 
     fn inspect(value: &Value, schemas: &serde_json::Map<String, Value>, location: &str) {
         match value {
             Value::Object(object) => {
                 if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                    let required = object.get("required").and_then(Value::as_array);
                     for (name, schema) in properties {
                         if name.ends_with("inode_id") {
-                            assert!(
-                                !schema_is_integer(schema, schemas),
-                                "integer inode property at {location}.{name}: {schema}"
+                            let is_required = required.is_some_and(|required| {
+                                required.iter().any(|entry| entry.as_str() == Some(name))
+                            });
+                            assert_public_inode_schema(
+                                schema,
+                                schemas,
+                                !is_required,
+                                &format!("{location}.{name}"),
                             );
                         }
                     }
@@ -638,10 +677,7 @@ fn openapi_uses_strings_for_inode_properties_and_path_parameters() {
                     if let Some(name) = object.get("name").and_then(Value::as_str) {
                         if name.ends_with("inode_id") {
                             let schema = object.get("schema").expect("path parameter schema");
-                            assert!(
-                                !schema_is_integer(schema, schemas),
-                                "integer inode path parameter at {location}: {schema}"
-                            );
+                            assert_public_inode_schema(schema, schemas, false, location);
                         }
                     }
                 }

@@ -93,7 +93,7 @@ pub struct ErrorDetails {
     )]
     #[cfg_attr(
         feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
+        schema(schema_with = crate::public_inode_id::optional_schema)
     )]
     pub inode_id: Option<InodeId>,
     /// Revision the request expected to be current.
@@ -259,7 +259,7 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(
             feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
+            schema(schema_with = crate::public_inode_id::optional_schema)
         )]
         expected_inode_id: Option<InodeId>,
     },
@@ -343,7 +343,7 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(
             feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
+            schema(schema_with = crate::public_inode_id::optional_schema)
         )]
         expected_inode_id: Option<InodeId>,
         /// When set, the update applies only while the inode's attribute

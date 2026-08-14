@@ -3547,10 +3547,17 @@
                 "description": "Namespace that was read."
               },
               "parent_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "description": "Stable inode ID within a namespace",
+                    "example": "ino_123",
+                    "pattern": "^ino_[1-9][0-9]*$"
+                  }
+                ]
               },
               "path": {
                 "$ref": "#/components/schemas/AbsolutePath",
@@ -4675,10 +4682,17 @@
             ]
           },
           "inode_id": {
-            "type": "string",
-            "description": "Stable inode ID within a namespace",
-            "example": "ino_123",
-            "pattern": "^ino_[1-9][0-9]*$"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "description": "Stable inode ID within a namespace",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
+              }
+            ]
           },
           "operation_index": {
             "type": [
@@ -5104,10 +5118,17 @@
                 "description": "Whether a non-empty directory may be tombstoned recursively."
               },
               "expected_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "description": "Stable inode ID within a namespace",
+                    "example": "ino_123",
+                    "pattern": "^ino_[1-9][0-9]*$"
+                  }
+                ]
               },
               "kind": {
                 "type": "string",
@@ -5267,10 +5288,17 @@
                 ]
               },
               "expected_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "description": "Stable inode ID within a namespace",
+                    "example": "ino_123",
+                    "pattern": "^ino_[1-9][0-9]*$"
+                  }
+                ]
               },
               "kind": {
                 "type": "string",
@@ -5569,10 +5597,17 @@
                 "description": "Checkpoint pinning the state being walked."
               },
               "cursor_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "description": "Stable inode ID within a namespace",
+                    "example": "ino_123",
+                    "pattern": "^ino_[1-9][0-9]*$"
+                  }
+                ]
               },
               "status": {
                 "type": "string",
@@ -6547,10 +6582,17 @@
             ]
           },
           "parent_inode_id": {
-            "type": "string",
-            "description": "Stable inode ID within a namespace",
-            "example": "ino_123",
-            "pattern": "^ino_[1-9][0-9]*$"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "description": "Stable inode ID within a namespace",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
+              }
+            ]
           }
         }
       },

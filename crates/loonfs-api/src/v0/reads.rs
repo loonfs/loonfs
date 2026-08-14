@@ -50,7 +50,7 @@ pub struct AuthoritativePathEntry {
     )]
     #[cfg_attr(
         feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
+        schema(schema_with = crate::public_inode_id::optional_schema)
     )]
     pub parent_inode_id: Option<InodeId>,
     /// Stored display name for this path component, absent for the nameless root.
@@ -506,7 +506,7 @@ pub struct TrashEntry {
     )]
     #[cfg_attr(
         feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
+        schema(schema_with = crate::public_inode_id::optional_schema)
     )]
     pub parent_inode_id: Option<InodeId>,
     /// Canonical key of the deleted binding, when recorded.

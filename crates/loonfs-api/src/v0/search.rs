@@ -148,7 +148,7 @@ pub enum GrepIndexLifecycle {
         )]
         #[cfg_attr(
             feature = "openapi",
-            schema(schema_with = crate::public_inode_id::schema)
+            schema(schema_with = crate::public_inode_id::optional_schema)
         )]
         cursor_inode_id: Option<InodeId>,
         /// Checkpoint pinning the state being walked.

@@ -126,6 +126,19 @@ pub fn schema() -> utoipa::openapi::schema::Object {
         .build()
 }
 
+/// Builds the OpenAPI schema for an optional public inode ID.
+#[cfg(feature = "openapi")]
+pub fn optional_schema() -> utoipa::openapi::schema::Schema {
+    utoipa::openapi::schema::OneOf::builder()
+        .item(
+            utoipa::openapi::schema::Object::builder()
+                .schema_type(utoipa::openapi::schema::Type::Null),
+        )
+        .item(schema())
+        .build()
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
