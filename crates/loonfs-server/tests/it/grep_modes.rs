@@ -180,7 +180,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     // exhaustive tail and nudges the index at the same time.
     let response = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].absolute_path, "/note.txt");
+    assert_eq!(response.matches[0].path, "/note.txt");
     settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
     let caught_up = grep(&router, &namespace_id, "automatic needle").await;

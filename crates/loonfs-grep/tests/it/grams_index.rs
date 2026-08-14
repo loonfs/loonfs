@@ -161,7 +161,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .await
         .expect("grep after steps");
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].absolute_path, "/alpha.txt");
+    assert_eq!(response.matches[0].path, "/alpha.txt");
 
     // New commits are visible immediately through the exhaustive tail, and
     // a later step absorbs them into the index.
@@ -272,7 +272,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .await
         .expect("stale grep after explicit worker catch-up");
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].absolute_path, "/delta.txt");
+    assert_eq!(response.matches[0].path, "/delta.txt");
 
     writer.shutdown().await.expect("writer shutdown");
 }
@@ -583,7 +583,7 @@ async fn collect_grep_paths(
             response
                 .matches
                 .into_iter()
-                .map(|found| found.absolute_path.to_string()),
+                .map(|found| found.path.to_string()),
         );
         let Some(cursor) = response.next_cursor else {
             return paths;
@@ -640,7 +640,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         let mut matched: Vec<String> = response
             .matches
             .iter()
-            .map(|found| found.absolute_path.to_string())
+            .map(|found| found.path.to_string())
             .collect();
         matched.sort();
         assert_eq!(
@@ -838,7 +838,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .await
         .expect("a page that fills before the failed candidate must succeed");
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].absolute_path, "/alpha.txt");
+    assert_eq!(response.matches[0].path, "/alpha.txt");
     assert_eq!(response.matches[0].line, "needle one");
     let cursor = response
         .next_cursor
@@ -944,7 +944,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("first page");
     assert_eq!(page_one.matches.len(), 1);
-    assert_eq!(page_one.matches[0].absolute_path, "/alpha.txt");
+    assert_eq!(page_one.matches[0].path, "/alpha.txt");
     let cursor_token = page_one
         .next_cursor
         .clone()
@@ -967,7 +967,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("second page");
     assert_eq!(page_two.matches.len(), 1);
-    assert_eq!(page_two.matches[0].absolute_path, "/charlie.txt");
+    assert_eq!(page_two.matches[0].path, "/charlie.txt");
     assert!(page_two.next_cursor.is_none());
     assert!(
         cursor.last_inode_id < page_two.matches[0].inode_id,

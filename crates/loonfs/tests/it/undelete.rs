@@ -523,7 +523,7 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
         }
     }
     // The `Deleted` event's enclosing sequence is the deletion generation an
-    // undelete passes as `deleted_at_seq`, so a feed projection can drive a
+    // undelete passes as `deletion_seq`, so a feed projection can drive a
     // recovery without guessing at "newest".
     assert_eq!(deleted_seq, Some(deletion));
     assert_eq!(undeleted.as_deref(), Some("report.txt"));
@@ -611,7 +611,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
                     },
                     FilesystemOperation::Undelete {
                         inode_id: entry.inode_id,
-                        deleted_at_seq: guessed_seq,
+                        deletion_seq: guessed_seq,
                         path: Some(
                             parse_mutation_path("/resurrected.txt").expect("valid mutation path"),
                         ),

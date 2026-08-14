@@ -171,8 +171,8 @@ fn a_scrape_reports_positive_process_resident_bytes() {
 #[test]
 fn route_labels_intern_once_and_refuse_to_grow_without_bound() {
     let mut routes = RouteLabels::default();
-    let first = routes.intern("/v0/namespaces/{namespace}/commits");
-    let again = routes.intern("/v0/namespaces/{namespace}/commits");
+    let first = routes.intern("/v0/namespaces/{namespace_id}/commits");
+    let again = routes.intern("/v0/namespaces/{namespace_id}/commits");
     assert_eq!(first, again);
     assert_eq!(first.as_ptr(), again.as_ptr());
 

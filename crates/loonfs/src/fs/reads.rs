@@ -148,7 +148,7 @@ impl FsReader {
         let next_cursor = page.next_cursor;
         let response = ListPathEntriesResponse {
             namespace_id: namespace_id.clone(),
-            absolute_path: listed_path,
+            path: listed_path,
             head_seq,
             entries: page.items,
             next_cursor: None,

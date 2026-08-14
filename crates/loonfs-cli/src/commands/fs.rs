@@ -65,7 +65,7 @@ fn commit_options(
 
 struct FollowedPathEntryPages {
     namespace_id: NamespaceId,
-    absolute_path: AbsolutePath,
+    path: AbsolutePath,
     head_seq: ChangeSeq,
     head_drift: Option<ListingHeadDrift>,
     next_cursor: Option<String>,
@@ -96,7 +96,7 @@ async fn follow_path_entry_pages(
             .map_err(|error| context.fail(kind, error))?;
         let ListPathEntriesResponse {
             namespace_id,
-            absolute_path,
+            path: absolute_path,
             head_seq,
             entries,
             next_cursor,
@@ -110,7 +110,7 @@ async fn follow_path_entry_pages(
         if filled || !follow || cursor.is_none() {
             return Ok(FollowedPathEntryPages {
                 namespace_id,
-                absolute_path,
+                path: absolute_path,
                 head_seq: heads
                     .last()
                     .expect("a listing observes the page it just received"),
@@ -197,7 +197,7 @@ pub(crate) async fn run_filesystem_ls(
         mode: Some(context.mode),
         data: CommandData::PathEntries {
             namespace_id: followed.namespace_id,
-            absolute_path: followed.absolute_path,
+            path: followed.path,
             head_seq: followed.head_seq,
             head_drift: followed.head_drift,
             entries,
@@ -732,8 +732,8 @@ pub(crate) async fn run_filesystem_trash(
         .map(|entry| {
             hint.command(
                 entry.display_name.is_some(),
-                entry.root_inode_id,
-                entry.deleted_at_seq,
+                entry.inode_id,
+                entry.deletion_seq,
             )
         })
         .collect();
@@ -1218,7 +1218,7 @@ pub(crate) async fn run_filesystem_undelete(
             &context.namespace,
             spec.as_ref().map(|spec| spec.absolute_path()),
             loonfs_api::InodeId(args.inode),
-            loonfs_api::ChangeSeq(args.deleted_at),
+            loonfs_api::ChangeSeq(args.deletion_seq),
             &loonfs_client::UndeleteOptions {
                 commit: commit_options(&context.actor, commit_id, args.message.clone()),
             },

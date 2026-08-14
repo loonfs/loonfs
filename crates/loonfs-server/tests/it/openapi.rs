@@ -35,38 +35,44 @@ fn openapi_documents_current_server_paths() {
         ("/metrics", "get"),
         ("/v0/capabilities", "get"),
         ("/v0/namespaces", "post"),
-        ("/v0/namespaces/{namespace}", "get"),
-        ("/v0/namespaces/{namespace}", "delete"),
-        ("/v0/namespaces/{namespace}/forks", "post"),
-        ("/v0/namespaces/{namespace}/filesystem/list", "get"),
-        ("/v0/namespaces/{namespace}/filesystem/stat", "get"),
-        ("/v0/namespaces/{namespace}/filesystem/content", "get"),
-        ("/v0/namespaces/{namespace}/filesystem/downloads", "post"),
-        ("/v0/namespaces/{namespace}/filesystem/revisions", "get"),
-        ("/v0/namespaces/{namespace}/commits", "post"),
-        ("/v0/namespaces/{namespace}/uploads", "post"),
+        ("/v0/namespaces/{namespace_id}", "get"),
+        ("/v0/namespaces/{namespace_id}", "delete"),
+        ("/v0/namespaces/{namespace_id}/forks", "post"),
+        ("/v0/namespaces/{namespace_id}/filesystem/list", "get"),
+        ("/v0/namespaces/{namespace_id}/filesystem/stat", "get"),
+        ("/v0/namespaces/{namespace_id}/filesystem/content", "get"),
+        ("/v0/namespaces/{namespace_id}/filesystem/downloads", "post"),
+        ("/v0/namespaces/{namespace_id}/filesystem/revisions", "get"),
+        ("/v0/namespaces/{namespace_id}/commits", "post"),
+        ("/v0/namespaces/{namespace_id}/uploads", "post"),
         (
-            "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
+            "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
             "put",
         ),
         (
-            "/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
+            "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             "post",
         ),
-        ("/v0/namespaces/{namespace}/changes", "get"),
-        ("/v0/admin/namespaces/{namespace}/checkpoints", "post"),
-        ("/v0/admin/namespaces/{namespace}/checkpoints", "get"),
+        ("/v0/namespaces/{namespace_id}/changes", "get"),
+        ("/v0/admin/namespaces/{namespace_id}/checkpoints", "post"),
+        ("/v0/admin/namespaces/{namespace_id}/checkpoints", "get"),
         (
-            "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",
+            "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
             "post",
         ),
-        ("/v0/admin/namespaces/{namespace}/maintenance/step", "post"),
-        ("/v0/admin/namespaces/{namespace}/grep/index/enable", "post"),
         (
-            "/v0/admin/namespaces/{namespace}/grep/index/disable",
+            "/v0/admin/namespaces/{namespace_id}/maintenance/step",
             "post",
         ),
-        ("/v0/admin/namespaces/{namespace}/grep/index/gc", "post"),
+        (
+            "/v0/admin/namespaces/{namespace_id}/grep/index/enable",
+            "post",
+        ),
+        (
+            "/v0/admin/namespaces/{namespace_id}/grep/index/disable",
+            "post",
+        ),
+        ("/v0/admin/namespaces/{namespace_id}/grep/index/gc", "post"),
         ("/v0/admin/store/probe", "post"),
     ] {
         assert_path_method(paths, path, method);
@@ -75,16 +81,48 @@ fn openapi_documents_current_server_paths() {
     assert!(!paths.contains_key("/openapi.json"));
     assert_query_params(
         paths,
-        "/v0/namespaces/{namespace}/filesystem/list",
+        "/v0/namespaces/{namespace_id}/filesystem/list",
         "get",
         &["path", "limit", "cursor"],
     );
     assert_query_params(
         paths,
-        "/v0/namespaces/{namespace}/changes",
+        "/v0/namespaces/{namespace_id}/changes",
         "get",
         &["after_seq", "limit"],
     );
+
+    let mut namespace_scoped_operations = 0;
+    for (path, path_item) in paths {
+        if !path.contains("/namespaces/{") {
+            continue;
+        }
+        assert!(
+            path.contains("{namespace_id}"),
+            "namespace-scoped OpenAPI path uses the retired parameter name: `{path}`"
+        );
+        assert!(!path.contains("{namespace}"));
+        for method in ["get", "post", "put", "delete", "patch"] {
+            let Some(operation) = path_item.get(method) else {
+                continue;
+            };
+            namespace_scoped_operations += 1;
+            let path_parameter_names = operation
+                .get("parameters")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|parameter| parameter.get("in").and_then(Value::as_str) == Some("path"))
+                .filter_map(|parameter| parameter.get("name").and_then(Value::as_str))
+                .collect::<BTreeSet<_>>();
+            assert!(
+                path_parameter_names.contains("namespace_id"),
+                "`{method} {path}` does not declare `namespace_id` as a path parameter"
+            );
+            assert!(!path_parameter_names.contains("namespace"));
+        }
+    }
+    assert_eq!(namespace_scoped_operations, 26);
 }
 
 #[test]
@@ -181,6 +219,9 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         "whole_file_sha256",
         "DirectPutContentClaim",
         "DirectMultipartContentClaim",
+        "absolute_path",
+        "root_inode_id",
+        "deleted_at_seq",
     ] {
         assert!(
             !raw.contains(dead_name),
@@ -226,6 +267,12 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     assert!(!required.contains("multipart"));
 
     for properties in values_named(&spec, "properties").filter_map(Value::as_object) {
+        for retired_name in ["absolute_path", "root_inode_id", "deleted_at_seq"] {
+            assert!(
+                !properties.contains_key(retired_name),
+                "retired public field `{retired_name}` remains in an OpenAPI schema"
+            );
+        }
         assert!(
             !properties.contains_key("crc64nvme"),
             "crc64nvme must be an algorithm value, never a raw public field"

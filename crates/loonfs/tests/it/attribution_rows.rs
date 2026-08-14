@@ -250,7 +250,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     .expect("list trash before checkpoint");
     assert_eq!(trash.entries.len(), 1);
     assert_eq!(trash.entries[0].deleted_by, deleter);
-    assert_eq!(trash.entries[0].deleted_at_seq, deletion.committed_seq);
+    assert_eq!(trash.entries[0].deletion_seq, deletion.committed_seq);
 
     fs.create_checkpoint_blocking(&source_id)
         .expect("checkpoint deletion rows");
@@ -275,5 +275,5 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     .expect("list trash after checkpoint, retention, and restart");
     assert_eq!(trash.entries.len(), 1);
     assert_eq!(trash.entries[0].deleted_by, deleter);
-    assert_eq!(trash.entries[0].deleted_at_seq, deletion.committed_seq);
+    assert_eq!(trash.entries[0].deletion_seq, deletion.committed_seq);
 }

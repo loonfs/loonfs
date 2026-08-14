@@ -86,7 +86,7 @@ pub enum FilesystemChange {
     },
     /// A file or directory subtree was deleted. The enclosing change's
     /// `committed_seq` is the deletion generation an undelete request passes
-    /// as `deleted_at_seq`.
+    /// as `deletion_seq`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
     Deleted {
         /// Inode at the root of the deleted subtree.

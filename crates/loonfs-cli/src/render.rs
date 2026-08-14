@@ -595,8 +595,8 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     format_utc_ms(entry.deleted_at_ms),
                     render_actor(&entry.deleted_by),
                     name,
-                    entry.root_inode_id,
-                    entry.deleted_at_seq.0,
+                    entry.inode_id,
+                    entry.deletion_seq.0,
                 ));
             }
             if response.entries.is_empty() {
@@ -739,12 +739,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         } => {
             let mut lines: Vec<String> = matches
                 .iter()
-                .map(|found| {
-                    format!(
-                        "{}:{}:{}",
-                        found.absolute_path, found.line_number, found.line
-                    )
-                })
+                .map(|found| format!("{}:{}:{}", found.path, found.line_number, found.line))
                 .collect();
             if *truncated {
                 lines.push(format!(
@@ -763,7 +758,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             lines.join("\n")
         }
         CommandData::PathEntry(entry) => {
-            let mut lines = vec![format!("path: {}", entry.absolute_path)];
+            let mut lines = vec![format!("path: {}", entry.path)];
             if let Some(display_name) = &entry.display_name {
                 lines.push(format!("name: {display_name}"));
             }
@@ -954,7 +949,7 @@ pub(crate) fn human_path_entry(entry: &loonfs_api::AuthoritativePathEntry) -> St
         size,
         format_utc_ms(entry.created_at_ms),
         render_actor(&entry.created_by),
-        entry.absolute_path
+        entry.path
     )
 }
 
@@ -1009,7 +1004,7 @@ mod tests {
     fn path_entry(path: &str, display_name: Option<&str>) -> AuthoritativePathEntry {
         AuthoritativePathEntry {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            absolute_path: AbsolutePath::parse(path).expect("absolute path"),
+            path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if display_name.is_some() { 2 } else { 1 }),
             created_by: loonfs_api::ActorRef::loonfs_system(),
             created_at_ms: 1_752_624_000_000,

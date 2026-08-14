@@ -95,11 +95,11 @@ pub(super) struct UploadPathParams {
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/uploads",
+        path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
         description = "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
-        params(("namespace" = String, Path, description = "Namespace id")),
+        params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = BeginUploadRequest,
         responses(
             (status = 200, description = "Upload session started", body = BeginUploadResponse),
@@ -114,10 +114,10 @@ pub(super) struct UploadPathParams {
 )]
 pub(super) async fn begin_upload(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<BeginUploadRequest>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     // Decoding the body settled which transport this is and that it carries
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
@@ -270,12 +270,12 @@ async fn begin_direct_multipart_upload(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/uploads/{upload_id}/parts",
+        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
         tag = "uploads",
         summary = "Sign multipart parts",
         description = "Returns one short-lived, checksum-bound upload capability per requested part of an open direct_multipart session. Asking again for a part is how a client retries it.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         request_body = SignUploadPartsRequest,
@@ -293,11 +293,11 @@ async fn begin_direct_multipart_upload(
 )]
 pub(super) async fn sign_upload_parts(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
     AppJson(request): AppJson<SignUploadPartsRequest>,
 ) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let Some(issuer) = state
@@ -491,12 +491,12 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
     feature = "openapi",
     utoipa::path(
         put,
-        path = "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
+        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
         tag = "uploads",
         summary = "Upload content",
         description = "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         request_body(content = Vec<u8>, content_type = "application/octet-stream"),
@@ -527,11 +527,11 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
 /// storage error.
 pub(super) async fn upload_content(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
     body: UploadBodyStream,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let (stream, outcome) = body.into_stream();
@@ -551,12 +551,12 @@ pub(super) async fn upload_content(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
+        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
         description = "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived validation token for a following file write.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         request_body = CompleteUploadRequest,
@@ -573,11 +573,11 @@ pub(super) async fn upload_content(
 )]
 pub(super) async fn complete_upload(
     State(state): State<AppState>,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
     AppJson(request): AppJson<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let completed = state
@@ -596,12 +596,12 @@ pub(super) async fn complete_upload(
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/namespaces/{namespace}/uploads/{upload_id}",
+        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Read upload session",
         description = "Reads one upload session. A completed session answers with a freshly minted validation token for its content, so a client that lost a commit response can commit again without re-uploading anything.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         responses(
@@ -617,14 +617,14 @@ pub(super) async fn complete_upload(
 pub(super) async fn read_upload_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
 ) -> Result<Json<UploadStatusResponse>, ApiResponseError> {
     // A completed session answers with a freshly minted content-validation
     // token, which is a capability to commit that content. Authorization
     // runs before the id is even parsed, as everywhere else.
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let (mut response, receipt) = state
@@ -647,12 +647,12 @@ pub(super) async fn read_upload_status(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/uploads/{upload_id}/abort",
+        path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
         tag = "uploads",
         summary = "Abort upload",
         description = "Ends an upload session without selecting content and deletes the object it was writing. Repeating it succeeds; a session that already completed cannot be aborted.",
         params(
-            ("namespace" = String, Path, description = "Namespace id"),
+            ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         responses(
@@ -669,11 +669,11 @@ pub(super) async fn read_upload_status(
 pub(super) async fn abort_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
-    namespace: NamespaceIdPath,
+    namespace_id_path: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
 ) -> Result<Json<AbortUploadResponse>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
-    let namespace_id = namespace.into_id()?;
+    let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let response = state

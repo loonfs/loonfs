@@ -111,7 +111,7 @@
         ]
       }
     },
-    "/v0/admin/namespaces/{namespace}/checkpoints": {
+    "/v0/admin/namespaces/{namespace_id}/checkpoints": {
       "get": {
         "tags": [
           "admin"
@@ -121,7 +121,7 @@
         "operationId": "list_checkpoints",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -185,7 +185,7 @@
         "operationId": "create_checkpoint",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -272,7 +272,7 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release": {
+    "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release": {
       "post": {
         "tags": [
           "admin"
@@ -282,7 +282,7 @@
         "operationId": "release_checkpoint",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -347,7 +347,7 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/grep/index": {
+    "/v0/admin/namespaces/{namespace_id}/grep/index": {
       "get": {
         "tags": [
           "admin"
@@ -357,7 +357,7 @@
         "operationId": "grep_index_status",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -423,7 +423,7 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/grep/index/disable": {
+    "/v0/admin/namespaces/{namespace_id}/grep/index/disable": {
       "post": {
         "tags": [
           "admin"
@@ -433,7 +433,7 @@
         "operationId": "disable_grep_index",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -519,7 +519,7 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/grep/index/enable": {
+    "/v0/admin/namespaces/{namespace_id}/grep/index/enable": {
       "post": {
         "tags": [
           "admin"
@@ -529,7 +529,7 @@
         "operationId": "enable_grep_index",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -615,7 +615,7 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/grep/index/gc": {
+    "/v0/admin/namespaces/{namespace_id}/grep/index/gc": {
       "post": {
         "tags": [
           "admin"
@@ -625,7 +625,7 @@
         "operationId": "gc_grep_index",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -714,7 +714,7 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/maintenance/step": {
+    "/v0/admin/namespaces/{namespace_id}/maintenance/step": {
       "post": {
         "tags": [
           "admin"
@@ -724,7 +724,7 @@
         "operationId": "maintenance_step",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -961,7 +961,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}": {
+    "/v0/namespaces/{namespace_id}": {
       "get": {
         "tags": [
           "namespaces"
@@ -971,7 +971,7 @@
         "operationId": "namespace_status",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1045,7 +1045,7 @@
         "operationId": "delete_namespace",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1130,7 +1130,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/changes": {
+    "/v0/namespaces/{namespace_id}/changes": {
       "get": {
         "tags": [
           "filesystem"
@@ -1140,7 +1140,7 @@
         "operationId": "list_changes",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1224,7 +1224,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/commits": {
+    "/v0/namespaces/{namespace_id}/commits": {
       "post": {
         "tags": [
           "filesystem"
@@ -1234,7 +1234,7 @@
         "operationId": "apply_commit",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1330,7 +1330,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/filesystem/content": {
+    "/v0/namespaces/{namespace_id}/filesystem/content": {
       "get": {
         "tags": [
           "filesystem"
@@ -1340,7 +1340,7 @@
         "operationId": "get_file_bytes",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1446,7 +1446,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/filesystem/downloads": {
+    "/v0/namespaces/{namespace_id}/filesystem/downloads": {
       "post": {
         "tags": [
           "filesystem"
@@ -1456,7 +1456,7 @@
         "operationId": "begin_download",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1542,7 +1542,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/filesystem/list": {
+    "/v0/namespaces/{namespace_id}/filesystem/list": {
       "get": {
         "tags": [
           "filesystem"
@@ -1552,7 +1552,7 @@
         "operationId": "list_path_entries",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1654,7 +1654,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/filesystem/revisions": {
+    "/v0/namespaces/{namespace_id}/filesystem/revisions": {
       "get": {
         "tags": [
           "filesystem"
@@ -1664,7 +1664,7 @@
         "operationId": "list_file_revisions",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1757,7 +1757,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/filesystem/stat": {
+    "/v0/namespaces/{namespace_id}/filesystem/stat": {
       "get": {
         "tags": [
           "filesystem"
@@ -1767,7 +1767,7 @@
         "operationId": "stat_path",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1851,7 +1851,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/filesystem/trash": {
+    "/v0/namespaces/{namespace_id}/filesystem/trash": {
       "get": {
         "tags": [
           "filesystem"
@@ -1861,7 +1861,7 @@
         "operationId": "list_trash",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -1935,7 +1935,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/forks": {
+    "/v0/namespaces/{namespace_id}/forks": {
       "post": {
         "tags": [
           "namespaces"
@@ -1945,7 +1945,7 @@
         "operationId": "fork_namespace",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Source namespace id",
             "required": true,
@@ -2031,7 +2031,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/query/grep": {
+    "/v0/namespaces/{namespace_id}/query/grep": {
       "post": {
         "tags": [
           "query"
@@ -2041,7 +2041,7 @@
         "operationId": "grep",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -2157,7 +2157,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/uploads": {
+    "/v0/namespaces/{namespace_id}/uploads": {
       "post": {
         "tags": [
           "uploads"
@@ -2167,7 +2167,7 @@
         "operationId": "begin_upload",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -2253,7 +2253,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/uploads/{upload_id}": {
+    "/v0/namespaces/{namespace_id}/uploads/{upload_id}": {
       "get": {
         "tags": [
           "uploads"
@@ -2263,7 +2263,7 @@
         "operationId": "read_upload_status",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -2338,7 +2338,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/uploads/{upload_id}/abort": {
+    "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort": {
       "post": {
         "tags": [
           "uploads"
@@ -2348,7 +2348,7 @@
         "operationId": "abort_upload",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -2433,7 +2433,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/uploads/{upload_id}/complete": {
+    "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete": {
       "post": {
         "tags": [
           "uploads"
@@ -2443,7 +2443,7 @@
         "operationId": "complete_upload",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -2538,7 +2538,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/uploads/{upload_id}/content": {
+    "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content": {
       "put": {
         "tags": [
           "uploads"
@@ -2548,7 +2548,7 @@
         "operationId": "upload_content",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -2665,7 +2665,7 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/uploads/{upload_id}/parts": {
+    "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts": {
       "post": {
         "tags": [
           "uploads"
@@ -2675,7 +2675,7 @@
         "operationId": "sign_upload_parts",
         "parameters": [
           {
-            "name": "namespace",
+            "name": "namespace_id",
             "in": "path",
             "description": "Namespace id",
             "required": true,
@@ -2987,17 +2987,13 @@
             "type": "object",
             "required": [
               "namespace_id",
-              "absolute_path",
+              "path",
               "inode_id",
               "created_by",
               "created_at_ms",
               "head_seq"
             ],
             "properties": {
-              "absolute_path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute path as rendered from stored display names."
-              },
               "created_at_ms": {
                 "type": "integer",
                 "format": "int64",
@@ -3041,6 +3037,10 @@
                     "description": "Parent directory inode, or `None` for the root."
                   }
                 ]
+              },
+              "path": {
+                "$ref": "#/components/schemas/AbsolutePath",
+                "description": "Absolute path as rendered from stored display names."
               }
             }
           }
@@ -3143,16 +3143,12 @@
         "description": "A short-lived capability to read one file's content object, plus\neverything the reader needs to check what arrives.\n\nThe raw object key is deliberately not here, exactly as it is not in a\n`direct_put` grant: a client learns a URL that expires, not an address it\ncan revisit.\n\nThe grant names one immutable content object, so it does not go stale\nwhen the path moves on. A commit that replaces the file writes a new\nobject and leaves this one alone; what the capability reads is what the\nrequested revision held when the grant was issued, and the reference\nsays which bytes those are.",
         "required": [
           "namespace_id",
-          "absolute_path",
+          "path",
           "revision_no",
           "content_ref",
           "access"
         ],
         "properties": {
-          "absolute_path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute path as rendered from stored display names."
-          },
           "access": {
             "$ref": "#/components/schemas/ObjectTransferAccess",
             "description": "Short-lived read capability the client uses without learning the raw object key."
@@ -3164,6 +3160,10 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace that was read."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path as rendered from stored display names."
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
@@ -4433,7 +4433,7 @@
           {
             "type": "object",
             "title": "FilesystemChangeDeleted",
-            "description": "A file or directory subtree was deleted. The enclosing change's\n`committed_seq` is the deletion generation an undelete request passes\nas `deleted_at_seq`.",
+            "description": "A file or directory subtree was deleted. The enclosing change's\n`committed_seq` is the deletion generation an undelete request passes\nas `deletion_seq`.",
             "required": [
               "inode_id",
               "kind"
@@ -4694,14 +4694,14 @@
           {
             "type": "object",
             "title": "FsOpUndelete",
-            "description": "Recover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deleted_at_seq` (both reported by the\ndelete and by the change feed) and re-bind it. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
+            "description": "Recover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deletion_seq` (both reported by the\ndelete and by the change feed) and re-bind it. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
             "required": [
               "inode_id",
-              "deleted_at_seq",
+              "deletion_seq",
               "kind"
             ],
             "properties": {
-              "deleted_at_seq": {
+              "deletion_seq": {
                 "$ref": "#/components/schemas/ChangeSeq",
                 "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
               },
@@ -5167,7 +5167,7 @@
         "type": "object",
         "description": "One line-oriented match.",
         "required": [
-          "absolute_path",
+          "path",
           "inode_id",
           "revision_no",
           "line_number",
@@ -5175,10 +5175,6 @@
           "line"
         ],
         "properties": {
-          "absolute_path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "The file's absolute path, derived at the snapshot."
-          },
           "byte_offset": {
             "type": "integer",
             "format": "int64",
@@ -5202,6 +5198,10 @@
           "line_truncated": {
             "type": "boolean",
             "description": "True when `line` was truncated."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "The file's absolute path, derived at the snapshot."
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
@@ -5345,16 +5345,12 @@
         "description": "Response for listing file revisions.",
         "required": [
           "namespace_id",
-          "absolute_path",
+          "path",
           "inode_id",
           "head_seq",
           "revisions"
         ],
         "properties": {
-          "absolute_path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute file path requested by the caller."
-          },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Namespace head sequence used for the read."
@@ -5374,6 +5370,10 @@
             ],
             "description": "Opaque cursor for the next page, if more revisions are available."
           },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute file path requested by the caller."
+          },
           "revisions": {
             "type": "array",
             "items": {
@@ -5388,15 +5388,11 @@
         "description": "One directory listing and the namespace head it was answered at.\n\nThe envelope names the listing target and head so an empty directory\nstill tells the caller which state it observed, and so the response can\ngrow without reshaping `entries`.",
         "required": [
           "namespace_id",
-          "absolute_path",
+          "path",
           "head_seq",
           "entries"
         ],
         "properties": {
-          "absolute_path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute path of the listed directory."
-          },
           "entries": {
             "type": "array",
             "items": {
@@ -5418,6 +5414,10 @@
               "null"
             ],
             "description": "Cursor for the next page, if more entries remain."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path of the listed directory."
           }
         }
       },
@@ -6028,8 +6028,8 @@
         "type": "object",
         "description": "One recoverable deletion: an active subtree tombstone plus the identity\nof the binding it deleted, when the delete recorded one. Entries with no\nrecorded name predate the enriched tombstone rows; their inode and\nsequence still form a complete `undelete` handle.",
         "required": [
-          "root_inode_id",
-          "deleted_at_seq",
+          "inode_id",
+          "deletion_seq",
           "deleted_at_ms",
           "deleted_by"
         ],
@@ -6040,13 +6040,13 @@
             "description": "Time of the deletion, in Unix milliseconds.",
             "minimum": 0
           },
-          "deleted_at_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Commit sequence of the deletion; the other half of the handle."
-          },
           "deleted_by": {
             "$ref": "#/components/schemas/ActorRef",
             "description": "Actor responsible for the deletion."
+          },
+          "deletion_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Commit sequence of the deletion; the other half of the handle."
           },
           "display_name": {
             "oneOf": [
@@ -6058,6 +6058,10 @@
                 "description": "User-facing spelling of the deleted binding, when recorded."
               }
             ]
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Inode the deletion hid; half of the recovery handle."
           },
           "name_key": {
             "oneOf": [
@@ -6080,10 +6084,6 @@
                 "description": "Directory that held the deleted binding, when recorded."
               }
             ]
-          },
-          "root_inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "Root inode the deletion hid; half of the recovery handle."
           }
         }
       },

@@ -76,7 +76,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     // Labels render in sorted order, so a scrape of the same readings is
     // byte-stable however the instrument was registered.
     let status_route = "loonfs_server_requests_total{method=\"GET\",\
-                        route=\"/v0/namespaces/{namespace}\",status_class=\"2xx\"}";
+                        route=\"/v0/namespaces/{namespace_id}\",status_class=\"2xx\"}";
     assert_eq!(series(&first, status_route), 1.0);
     assert_eq!(
         series(
@@ -92,7 +92,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     assert!(
         series(
             &first,
-            "loonfs_server_request_seconds_count{route=\"/v0/namespaces/{namespace}\"}"
+            "loonfs_server_request_seconds_count{route=\"/v0/namespaces/{namespace_id}\"}"
         ) >= 1.0
     );
 

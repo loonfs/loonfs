@@ -26,7 +26,7 @@ within a plane is expressed as **named features** (section 2).
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
-| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
+| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace_id}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
 Notes:
@@ -409,7 +409,7 @@ silently merge. Those checks are evaluated where their operation runs, which
 is what lets a later operation depend on an earlier one. Callers add their
 own cross-request guards on the operation itself where staleness matters:
 `expected_revision_no` on a replacing put, `expected_inode_id` on a delete,
-`deleted_at_seq` on an undelete, and `expected_head_seq` on a namespace
+`deletion_seq` on an undelete, and `expected_head_seq` on a namespace
 delete. A guard is evaluated against the state its own operation sees, which
 includes what earlier operations in the same request did.
 
@@ -1327,7 +1327,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
 ```json
 {
   "namespace_id": "demo",
-  "absolute_path": "/docs/report.txt",
+  "path": "/docs/report.txt",
   "inode_id": 42,
   "created_by": { "kind": "user", "id": "usr_8f3c" },
   "created_at_ms": 1752623000000,
@@ -1422,12 +1422,12 @@ An unrecognized cursor version is also rejected as `invalid_request`.
 ```json
 {
   "namespace_id": "demo",
-  "absolute_path": "/docs",
+  "path": "/docs",
   "head_seq": 418,
   "entries": [
     {
       "namespace_id": "demo",
-      "absolute_path": "/docs/report.txt",
+      "path": "/docs/report.txt",
       "inode_id": 42,
       "created_by": { "kind": "user", "id": "usr_8f3c" },
       "created_at_ms": 1752623000000,
@@ -1448,7 +1448,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
     },
     {
       "namespace_id": "demo",
-      "absolute_path": "/docs/slides",
+      "path": "/docs/slides",
       "inode_id": 43,
       "created_by": { "kind": "user", "id": "usr_8f3c" },
       "created_at_ms": 1752623000000,
@@ -1465,7 +1465,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
 ### 6.6 `GET /filesystem/trash`
 
 Lists the namespace's recoverable deletions, oldest deletion first — ascending
-by `(deleted_at_seq, root_inode_id)` — paged with the standard `limit`/`cursor`
+by `(deletion_seq, inode_id)` — paged with the standard `limit`/`cursor`
 pattern (the cursor is an ordering resume like every other). The listing is a
 range scan over the derived active-deletions family (format spec, section
 2.5), so a page costs the page rather than the namespace's deletion history.
@@ -1485,8 +1485,8 @@ leaves the inner one listed.
   "head_seq": 418,
   "entries": [
     {
-      "root_inode_id": 42,
-      "deleted_at_seq": 417,
+      "inode_id": 42,
+      "deletion_seq": 417,
       "deleted_at_ms": 1752625000000,
       "deleted_by": { "kind": "user", "id": "usr_8f3c" },
       "parent_inode_id": 7,
@@ -1510,15 +1510,15 @@ client create such a file offers it.
 
 Revision listing returns newest revisions first and uses the same
 `limit` / `cursor` pattern as directory listing, resolving the current path
-to its current inode. The response echoes that requested path as
-`absolute_path`. Responses include `next_cursor` only when another page is
+to its current inode. The response echoes that requested path as `path`.
+Responses include `next_cursor` only when another page is
 available. Revision history is never pruned — paging to the end always
 reaches revision 1, regardless of how far the retention floor has advanced.
 
 ```json
 {
   "namespace_id": "demo",
-  "absolute_path": "/docs/report.txt",
+  "path": "/docs/report.txt",
   "inode_id": 42,
   "head_seq": 418,
   "revisions": [
@@ -1696,7 +1696,7 @@ deletion's committed sequence.
     {
       "kind": "undelete",
       "inode_id": 42,
-      "deleted_at_seq": 17,
+      "deletion_seq": 17,
       "path": "/docs/report.txt"
     }
   ]
@@ -1715,7 +1715,7 @@ would: the parent must not be deleted, and the name must be free, each
 answering its usual code otherwise.
 
 Only the root of a deletion can be undeleted, and only the exact deletion
-generation named by `deleted_at_seq` — anything else answers `not_deleted`
+generation named by `deletion_seq` — anything else answers `not_deleted`
 with the requested and active generations in the details, so a stale
 recovery request can never cancel a later deletion.
 
@@ -2021,7 +2021,7 @@ checks the arriving bytes against:
 ```json
 {
   "namespace_id": "demo",
-  "absolute_path": "/docs/report.txt",
+  "path": "/docs/report.txt",
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
@@ -2114,7 +2114,7 @@ Event kinds:
 | `created` | A file or directory was created. | `inode_id`, `inode_kind`, `parent_inode_id`, `display_name`; file creations also carry `revision_no` and `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`. |
-| `deleted` | A file or directory subtree was deleted. The enclosing change's `committed_seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
+| `deleted` | A file or directory subtree was deleted. The enclosing change's `committed_seq` **is** the `deletion_seq` used by trash and undelete; the event does not duplicate it. | `inode_id`, plus optional `deleted_direntry` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 
@@ -2180,7 +2180,7 @@ Representative response:
   "tail_scanned": true,
   "matches": [
     {
-      "absolute_path": "/src/search.rs",
+      "path": "/src/search.rs",
       "inode_id": 42,
       "revision_no": 3,
       "line_number": 17,
@@ -2254,7 +2254,7 @@ Metric names are `loonfs_<subsystem>_<metric>`, covering the object-store
 calls the process made, the maintenance steps it settled, the publications
 it batched, what garbage collection reclaimed, and the requests this
 server served. Label values come from closed vocabularies only: a request
-is labeled by the route template it matched (`/v0/namespaces/{namespace}`),
+is labeled by the route template it matched (`/v0/namespaces/{namespace_id}`),
 never by its own path, so no namespace, upload, commit, or checkpoint id
 ever appears in a label. Values are per process and reset when it
 restarts, which is the ordinary contract for a counter a scraper reads.

@@ -681,7 +681,7 @@ fn matched_paths(response: &GrepResponse) -> Vec<String> {
     response
         .matches
         .iter()
-        .map(|found| found.absolute_path.as_str().to_owned())
+        .map(|found| found.path.as_str().to_owned())
         .collect()
 }
 
@@ -1246,10 +1246,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         1,
         "scan must cover the WAL-only revision"
     );
-    assert_eq!(
-        response.matches[0].absolute_path.as_str(),
-        "/only-in-wal.txt"
-    );
+    assert_eq!(response.matches[0].path.as_str(), "/only-in-wal.txt");
 
     writer.shutdown().await.expect("shutdown");
 }
@@ -1378,7 +1375,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
     assert!(shared.built_through_seq < shared.head_seq);
     assert!(shared.next_cursor.is_none());
     for found in &shared.matches {
-        assert!(found.absolute_path.starts_with("/docs/file-"));
+        assert!(found.path.starts_with("/docs/file-"));
         assert!(matches!(found.line_number, 1 | 2));
         assert_eq!(
             found.byte_offset,
@@ -1392,7 +1389,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
         .await
         .expect("tail query");
     assert_eq!(tail.matches.len(), 1);
-    assert_eq!(tail.matches[0].absolute_path, "/tail.txt");
+    assert_eq!(tail.matches[0].path, "/tail.txt");
     assert_eq!(tail.matches[0].line_number, 1);
     assert_eq!(tail.matches[0].byte_offset, 0);
     assert_eq!(tail.matches[0].line, "tail-only needle");
@@ -1423,7 +1420,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
         assert_eq!(page.namespace_id, namespace_id);
         assert_eq!(page.matches.len(), 1);
         let found = &page.matches[0];
-        assert!(found_matches.insert((found.absolute_path.clone(), found.line_number)));
+        assert!(found_matches.insert((found.path.clone(), found.line_number)));
         let Some(cursor) = page.next_cursor else {
             break;
         };
@@ -1520,7 +1517,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .await
         .expect("source query after fork");
     assert_eq!(source_response.matches.len(), 1);
-    assert_eq!(source_response.matches[0].absolute_path, "/source.txt");
+    assert_eq!(source_response.matches[0].path, "/source.txt");
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -1717,7 +1714,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
         .await
         .expect("query follows the published pointer");
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].absolute_path, "/needle.txt");
+    assert_eq!(response.matches[0].path, "/needle.txt");
 
     // And the retention above was the grace window, not an inert pass: past
     // it, the superseded manifest goes and the published one stays.

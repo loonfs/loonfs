@@ -329,7 +329,7 @@ pub(super) fn file_revisions_page_response(
         .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
     Ok(ListFileRevisionsResponse {
         namespace_id,
-        absolute_path,
+        path: absolute_path,
         inode_id,
         head_seq,
         revisions: page.items,

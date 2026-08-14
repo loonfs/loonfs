@@ -94,7 +94,7 @@ async fn a_streamed_read_holds_one_chunk_of_its_file() {
         .await
         .expect("open stream");
     assert_eq!(stream.size_bytes(), PAYLOAD_BYTES as u64);
-    assert_eq!(stream.entry().absolute_path.as_str(), PATH);
+    assert_eq!(stream.entry().path.as_str(), PATH);
 
     let mut read = Vec::with_capacity(PAYLOAD_BYTES);
     let mut chunks = 0u64;

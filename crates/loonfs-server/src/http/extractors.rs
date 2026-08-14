@@ -63,14 +63,14 @@ fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
     NamespaceId::parse(&value).map_err(ApiResponseError::invalid_namespace_id)
 }
 
-/// The decoded `namespace` path segment, deserialized by name so routes with
+/// The decoded `namespace_id` path segment, deserialized by name so routes with
 /// additional path parameters can share the extractor.
 #[derive(Debug, serde::Deserialize)]
 struct NamespaceSegment {
-    namespace: String,
+    namespace_id: String,
 }
 
-/// Extractor for the `{namespace}` path segment of namespace-scoped routes.
+/// Extractor for the `{namespace_id}` path segment of namespace-scoped routes.
 ///
 /// The segment is parsed into a [`NamespaceId`] at extraction time, but the
 /// outcome is surfaced through [`NamespaceIdPath::into_id`] inside the
@@ -96,7 +96,9 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match AxumPath::<NamespaceSegment>::from_request_parts(parts, state).await {
-            Ok(AxumPath(NamespaceSegment { namespace })) => Ok(Self(parse_namespace_id(namespace))),
+            Ok(AxumPath(NamespaceSegment { namespace_id })) => {
+                Ok(Self(parse_namespace_id(namespace_id)))
+            }
             Err(rejection) => Ok(Self(Err(invalid_path_params(&rejection)))),
         }
     }

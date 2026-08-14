@@ -175,7 +175,7 @@ pub(crate) enum CommandData {
     Trash(TrashListing),
     PathEntries {
         namespace_id: NamespaceId,
-        absolute_path: AbsolutePath,
+        path: AbsolutePath,
         /// Namespace head the final page was read from.
         head_seq: ChangeSeq,
         /// Heads observed when this invocation crossed namespace states.
@@ -320,7 +320,7 @@ mod tests {
     fn path_entries(head_drift: Option<ListingHeadDrift>) -> CommandData {
         CommandData::PathEntries {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            absolute_path: AbsolutePath::parse("/docs").expect("absolute path"),
+            path: AbsolutePath::parse("/docs").expect("absolute path"),
             head_seq: ChangeSeq(8),
             head_drift,
             entries: Vec::new(),

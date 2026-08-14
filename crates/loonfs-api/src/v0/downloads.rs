@@ -63,7 +63,7 @@ pub struct BeginDownloadResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// Absolute path as rendered from stored display names.
-    pub absolute_path: AbsolutePath,
+    pub path: AbsolutePath,
     /// Revision the capability reads, resolved from the request.
     pub revision_no: RevisionNo,
     /// Identity, byte length, and checksum evidence for the object the
@@ -113,7 +113,7 @@ mod tests {
     fn a_download_grant_exposes_only_presigned_access() {
         let response = BeginDownloadResponse {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            absolute_path: absolute_path(),
+            path: absolute_path(),
             revision_no: RevisionNo(7),
             content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
             access: ObjectTransferAccess::PresignedUrl {

@@ -292,7 +292,7 @@ impl UndeleteHint {
         &self,
         recorded_binding: bool,
         inode_id: InodeId,
-        deleted_at: ChangeSeq,
+        deletion_seq: ChangeSeq,
     ) -> String {
         // The placeholder is deliberately left unquoted: pasted unedited, a
         // shell rejects it instead of recovering the entry to a file
@@ -303,8 +303,8 @@ impl UndeleteHint {
             format!("{PATH_PLACEHOLDER} ")
         };
         format!(
-            "loonfs undelete {destination}--inode {inode_id} --deleted-at {}{}",
-            deleted_at.0, self.context_flags
+            "loonfs undelete {destination}--inode {inode_id} --deletion-seq {}{}",
+            deletion_seq.0, self.context_flags
         )
     }
 }

@@ -243,7 +243,7 @@ async fn undelete<S: ObjectStore + ?Sized>(
         commit_id,
         FilesystemOperation::Undelete {
             inode_id,
-            deleted_at_seq,
+            deletion_seq: deleted_at_seq,
             path: Some(AbsolutePath::parse(absolute_path).expect("path")),
         },
         context,
@@ -328,8 +328,8 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
                 }
             };
             Some(TrashEntry {
-                root_inode_id,
-                deleted_at_seq: active.generation.seq,
+                inode_id: root_inode_id,
+                deletion_seq: active.generation.seq,
                 deleted_at_ms: active.deleted_at_ms,
                 deleted_by: active.actor,
                 parent_inode_id: deleted_direntry
@@ -349,7 +349,7 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
 /// normalized away and pinned separately by
 /// `the_listing_is_ordered_oldest_deletion_first`.
 fn sorted_by_generation(mut entries: Vec<TrashEntry>) -> Vec<TrashEntry> {
-    entries.sort_by_key(|entry| (entry.deleted_at_seq, entry.root_inode_id));
+    entries.sort_by_key(|entry| (entry.deletion_seq, entry.inode_id));
     entries
 }
 
@@ -522,8 +522,8 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
     assert!(
         entries
             .windows(2)
-            .all(|pair| (pair[0].deleted_at_seq, pair[0].root_inode_id)
-                < (pair[1].deleted_at_seq, pair[1].root_inode_id)),
+            .all(|pair| (pair[0].deletion_seq, pair[0].inode_id)
+                < (pair[1].deletion_seq, pair[1].inode_id)),
         "entries must ascend by (deleted_at_seq, root_inode_id): {entries:?}"
     );
 }
@@ -572,7 +572,7 @@ async fn trash_pages_resume_after_the_generation_the_cursor_names() {
         .expect("five deletions do not fit one page of two");
     assert_eq!(
         (cursor.last_deleted_at_seq, cursor.last_root_inode_id),
-        (first.items[1].deleted_at_seq, first.items[1].root_inode_id),
+        (first.items[1].deletion_seq, first.items[1].inode_id),
         "the cursor names the generation the page ended on"
     );
 
@@ -677,8 +677,8 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
         1,
         "a deletion below the floor stays listed: {entries:?}"
     );
-    assert_eq!(entries[0].root_inode_id, deleted_inode_id);
-    assert_eq!(entries[0].deleted_at_seq, deleted.committed_seq);
+    assert_eq!(entries[0].inode_id, deleted_inode_id);
+    assert_eq!(entries[0].deletion_seq, deleted.committed_seq);
 
     undelete(
         &store,
@@ -795,7 +795,7 @@ async fn nested_deletions_each_keep_their_own_entry() {
     assert_eq!(
         nested
             .iter()
-            .map(|entry| entry.root_inode_id)
+            .map(|entry| entry.inode_id)
             .collect::<Vec<_>>(),
         vec![child_inode_id, parent_inode_id],
         "a deletion inside an already-deleted subtree keeps its own entry"
@@ -813,10 +813,7 @@ async fn nested_deletions_each_keep_their_own_entry() {
     .await;
     let after = trash_entries(&store, &namespace_id, 10).await;
     assert_eq!(
-        after
-            .iter()
-            .map(|entry| entry.root_inode_id)
-            .collect::<Vec<_>>(),
+        after.iter().map(|entry| entry.inode_id).collect::<Vec<_>>(),
         vec![child_inode_id],
         "recovering the parent leaves the child's own deletion listed"
     );
@@ -862,13 +859,13 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
     let entries = trash_entries(&store, &namespace_id, 10).await;
     assert_eq!(entries.len(), 2, "{entries:?}");
     assert_eq!(
-        entries[1].deleted_at_seq, fresh.committed_seq,
+        entries[1].deletion_seq, fresh.committed_seq,
         "the unflushed deletion lists last, in deletion order"
     );
 
     // An undelete in the tail hides a deletion the manifest still lists.
-    let durable_inode_id = entries[0].root_inode_id;
-    let durable_seq = entries[0].deleted_at_seq;
+    let durable_inode_id = entries[0].inode_id;
+    let durable_seq = entries[0].deletion_seq;
     undelete(
         &store,
         &namespace_id,
@@ -885,5 +882,5 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
         1,
         "an unflushed undelete must hide the durable row it cancels: {entries:?}"
     );
-    assert_eq!(entries[0].deleted_at_seq, fresh.committed_seq);
+    assert_eq!(entries[0].deletion_seq, fresh.committed_seq);
 }

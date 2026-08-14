@@ -170,7 +170,7 @@ impl VisibilityHarness {
     ) -> Result<CommitResponse, CoreError> {
         self.publish_operation(FilesystemOperation::Undelete {
             inode_id,
-            deleted_at_seq,
+            deletion_seq: deleted_at_seq,
             path: Some(AbsolutePath::parse(path).expect("valid path")),
         })
         .await

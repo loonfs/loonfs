@@ -276,14 +276,14 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
             }
             CommitOp::Undelete {
                 inode_id,
-                deleted_at_seq,
+                deletion_seq,
                 parent_inode_id,
                 display_name,
             } => {
                 let active = validate_undelete_target(
                     metadata_state,
                     *inode_id,
-                    *deleted_at_seq,
+                    *deletion_seq,
                     committed_seq,
                 )
                 .await?;

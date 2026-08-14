@@ -223,8 +223,7 @@ async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
         if cursor.is_none() {
             return Ok(loonfs_api::ListFileRevisionsResponse {
                 namespace_id: namespace_id.clone(),
-                absolute_path: loonfs_api::AbsolutePath::parse(absolute_path)
-                    .expect("valid test path"),
+                path: loonfs_api::AbsolutePath::parse(absolute_path).expect("valid test path"),
                 inode_id,
                 head_seq: context.head.seq,
                 revisions,
@@ -542,7 +541,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         .expect("materialized stat");
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.absolute_path.as_str(), "/docs/report");
+    assert_eq!(actual.path.as_str(), "/docs/report");
     assert_eq!(actual.size_bytes(), Some(5));
 }
 
@@ -1637,7 +1636,7 @@ async fn resolve_path_uses_nfc_casefold_folding() {
     let resolved = resolve_path(&store, &namespace_id("demo"), lookup_path)
         .await
         .expect("resolve path");
-    assert_eq!(resolved.absolute_path.as_str(), stored_path);
+    assert_eq!(resolved.path.as_str(), stored_path);
     assert_eq!(named_entry(&resolved), "Cafe\u{0301}.txt");
 }
 
@@ -1725,7 +1724,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         .expect("list root");
     let root_names: Vec<&str> = root_entries
         .iter()
-        .map(|entry| entry.absolute_path.as_str())
+        .map(|entry| entry.path.as_str())
         .collect();
     assert!(
         root_names.contains(&"/live"),
@@ -1741,7 +1740,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         .expect("list live dir");
     assert_eq!(live_entries.len(), 1, "one live child");
     let kept = &live_entries[0];
-    assert_eq!(kept.absolute_path.as_str(), "/live/kept.txt");
+    assert_eq!(kept.path.as_str(), "/live/kept.txt");
     assert_eq!(
         kept.size_bytes(),
         Some(b"alive".len() as u64),

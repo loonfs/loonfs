@@ -1664,7 +1664,7 @@ fn every_mutating_command_records_its_message() {
     let inode_id = json_data(&removed)["inode_id"]
         .as_u64()
         .expect("rm reports the deleted inode id");
-    let deleted_at = json_data(&removed)["committed_seq"]
+    let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()
         .expect("rm reports the committed seq");
     assert_success(&harness.run(&[
@@ -1672,8 +1672,8 @@ fn every_mutating_command_records_its_message() {
         "/dir/moved.txt",
         "--inode",
         &inode_id.to_string(),
-        "--deleted-at",
-        &deleted_at.to_string(),
+        "--deletion-seq",
+        &deletion_seq.to_string(),
         "-m",
         "undelete message",
     ]));
@@ -1795,14 +1795,14 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
     assert!(table.contains("loonfs undelete "), "{table}");
 
     // Recovering through the listed handle empties that entry out of trash.
-    let inode = report["root_inode_id"].as_u64().expect("inode");
-    let seq = report["deleted_at_seq"].as_u64().expect("seq");
+    let inode = report["inode_id"].as_u64().expect("inode");
+    let seq = report["deletion_seq"].as_u64().expect("seq");
     assert_success(&harness.run(&[
         "undelete",
         "/docs/Quarterly Report.PDF",
         "--inode",
         &inode.to_string(),
-        "--deleted-at",
+        "--deletion-seq",
         &seq.to_string(),
     ]));
     let after = harness.run(&["--json", "trash"]);
@@ -1848,10 +1848,10 @@ fn recovery_hints_name_their_namespace_and_quote_the_path() {
     let removed = harness.run(&["rm", "/docs/Quarterly Report.PDF"]);
     assert_success(&removed);
     let entry = json_data(&harness.run(&["--json", "trash"]))["entries"][0].clone();
-    let deleted_at = entry["deleted_at_seq"].as_u64().expect("the deletion seq");
+    let deletion_seq = entry["deletion_seq"].as_u64().expect("the deletion seq");
     assert_eq!(
         hinted_recovery_command(&removed),
-        format!("loonfs undelete --inode {inode} --deleted-at {deleted_at} --namespace demo")
+        format!("loonfs undelete --inode {inode} --deletion-seq {deletion_seq} --namespace demo")
     );
 
     // The trash table offers the same command for the same deletion. Neither
@@ -1861,7 +1861,7 @@ fn recovery_hints_name_their_namespace_and_quote_the_path() {
     assert_success(&listed);
     assert_eq!(
         trash_recovery_command(&listed, "Quarterly Report.PDF"),
-        format!("loonfs undelete --inode {inode} --deleted-at {deleted_at} --namespace demo")
+        format!("loonfs undelete --inode {inode} --deletion-seq {deletion_seq} --namespace demo")
     );
 
     // Pasting the hint into a shell recovers the file, which is the whole
@@ -3478,12 +3478,25 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     let inode_id = json_data(&removed)["inode_id"]
         .as_u64()
         .expect("rm reports the deleted inode id");
-    let deleted_at = json_data(&removed)["committed_seq"]
+    let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()
         .expect("rm reports the deletion sequence");
     let gone = harness.run(&["--json", "revisions", "/docs/report.txt"]);
     assert_failure(&gone);
     assert_eq!(json_error(&gone)["code"], "path_not_found");
+
+    let retired_flag = harness.run(&[
+        "undelete",
+        "/docs/report.txt",
+        "--inode",
+        &inode_id.to_string(),
+        "--deleted-at",
+        &deletion_seq.to_string(),
+    ]);
+    assert_failure(&retired_flag);
+    let retired_flag_error = stderr_string(&retired_flag);
+    assert!(retired_flag_error.contains("--deleted-at"));
+    assert!(retired_flag_error.contains("--deletion-seq"));
 
     // Undelete brings back identity, content, and revision history.
     let recovered = harness.run(&[
@@ -3492,8 +3505,8 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         "/docs/report.txt",
         "--inode",
         &inode_id.to_string(),
-        "--deleted-at",
-        &deleted_at.to_string(),
+        "--deletion-seq",
+        &deletion_seq.to_string(),
     ]);
     assert_success(&recovered);
     assert_eq!(json_data(&recovered)["target"], "demo:/docs/report.txt");
@@ -3517,8 +3530,8 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         "/docs/report-copy.txt",
         "--inode",
         &inode_id.to_string(),
-        "--deleted-at",
-        &deleted_at.to_string(),
+        "--deletion-seq",
+        &deletion_seq.to_string(),
     ]);
     assert_failure(&again);
     assert_eq!(json_error(&again)["code"], "not_deleted");
@@ -3555,10 +3568,10 @@ fn an_undelete_without_a_path_restores_in_place() {
     let trash = harness.run(&["--json", "trash"]);
     assert_success(&trash);
     let entry = json_data(&trash)["entries"][0].clone();
-    let inode_id = entry["root_inode_id"]
+    let inode_id = entry["inode_id"]
         .as_u64()
         .expect("trash reports the deleted inode id");
-    let deleted_at = entry["deleted_at_seq"]
+    let deletion_seq = entry["deletion_seq"]
         .as_u64()
         .expect("trash reports the deletion sequence");
 
@@ -3570,8 +3583,8 @@ fn an_undelete_without_a_path_restores_in_place() {
         "undelete",
         "--inode",
         &inode_id.to_string(),
-        "--deleted-at",
-        &deleted_at.to_string(),
+        "--deletion-seq",
+        &deletion_seq.to_string(),
     ]);
     assert_success(&recovered);
     assert_eq!(json_data(&recovered)["target"], "demo:(restored in place)");
@@ -3600,8 +3613,8 @@ fn an_undelete_without_a_path_restores_in_place() {
         "undelete",
         "--inode",
         &inode_id.to_string(),
-        "--deleted-at",
-        &deleted_at.to_string(),
+        "--deletion-seq",
+        &deletion_seq.to_string(),
     ]);
     assert_failure(&stale);
     assert_eq!(json_error(&stale)["code"], "not_deleted");
@@ -3635,7 +3648,7 @@ fn remote_undelete_recovers_through_http() {
     let inode_id = json_data(&removed)["inode_id"]
         .as_u64()
         .expect("rm reports the deleted inode id");
-    let deleted_at = json_data(&removed)["committed_seq"]
+    let deletion_seq = json_data(&removed)["committed_seq"]
         .as_u64()
         .expect("rm reports the deletion sequence");
 
@@ -3647,7 +3660,7 @@ fn remote_undelete_recovers_through_http() {
         trash_recovery_command(&listed, "wire.txt"),
         format!(
             "loonfs undelete --inode {inode_id} \
-             --deleted-at {deleted_at} --namespace demo"
+             --deletion-seq {deletion_seq} --namespace demo"
         )
     );
 
@@ -3657,8 +3670,8 @@ fn remote_undelete_recovers_through_http() {
         "/wire.txt",
         "--inode",
         &inode_id.to_string(),
-        "--deleted-at",
-        &deleted_at.to_string(),
+        "--deletion-seq",
+        &deletion_seq.to_string(),
     ]);
     assert_success(&recovered);
     let cat = harness.run(&["cat", "/wire.txt"]);
@@ -4888,7 +4901,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     assert_success(&first);
     let first_data = json_data(&first);
     assert_eq!(first_data["namespace_id"], "demo");
-    assert_eq!(first_data["absolute_path"], "/listing");
+    assert_eq!(first_data["path"], "/listing");
     assert!(first_data["head_seq"].is_u64());
     assert!(first_data.get("head_drift").is_none());
     let first_entries = first_data["entries"].as_array().expect("first page");
@@ -4916,7 +4929,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     assert_success(&all_json);
     let all_json_data = json_data(&all_json);
     assert_eq!(all_json_data["namespace_id"], "demo");
-    assert_eq!(all_json_data["absolute_path"], "/listing");
+    assert_eq!(all_json_data["path"], "/listing");
     assert!(all_json_data["head_seq"].is_u64());
     assert!(all_json_data.get("head_drift").is_none());
     assert_eq!(
@@ -4943,7 +4956,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
         .all(|entry| entry.get("data").is_none()));
     let actual_paths = jsonl_entries
         .iter()
-        .map(|entry| entry["absolute_path"].as_str().expect("entry path"))
+        .map(|entry| entry["path"].as_str().expect("entry path"))
         .collect::<Vec<_>>();
     let expected_paths = (0..=loonfs_api::DEFAULT_PAGE_LIMIT)
         .map(|index| format!("/listing/f{index:04}.txt"))
@@ -4956,10 +4969,10 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     let second_entries = second_data["entries"].as_array().expect("second page");
     assert_eq!(second_entries.len(), 1);
     assert_eq!(
-        first_entries.last().expect("last first-page entry")["absolute_path"],
+        first_entries.last().expect("last first-page entry")["path"],
         "/listing/f0999.txt"
     );
-    assert_eq!(second_entries[0]["absolute_path"], "/listing/f1000.txt");
+    assert_eq!(second_entries[0]["path"], "/listing/f1000.txt");
 }
 
 /// A two-page wire fixture makes the otherwise racy between-page commit
@@ -4972,14 +4985,14 @@ fn ls_surfaces_head_drift_from_paged_responses() {
     let (server_url, server) = json_response_server(vec![
         serde_json::json!({
             "namespace_id": "demo",
-            "absolute_path": "/docs",
+            "path": "/docs",
             "head_seq": 5,
             "entries": [],
             "next_cursor": "resume-after-first-page",
         }),
         serde_json::json!({
             "namespace_id": "demo",
-            "absolute_path": "/docs",
+            "path": "/docs",
             "head_seq": 8,
             "entries": [],
         }),
@@ -4990,7 +5003,7 @@ fn ls_surfaces_head_drift_from_paged_responses() {
     assert!(json.stderr.is_empty());
     let data = json_data(&json);
     assert_eq!(data["namespace_id"], "demo");
-    assert_eq!(data["absolute_path"], "/docs");
+    assert_eq!(data["path"], "/docs");
     assert_eq!(data["head_seq"], 8);
     assert_eq!(
         data["head_drift"],
@@ -5004,14 +5017,14 @@ fn ls_surfaces_head_drift_from_paged_responses() {
     let (server_url, server) = json_response_server(vec![
         serde_json::json!({
             "namespace_id": "demo",
-            "absolute_path": "/docs",
+            "path": "/docs",
             "head_seq": 11,
             "entries": [],
             "next_cursor": "resume-after-first-page",
         }),
         serde_json::json!({
             "namespace_id": "demo",
-            "absolute_path": "/docs",
+            "path": "/docs",
             "head_seq": 12,
             "entries": [],
         }),
@@ -5039,7 +5052,7 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
     let (server_url, server) = json_response_server(vec![
         serde_json::json!({
             "namespace_id": "demo",
-            "absolute_path": "/docs",
+            "path": "/docs",
             "inode_id": 2,
             "created_by": { "kind": "system", "id": "loonfs" },
             "created_at_ms": 1_752_624_000_000_u64,
@@ -5050,11 +5063,11 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
         }),
         serde_json::json!({
             "namespace_id": "demo",
-            "absolute_path": "/docs",
+            "path": "/docs",
             "head_seq": 20,
             "entries": [{
                 "namespace_id": "demo",
-                "absolute_path": "/docs/sub",
+                "path": "/docs/sub",
                 "inode_id": 3,
                 "created_by": { "kind": "system", "id": "loonfs" },
                 "created_at_ms": 1_752_624_000_000_u64,
@@ -5066,7 +5079,7 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
         }),
         serde_json::json!({
             "namespace_id": "demo",
-            "absolute_path": "/docs/sub",
+            "path": "/docs/sub",
             "head_seq": 21,
             "entries": [],
         }),
@@ -5139,7 +5152,7 @@ fn ls_limit_bounds_the_whole_listing_and_rejects_all() {
     let second_entries = second_data["entries"].as_array().expect("json array");
     assert_eq!(second_entries.len(), 2);
     assert_ne!(
-        second_entries[0]["absolute_path"], first_entries[0]["absolute_path"],
+        second_entries[0]["path"], first_entries[0]["path"],
         "the cursor resumes after the entries already printed"
     );
 

@@ -713,7 +713,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// `rm` and the change feed. Scopes recovery to that exact deletion,
     /// so a stale command cannot cancel a later delete.
     #[arg(long)]
-    pub deleted_at: u64,
+    pub deletion_seq: u64,
     /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.

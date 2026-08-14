@@ -134,7 +134,7 @@ async fn http_reads_project_flat_attribute_siblings_together() {
     assert_eq!(entries.len(), 2);
     for entry in entries {
         assert_projection(entry, true);
-        match entry["absolute_path"].as_str().expect("path") {
+        match entry["path"].as_str().expect("path") {
             "/docs/report.txt" => {
                 assert_eq!(entry["attributes"]["owner"], "platform");
                 assert_eq!(entry["attributes_revision_no"], 1);

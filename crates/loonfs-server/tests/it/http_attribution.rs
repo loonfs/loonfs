@@ -224,7 +224,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .expect("list trash");
     assert_eq!(trash.entries.len(), 1);
     let deleted = &trash.entries[0];
-    assert_eq!(deleted.deleted_at_seq, delete.committed_seq);
+    assert_eq!(deleted.deletion_seq, delete.committed_seq);
     assert_eq!(deleted.deleted_at_ms, delete_change.committed_at_ms);
     assert_eq!(deleted.deleted_by, deleter);
 
@@ -233,8 +233,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .client
         .undelete(
             &namespace,
-            deleted.root_inode_id,
-            deleted.deleted_at_seq,
+            deleted.inode_id,
+            deleted.deletion_seq,
             None,
             &UndeleteOptions::new(undelete_actor.clone()),
         )

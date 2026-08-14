@@ -650,7 +650,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         absolute_path: Option<&str>,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
@@ -671,7 +671,7 @@ impl FsWriter {
                 options.commit.message.clone(),
                 FilesystemOperation::Undelete {
                     inode_id,
-                    deleted_at_seq,
+                    deletion_seq,
                     path,
                 },
             ),

@@ -772,7 +772,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Recovers a deleted file or subtree; `inode_id` and `deleted_at_seq`
+    /// Recovers a deleted file or subtree; `inode_id` and `deletion_seq`
     /// are the identity and committed sequence the delete reported. An
     /// absent `path` restores in place, under the parent and name the
     /// deletion recorded.
@@ -781,19 +781,19 @@ impl ResolvedTarget {
         namespace: &NamespaceId,
         path: Option<&AbsolutePath>,
         inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         options: &UndeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .undelete(namespace, path, inode_id, deleted_at_seq, options)
+                    .undelete(namespace, path, inode_id, deletion_seq, options)
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .undelete(namespace, inode_id, deleted_at_seq, path, options)
+                .undelete(namespace, inode_id, deletion_seq, path, options)
                 .await?),
         }
     }

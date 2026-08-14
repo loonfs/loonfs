@@ -628,7 +628,7 @@ impl Client {
             .await?;
         let mut envelope = ListPathEntriesResponse {
             namespace_id: first_page.namespace_id,
-            absolute_path: first_page.absolute_path,
+            path: first_page.path,
             head_seq: first_page.head_seq,
             entries: first_page.entries,
             next_cursor: None,
@@ -803,7 +803,7 @@ impl Client {
         if start_offset > download.content_ref.size_bytes {
             return Err(ClientError::Http(format!(
                 "cannot resume a download of `{}` at offset {start_offset} of {} bytes",
-                download.absolute_path, download.content_ref.size_bytes
+                download.path, download.content_ref.size_bytes
             )));
         }
         let mut request = WireRequest::presigned(reqwest::Method::GET, url);
@@ -817,7 +817,7 @@ impl Client {
         Ok(DirectDownloadStream {
             body,
             expected: download.content_ref.clone(),
-            path: download.absolute_path.clone(),
+            path: download.path.clone(),
             digest: StreamingChecksum::for_algorithm(download.content_ref.checksum.algorithm),
             // The counter measures the whole object, not this response, so
             // the length check at the end lands where it always did.
@@ -853,7 +853,7 @@ impl Client {
         W: tokio::io::AsyncWrite + Unpin,
     {
         use tokio::io::AsyncWriteExt as _;
-        let path = &download.absolute_path;
+        let path = &download.path;
         let mut download = self.open_direct_download(download).await?;
         let mut size_bytes = 0u64;
         while let Some(chunk) = download.next_chunk().await? {
@@ -2413,7 +2413,7 @@ impl Client {
         &self,
         namespace: &NamespaceId,
         inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
+        deletion_seq: ChangeSeq,
         path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
     ) -> Result<ApiCommitResponse> {
@@ -2433,7 +2433,7 @@ impl Client {
                     options.commit.message.clone(),
                     FilesystemOperation::Undelete {
                         inode_id,
-                        deleted_at_seq,
+                        deletion_seq,
                         path: path.cloned(),
                     },
                 ),
