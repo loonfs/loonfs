@@ -749,7 +749,7 @@ or retain.
 Four reorganize outcomes describe work the step did not do itself. A family
 group that has outgrown one step is rebuilt by a background streaming
 compaction, and the step publishes nothing in that case: the job publishes
-once, when it finishes. `reorganize.kind` says what became of that job.
+once, when it finishes. `reorganize.outcome` says what became of that job.
 
 `compaction_started` means this step started one. `compaction_at_capacity`
 means this step's job claimed the namespace but is waiting for a process

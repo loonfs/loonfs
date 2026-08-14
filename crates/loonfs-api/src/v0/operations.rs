@@ -916,7 +916,7 @@ pub struct MetadataMaintenanceRequest {
 /// What the WAL-flush part of a maintenance step did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum WalFlushStepOutcome {
     /// The tail was below the threshold, so there was nothing to fold.
     NotNeeded,
@@ -946,7 +946,7 @@ pub enum WalFlushStepOutcome {
 /// consumes are engine policy, not a wire contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ReorganizeStepOutcome {
     /// No family group had enough delta runs to merge.
     NotNeeded,
@@ -1553,6 +1553,22 @@ mod tests {
         let gc: GcResponse =
             serde_json::from_value(gc_json).expect("decode gc response without optional fields");
         assert_eq!(gc.next_reclamation_at_ms, None);
+    }
+
+    #[test]
+    fn maintenance_step_outcomes_use_the_outcome_tag() {
+        assert_eq!(
+            serde_json::to_value(WalFlushStepOutcome::Flushed {
+                manifest_head_seq: ChangeSeq(9),
+            })
+            .expect("serialize WAL flush outcome"),
+            serde_json::json!({"outcome": "flushed", "manifest_head_seq": 9})
+        );
+        assert_eq!(
+            serde_json::to_value(ReorganizeStepOutcome::UnitPublished)
+                .expect("serialize reorganize outcome"),
+            serde_json::json!({"outcome": "unit_published"})
+        );
     }
 
     /// The maintenance bodies are optional selectors and overrides all the
