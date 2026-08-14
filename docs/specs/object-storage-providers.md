@@ -29,14 +29,12 @@ preconditions are the safety argument: the checksum binds the stored bytes to
 the requested content reference, and create-only behavior prevents a client
 from replacing an immutable content object. A provider that accepts the HMAC
 signature but silently ignores either precondition breaks that argument.
-
-Provider-neutral code uses the common
-`{"algorithm":"sha256","value":"<64 lowercase hex>"}` checksum shape.
-Coverage comes from the enclosing content reference, upload claim, or part;
-the operation determines the accepted algorithm. Provider spellings such as
-base64 headers remain inside the adapter and are normalized to lowercase hex
-before entering the model.
 HMAC-compatible gateways have been observed doing exactly that.
+
+LoonFS represents every checksum as
+`{"algorithm":"sha256","value":"<64 lowercase hex>"}`. The surrounding
+object says whether the checksum covers complete content or one upload part.
+Adapters convert provider formats, including base64 headers, to lowercase hex.
 
 Two things must both hold for direct-put to be available, and
 `ConfiguredObjectStore::direct_transfers` is the code that decides — building
