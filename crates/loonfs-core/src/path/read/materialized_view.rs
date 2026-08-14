@@ -173,20 +173,16 @@ pub struct DirectDownloadTarget {
     pub object_key: String,
 }
 
-/// Where one inode revision's bytes live for direct-download authorization.
-///
-/// Unlike [`DirectDownloadTarget`], this identity-addressed target carries no
-/// path because a retained revision remains readable after its inode moves or
-/// loses its current binding.
+/// Content information needed to authorize an inode download.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectDownloadByInodeTarget {
-    /// File inode that owns the revision.
+    /// File inode that owns this revision.
     pub inode_id: InodeId,
-    /// Revision this target reads.
+    /// Revision being read.
     pub revision_no: RevisionNo,
-    /// Identity, byte length, and checksum evidence for those bytes.
+    /// Content identity, size, and checksum.
     pub content_ref: ContentRef,
-    /// Logical unscoped object key an issuer signs a read of.
+    /// Object key used to sign the read.
     pub object_key: String,
 }
 
@@ -346,9 +342,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await
     }
 
-    /// Resolves a currently visible inode to the canonical entry returned by
-    /// path stat, using the child-keyed binding index rather than a directory
-    /// listing scan.
+    /// Returns the current entry for a visible inode without listing a
+    /// directory.
     pub(crate) async fn stat_inode(
         &self,
         inode_id: InodeId,
@@ -453,8 +448,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })
     }
 
-    /// Resolves one retained inode revision to the object a direct read would
-    /// fetch. Current visibility and path are intentionally irrelevant.
+    /// Resolves retained inode content without requiring a current path.
     pub(crate) async fn direct_download_target_by_inode(
         &self,
         inode_id: InodeId,

@@ -101,7 +101,7 @@ pub(super) async fn begin_download(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
-        description = "Authorizes a direct read of one retained inode revision. The strict body is `{}` and the response is path-free because historical identity does not imply a current binding.",
+        description = "Authorizes a direct read of one retained inode revision. The request body is `{}` and the response does not include a path.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = InodeId, Path, description = "File inode id"),
@@ -120,7 +120,7 @@ pub(super) async fn begin_download(
         )
     )
 )]
-/// Issues one short-lived read capability for a retained inode revision.
+/// Authorizes a direct read of one retained inode revision.
 pub(super) async fn begin_download_by_inode(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,

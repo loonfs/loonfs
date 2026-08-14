@@ -75,28 +75,25 @@ pub struct BeginDownloadResponse {
     pub access: ObjectTransferAccess,
 }
 
-/// Strict empty body for a download already addressed by route identity.
+/// Empty request for an inode-addressed download.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct BeginDownloadByInodeRequest {}
 
-/// A short-lived capability to read one inode revision's content object.
-///
-/// Historical inode identity is deliberately path-free: the inode may have
-/// moved since the revision was written or may have no current binding.
+/// A short-lived capability to read one inode revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BeginDownloadByInodeResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
-    /// File inode whose revision is authorized.
+    /// File inode being read.
     pub inode_id: InodeId,
-    /// Revision the capability reads.
+    /// Revision being read.
     pub revision_no: RevisionNo,
-    /// Identity, byte length, and checksum evidence for the authorized object.
+    /// Content identity, size, and checksum.
     pub content_ref: ContentRef,
-    /// Short-lived read capability the client uses without learning the raw object key.
+    /// Short-lived provider access without the raw object key.
     pub access: ObjectTransferAccess,
 }
 

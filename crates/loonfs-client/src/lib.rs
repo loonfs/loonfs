@@ -695,7 +695,7 @@ impl Client {
         self.request_json::<(), _>(self.get(&url), None).await
     }
 
-    /// Stats one currently visible inode, projecting what `options` asks for.
+    /// Returns the current entry for a visible inode.
     pub async fn stat_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -802,8 +802,7 @@ impl Client {
             .await
     }
 
-    /// Asks for one short-lived capability to read a retained inode revision
-    /// straight from the store.
+    /// Requests direct access to one retained inode revision.
     pub async fn begin_download_by_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -853,7 +852,7 @@ impl Client {
         .await
     }
 
-    /// Opens an inode-addressed download grant as a bounded, verified stream.
+    /// Opens an inode download as a bounded, verified stream.
     pub async fn open_direct_download_by_inode(
         &self,
         download: &BeginDownloadByInodeResponse,
@@ -861,7 +860,7 @@ impl Client {
         self.open_direct_download_by_inode_at(download, 0).await
     }
 
-    /// Opens an inode-addressed download grant from `start_offset`.
+    /// Opens an inode download from `start_offset`.
     pub async fn open_direct_download_by_inode_at(
         &self,
         download: &BeginDownloadByInodeResponse,
@@ -984,7 +983,7 @@ impl Client {
             .await
     }
 
-    /// Returns one path-free page of retained revisions for a file inode.
+    /// Returns one page of retained revisions for a file inode.
     pub async fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,

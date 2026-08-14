@@ -1,4 +1,4 @@
-//! Inode-addressed current metadata and retained revision reads.
+//! Current metadata and revision reads by inode id.
 
 use crate::common::{open_runtime_async, store};
 use loonfs::{

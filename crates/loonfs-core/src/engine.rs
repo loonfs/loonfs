@@ -283,8 +283,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    /// Resolves one inode revision to the object key needed for a direct
-    /// download. This reads retained identity metadata only and transfers no
+    /// Resolves one inode revision for a direct download without reading its
     /// content bytes.
     pub async fn direct_download_target_by_inode(
         &self,
@@ -297,8 +296,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    /// Stats one currently visible inode against the pinned runtime read
-    /// context.
+    /// Returns the current entry for a visible inode.
     pub async fn stat_inode(
         &self,
         inode_id: InodeId,

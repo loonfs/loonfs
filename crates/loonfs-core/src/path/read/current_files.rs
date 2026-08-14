@@ -107,9 +107,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Resolves one currently visible inode through the child-keyed binding
-/// index, returning the same canonical identity projection a path walk
-/// produces. No directory listing is involved.
+/// Resolves a visible inode and its current path through parent bindings.
 pub(super) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
     ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,

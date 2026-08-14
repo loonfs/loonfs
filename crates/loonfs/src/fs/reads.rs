@@ -53,8 +53,7 @@ impl FsReader {
         Ok(entry)
     }
 
-    /// Resolves a currently visible inode to its canonical entry at the
-    /// current head, projecting what `options` asks for.
+    /// Returns the current entry for a visible inode.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.stat_inode",
@@ -277,9 +276,8 @@ impl FsReader {
         Ok(target)
     }
 
-    /// Resolves one retained inode revision to the content object a direct
-    /// read would fetch. The answer is path-free and does not require the
-    /// inode to be currently visible.
+    /// Resolves retained inode content for a direct download without
+    /// requiring a current path.
     pub async fn direct_download_target_by_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -425,9 +423,7 @@ impl FsReader {
         )?)
     }
 
-    /// Lists one page of a file inode's retained revision history. The
-    /// response is path-free because the inode may have moved or been
-    /// deleted since those revisions were written.
+    /// Lists one page of retained revisions for a file inode.
     pub async fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,

@@ -353,7 +353,7 @@ impl ResolvedTarget {
             .await
     }
 
-    /// Describes one currently visible inode, attributes included.
+    /// Describes one visible inode, including its attributes.
     pub(crate) async fn stat_inode(
         &self,
         namespace_id: &NamespaceId,

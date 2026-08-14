@@ -251,7 +251,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `namespace_not_found` | 404 | The namespace has no head, so it does not exist. |
 | `namespace_deleted` | 410 | The namespace's head records the terminal deleted state. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
 | `path_not_found` | 404 | No visible entry at the path. |
-| `inode_not_found` | 404 | No currently visible inode for an inode-addressed current-state read, or no retained inode row for an identity-addressed history read. |
+| `inode_not_found` | 404 | The requested visible or retained inode does not exist. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id, or one that was aborted: an aborted session will never select content, so it reports the absence that its deletion will. |
 | `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
@@ -1387,14 +1387,10 @@ The namespace root is nameless: its entry omits both `parent_inode_id` and
 `display_name`. Every non-root entry carries a validated `display_name`; the
 empty string is not a spelling for the root or for any named path component.
 
-The inode form returns this exact entry shape, including the inode's current
-`path`. It resolves identity through the child-keyed current-binding index;
-it never searches directory listings. A rename therefore changes `path`,
-`parent_inode_id`, and `display_name` as applicable while preserving
-`inode_id`, creation attribution, attributes, and file revision metadata.
-An unknown or not-currently-visible inode answers `inode_not_found`. The root
-inode answers `/` under the same nameless-root rule. `include_attributes`
-has the same syntax and default as path stat.
+The inode route returns the same entry shape, including the current `path`.
+Renaming an entry changes its path and name but not its inode id or metadata.
+An unknown or hidden inode returns `inode_not_found`. The root inode returns
+`/`. `include_attributes` behaves the same as it does for path stat.
 
 ### 6.5 `GET /filesystem/list`
 
@@ -1525,21 +1521,16 @@ end of the road: the download transport in section 6.10 reads the same bytes
 without the server holding them, and every deployment that could have let a
 client create such a file offers it.
 
-Revision listing returns newest revisions first and uses the standard
-`limit` / `cursor` pattern. The path route resolves the current path to its
-current inode; the inode route addresses that inode directly. The response is
-path-free for both forms: a path is not historical identity, and an inode may
-move while a cursor is held. Responses include `next_cursor` only when another
-page is available. Revision history is never pruned — paging to the end always
-reaches revision 1, regardless of how far the retention floor has advanced.
+Revision listings return newest revisions first and use the standard
+`limit`/`cursor` pattern. The path route resolves the current inode first; the
+inode route addresses it directly. Both return the same path-free response.
+`next_cursor` is included only when another page is available. Revision
+history is not pruned, so paging to the end reaches revision 1.
 
-`GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content`
-likewise resolves the pair directly and verifies the selected `ContentRef`;
-it never re-enters through a current path. A deleted file remains listable and
-readable by inode while its retained rows exist. A directory inode follows the
-existing not-a-file convention (`path_conflict`), an unknown inode answers
-`inode_not_found`, and a missing revision under a valid file inode answers
-`revision_not_found`. Inode routes never answer `path_not_found`.
+The inode content route reads and verifies a revision without resolving a
+current path. Deleted files remain readable while their revision rows are
+retained. A directory returns `path_conflict`, an unknown inode returns
+`inode_not_found`, and an unknown revision returns `revision_not_found`.
 
 ```json
 {
@@ -2062,10 +2053,9 @@ checks the arriving bytes against:
 }
 ```
 
-The identity-addressed form is
+The inode form is
 `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`.
-Its body is strictly `{}`. Its response deliberately does not invent a path
-for a historical or unbound revision:
+Its body is `{}` and its response does not include a path:
 
 ```json
 {
@@ -2087,10 +2077,9 @@ for a historical or unbound revision:
 }
 ```
 
-Both grant routes use the same proven-provider gate and access shape. The
-inode form resolves the retained `(inode_id, revision_no)` pair directly, so
-it remains available after rename or deletion exactly when the proxied inode
-revision read does.
+Both download routes use the same provider support check and access format.
+The inode route remains available after a rename or deletion while the
+revision is retained.
 
 Four properties follow from the shape, and clients may rely on all of them.
 

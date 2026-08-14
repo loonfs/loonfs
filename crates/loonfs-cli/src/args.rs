@@ -447,10 +447,10 @@ pub(crate) struct FilesystemLsArgs {
 pub(crate) struct FilesystemStatArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Absolute path to describe. Omit when using `--inode`.
+    /// Absolute path to describe.
     #[arg(required_unless_present = "inode", conflicts_with = "inode")]
     pub path: Option<String>,
-    /// Currently visible inode to describe by stable identity.
+    /// Visible inode to describe instead of a path.
     #[arg(long, value_name = "INODE_ID")]
     pub inode: Option<u64>,
 }

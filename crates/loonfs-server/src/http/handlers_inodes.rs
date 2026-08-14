@@ -1,4 +1,4 @@
-//! Inode-addressed read handlers: current stat and retained revision reads.
+//! HTTP reads addressed by inode id.
 
 use super::error::ApiResponseError;
 use super::handlers_filesystem::{
@@ -86,7 +86,7 @@ pub(super) async fn stat_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
         tag = "inodes",
         summary = "List file revisions by inode",
-        description = "Returns retained revisions for a file inode without requiring a current path or binding. The response is path-free.",
+        description = "Returns retained revisions for a file inode without requiring a current path.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = InodeId, Path, description = "File inode id"),
@@ -137,7 +137,7 @@ pub(super) async fn list_file_revisions_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
         summary = "Read file revision by inode",
-        description = "Reads and verifies one retained file revision directly by `(inode_id, revision_no)`, without resolving a current path.",
+        description = "Reads and verifies one retained file revision by inode id and revision number.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = InodeId, Path, description = "File inode id"),

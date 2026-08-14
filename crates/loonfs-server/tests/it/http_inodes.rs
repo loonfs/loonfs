@@ -1,4 +1,4 @@
-//! HTTP inode-addressed stat, revision history, and content reads.
+//! HTTP stat, revision history, and content reads by inode id.
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
