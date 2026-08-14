@@ -16,8 +16,7 @@ use crate::uploads::UploadJournal;
 use bytes::Bytes;
 use loonfs_api::{
     v0::{
-        ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest,
-        GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse, StoreProbeRequest,
+        ChangesResponse, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, StoreProbeRequest,
         StoreProbeResponse, UploadStatusResponse,
     },
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, ContentRef,
@@ -221,8 +220,6 @@ fn maintenance_host_needs_an_embedded_profile() -> BackendError {
 /// Where a wait stopped and what it cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepWaitProgress {
-    /// The lifecycle last observed.
-    pub state: GrepIndexLifecycle,
     /// Steps this wait spent.
     pub steps: u64,
     /// True when the index reached the target sequence.
@@ -479,7 +476,7 @@ impl ResolvedTarget {
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGrepIndexResponse, BackendError> {
+    ) -> Result<GrepIndexStatusResponse, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.enable_grep_index(namespace_id).await,
             Self::Remote(target) => Ok(target.client.enable_grep_index(namespace_id).await?),
@@ -490,7 +487,7 @@ impl ResolvedTarget {
     pub(crate) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGrepIndexResponse, BackendError> {
+    ) -> Result<GrepIndexStatusResponse, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.disable_grep_index(namespace_id).await,
             Self::Remote(target) => Ok(target.client.disable_grep_index(namespace_id).await?),
@@ -547,15 +544,15 @@ impl ResolvedTarget {
                 let started_ms = timer.monotonic_now_ms();
                 let mut steps = 0;
                 loop {
-                    let state = target.client.grep_index_status(namespace_id).await?.state;
-                    let reached = state.is_built_through(target_seq);
+                    let lifecycle = target
+                        .client
+                        .grep_index_status(namespace_id)
+                        .await?
+                        .lifecycle;
+                    let reached = lifecycle.is_built_through(target_seq);
                     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
                     if reached || budget.spent(steps, elapsed_ms) {
-                        return Ok(GrepWaitProgress {
-                            state,
-                            steps,
-                            reached,
-                        });
+                        return Ok(GrepWaitProgress { steps, reached });
                     }
                     rest_between_status_checks().await;
                     steps += 1;

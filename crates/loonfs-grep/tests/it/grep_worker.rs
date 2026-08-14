@@ -2347,24 +2347,24 @@ async fn a_backfilling_root_never_reports_a_built_through_sequence() {
     };
     assert_eq!(again, state);
 
-    // Once the walk finishes, the steady root carries the target it reached
-    // as its own watermark, and no target field survives.
+    // Once the walk finishes, the API reports the root as active with the
+    // target it reached as its own watermark, and no target field survives.
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let steady = loonfs_api::v0::GrepIndexLifecycle::from(
+    let active = loonfs_api::v0::GrepIndexLifecycle::from(
         &worker
             .lifecycle(&namespace_id)
             .await
-            .expect("read steady lifecycle"),
+            .expect("read completed lifecycle"),
     );
     assert_eq!(
-        steady,
-        loonfs_api::v0::GrepIndexLifecycle::Steady {
+        active,
+        loonfs_api::v0::GrepIndexLifecycle::Active {
             built_through_seq: ChangeSeq(1),
             next_event_index: 0,
         }
     );
-    assert!(!serde_json::to_string(&steady)
-        .expect("serialize the steady lifecycle")
+    assert!(!serde_json::to_string(&active)
+        .expect("serialize the active API lifecycle")
         .contains("target_seq"));
     writer.shutdown().await.expect("shutdown");
 }

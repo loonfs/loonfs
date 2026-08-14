@@ -229,9 +229,10 @@ impl GrepLifecycle {
 
 /// The durable lifecycle as the admin plane reports it.
 ///
-/// The wire enum mirrors the durable one phase for phase, so a reader of
-/// either sees the same facts under the same names and no host has to
-/// invent a number for a phase that does not have one.
+/// The wire enum mirrors the durable one state for state. The durable
+/// `Steady` spelling maps to the admin API's `Active` spelling without
+/// changing the durable encoding, and no host invents a number for a state
+/// that does not have one.
 impl From<&GrepLifecycle> for loonfs_api::v0::GrepIndexLifecycle {
     fn from(lifecycle: &GrepLifecycle) -> Self {
         match lifecycle {
@@ -248,7 +249,7 @@ impl From<&GrepLifecycle> for loonfs_api::v0::GrepIndexLifecycle {
             GrepLifecycle::Steady {
                 built_through_seq,
                 next_event_index,
-            } => Self::Steady {
+            } => Self::Active {
                 built_through_seq: *built_through_seq,
                 next_event_index: *next_event_index,
             },

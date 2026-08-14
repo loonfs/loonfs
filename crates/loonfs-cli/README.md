@@ -301,7 +301,7 @@ Maintenance
     give up, exit nonzero, and report how far the index got
 
   loonfs admin index-status
-    Report where the gram content index is: disabled, backfilling, or steady
+    Report where the gram content index is: disabled, backfilling, or active
     at a watermark
 
   loonfs admin index-disable

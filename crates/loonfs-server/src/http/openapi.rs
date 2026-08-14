@@ -190,8 +190,6 @@ impl utoipa::ToSchema for CompleteUploadRequestSchema {
         loonfs_api::v0::GrepResponse,
         loonfs_api::v0::GrepIndexLifecycle,
         loonfs_api::v0::GrepIndexStatusResponse,
-        loonfs_api::v0::EnableGrepIndexResponse,
-        loonfs_api::v0::DisableGrepIndexResponse,
         loonfs_api::v0::GrepGcRequest,
         loonfs_api::v0::GrepGcResponse,
         loonfs_api::v0::StoreProbeRequest,

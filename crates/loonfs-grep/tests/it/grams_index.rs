@@ -10,6 +10,7 @@ use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
     NamespaceId, PutFileOptions, SharedObjectStore,
 };
+use loonfs_api::v0::GrepIndexLifecycle;
 use loonfs_api::{
     decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest, DEFAULT_MAX_PAGE_LIMIT,
 };
@@ -144,12 +145,11 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     let enabled = host.enable_grep_index(&namespace_id).await.expect("enable");
-    assert!(!enabled.already_enabled);
     let again = host
         .enable_grep_index(&namespace_id)
         .await
         .expect("re-enable");
-    assert!(again.already_enabled);
+    assert_eq!(again.lifecycle, enabled.lifecycle);
 
     // Explicit worker steps run the backfill and keep the watermark current.
     for _ in 0..2 {
@@ -191,7 +191,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .disable_grep_index(&namespace_id)
         .await
         .expect("disable");
-    assert!(disabled.was_enabled);
+    assert_eq!(disabled.lifecycle, GrepIndexLifecycle::Disabled);
     let error = host
         .grep(&namespace_id, &request("needle"))
         .await

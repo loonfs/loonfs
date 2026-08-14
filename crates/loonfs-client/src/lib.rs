@@ -27,11 +27,10 @@ use loonfs_api::{
         BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
         ChangesResponse, CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
         CompleteMultipartUploadRequest, CompleteUploadResponse, CompletedUploadPart, ContentToken,
-        DirectMultipartUploadOptions, DisableGrepIndexResponse, EnableGrepIndexResponse,
-        GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest,
-        StoreProbeResponse, UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim,
-        UploadStatusResponse,
+        DirectMultipartUploadOptions, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse,
+        ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart,
+        StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadContentResponse,
+        UploadPartChecksumClaim, UploadStatusResponse,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
@@ -1432,7 +1431,7 @@ impl Client {
 
     /// Content search over the namespace's grep index (query plane).
     /// Gate on the `query.grep` capability before calling against unknown
-    /// deployments; the namespace must also have a materialized steady-state
+    /// deployments; the namespace must also have a materialized active
     /// grep root or the server answers `not_supported`.
     pub async fn grep(
         &self,
@@ -1444,7 +1443,7 @@ impl Client {
     }
 
     /// Reads the namespace's grep-index lifecycle (admin plane): disabled,
-    /// backfilling toward a captured sequence, or steady at a watermark.
+    /// backfilling toward a captured sequence, or active at a watermark.
     /// One grep root read on the server, with no side effects.
     pub async fn grep_index_status(
         &self,
@@ -1463,12 +1462,12 @@ impl Client {
     pub async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGrepIndexResponse> {
+    ) -> Result<GrepIndexStatusResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/enable",
             self.base_url
         );
-        self.request_json::<(), EnableGrepIndexResponse>(self.post(&url), None)
+        self.request_json::<(), GrepIndexStatusResponse>(self.post(&url), None)
             .await
     }
 
@@ -1477,12 +1476,12 @@ impl Client {
     pub async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGrepIndexResponse> {
+    ) -> Result<GrepIndexStatusResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/disable",
             self.base_url
         );
-        self.request_json::<(), DisableGrepIndexResponse>(self.post(&url), None)
+        self.request_json::<(), GrepIndexStatusResponse>(self.post(&url), None)
             .await
     }
 

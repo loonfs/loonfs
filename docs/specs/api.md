@@ -26,7 +26,7 @@ within a plane is expressed as **named features** (section 2).
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
-| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace_id}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
+| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace_id}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized active grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
 Notes:
@@ -161,7 +161,7 @@ hoc.
 | `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
-| `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
+| `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0`'s only feature key is `admin.grep.index`; the rest of that plane
 is required ops. `acl.*` keys are unregistered until that plane
@@ -685,7 +685,7 @@ A representative v0 binding is shown below.
 | List checkpoints | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` (one bounded page of active records in ascending checkpoint-id order, with the id the release route takes; see below) |
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
 | Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
-| Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
+| Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized active grep root) |
 | Read the grep index's lifecycle | `GET /v0/admin/namespaces/{ns}/grep/index` (feature `admin.grep.index`; one grep root read, no side effects) |
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (feature `admin.grep.index`; CAS-publishes the independent grep root into checkpointed backfill and nudges the deployment's maintenance runner; idempotent) |
 | Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (feature `admin.grep.index`; CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
@@ -693,17 +693,30 @@ A representative v0 binding is shown below.
 | Probe the store contract | `POST /v0/admin/store/probe` (the one admin route whose subject is the store rather than a namespace; body carries no options today and `{}` is the request; see below) |
 | Scrape metrics | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
-The status route and the enable response both report the index's lifecycle
-as a tagged `state`, and the phases never share a field:
+The status, enable, and disable routes all return one flat grep-index object:
+`namespace_id`, lifecycle fields tagged by `status`, `next_run_ordinal`, and
+`reorganize_pending`. Lifecycle statuses never share a sequence field:
 
-| `phase` | Carries | Means |
+| `status` | Carries | Means |
 | --- | --- | --- |
 | `disabled` | — | No index is maintained here. Also the answer for a namespace that never enabled one. |
 | `backfilling` | `target_seq`, `cursor_inode_id`, `checkpoint_id` | The initial walk over a pinned checkpoint is running. `target_seq` is the namespace sequence that checkpoint captured; reaching it completes the backfill. Nothing is searchable yet, and no watermark exists to report. |
-| `steady` | `built_through_seq`, `next_event_index` | The index follows the change feed. Commits at or below `built_through_seq` are searchable, except that a non-zero `next_event_index` leaves the rest of that one commit unindexed. |
+| `active` | `built_through_seq`, `next_event_index` | The index follows the change feed. Commits at or below `built_through_seq` are searchable, except that a non-zero `next_event_index` leaves the rest of that one commit unindexed. |
 
-A backfill therefore never reports a `built_through_seq`, and a steady index
-never reports a `target_seq`. A client waiting for the index to catch up
+For example:
+
+```json
+{"namespace_id":"demo","status":"active","built_through_seq":12,"next_run_ordinal":3,"reorganize_pending":false}
+```
+
+```json
+{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":4,"checkpoint_id":"chk_00000000000000000000000000000009","next_run_ordinal":1,"reorganize_pending":false}
+```
+
+A backfill therefore never reports a `built_through_seq`, and an active index
+never reports a `target_seq`. `next_run_ordinal` is the next logical run the
+index will allocate, while `reorganize_pending` reports whether a partitioned
+segment reorganization is in progress. A client waiting for the index to catch up
 captures one sequence before it starts waiting and stops there, rather than
 chasing a head that keeps moving.
 

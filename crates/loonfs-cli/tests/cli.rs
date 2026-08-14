@@ -3971,7 +3971,7 @@ fn embedded_grep_works_after_index_enable() {
     // driver, no state that never resolves.
     let enabled = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&enabled);
-    assert_eq!(json_data(&enabled)["state"]["phase"], "steady");
+    assert_eq!(json_data(&enabled)["status"], "active");
     assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
     assert_eq!(json_data(&enabled)["budget_exhausted"], false);
     let found = harness.run(&["--json", "grep", "TODO"]);
@@ -3990,7 +3990,7 @@ fn embedded_grep_works_after_index_enable() {
     assert_success(&harness.run(&["put", more.to_str().expect("utf-8 path"), "/src/lib.rs"]));
     let recaught = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&recaught);
-    assert_eq!(json_data(&recaught)["already_enabled"], true);
+    assert_eq!(json_data(&recaught)["status"], "active");
     let found = harness.run(&["--json", "grep", "TODO"]);
     assert_success(&found);
     assert_eq!(
@@ -4096,14 +4096,14 @@ fn index_enable_leaves_core_maintenance_decoupled() {
 
     let retried = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&retried);
-    assert_eq!(json_data(&retried)["already_enabled"], true);
+    assert_eq!(json_data(&retried)["status"], "active");
     assert!(json_data(&retried).get("backfill_step").is_none());
 }
 
-/// The index reports the phase it is in, and the phases do not share a
-/// field: a backfill names its target, a steady index names its watermark.
+/// The index reports its lifecycle status, and statuses do not share a
+/// field: a backfill names its target, an active index names its watermark.
 #[test]
-fn index_status_reports_each_phase_in_its_own_terms() {
+fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -4111,35 +4111,44 @@ fn index_status_reports_each_phase_in_its_own_terms() {
 
     let disabled = harness.run(&["--json", "admin", "index-status"]);
     assert_success(&disabled);
-    assert_eq!(json_data(&disabled)["state"]["phase"], "disabled");
-    assert!(json_data(&disabled)["state"]
-        .get("built_through_seq")
-        .is_none());
+    assert_eq!(json_data(&disabled)["status"], "disabled");
+    assert!(json_data(&disabled).get("built_through_seq").is_none());
 
     // `--no-wait` returns with the root the enable published: a backfill,
     // naming the sequence it will walk to and nothing it has indexed.
     let enabled = harness.run(&["--json", "admin", "index-enable", "--no-wait"]);
     assert_success(&enabled);
-    let state = &json_data(&enabled)["state"];
-    assert_eq!(state["phase"], "backfilling");
-    assert_eq!(state["target_seq"], 0);
-    assert!(state.get("built_through_seq").is_none());
+    let data = json_data(&enabled);
+    assert_eq!(data["status"], "backfilling");
+    assert_eq!(data["target_seq"], 0);
+    assert!(data.get("built_through_seq").is_none());
     assert!(json_data(&enabled).get("waited_for_seq").is_none());
     assert_eq!(json_data(&enabled)["steps"], 0);
 
     let backfilling = harness.run(&["--json", "admin", "index-status"]);
     assert_success(&backfilling);
-    assert_eq!(json_data(&backfilling)["state"]["phase"], "backfilling");
+    assert_eq!(json_data(&backfilling)["status"], "backfilling");
     assert_eq!(json_data(&backfilling)["reorganize_pending"], false);
     assert!(backfilling_text_names_no_watermark(&harness));
 
-    // Waiting takes it steady, and only then is there a watermark.
+    // Waiting takes it active, and only then is there a watermark.
     assert_success(&harness.run(&["admin", "index-enable"]));
-    let steady = harness.run(&["--json", "admin", "index-status"]);
-    assert_success(&steady);
-    assert_eq!(json_data(&steady)["state"]["phase"], "steady");
-    assert_eq!(json_data(&steady)["state"]["built_through_seq"], 0);
-    assert!(json_data(&steady)["state"].get("target_seq").is_none());
+    let active = harness.run(&["--json", "admin", "index-status"]);
+    assert_success(&active);
+    assert_eq!(json_data(&active)["status"], "active");
+    assert_eq!(json_data(&active)["built_through_seq"], 0);
+    assert!(json_data(&active).get("target_seq").is_none());
+
+    let disabled = harness.run(&["--json", "admin", "index-disable"]);
+    assert_success(&disabled);
+    let data = json_data(&disabled);
+    assert_eq!(data["status"], "disabled");
+    assert!(data.get("built_through_seq").is_none());
+    assert!(data.get("next_run_ordinal").is_some());
+
+    let disabled_again = harness.run(&["--json", "admin", "index-disable"]);
+    assert_success(&disabled_again);
+    assert_eq!(json_data(&disabled_again)["status"], "disabled");
 }
 
 fn backfilling_text_names_no_watermark(harness: &Harness) -> bool {
@@ -4171,7 +4180,7 @@ fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     let status = harness.run(&["--json", "admin", "index-status"]);
     assert_success(&status);
     assert_eq!(
-        json_data(&status)["state"]["built_through_seq"],
+        json_data(&status)["built_through_seq"],
         1,
         "the earlier wait stopped at the target it captured"
     );
@@ -4180,7 +4189,7 @@ fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
     assert_success(&harness.run(&["admin", "index-enable"]));
     let caught_up = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&caught_up);
-    assert_eq!(json_data(&caught_up)["already_enabled"], true);
+    assert_eq!(json_data(&caught_up)["status"], "active");
     assert_eq!(json_data(&caught_up)["waited_for_seq"], 2);
     assert_eq!(
         json_data(&caught_up)["steps"],
@@ -4211,7 +4220,7 @@ fn index_enable_budgets_exit_nonzero_and_report_progress() {
         assert_eq!(data["steps"], 0, "{budget:?}");
         assert_eq!(data["waited_for_seq"], 1, "{budget:?}");
         assert_eq!(
-            data["state"]["phase"], "backfilling",
+            data["status"], "backfilling",
             "the report must say where the index actually is: {budget:?}"
         );
     }
@@ -4255,17 +4264,17 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
 
     let disabled = harness.run(&["--json", "admin", "index-status"]);
     assert_success(&disabled);
-    assert_eq!(json_data(&disabled)["state"]["phase"], "disabled");
+    assert_eq!(json_data(&disabled)["status"], "disabled");
 
     let enabled = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&enabled);
     assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
     assert_eq!(json_data(&enabled)["budget_exhausted"], false);
-    assert_eq!(json_data(&enabled)["state"]["phase"], "steady");
+    assert_eq!(json_data(&enabled)["status"], "active");
 
-    let steady = harness.run(&["--json", "admin", "index-status"]);
-    assert_success(&steady);
-    assert_eq!(json_data(&steady)["state"]["built_through_seq"], 1);
+    let active = harness.run(&["--json", "admin", "index-status"]);
+    assert_success(&active);
+    assert_eq!(json_data(&active)["built_through_seq"], 1);
 
     let found = harness.run(&["--json", "grep", "remote needle"]);
     assert_success(&found);
@@ -4374,7 +4383,7 @@ fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
         let status = harness.run(&["--json", "admin", "index-status", "--namespace", namespace]);
         assert_success(&status);
         assert_eq!(
-            json_data(&status)["state"]["built_through_seq"],
+            json_data(&status)["built_through_seq"],
             1,
             "the assigned index must reach the head it was behind: {namespace}"
         );
