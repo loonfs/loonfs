@@ -44,7 +44,7 @@ pub(super) struct StatInodeQuery {
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = InodeId, Path, description = "Inode id"),
-            ("include_attributes" = Option<String>, Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`.")
+            ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
         ),
         responses(
             (status = 200, description = "Authoritative current inode entry", body = loonfs_api::AuthoritativePathEntry),
@@ -90,7 +90,7 @@ pub(super) async fn stat_inode(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = InodeId, Path, description = "File inode id"),
-            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
         ),
         responses(

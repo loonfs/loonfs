@@ -211,7 +211,7 @@ pub(super) async fn create_namespace(
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Get namespace status",
-        description = "Returns the current head, manifest, checkpoint, WAL tail, and retention state for a namespace.",
+        description = "Returns the current head, manifest, WAL tail, and retention state for a namespace.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Namespace status", body = loonfs_api::NamespaceStatusResponse),
@@ -248,7 +248,7 @@ pub(super) async fn namespace_status(
         description = "Marks a namespace as deleted.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("expected_head_seq" = Option<String>, Query, description = "Delete only if the namespace head is still at this sequence")
+            ("expected_head_seq" = Option<ChangeSeq>, Query, description = "Delete only if the namespace head is still at this sequence")
         ),
         responses(
             (status = 200, description = "Namespace deleted", body = loonfs_api::DeleteNamespaceResponse),
@@ -379,7 +379,7 @@ pub(super) async fn create_checkpoint(
         description = "Lists one page of active checkpoints in checkpoint-id order. Expired checkpoints remain visible until collection releases them. Released checkpoints are omitted. The cursor resumes a live listing and does not create a snapshot.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque checkpoint-list page cursor")
         ),
         responses(

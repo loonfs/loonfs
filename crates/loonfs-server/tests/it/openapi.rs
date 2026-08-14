@@ -220,6 +220,219 @@ fn openapi_documents_current_server_paths() {
 }
 
 #[test]
+fn openapi_operation_ids_are_the_frozen_public_registry() {
+    const REGISTRY_MESSAGE: &str = "the operationId registry is a frozen public contract; record any deliberate rename in crates/loonfs-server/tests/it/openapi.rs::openapi_operation_ids_are_the_frozen_public_registry";
+
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let paths = spec
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("openapi paths object");
+    let mut operation_ids = paths
+        .values()
+        .filter_map(Value::as_object)
+        .flat_map(|path_item| {
+            ["get", "post", "put", "delete", "patch"]
+                .into_iter()
+                .filter_map(|method| path_item.get(method))
+        })
+        .map(|operation| {
+            operation
+                .get("operationId")
+                .and_then(Value::as_str)
+                .expect("OpenAPI operation has an operationId")
+        })
+        .collect::<Vec<_>>();
+    let unique_operation_ids = operation_ids.iter().copied().collect::<BTreeSet<_>>();
+    assert_eq!(
+        unique_operation_ids.len(),
+        operation_ids.len(),
+        "duplicate operationIds found; {REGISTRY_MESSAGE}"
+    );
+
+    operation_ids.sort_unstable();
+    assert_eq!(
+        operation_ids,
+        [
+            "abort_upload",
+            "apply_commit",
+            "begin_download",
+            "begin_download_by_inode",
+            "begin_upload",
+            "capabilities",
+            "complete_upload",
+            "create_checkpoint",
+            "create_namespace",
+            "delete_namespace",
+            "disable_grep_index",
+            "enable_grep_index",
+            "fork_namespace",
+            "gc_grep_index",
+            "get_file_bytes",
+            "get_file_revision_bytes_by_inode",
+            "grep",
+            "grep_index_status",
+            "health",
+            "list_changes",
+            "list_checkpoints",
+            "list_file_revisions",
+            "list_file_revisions_by_inode",
+            "list_path_entries",
+            "list_trash",
+            "maintenance_step",
+            "namespace_status",
+            "probe_store",
+            "read_upload_status",
+            "readiness",
+            "release_checkpoint",
+            "serve_metrics",
+            "sign_upload_parts",
+            "stat_inode",
+            "stat_path",
+            "upload_content",
+        ],
+        "operationIds changed; {REGISTRY_MESSAGE}"
+    );
+}
+
+#[test]
+fn openapi_query_parameters_publish_the_runtime_grammar() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let paths = spec
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("openapi paths object");
+
+    for (path, method) in [
+        ("/v0/namespaces/{namespace_id}/filesystem/list", "get"),
+        ("/v0/namespaces/{namespace_id}/filesystem/revisions", "get"),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            "get",
+        ),
+        ("/v0/namespaces/{namespace_id}/filesystem/trash", "get"),
+        ("/v0/admin/namespaces/{namespace_id}/checkpoints", "get"),
+        ("/v0/namespaces/{namespace_id}/changes", "get"),
+    ] {
+        let parameter = query_parameter(paths, path, method, "limit");
+        assert_eq!(parameter.get("required"), Some(&Value::Bool(false)));
+        let schema = parameter.get("schema").expect("limit schema");
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("integer"));
+        assert_eq!(schema.get("format").and_then(Value::as_str), Some("int32"));
+        assert_eq!(schema.get("minimum").and_then(Value::as_u64), Some(1));
+        assert_eq!(schema.get("maximum").and_then(Value::as_u64), Some(1000));
+        assert_eq!(schema.get("default").and_then(Value::as_u64), Some(1000));
+    }
+
+    for (path, default) in [
+        ("/v0/namespaces/{namespace_id}/filesystem/stat", true),
+        ("/v0/namespaces/{namespace_id}/filesystem/list", false),
+        ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", true),
+    ] {
+        let parameter = query_parameter(paths, path, "get", "include_attributes");
+        assert_eq!(parameter.get("required"), Some(&Value::Bool(false)));
+        let schema = parameter.get("schema").expect("include_attributes schema");
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("boolean"));
+        assert_eq!(
+            schema.get("default").and_then(Value::as_bool),
+            Some(default)
+        );
+    }
+
+    for (path, method, parameter_name, schema_name, required) in [
+        (
+            "/v0/namespaces/{namespace_id}/changes",
+            "get",
+            "after_seq",
+            "ChangeSeq",
+            true,
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/filesystem/content",
+            "get",
+            "revision_no",
+            "RevisionNo",
+            false,
+        ),
+        (
+            "/v0/namespaces/{namespace_id}",
+            "delete",
+            "expected_head_seq",
+            "ChangeSeq",
+            false,
+        ),
+    ] {
+        let parameter = query_parameter(paths, path, method, parameter_name);
+        assert_eq!(parameter.get("required"), Some(&Value::Bool(required)));
+        let expected_ref = format!("#/components/schemas/{schema_name}");
+        assert_eq!(
+            parameter.pointer("/schema/$ref").and_then(Value::as_str),
+            Some(expected_ref.as_str())
+        );
+    }
+
+    for (path, method, parameter_name) in [
+        (
+            "/v0/namespaces/{namespace_id}/filesystem/list",
+            "get",
+            "path",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/filesystem/stat",
+            "get",
+            "path",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/filesystem/content",
+            "get",
+            "path",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/filesystem/revisions",
+            "get",
+            "path",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/filesystem/list",
+            "get",
+            "cursor",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/filesystem/revisions",
+            "get",
+            "cursor",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            "get",
+            "cursor",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/filesystem/trash",
+            "get",
+            "cursor",
+        ),
+        (
+            "/v0/admin/namespaces/{namespace_id}/checkpoints",
+            "get",
+            "cursor",
+        ),
+    ] {
+        let parameter = query_parameter(paths, path, method, parameter_name);
+        assert_eq!(
+            parameter.pointer("/schema/type").and_then(Value::as_str),
+            Some("string")
+        );
+    }
+}
+
+#[test]
 fn openapi_names_tagged_one_of_alternatives() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -597,6 +810,28 @@ fn assert_query_params(
             "missing query parameter `{name}` for `{method} {path}`"
         );
     }
+}
+
+fn query_parameter<'a>(
+    paths: &'a serde_json::Map<String, Value>,
+    path: &str,
+    method: &str,
+    parameter_name: &str,
+) -> &'a Value {
+    paths
+        .get(path)
+        .and_then(|path_item| path_item.get(method))
+        .and_then(|operation| operation.get("parameters"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|parameter| {
+            parameter.get("in").and_then(Value::as_str) == Some("query")
+                && parameter.get("name").and_then(Value::as_str) == Some(parameter_name)
+        })
+        .unwrap_or_else(|| {
+            panic!("missing query parameter `{parameter_name}` for `{method} {path}`")
+        })
 }
 
 fn assert_path_parameter_schema(

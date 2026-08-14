@@ -109,6 +109,62 @@ pub(super) struct ChangesQuery {
     limit: Option<String>,
 }
 
+/// Schema-only override for the shared page-limit query contract.
+#[cfg(feature = "openapi")]
+pub(super) struct OpenApiPageLimit;
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for OpenApiPageLimit {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::Object::builder()
+            .schema_type(utoipa::openapi::schema::Type::Integer)
+            .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
+                utoipa::openapi::KnownFormat::Int32,
+            )))
+            .minimum(Some(1u32))
+            .maximum(Some(loonfs_api::DEFAULT_MAX_PAGE_LIMIT))
+            .default(Some(serde_json::json!(loonfs_api::DEFAULT_PAGE_LIMIT)))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for OpenApiPageLimit {}
+
+/// Schema-only override for an optional boolean that defaults to true.
+#[cfg(feature = "openapi")]
+pub(super) struct OpenApiDefaultTrueBoolean;
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for OpenApiDefaultTrueBoolean {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::Object::builder()
+            .schema_type(utoipa::openapi::schema::Type::Boolean)
+            .default(Some(serde_json::json!(true)))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for OpenApiDefaultTrueBoolean {}
+
+/// Schema-only override for an optional boolean that defaults to false.
+#[cfg(feature = "openapi")]
+pub(super) struct OpenApiDefaultFalseBoolean;
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for OpenApiDefaultFalseBoolean {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::Object::builder()
+            .schema_type(utoipa::openapi::schema::Type::Boolean)
+            .default(Some(serde_json::json!(false)))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for OpenApiDefaultFalseBoolean {}
+
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -120,9 +176,9 @@ pub(super) struct ChangesQuery {
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
-            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor"),
-            ("include_attributes" = Option<String>, Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.")
+            ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.")
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_api::ListPathEntriesResponse),
@@ -177,7 +233,7 @@ pub(super) async fn list_path_entries(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
-            ("include_attributes" = Option<String>, Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
+            ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
         ),
         responses(
             (status = 200, description = "Authoritative path entry", body = loonfs_api::AuthoritativePathEntry),
@@ -222,7 +278,7 @@ pub(super) async fn stat_path(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
-            ("revision_no" = Option<String>, Query, description = "Optional prior revision number")
+            ("revision_no" = Option<RevisionNo>, Query, description = "Optional prior revision number")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
@@ -283,7 +339,7 @@ pub(super) async fn get_file_bytes(
         description = "Returns the namespace's recoverable deletions, oldest deletion first. Entries never age out at the retention floor; each carries the inode id and deletion sequence undelete needs, plus the deleted name when the delete recorded one.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque trash page cursor")
         ),
         responses(
@@ -329,7 +385,7 @@ pub(super) async fn list_trash(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
-            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
         ),
         responses(
@@ -494,8 +550,8 @@ pub(super) async fn apply_commit(
         description = "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("after_seq" = String, Query, description = "Return committed changes after this sequence"),
-            ("limit" = Option<String>, Query, description = "Maximum page size")
+            ("after_seq" = loonfs_api::ChangeSeq, Query, description = "Return committed changes after this sequence"),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ChangesResponse),
