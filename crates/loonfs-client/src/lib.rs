@@ -1830,7 +1830,7 @@ impl Client {
             return Err(error);
         }
         let response = self.complete_upload(namespace_id, &upload_id).await?;
-        Ok(Self::staged_from_completion(response))
+        Self::staged_from_completion(response)
     }
 
     /// Uploads one object straight to object storage in bounded waves of
@@ -1927,7 +1927,7 @@ impl Client {
                 },
             )
             .await?;
-        Ok(Self::staged_from_completion(response))
+        Self::staged_from_completion(response)
     }
 
     /// Cuts the payload into parts and uploads them, holding at most
@@ -2139,22 +2139,28 @@ impl Client {
         upload_id: &UploadId,
     ) -> Result<StagedContent> {
         let response = self.complete_upload(namespace_id, upload_id).await?;
-        Ok(Self::staged_from_completion(response))
+        Self::staged_from_completion(response)
     }
 
-    fn staged_from_completion(response: UploadSessionResponse) -> StagedContent {
-        let UploadSessionStatus::Completed {
-            content_ref,
-            content_token,
-            ..
-        } = response.status
-        else {
-            unreachable!("the completion endpoint returned a non-completed session")
+    fn staged_from_completion(response: UploadSessionResponse) -> Result<StagedContent> {
+        let status = match response.status {
+            UploadSessionStatus::Completed {
+                content_ref,
+                content_token,
+                ..
+            } => {
+                return Ok(StagedContent {
+                    content_ref,
+                    content_token,
+                });
+            }
+            UploadSessionStatus::Open { .. } => "open",
+            UploadSessionStatus::Aborted { .. } => "aborted",
         };
-        StagedContent {
-            content_ref,
-            content_token,
-        }
+        Err(ClientError::Protocol(format!(
+            "completion of upload `{}` returned status `{status}`",
+            response.upload_id
+        )))
     }
 
     /// Uploads bytes and commits them at a path.
@@ -3054,6 +3060,56 @@ mod tests {
             .expect("completed-session replay should retry");
         assert_eq!(actual, response);
         assert_eq!(transport.attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn staging_rejects_a_non_completed_completion_response() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let upload_id =
+            UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id");
+        let statuses = [
+            (
+                "open",
+                UploadSessionStatus::Open {
+                    expires_at_ms: 1_000,
+                },
+            ),
+            (
+                "aborted",
+                UploadSessionStatus::Aborted {
+                    aborted_at_ms: 2_000,
+                },
+            ),
+        ];
+
+        for (status_name, status) in statuses {
+            let response = UploadSessionResponse {
+                namespace_id: namespace_id.clone(),
+                upload_id: upload_id.clone(),
+                mode: loonfs_api::v0::UploadMode::ServiceProxied,
+                status,
+            };
+            let transport = crate::transport::test_transport::script([
+                crate::transport::test_transport::Outcome::Success(
+                    serde_json::to_vec(&response).expect("serialize response"),
+                ),
+            ]);
+            let client = retry_policy_client();
+
+            let error = client
+                .complete_staged(&namespace_id, &upload_id)
+                .await
+                .expect_err("a completion response must report completed");
+            assert!(
+                matches!(
+                    &error,
+                    ClientError::Protocol(message)
+                        if message.contains(upload_id.as_str()) && message.contains(status_name)
+                ),
+                "expected protocol error, got {error:?}"
+            );
+            assert_eq!(transport.attempts(), 1);
+        }
     }
 
     /// An intermediary answering with a non-envelope body (a load balancer's
