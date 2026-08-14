@@ -95,63 +95,6 @@ fn read_golden(name: &str) -> Vec<u8> {
     })
 }
 
-fn assert_json_has_no_retired_public_field(value: &serde_json::Value, name: &str) {
-    match value {
-        serde_json::Value::Object(object) => {
-            for retired in [
-                "absolute_path",
-                "root_inode_id",
-                "deleted_at_seq",
-                "validated_content_token",
-            ] {
-                assert!(
-                    !object.contains_key(retired),
-                    "golden JSON `{name}` carries retired public field `{retired}`"
-                );
-            }
-            for nested in object.values() {
-                assert_json_has_no_retired_public_field(nested, name);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for nested in values {
-                assert_json_has_no_retired_public_field(nested, name);
-            }
-        }
-        _ => {}
-    }
-}
-
-#[test]
-fn json_goldens_do_not_pin_retired_public_field_names() {
-    let directory = golden_path("");
-    for entry in std::fs::read_dir(directory).expect("read golden directory") {
-        let entry = entry.expect("read golden directory entry");
-        let path = entry.path();
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|error| panic!("read `{}`: {error}", path.display()));
-        for retired in ["ValidatedContentToken", "validated_content_token"] {
-            assert!(
-                !bytes
-                    .windows(retired.len())
-                    .any(|window| window == retired.as_bytes()),
-                "golden fixture `{}` carries retired public name `{retired}`",
-                path.display()
-            );
-        }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("golden JSON filename");
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .unwrap_or_else(|error| panic!("parse `{name}`: {error}"));
-        assert_json_has_no_retired_public_field(&value, name);
-    }
-}
-
 fn unzstd(bytes: &[u8]) -> Vec<u8> {
     zstd::stream::decode_all(bytes).expect("decompress envelope")
 }

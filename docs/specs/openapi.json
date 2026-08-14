@@ -135,7 +135,11 @@
             "description": "Maximum page size",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
             }
           },
           {
@@ -985,7 +989,7 @@
           "namespaces"
         ],
         "summary": "Get namespace status",
-        "description": "Returns the current head, manifest, checkpoint, WAL tail, and retention state for a namespace.",
+        "description": "Returns the current head, manifest, WAL tail, and retention state for a namespace.",
         "operationId": "namespace_status",
         "parameters": [
           {
@@ -1077,7 +1081,7 @@
             "description": "Delete only if the namespace head is still at this sequence",
             "required": false,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/ChangeSeq"
             }
           }
         ],
@@ -1172,7 +1176,7 @@
             "description": "Return committed changes after this sequence",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/ChangeSeq"
             }
           },
           {
@@ -1181,7 +1185,11 @@
             "description": "Maximum page size",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
             }
           }
         ],
@@ -1381,7 +1389,7 @@
             "description": "Optional prior revision number",
             "required": false,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/RevisionNo"
             }
           }
         ],
@@ -1593,7 +1601,11 @@
             "description": "Maximum page size",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
             }
           },
           {
@@ -1611,7 +1623,8 @@
             "description": "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "boolean",
+              "default": false
             }
           }
         ],
@@ -1705,7 +1718,11 @@
             "description": "Maximum page size",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
             }
           },
           {
@@ -1808,7 +1825,8 @@
             "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "boolean",
+              "default": true
             }
           }
         ],
@@ -1893,7 +1911,11 @@
             "description": "Maximum page size",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
             }
           },
           {
@@ -2079,10 +2101,11 @@
           {
             "name": "include_attributes",
             "in": "query",
-            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`.",
+            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "boolean",
+              "default": true
             }
           }
         ],
@@ -2176,7 +2199,11 @@
             "description": "Maximum page size",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
             }
           },
           {
