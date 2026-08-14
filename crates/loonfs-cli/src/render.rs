@@ -793,13 +793,13 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             // is. An inode holding no attributes prints nothing extra: the
             // header already answered the question that was asked.
             if let Some(attributes) = &entry.attributes {
-                if let Some(updated_by) = &attributes.updated_by {
+                if let Some(updated_by) = &attributes.attributes_updated_by {
                     lines.push(format!(
                         "attributes_updated_by: {}",
                         render_actor(updated_by)
                     ));
                 }
-                if let Some(updated_at_ms) = attributes.updated_at_ms {
+                if let Some(updated_at_ms) = attributes.attributes_updated_at_ms {
                     lines.push(format!(
                         "attributes_updated: {}",
                         format_utc_ms(updated_at_ms)
@@ -1002,7 +1002,7 @@ mod tests {
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
     use loonfs_api::{
-        AbsolutePath, AuthoritativeAttributes, AuthoritativePathEntry, AuthoritativePathEntryKind,
+        AbsolutePath, AttributesProjection, AuthoritativePathEntry, AuthoritativePathEntryKind,
         ChangeSeq, DisplayName, InodeId, NamespaceId,
     };
 
@@ -1049,10 +1049,10 @@ mod tests {
     /// can be read off the last line.
     fn stat_with_attribute(value: AttributeValue) -> CommandOutput {
         let mut entry = path_entry("/docs", Some("docs"));
-        entry.attributes = Some(AuthoritativeAttributes {
-            revision_no: loonfs_api::AttributeRevisionNo(1),
-            updated_by: Some(loonfs_api::ActorRef::loonfs_system()),
-            updated_at_ms: Some(1_752_624_000_000),
+        entry.attributes = Some(AttributesProjection {
+            attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
+            attributes_updated_by: Some(loonfs_api::ActorRef::loonfs_system()),
+            attributes_updated_at_ms: Some(1_752_624_000_000),
             attributes: loonfs_api::Attributes::new(std::collections::BTreeMap::from([(
                 loonfs_api::AttributeKey::parse("note").expect("attribute key"),
                 value,
@@ -1111,16 +1111,15 @@ mod tests {
     /// JSON output needs no escaping of its own: serde emits an escaped
     /// string, and the value round-trips through a decode unchanged.
     #[test]
-    fn json_stat_carries_attribute_values_verbatim() {
+    fn json_stat_flattens_the_attribute_projection_and_preserves_values() {
         let newline =
             stat_with_attribute(AttributeValue::parse("first\nsecond").expect("attribute value"));
         let json: serde_json::Value =
             serde_json::from_str(&json_success(&newline).expect("JSON stat should render"))
                 .expect("rendered stat is JSON");
-        assert_eq!(
-            json["data"]["attributes"]["attributes"]["note"],
-            "first\nsecond"
-        );
+        assert_eq!(json["data"]["attributes"]["note"], "first\nsecond");
+        assert_eq!(json["data"]["attributes_revision_no"], 1);
+        assert!(json.pointer("/data/attributes/attributes").is_none());
     }
 
     #[test]

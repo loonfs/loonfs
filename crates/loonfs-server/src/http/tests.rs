@@ -50,6 +50,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "allow_stale",
     "attributes_changed",
     "attributes_revision_no",
+    "attributes_updated_at_ms",
+    "attributes_updated_by",
     "bearer_auth",
     "begin_put",
     "budget_exhausted",

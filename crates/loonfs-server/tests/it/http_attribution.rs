@@ -62,8 +62,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     assert_eq!(root.created_by, ActorRef::loonfs_system());
     assert!(root.created_at_ms > 0);
     let root_attributes = root.attributes.expect("root attributes");
-    assert_eq!(root_attributes.updated_by, None);
-    assert_eq!(root_attributes.updated_at_ms, None);
+    assert_eq!(root_attributes.attributes_updated_by, None);
+    assert_eq!(root_attributes.attributes_updated_at_ms, None);
 
     let creator = actor("creator");
     let create = harness
@@ -182,8 +182,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     assert_eq!(after_move.kind, before_move.kind);
 
     let bare_attributes = after_move.attributes.expect("synthetic attributes");
-    assert_eq!(bare_attributes.updated_by, None);
-    assert_eq!(bare_attributes.updated_at_ms, None);
+    assert_eq!(bare_attributes.attributes_updated_by, None);
+    assert_eq!(bare_attributes.attributes_updated_at_ms, None);
     let updater = actor("updater");
     let update = harness
         .client
@@ -204,8 +204,11 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .expect("stat attributes")
         .attributes
         .expect("attributes projection");
-    assert_eq!(updated.updated_by, Some(updater));
-    assert_eq!(updated.updated_at_ms, Some(update_change.committed_at_ms));
+    assert_eq!(updated.attributes_updated_by, Some(updater));
+    assert_eq!(
+        updated.attributes_updated_at_ms,
+        Some(update_change.committed_at_ms)
+    );
 
     let deleter = actor("deleter");
     let delete = harness

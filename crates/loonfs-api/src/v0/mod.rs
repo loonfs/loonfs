@@ -37,7 +37,7 @@ pub use operations::{
     WalFlushStepOutcome,
 };
 pub use reads::{
-    AuthoritativeAttributes, AuthoritativeFileBytes, AuthoritativePathEntry,
+    AttributesProjection, AuthoritativeFileBytes, AuthoritativePathEntry,
     AuthoritativePathEntryKind, ListPathEntriesResponse, ListTrashResponse, TrashEntry,
 };
 pub use search::{

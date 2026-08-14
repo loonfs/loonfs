@@ -147,7 +147,7 @@ pub use secret::SecretString;
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
-    AdvanceRetentionResponse, ApiError, AuthoritativeAttributes, AuthoritativeFileBytes,
+    AdvanceRetentionResponse, ApiError, AttributesProjection, AuthoritativeFileBytes,
     AuthoritativePathEntry, AuthoritativePathEntryKind, CheckpointOwnerSummary, CheckpointSummary,
     CommitRequest, CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,

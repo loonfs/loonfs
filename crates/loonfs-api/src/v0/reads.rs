@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 /// This is the result shape for stat/list style reads. The entry kind carries
 /// the file-only revision and content summary, so a directory cannot carry a
 /// partial file payload. Attributes are likewise projected as one value or
-/// omitted as one value.
+/// omitted as one value, while serializing as prefixed sibling fields.
+/// The attribute revision is read independently — clients feed it to
+/// `expected_attributes_revision_no` on the next write without touching the
+/// values — so this is a prefixed-sibling projection rather than a value
+/// consumed as one nested unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AuthoritativePathEntry {
@@ -40,8 +44,8 @@ pub struct AuthoritativePathEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<DisplayName>,
     /// The inode's attribute projection, when requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attributes: Option<AuthoritativeAttributes>,
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<AttributesProjection>,
 }
 
 impl AuthoritativePathEntry {
@@ -135,21 +139,21 @@ impl AuthoritativePathEntryKind {
     }
 }
 
-/// One inode's complete projected attribute state.
+/// One inode's structurally complete attribute projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct AuthoritativeAttributes {
+pub struct AttributesProjection {
     /// The attribute revision this projection represents.
-    pub revision_no: AttributeRevisionNo,
+    pub attributes_revision_no: AttributeRevisionNo,
     /// Actor responsible for the latest attribute update. This is `None` for
     /// the initial empty state at revision 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_by: Option<ActorRef>,
+    pub attributes_updated_by: Option<ActorRef>,
     /// Time of the latest attribute update, in Unix milliseconds. This is
     /// `None` for the initial empty state at revision 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at_ms: Option<u64>,
-    /// The complete attribute map at `revision_no`.
+    pub attributes_updated_at_ms: Option<u64>,
+    /// The complete attribute map at `attributes_revision_no`.
     ///
     /// An inode that has never had attributes written is at revision 0 with
     /// an empty map.
@@ -331,27 +335,89 @@ mod tests {
         );
     }
 
-    /// An unprojected entry omits attributes; a projected one carries the
-    /// map and revision together, and an empty map is a projected answer.
     #[test]
-    fn attributes_serialize_as_one_optional_projection() {
+    fn requested_attributes_serialize_as_flat_prefixed_siblings() {
+        let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
+        projected.attributes = Some(AttributesProjection {
+            attributes_revision_no: crate::AttributeRevisionNo(7),
+            attributes_updated_by: Some(ActorRef::loonfs_system()),
+            attributes_updated_at_ms: Some(1_752_624_000_000),
+            attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
+                crate::AttributeKey::parse("owner").expect("attribute key"),
+                crate::AttributeValue::parse("finance").expect("attribute value"),
+            )]))
+            .expect("attributes"),
+        });
+
+        let projected_json = serde_json::to_value(&projected).expect("serialize projected entry");
+        assert_eq!(projected_json["attributes_revision_no"], 7);
+        assert_eq!(
+            projected_json["attributes"],
+            serde_json::json!({ "owner": "finance" })
+        );
+        assert_eq!(
+            projected_json["attributes_updated_by"],
+            serde_json::json!({ "kind": "system", "id": "loonfs" })
+        );
+        assert_eq!(
+            projected_json["attributes_updated_at_ms"],
+            1_752_624_000_000_u64
+        );
+
+        let decoded: AuthoritativePathEntry =
+            serde_json::from_value(projected_json).expect("decode projected entry");
+        let projection = decoded.attributes.expect("projected attributes");
+        assert_eq!(
+            projection.attributes_revision_no,
+            crate::AttributeRevisionNo(7)
+        );
+    }
+
+    #[test]
+    fn unrequested_attributes_omit_both_wire_keys() {
         let unprojected = entry("/docs", Some(InodeId(1)), Some("docs"));
         let unprojected_json =
             serde_json::to_value(&unprojected).expect("serialize unprojected entry");
         assert!(unprojected_json.get("attributes").is_none());
+        assert!(unprojected_json.get("attributes_revision_no").is_none());
 
-        let mut projected = unprojected;
-        projected.attributes = Some(AuthoritativeAttributes {
-            revision_no: crate::AttributeRevisionNo(0),
-            updated_by: None,
-            updated_at_ms: None,
+        let decoded: AuthoritativePathEntry =
+            serde_json::from_value(unprojected_json).expect("decode unprojected entry");
+        assert!(decoded.attributes.is_none());
+    }
+
+    #[test]
+    fn never_written_attributes_serialize_as_revision_zero_and_empty_map() {
+        let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
+        projected.attributes = Some(AttributesProjection {
+            attributes_revision_no: crate::AttributeRevisionNo(0),
+            attributes_updated_by: None,
+            attributes_updated_at_ms: None,
             attributes: crate::Attributes::default(),
         });
         let projected_json = serde_json::to_value(&projected).expect("serialize projected entry");
-        assert_eq!(
-            projected_json["attributes"],
-            serde_json::json!({ "revision_no": 0, "attributes": {} })
-        );
+        assert_eq!(projected_json["attributes_revision_no"], 0);
+        assert_eq!(projected_json["attributes"], serde_json::json!({}));
+        assert!(projected_json.get("attributes_updated_by").is_none());
+        assert!(projected_json.get("attributes_updated_at_ms").is_none());
+    }
+
+    #[test]
+    fn serialized_entries_never_nest_attributes_inside_attributes() {
+        let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
+        projected.attributes = Some(AttributesProjection {
+            attributes_revision_no: crate::AttributeRevisionNo(1),
+            attributes_updated_by: None,
+            attributes_updated_at_ms: None,
+            attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
+                crate::AttributeKey::parse("owner").expect("attribute key"),
+                crate::AttributeValue::parse("finance").expect("attribute value"),
+            )]))
+            .expect("attributes"),
+        });
+
+        let projected_json = serde_json::to_value(projected).expect("serialize projected entry");
+        assert!(projected_json.pointer("/attributes/attributes").is_none());
     }
 }
 

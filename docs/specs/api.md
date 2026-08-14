@@ -460,7 +460,7 @@ Responses expose attribution through these fields:
 - `created_by` and `created_at_ms` come from the commit that created an inode.
 - `revision_actor` identifies the actor for the current file revision. Each
   revision-history entry also has an `actor`. Directories have neither field.
-- `attributes.updated_by` identifies who last changed the stored attributes.
+- `attributes_updated_by` identifies who last changed the stored attributes.
   The initial empty attributes at revision 0 have no updater.
 - `deleted_by` identifies the actor for an active trash entry.
 
@@ -1345,12 +1345,10 @@ the durable naming rules (`format.md`, "Durable naming conventions").
     "checksum": { "algorithm": "sha256", "value": "42d..." }
   },
   "committed_at_ms": 1752624000000,
-  "attributes": {
-    "revision_no": 3,
-    "updated_by": { "kind": "user", "id": "metadata-editor" },
-    "updated_at_ms": 1752623500000,
-    "attributes": { "owner": "platform" }
-  }
+  "attributes_revision_no": 3,
+  "attributes_updated_by": { "kind": "user", "id": "metadata-editor" },
+  "attributes_updated_at_ms": 1752623500000,
+  "attributes": { "owner": "platform" }
 }
 ```
 
@@ -1360,19 +1358,22 @@ current revision row. These stamps are observational — sequences are the
 order, and no validity rule reads them. Directories have creation time but no
 modified time in v0; rename and move change neither attribution nor time.
 
-`include_attributes` selects whether the entry carries the inode's grouped
-attribute projection. It accepts `true` or `false`; anything else is `invalid_request`. Stat
+`include_attributes` selects whether the entry carries the inode's attribute
+projection. It accepts `true` or `false`; anything else is `invalid_request`. Stat
 defaults to `true`, because a stat answers for one path and a map is capped
 at 64 KiB.
 
-The `attributes` value is present or absent as one group. When present, it
-carries `revision_no`, the complete `attributes` map, and `updated_by` plus
-`updated_at_ms` when a persisted attributes revision exists. An empty map is a
-real projected answer at its current revision, and an inode that has never
-had attributes written reads as `{}` at revision 0 with no `updated_by` or
-`updated_at_ms`. A read that did not
-include attributes omits the group, so an absent group never means "no
-attributes".
+The projection serializes as prefixed siblings. `attributes_revision_no` and
+the complete `attributes` map are present together or absent together;
+`attributes_updated_by` and `attributes_updated_at_ms` are also present when a
+persisted attributes revision exists. The revision number is read
+independently — clients feed it to `expected_attributes_revision_no` on the
+next write without touching the values — which is the prefixed-sibling case,
+not the consumed-as-a-unit case used by the entry-kind enum. An empty map is a
+real projected answer at its current revision, and an inode that has never had
+attributes written reads as `{}` at revision 0 with no updater or update time.
+A read that did not include attributes omits all four siblings, so an absent
+projection never means "no attributes".
 
 The namespace root is nameless: its entry omits both `parent_inode_id` and
 `display_name`. Every non-root entry carries a validated `display_name`; the
@@ -1393,11 +1394,11 @@ request path remains the authority for what is being listed. Responses
 include `next_cursor` only when another page is available.
 
 `include_attributes` works exactly as it does on stat, and obeys the same
-both-or-neither projection rule, but it defaults to `false`. That default is
-what bounds a listing: a page holds up to `pagination.max_limit` entries and
-each attribute map may be 64 KiB, and no request declares a byte budget, so a
-listing carries attributes only when the caller asks and sizes its pages for
-what comes back.
+required-siblings-together projection rule, but it defaults to `false`. That
+default is what bounds a listing: a page holds up to `pagination.max_limit`
+entries and each attribute map may be 64 KiB, and no request declares a byte
+budget, so a listing carries attributes only when the caller asks and sizes
+its pages for what comes back.
 
 A cursor is an opaque ordering resume, not a snapshot pin. Every cursor in the API
 — directory listing, revision listing, grep, and the change feed alike —
