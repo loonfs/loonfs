@@ -11,7 +11,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
-use loonfs_api::StorageChecksum;
+use loonfs_api::Checksum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File};
@@ -382,14 +382,14 @@ where
         key: &str,
         provider_upload_id: &str,
         parts: &[MultipartPart],
-        full_object_checksum: &StorageChecksum,
+        checksum: &Checksum,
     ) -> Result<MultipartCompletion> {
         let start = sample_clock();
         let (result, attempts) = counting_attempts(self.inner.complete_multipart_upload(
             key,
             provider_upload_id,
             parts,
-            full_object_checksum,
+            checksum,
         ))
         .await;
         self.record_unit(

@@ -156,8 +156,7 @@ fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
         kind: loonfs_api::ContentRefKind::BlobV1,
         content_id: ContentId::generate(),
         size_bytes: bytes.len() as u64,
-        storage_checksum: loonfs_api::StorageChecksum::crc32c(bytes),
-        whole_file_sha256: None,
+        checksum: loonfs_api::Checksum::crc32c(bytes),
     }
 }
 

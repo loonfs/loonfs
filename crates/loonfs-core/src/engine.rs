@@ -24,7 +24,7 @@ use loonfs_api::options::{ListPathEntriesOptions, StatPathOptions};
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, DirectMultipartUploadOptions,
-    DirectPutContentClaim, UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
+    UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
 use loonfs_api::EffectiveLimit;
@@ -484,7 +484,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// reference that names it, and the internal object key to sign.
     pub async fn begin_direct_put_upload_target(
         &self,
-        claim: DirectPutContentClaim,
+        claim: UploadContentClaim,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         crate::protocol::begin_direct_put_upload_target(
             &self.store,

@@ -268,10 +268,10 @@ mod tests {
     use crate::ObjectStore;
     use crate::ObjectStoreError;
     use bytes::Bytes;
+    use loonfs_api::Checksum;
     use loonfs_api::ChecksumAlgorithm;
     use loonfs_api::ContentId;
     use loonfs_api::ContentRef;
-    use loonfs_api::StorageChecksum;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -541,11 +541,10 @@ mod tests {
         )
     }
 
-    /// A reference whose storage checksum is the CRC-32C GCS enforces.
+    /// A reference whose checksum is the CRC-32C GCS enforces.
     fn crc32c_content_ref() -> ContentRef {
         ContentRef {
-            storage_checksum: StorageChecksum::crc32c(b"hello"),
-            whole_file_sha256: None,
+            checksum: Checksum::crc32c(b"hello"),
             ..ContentRef::blob_v1(ContentId::generate(), b"hello")
         }
     }

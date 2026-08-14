@@ -37,10 +37,10 @@ use loonfs_api::wire::wal::{
 };
 use loonfs_api::{
     sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
-    Attributes, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
-    ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId,
-    MetadataCompactionId, MetadataTableId, NameKey, NamespaceId, RevisionNo, StorageChecksum,
-    UploadId, WalSegmentId, WriterEpoch,
+    Attributes, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId,
+    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId,
+    MetadataCompactionId, MetadataTableId, NameKey, NamespaceId, RevisionNo, UploadId,
+    WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -144,11 +144,10 @@ fn sample_crc_content_ref() -> ContentRef {
         kind: ContentRefKind::BlobV1,
         content_id: content_id("con_fedcba9876543210fedcba9876543210"),
         size_bytes: 11_534_336,
-        storage_checksum: StorageChecksum {
+        checksum: Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
             value: "bbb7305bdf118bcb".to_owned(),
         },
-        whole_file_sha256: None,
     }
 }
 
@@ -168,11 +167,10 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
             kind: ContentRefKind::BlobV1,
             content_id: content_id("con_00112233445566778899aabbccddeeff"),
             size_bytes: 4_096,
-            storage_checksum: StorageChecksum {
+            checksum: Checksum {
                 algorithm: ChecksumAlgorithm::Crc32c,
                 value: "1a2b3c4d".to_owned(),
             },
-            whole_file_sha256: None,
         },
     ];
     let encoded = serde_json::to_vec_pretty(&references).expect("encode content refs");
@@ -625,7 +623,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session.v2.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -669,7 +667,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session_direct_put.v2.json",
+        "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -690,7 +688,7 @@ fn control_objects_match_golden_bytes() {
     // payload is known, so it records identity, the provider upload, and
     // the geometry — and learns what it assembled only at completion.
     check_control_golden(
-        "control_upload_session_direct_multipart.v2.json",
+        "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -701,6 +699,7 @@ fn control_objects_match_golden_bytes() {
             transport: UploadSessionTransport::DirectMultipart {
                 provider_upload_id: "provider-upload-id".to_owned(),
                 part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
+                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
@@ -710,7 +709,7 @@ fn control_objects_match_golden_bytes() {
     // A proxied session mid-flight: it has written its bytes and recorded
     // what they were, and is still open to complete.
     check_control_golden(
-        "control_upload_session_staged.v2.json",
+        "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -727,7 +726,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session_claimed.v2.json",
+        "control_upload_session_claimed.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -744,7 +743,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session_aborted.v2.json",
+        "control_upload_session_aborted.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -788,7 +787,7 @@ fn every_mutable_control_payload_rejects_unknown_fields_as_corruption() {
         add_unknown,
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session.v2.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         add_unknown,
     );
@@ -824,12 +823,12 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         |payload| payload["owner"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session.v2.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["state"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_staged.v2.json",
+        "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
             payload["transport"]["staging"]["content_ref"]["field_from_the_future"] =
@@ -837,7 +836,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         },
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_direct_multipart.v2.json",
+        "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
             payload["transport"]["field_from_the_future"] = serde_json::Value::from(true);
@@ -913,7 +912,7 @@ fn fork_checkpoint_records_reject_a_missing_lease_expiry() {
 fn upload_sessions_reject_the_pre_monotonic_lifecycle_encoding() {
     for legacy_state in ["active", "condemned"] {
         assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-            "control_upload_session.v2.json",
+            "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| payload["state"] = serde_json::Value::from(legacy_state),
         );
@@ -921,7 +920,7 @@ fn upload_sessions_reject_the_pre_monotonic_lifecycle_encoding() {
     // The deleted states are not tags this format knows either.
     for legacy_kind in ["active", "condemned"] {
         assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-            "control_upload_session.v2.json",
+            "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| payload["state"]["kind"] = serde_json::Value::from(legacy_kind),
         );
@@ -930,7 +929,7 @@ fn upload_sessions_reject_the_pre_monotonic_lifecycle_encoding() {
     // aged, so it is not that state.
     for tagged_without_its_stamp in ["open", "completed", "aborted"] {
         assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-            "control_upload_session.v2.json",
+            "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| {
                 payload["state"] = serde_json::json!({ "kind": tagged_without_its_stamp });
@@ -947,7 +946,7 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
         |payload| payload["state"] = serde_json::Value::from("future_state"),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_staged.v2.json",
+        "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
             payload["transport"]["staging"]["content_ref"]["kind"] =
@@ -955,7 +954,7 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
         },
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_direct_multipart.v2.json",
+        "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["transport"]["kind"] = serde_json::Value::from("future_transport"),
     );
@@ -970,7 +969,7 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
     // The whole flat payload, exactly as it was written before the
     // transport became a variant of its own.
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session.v2.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
             let content_ref = payload["state"]["content_ref"].clone();
@@ -979,7 +978,7 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
             object.insert("mode".to_owned(), serde_json::Value::from("direct_put"));
             object.insert(
                 "claimed_checksum".to_owned(),
-                content_ref["storage_checksum"].clone(),
+                content_ref["checksum"].clone(),
             );
             object.insert("direct_put_content_ref".to_owned(), content_ref.clone());
             object.insert("staged_content_ref".to_owned(), content_ref);
@@ -996,7 +995,7 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
         "staged_content_ref",
     ] {
         assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-            "control_upload_session.v2.json",
+            "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| payload[legacy_field] = serde_json::Value::from("direct_put"),
         );
@@ -1004,7 +1003,7 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
     // A session with no transport at all is not a session: there is no
     // default to fall back to, which is the point of moving it here.
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session.v2.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
             payload
@@ -1022,19 +1021,19 @@ fn upload_sessions_reject_the_pre_transport_flat_encoding() {
 fn upload_sessions_reject_a_reference_to_another_content_object() {
     let other = serde_json::Value::from("con_99999999999999999999999999999999");
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session.v2.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["state"]["content_ref"]["content_id"] = other.clone(),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_staged.v2.json",
+        "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
             payload["transport"]["staging"]["content_ref"]["content_id"] = other.clone();
         },
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_direct_put.v2.json",
+        "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["transport"]["promised_content"]["content_id"] = other.clone(),
     );
@@ -1046,7 +1045,7 @@ fn upload_sessions_reject_a_reference_to_another_content_object() {
 /// reference that drifts from the promise names content nobody proved.
 #[test]
 fn direct_put_sessions_reject_a_completion_that_drifts_from_the_promise() {
-    let fixture = "control_upload_session_direct_put.v2.json";
+    let fixture = "control_upload_session_direct_put.v1.json";
     // Completing the open fixture on its own promise is a record that
     // decodes, so the two edits below are refused for the drift alone.
     decode_control_object::<UploadSessionState>(
@@ -1067,7 +1066,7 @@ fn direct_put_sessions_reject_a_completion_that_drifts_from_the_promise() {
             fixture,
             ControlObjectKind::UploadSession,
             complete_on_the_promise(|content_ref| {
-                content_ref["storage_checksum"]["value"] = serde_json::Value::from("0".repeat(64));
+                content_ref["checksum"]["value"] = serde_json::Value::from("0".repeat(64));
             }),
         ),
     ] {
@@ -1098,12 +1097,13 @@ fn complete_on_the_promise(
 /// Each transport carries its own details, and carries all of them. A
 /// direct-put session that never recorded the reference its write was
 /// signed against could not check what landed; a multipart session missing
-/// its provider upload could not assemble or clean up. Neither is a record
-/// that decodes.
+/// its provider upload could not assemble or clean up, and one missing its
+/// checksum algorithm could not safely sign or complete after a restart.
+/// None is a record that decodes.
 #[test]
 fn upload_sessions_reject_a_transport_missing_its_own_fields() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_direct_put.v2.json",
+        "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
             payload["transport"]
@@ -1112,9 +1112,13 @@ fn upload_sessions_reject_a_transport_missing_its_own_fields() {
                 .remove("promised_content");
         },
     );
-    for missing in ["provider_upload_id", "part_size_bytes"] {
+    for missing in [
+        "provider_upload_id",
+        "part_size_bytes",
+        "checksum_algorithm",
+    ] {
         assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-            "control_upload_session_direct_multipart.v2.json",
+            "control_upload_session_direct_multipart.v1.json",
             ControlObjectKind::UploadSession,
             |payload| {
                 payload["transport"]
@@ -1126,7 +1130,7 @@ fn upload_sessions_reject_a_transport_missing_its_own_fields() {
     }
     // And no transport holds another's details.
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_direct_multipart.v2.json",
+        "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["transport"]["kind"] = serde_json::Value::from("service_proxied"),
     );
@@ -1137,7 +1141,7 @@ fn upload_sessions_reject_a_transport_missing_its_own_fields() {
 #[test]
 fn upload_sessions_reject_a_zero_multipart_part_size() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session_direct_multipart.v2.json",
+        "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["transport"]["part_size_bytes"] = serde_json::Value::from(0),
     );

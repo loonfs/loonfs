@@ -68,9 +68,8 @@ pub struct BeginDownloadResponse {
     pub revision_no: RevisionNo,
     /// Identity, byte length, and checksum evidence for the object the
     /// capability reads. A reader checks the bytes it receives against
-    /// `size_bytes`, and against `whole_file_sha256` when the reference
-    /// carries one — a direct-multipart object never will, because nobody
-    /// ever hashed it with SHA-256.
+    /// `size_bytes` and recomputes `checksum.algorithm` over the complete
+    /// payload.
     pub content_ref: ContentRef,
     /// Short-lived read capability the client uses without learning the raw object key.
     pub access: ObjectTransferAccess,

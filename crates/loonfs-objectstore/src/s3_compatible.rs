@@ -22,8 +22,8 @@ use base64::Engine as _;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{wire::hex::hex_encode_bytes, SecretString};
-use loonfs_api::{ChecksumAlgorithm, StorageChecksum};
-use object_store::aws::{AmazonS3Builder, Checksum};
+use loonfs_api::{Checksum, ChecksumAlgorithm};
+use object_store::aws::{AmazonS3Builder, Checksum as ProviderChecksum};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::fmt;
 use std::sync::Arc;
@@ -237,7 +237,7 @@ impl S3CompatibleStore {
             builder = builder.with_token(session_token.expose());
         }
         if config.sha256_upload_checksum {
-            builder = builder.with_checksum_algorithm(Checksum::SHA256);
+            builder = builder.with_checksum_algorithm(ProviderChecksum::SHA256);
         }
 
         let provider = Arc::new(
@@ -379,7 +379,7 @@ impl ObjectStore for S3CompatibleStore {
         }
 
         let headers = &response.headers;
-        let Some(storage_checksum) = s3_stored_checksum(headers) else {
+        let Some(checksum) = s3_stored_checksum(headers) else {
             return Err(ObjectStoreError::StoredChecksumMissing {
                 object_key: key.to_owned(),
             });
@@ -394,7 +394,7 @@ impl ObjectStore for S3CompatibleStore {
 
         Ok(Some(StoredObjectChecksum {
             size_bytes,
-            storage_checksum,
+            checksum,
         }))
     }
 
@@ -420,12 +420,12 @@ impl ObjectStore for S3CompatibleStore {
         key: &str,
         provider_upload_id: &str,
         parts: &[MultipartPart],
-        full_object_checksum: &StorageChecksum,
+        checksum: &Checksum,
     ) -> Result<MultipartCompletion> {
         let signed = self.request_signer.presign_complete_multipart(
             key,
             provider_upload_id,
-            full_object_checksum,
+            checksum,
             MULTIPART_CONTROL_TTL,
             Self::signing_time(),
         )?;
@@ -489,7 +489,7 @@ impl ObjectStore for S3CompatibleStore {
 /// The checksum *type* header is deliberately not consulted: R2 never sends
 /// one, and full-object coverage is established when LoonFS writes the
 /// object, not discovered when it reads the metadata back.
-fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<StorageChecksum> {
+fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<Checksum> {
     for (header, algorithm) in S3_CHECKSUM_HEADERS {
         let Some(value) = headers.get(*header).and_then(|value| value.to_str().ok()) else {
             continue;
@@ -500,7 +500,7 @@ fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<StorageChecksum> {
         if raw.len() != algorithm.value_bytes() {
             continue;
         }
-        return Some(StorageChecksum {
+        return Some(Checksum {
             algorithm: *algorithm,
             value: hex_encode_bytes(&raw),
         });
@@ -561,20 +561,12 @@ fn complete_multipart_body(parts: &[MultipartPart]) -> Result<String> {
     Ok(body)
 }
 
-fn base64_checksum(checksum: &StorageChecksum) -> Result<String> {
-    let raw = loonfs_api::wire::hex::hex_decode_bytes(&checksum.value).map_err(|_| {
-        ObjectStoreError::InvalidContentRef(format!(
-            "{} checksum must be lowercase hex",
-            checksum.algorithm
-        ))
-    })?;
-    if raw.len() != checksum.algorithm.value_bytes() {
-        return Err(ObjectStoreError::InvalidContentRef(format!(
-            "{} checksum must be {} hex characters",
-            checksum.algorithm,
-            checksum.algorithm.value_bytes() * 2
-        )));
-    }
+fn base64_checksum(checksum: &Checksum) -> Result<String> {
+    checksum
+        .validate()
+        .map_err(|error| ObjectStoreError::InvalidContentRef(error.to_string()))?;
+    let raw = loonfs_api::wire::hex::hex_decode_bytes(&checksum.value)
+        .map_err(|error| ObjectStoreError::InvalidContentRef(error.to_string()))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 

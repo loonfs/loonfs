@@ -31,6 +31,11 @@ from replacing an immutable content object. A provider that accepts the HMAC
 signature but silently ignores either precondition breaks that argument.
 HMAC-compatible gateways have been observed doing exactly that.
 
+LoonFS represents every checksum as
+`{"algorithm":"sha256","value":"<64 lowercase hex>"}`. The surrounding
+object says whether the checksum covers complete content or one upload part.
+Adapters convert provider formats, including base64 headers, to lowercase hex.
+
 Two things must both hold for direct-put to be available, and
 `ConfiguredObjectStore::direct_transfers` is the code that decides — building
 the bundle *is* the decision, so nothing above the object-store crate asks

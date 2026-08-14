@@ -1276,7 +1276,7 @@ mod tests {
                 "kind": "blob_v1",
                 "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 1,
-                "storage_checksum": {
+                "checksum": {
                     "algorithm": "sha256",
                     "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 }

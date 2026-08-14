@@ -16,7 +16,7 @@
 | **Checkpoint** | A durable pinned reference to one manifest version and namespace sequence. It lets readers and retention logic rely on that manifest without replaying the entire WAL history. |
 | **Snapshot** | An in-process read view. It may be stable for one operation or session, but it is not a durable checkpoint unless explicitly recorded as one. |
 | **Content object** | One immutable object containing file bytes. In v0, each file revision stores the whole file as one object. |
-| **Content ref** | The metadata pointer for a file revision: `kind: "blob_v1"`, the `content_id` naming the object, `size_bytes`, a mandatory full-object `storage_checksum`, and a `whole_file_sha256` when a trusted party computed one. |
+| **Content ref** | The metadata pointer for a file revision: `kind: "blob_v1"`, the `content_id` naming the object, `size_bytes`, and one mandatory full-object `checksum`. |
 | **Name key** | The folded form of a display name that sibling-collision checks compare on. The v0 rule is NFC, Unicode default case folding, then NFC again. |
 | **Tombstone** | A metadata record that hides a deleted inode or subtree without erasing history. |
 | **Retention floor** | The oldest sequence number from which the system still promises incremental replay. Older clients must re-bootstrap. It bounds replay only: file revision history is retained in full regardless of the floor, and the floor never advances unless an operator opts in. |

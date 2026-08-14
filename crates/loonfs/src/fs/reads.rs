@@ -183,9 +183,8 @@ impl FsReader {
     /// it reads: the content arrives one ranged read at a time with the
     /// verifying digest folded over it, so a 50 GiB file costs one chunk of
     /// memory rather than 50 GiB. The verification is the buffered read's,
-    /// unweakened — declared size, plus the reference's trusted whole-file
-    /// SHA-256 when it has one and its storage checksum when that is the only
-    /// full-object evidence there is — and it lands on the final
+    /// unweakened — declared size plus the reference's full-object checksum,
+    /// recomputed using the algorithm the reference names — and it lands on the final
     /// [`FileContentStream::next_chunk`] call. A caller that stops early
     /// stops with unverified bytes; a caller that wants the whole answer or
     /// none of it uses [`Self::get_file_bytes`].

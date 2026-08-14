@@ -283,7 +283,7 @@ impl PartReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::StorageChecksum;
+    use loonfs_api::Checksum;
 
     fn source(chunks: Vec<&'static [u8]>) -> PayloadStream {
         futures::stream::iter(chunks.into_iter().map(|chunk| Ok(Bytes::from(chunk)))).boxed()
@@ -375,7 +375,7 @@ mod tests {
             measured.spool.is_none(),
             "a file-backed payload must not be copied to be read twice"
         );
-        assert_eq!(digest.finish(), StorageChecksum::sha256(&payload));
+        assert_eq!(digest.finish(), Checksum::sha256(&payload));
     }
 
     /// A source that cannot be read again is spooled so the second pass has
@@ -389,7 +389,7 @@ mod tests {
         let measured = source.measure(&mut digest).await.expect("measure payload");
 
         assert_eq!(measured.size_bytes(), 5_000);
-        assert_eq!(digest.finish(), StorageChecksum::sha256(&payload));
+        assert_eq!(digest.finish(), Checksum::sha256(&payload));
         let spool_path = measured.path.clone();
         assert!(spool_path.exists(), "the second pass has nothing to read");
 

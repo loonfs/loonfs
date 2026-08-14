@@ -7,7 +7,7 @@ use crate::provider_env::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_api::{ContentId, ManifestObjectId, StorageChecksum};
+use loonfs_api::{Checksum, ContentId, ManifestObjectId};
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
@@ -396,7 +396,7 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
 
     let payload_len = 3 * loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES as usize;
     let payload: Vec<u8> = (0..payload_len).map(|index| (index % 251) as u8).collect();
-    let expected = StorageChecksum::sha256(&payload);
+    let expected = Checksum::sha256(&payload);
 
     let size_bytes = store
         .put_streamed(
@@ -415,7 +415,7 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
         .expect("streamed object exists");
     assert_eq!(read_back.len(), payload_len);
     assert_eq!(
-        StorageChecksum::sha256(&read_back),
+        Checksum::sha256(&read_back),
         expected,
         "the assembled object must hash to what was streamed into it"
     );

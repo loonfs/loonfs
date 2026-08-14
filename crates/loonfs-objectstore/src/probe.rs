@@ -36,7 +36,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_api::{ChecksumAlgorithm, StorageChecksum};
+use loonfs_api::{Checksum, ChecksumAlgorithm};
 
 /// Prefix owning every object a probe run writes.
 const PROBE_RUN_PREFIX: &str = "probe-runs";
@@ -743,24 +743,11 @@ async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> Ch
             stored.size_bytes
         )));
     }
-    let checksum = stored.storage_checksum;
-    if checksum.value.len() != checksum.algorithm.value_bytes() * 2 {
-        return Err(wrong(format!(
-            "a checksum value must be its algorithm's width in hex: {checksum:?}"
-        )));
-    }
-    if !checksum
-        .value
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(wrong(format!(
-            "a checksum value must be lowercase hex: {checksum:?}"
-        )));
-    }
-    if checksum.algorithm == ChecksumAlgorithm::Sha256
-        && checksum != StorageChecksum::sha256(&payload)
-    {
+    let checksum = stored.checksum;
+    checksum
+        .validate()
+        .map_err(|error| wrong(format!("a stored checksum is invalid: {error}")))?;
+    if checksum.algorithm == ChecksumAlgorithm::Sha256 && checksum != Checksum::sha256(&payload) {
         return Err(wrong(
             "a reported sha256 does not describe the bytes actually stored",
         ));

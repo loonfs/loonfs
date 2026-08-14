@@ -157,7 +157,7 @@ hoc.
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/stat` and `GET /filesystem/list`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the deployment's provider can sign a write that binds a whole-object checksum and a create-only precondition, on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
-| `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `storage_checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
+| `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`). | The server returns a short-lived presigned GET capability for the content object behind one path and revision. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
@@ -318,6 +318,28 @@ codebase.
 - As optional planes gain ops, SDKs should group them the way the planes are
   grouped (`core`, `admin`, and later), so the surface a deployment does not
   support is visibly absent instead of failing call by call.
+
+### 4.1 Checksums
+
+Every public checksum value uses one shape:
+
+```json
+{ "algorithm": "sha256", "value": "<64 lowercase hex>" }
+```
+
+The allowed algorithms are `sha256`, `crc64nvme`, and `crc32c`. Their values
+contain exactly 64, 16, and 8 lowercase hexadecimal characters respectively.
+Other algorithms and invalid values are rejected.
+
+The surrounding field defines what the checksum covers. Checksums in
+`ContentRef` and `UploadContentClaim` cover the complete content; a part
+checksum covers one multipart upload part. A `checksum_algorithm` field selects
+an algorithm but does not contain a checksum value.
+
+Service-proxied uploads use `sha256`. Direct PUT uses the algorithm advertised
+by `core.uploads.direct_put.checksum.<algorithm>`. Direct multipart uses the
+`checksum_algorithm` returned when the session begins, currently
+`crc64nvme`. Reads verify the algorithm stored in the content reference.
 
 ## 5. Minimal upload, commit, and change-feed model
 
@@ -530,31 +552,18 @@ day it joins the preimage.
    one defined in section 5.1, so annotations are compared exactly as the
    server fingerprints them — an absent message and an empty one are
    different commits, and a client must not fold both into "no message".
-4. Prove the uploaded bytes are the committed object's bytes: the content's
-   `whole_file_sha256` when it has one, and otherwise its
-   `storage_checksum`. This is the one question the fingerprint cannot
-   answer, because the retry deliberately fingerprints the *committed*
-   object.
+4. Compare the uploaded bytes with the committed content reference's
+   `checksum`. If the client still has the bytes, it recomputes the required
+   checksum. If it streamed the bytes, it uses the checksum calculated during
+   that stream. The algorithms must match; the client must not compare or
+   convert different algorithms.
 
-   A client that still holds its bytes recomputes whichever digest the
-   comparison calls for. A client that streamed its payload no longer has
-   the bytes, and compares the digest it folded during that one pass
-   instead — for a `direct_multipart` upload, the `crc64nvme` it claimed at
-   completion, which is also what the reference the server minted carries.
-   Both are evidence about the same bytes; they differ only in which digests
-   they can answer for, and a digest the upload never computed falls to rule
-   5 rather than being guessed at.
-
-   Equal fingerprints over provably equal bytes mean the logical operation
-   had already succeeded: report the commit that landed, with its original
-   `committed_seq`.
-5. Anything else surfaces a failure. A fingerprint that differs is the
-   `commit_id_reuse_conflict` unchanged, and so are different content and a
-   commit the client could not locate — absent receipt fields, or a sequence
-   retention no longer answers for. Content the client *cannot* compare — a
-   checksum algorithm it does not implement — is reported as a failure
-   naming why it could not reconcile. **A comparison that cannot be made is
-   never reported as success.**
+   If both the fingerprint and checksum match, report the original commit and
+   its `committed_seq`.
+5. Otherwise, report failure. Preserve `commit_id_reuse_conflict` when the
+   fingerprints or content differ. Also fail when the original commit cannot
+   be found or the client cannot compute the required checksum. An incomplete
+   comparison is never treated as success.
 
 The duplicate content object the rerun uploaded is then referenced by
 nothing. That is by design: it is a completed upload whose content no
@@ -944,44 +953,29 @@ so `GET /v0/admin/namespaces/{ns}/checkpoints` is where to look next.
 the client `PUT`s its bytes to `/uploads/{upload_id}/content` and the server
 writes them to object storage.
 
-The server does not hold the body. It hashes the payload as it forwards it,
-so a proxied upload costs one transfer part of server memory whatever the
-object's size, and `upload.max_content_bytes` is counted as the bytes arrive
-rather than measured after buffering — a body past the limit answers
-`content_too_large` without ever being held. The reference the upload
-produces carries `storage_checksum` = the SHA-256 the *server* computed over
-the complete payload, and `whole_file_sha256` set to the same value: the
-LoonFS write path is the trusted party that hashed these bytes (format spec,
-provenance rule).
+The server streams the body to object storage without buffering the complete
+file. While streaming, it counts the bytes and computes SHA-256. A body larger
+than `upload.max_content_bytes` fails with `content_too_large`. The resulting
+content reference stores the server-computed SHA-256 in `checksum`.
 
 #### Direct single-PUT upload
 
-For `direct_put`, the client requests a presigned upload capability. It
-declares what it can know — how many bytes it holds and what they hash to —
-and nothing about where they go: the server owns content identity, so a
-client can never aim a signed write at an object it chose.
+For `direct_put`, the client supplies the content size and checksum when the
+session begins. The server chooses the object identity and returns a presigned
+upload capability. The provider enforces the checksum included in the signed
+request.
 
-The claim is required *here*, at begin, and cannot move: the digest is
-signed into the header the provider enforces on the write, so the presigned
-URL cannot exist before the digest does. That is the one place a LoonFS
-client must read its payload before uploading it, and it is why
-`direct_multipart` — whose whole-object claim is never signed into anything
-— claims at completion instead.
-
-The claim names its algorithm, because providers do not agree on one: each
-binds into a presigned write whatever its own API can enforce. The
-deployment says which it is, in the
-`core.uploads.direct_put.checksum.<algorithm>` feature it advertises, and a
-claim in any other algorithm answers `invalid_request` at begin rather than
-being signed into a write the provider would refuse. A client reads that key
-and folds that digest over its payload while staging.
+The checksum algorithm must match
+`core.uploads.direct_put.checksum.<algorithm>`. Any other algorithm fails with
+`invalid_request`. Because the checksum is part of the signed request, the
+client must calculate it before uploading.
 
 ```json
 {
   "mode": "direct_put",
   "content": {
     "size_bytes": 1234,
-    "storage_checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" }
+    "checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" }
   }
 }
 ```
@@ -1003,8 +997,7 @@ The response includes only a short-lived transfer capability, never raw object-s
       "kind": "blob_v1",
       "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
       "size_bytes": 1234,
-      "storage_checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" },
-      "whole_file_sha256": "<64 lowercase hex>"
+      "checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" }
     },
     "access": {
       "kind": "presigned_url",
@@ -1067,27 +1060,21 @@ so cross-origin access is governed by the bucket's or container's own CORS
 configuration rather than by anything this API sets.
 
 After the client uploads bytes to the presigned URL, it calls complete with the
-`content_ref` the server returned at begin. Completion **verifies rather than
-trusts**: it reads the object's provider-stored full-object checksum and size
-in one metadata request and compares both against the reference. Write-time
-provider enforcement is real but not uniform across S3-compatible providers,
-and a random object id says nothing about its bytes, so the comparison is the
-load-bearing check rather than a formality. A mismatch fails the completion and
-deletes the object — safe because the id was never published, so nothing
-references it. A metadata request the provider does not answer is a different
-outcome: nothing was compared, so the completion reports `server_error`, leaves
-the object and the session as they were, and the client repeats it. Nothing is
-read back through the server either way.
+`content_ref` returned when the session began. The server reads the stored
+object's size and checksum from the provider and compares them with that
+reference. A mismatch fails the completion and deletes the unpublished object.
+If the provider metadata request fails, the server returns `server_error`
+without changing the object or session, so the client can retry. The server
+does not download the object during this check.
 
 #### Direct multipart upload
 
-`direct_multipart` is the one-pass path for a large object. The bytes cross
-the network once, in parallel, straight into object storage; the server
-opens and closes the provider's multipart upload and signs each part, and
-never sees a byte.
+`direct_multipart` uploads large objects directly to object storage in
+parallel. The server opens the provider upload, signs each part, and completes
+the upload without receiving the file bytes.
 
-**A begin request declares nothing about the payload.** It settles only the
-part geometry, and every field is optional:
+A begin request sets only the part size. It does not include the total size or
+complete-object checksum:
 
 ```json
 {
@@ -1096,117 +1083,87 @@ part geometry, and every field is optional:
 }
 ```
 
-`part_size_bytes` must be between 5 MiB and 5 GiB — the range every
-supported provider accepts for a non-final part — and defaults to 8 MiB. It
-is also what bounds the object: a provider accepts at most 10,000 parts, so
-one session carries at most `part_size_bytes` × 10,000 bytes. A client
-uploading something very large asks for a larger part size; a client that
-does not know its length takes the default and keeps asking for part URLs
-until its stream ends.
+`part_size_bytes` defaults to 8 MiB and must be between 5 MiB and 5 GiB. A
+session supports at most 10,000 parts, so larger objects require larger parts.
+A client that does not know the total size can request parts until its stream
+ends.
 
-**The two direct modes claim their content at opposite ends, and the reason
-is signing.** A `direct_put` client must declare its digest at begin
-because that digest is signed into the request header the provider will
-enforce — there is no presigned URL to hand out until it exists. A
-`direct_multipart` client declares nothing at begin because nothing about
-the whole object is signed into anything: each part carries its own
-checksum, and the assembled object's claim is only ever *verified*, at
-completion. Waiting until then costs nothing and buys a great deal — one
-pass over the bytes instead of two, and uploads of streams whose length is
-not known when they start.
+Direct PUT requires the complete checksum at the beginning because it is part
+of the signed request. Multipart uploads provide one checksum per part and the
+complete checksum at completion. This supports one-pass uploads and streams
+whose total size is initially unknown.
 
-The response is the geometry and nothing else — no content reference, no
-part count, and nothing about the provider:
+The response records the part size and checksum algorithm for the session:
 
 ```json
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
   "mode": "direct_multipart",
-  "direct_multipart": { "part_size_bytes": 8388608 }
+  "direct_multipart": {
+    "part_size_bytes": 8388608,
+    "checksum_algorithm": "crc64nvme"
+  }
 }
 ```
 
-There is no content reference to return because there is nothing yet to
-describe: the server has minted the object's identity, but its length and
-checksum are what the client reports at completion. A client that knows its
-size derives its own part count from `part_size_bytes`; one that does not
-simply keeps going.
+The response has no content reference because the complete size and checksum
+are not known yet. A client that knows its size can calculate the part count
+from `part_size_bytes`.
 
-**Parts.** `POST /uploads/{upload_id}/parts` takes a list of
-`{part_number, crc64nvme}` and returns one presigned capability per part,
-each with that part's checksum inside its signature. The client uploads
-parts directly and in parallel. A part is *not* create-only: asking for a
-part again and re-uploading it is how a client retries one, the provider
-takes the last write, and the object's checksum follows the bytes that
-stuck. Part sizes are the server's geometry, so a client never has to know a
-provider's minimum part size.
+**Parts.** `POST /uploads/{upload_id}/parts` accepts a list of
+`{part_number, checksum}` values and returns one presigned capability for each
+part. Every checksum must use the session's `checksum_algorithm`. Parts may be
+uploaded in parallel. To retry a part, request another capability and upload
+that part again; the provider keeps the latest upload.
 
-The server keeps **no durable record of any part**. Part bookkeeping — part
-number, etag, checksum — belongs to the client all the way to completion,
-exactly as it does in the provider's own multipart API.
+The server does not store part progress. The client must keep each part number,
+etag, and checksum until completion.
 
-**Completion.** `complete` carries the claim and the parts. The claim is the
-assembled object's length and its **CRC-64/NVME**, not a SHA-256: an
-S3-compatible provider computes a CRC-64/NVME over a multipart object and
-never computes a SHA-256 over it, so the CRC is the only full-object
-evidence that will ever exist for these bytes. The resulting `content_ref`
-therefore carries no `whole_file_sha256` (format spec, provenance rule).
+**Completion.** The completion request includes the complete size and checksum
+plus every uploaded part. In v0, multipart sessions use CRC-64/NVME. The
+resulting content reference stores that complete-object checksum.
 
 ```json
 {
   "completion": "multipart",
-  "multipart": { "size_bytes": 17301504, "crc64nvme": "<16 hex>" },
+  "content": {
+    "size_bytes": 17301504,
+    "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" }
+  },
   "parts": [
-    { "part_number": 1, "etag": "\"...\"", "crc64nvme": "<16 hex>" },
-    { "part_number": 2, "etag": "\"...\"", "crc64nvme": "<16 hex>" },
-    { "part_number": 3, "etag": "\"...\"", "crc64nvme": "<16 hex>" }
+    { "part_number": 1, "etag": "\"...\"", "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" } },
+    { "part_number": 2, "etag": "\"...\"", "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" } },
+    { "part_number": 3, "etag": "\"...\"", "checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" } }
   ]
 }
 ```
 
-Every part, once each, in ascending part order. A `direct_multipart`
-completion carries **no** `content_ref`: the client was never told the
-identity, and the completion response is where it learns it. Service-proxied
-and `direct_put` completions are the other way round — they name back the
-`content_ref` they were given under `"completion": "content_ref"`, and carry
-no multipart claim and no parts.
+The request lists every part once in ascending order. It does not include a
+content reference; the server returns the reference after completion.
+Service-proxied and direct-PUT completion requests instead send the content
+reference under `"completion": "content_ref"` and do not include parts.
 
-The server asks the provider to assemble the object and then **reads the
-assembled object's stored checksum and size back and compares them against
-the reference**. That read is load-bearing, not defence in depth: providers
-in this family do not agree about the whole-object checksum supplied at
-assembly time — one treats it as a precondition and refuses a mismatch, one
-accepts it, creates the object, and stores the true checksum instead — so
-LoonFS establishes the result for itself either way.
+The server asks the provider to assemble the object, then reads its stored size
+and checksum and compares them with the completion request. This read is
+required because providers do not handle an incorrect assembled checksum in
+the same way.
 
-**A completion that does not verify is terminal.** The provider's multipart
-upload is consumed by the completion attempt, so there are no parts left to
-retry against and the session can never produce the content it promised. The
-session goes to `aborted`, the object it assembled is deleted, and the
-failure is reported. The client starts a new session; there is no
-completion retry that could succeed.
+If the stored values do not match, the server aborts the session, deletes the
+object, and returns failure. The client must start a new session. If assembly
+or the metadata read fails before a comparison can be made, the server returns
+`server_error` and keeps the session open so completion can be retried.
 
-**A completion that could not be verified is not terminal.** Terminal means
-the read-back ran and disagreed. When the assembly call or the read-back
-fails at the transport instead, nothing was established about the object, so
-the completion reports `server_error` and changes nothing: the session stays
-`open` and any object the provider did assemble is left alone. The client
-repeats the completion, which resolves from durable state as below.
-
-**A lost completion response is not a failure.** Replaying the provider's
-completion is useless — one provider replays a success carrying no checksum,
-another reports an upload it has never heard of while the object sits there
-correct — so the replayed call's answer is never the signal. Re-calling
-`complete` resolves it from durable state instead:
+If the completion response is lost, the client calls `complete` again. The
+server resolves the result from durable state:
 
 - the session is already `completed` → the original result replays, with a
   freshly minted receipt;
 - the session is still `open` and the provider has no such upload → the
   object at the key is read back and verified; if it is the promised object,
   the completion is recorded as if the first attempt's response had arrived;
-- neither an upload nor a matching object exists → the completion fails
-  terminally, as above.
+- neither an upload nor a matching object exists → the session is aborted and
+  completion fails.
 
 **Cleanup.** The session record carries the provider's upload id, so a
 session that is aborted — by the client, by a failed verification, or by
@@ -1223,7 +1180,7 @@ another one for as long as the session is minting them.
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." }
+  "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
 }
 ```
 
@@ -1241,7 +1198,7 @@ ignored.
   "actor": { "kind": "service", "id": "document-importer" },
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1249,7 +1206,7 @@ ignored.
     {
       "kind": "put_file",
       "path": "/docs/report.pdf",
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "behavior": "no_replace"
     }
   ]
@@ -1385,8 +1342,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
-    "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
-    "whole_file_sha256": "42d..."
+    "checksum": { "algorithm": "sha256", "value": "42d..." }
   },
   "committed_at_ms": 1752624000000,
   "attributes": {
@@ -1486,8 +1442,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
         "kind": "blob_v1",
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
-        "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
-        "whole_file_sha256": "42d..."
+        "checksum": { "algorithm": "sha256", "value": "42d..." }
       }
     },
     {
@@ -1576,8 +1531,7 @@ reaches revision 1, regardless of how far the retention floor has advanced.
         "kind": "blob_v1",
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
-        "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
-        "whole_file_sha256": "42d..."
+        "checksum": { "algorithm": "sha256", "value": "42d..." }
       }
     }
   ],
@@ -1633,7 +1587,7 @@ create a directory and write into it:
   "message": "import the January report",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1642,7 +1596,7 @@ create a directory and write into it:
     {
       "kind": "put_file",
       "path": "/reports/2026/january.pdf",
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "behavior": "no_replace"
     },
     {
@@ -1851,29 +1805,23 @@ The semantic rule is:
   servers may also return an opaque `validated_content_token` that remote
   create/replace mutations carry back as their content-preparation proof.
 
-**Both request bodies are tagged unions, and the tag is required.** A begin
-request names its transport in `mode` and carries that transport's fields and
-no other's:
+Begin requests use `mode` to select the upload transport. A request may include
+only the fields for that mode:
 
 ```json
 { "mode": "service_proxied" }
-{ "mode": "direct_put", "content": { "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "<64 hex>" } } }
+{ "mode": "direct_put", "content": { "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } } }
 { "mode": "direct_multipart", "multipart": { "part_size_bytes": 8388608 } }
 ```
 
-`service_proxied` takes no other fields; `direct_put` requires its `content`
-claim, because the digest is signed into the write the provider enforces;
-`direct_multipart` takes an optional `multipart` object and defaults its
-geometry. A completion body is tagged the same way in `completion`, over the
-two shapes section 6.9's transports produce — `content_ref` for a session the
-server named an object for, `multipart` for one that assembled its own.
+`service_proxied` has no additional fields. `direct_put` requires `content`.
+`direct_multipart` accepts an optional `multipart` object and otherwise uses
+the default part size.
 
-A body that mixes two transports' fields, or omits the tag, is rejected as
-`invalid_request` when it is decoded — before any session is read. What the
-decoder cannot settle is whether the shape matches the *session*, since only
-the server knows which transport a session was opened with; completing a
-session with the other shape is `invalid_request` too, reported after the
-record is read.
+Completion requests use `completion` in the same way. Service-proxied and
+direct-PUT sessions use `content_ref`; multipart sessions use `content` and
+`parts`. Missing tags, mixed fields, and a completion shape that does not match
+the session fail with `invalid_request`.
 
 The begin-upload *response* is tagged the same way, in the same `mode`, and
 carries its transport's field and no other's: `service_proxied` carries
@@ -2013,8 +1961,7 @@ Representative content-upload response:
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
-    "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
-    "whole_file_sha256": "7ab..."
+    "checksum": { "algorithm": "sha256", "value": "7ab..." }
   }
 }
 ```
@@ -2027,8 +1974,7 @@ Representative complete-upload request:
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
-    "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
-    "whole_file_sha256": "7ab..."
+    "checksum": { "algorithm": "sha256", "value": "7ab..." }
   }
 }
 ```
@@ -2043,8 +1989,7 @@ Representative complete-upload response:
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
-    "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
-    "whole_file_sha256": "7ab..."
+    "checksum": { "algorithm": "sha256", "value": "7ab..." }
   },
   "validated_content_token": "opaque-server-token"
 }
@@ -2081,8 +2026,7 @@ checks the arriving bytes against:
     "kind": "blob_v1",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
-    "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
-    "whole_file_sha256": "42d..."
+    "checksum": { "algorithm": "sha256", "value": "42d..." }
   },
   "access": {
     "kind": "presigned_url",
@@ -2106,12 +2050,10 @@ connection, or fetch windows in parallel on the one URL without another round
 trip to the server. A server implementation must not sign a `Range` header
 into the capability; doing so would bind it to a single window.
 
-**The reference is the check, not a description.** A client verifies the
-length always, and `whole_file_sha256` whenever the reference carries one. A
-`direct_multipart` object carries none — nothing ever computed a SHA-256 over
-it (section 6.9) — and its length is then the whole check, exactly as it is
-for the server's own reads. Bytes that do not match are a failed download,
-not a file.
+**The client verifies the complete file.** It checks the byte length and
+recomputes the algorithm in `content_ref.checksum`. This applies to SHA-256,
+CRC-64/NVME, and CRC-32C, including downloads assembled from ranged or resumed
+requests. A mismatch fails the download.
 
 **The raw object key is never exposed.** A client learns a URL that expires,
 the same way a `direct_put` client does.
@@ -2155,8 +2097,7 @@ more than three events. The events stay in request order.
             "kind": "blob_v1",
             "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
             "size_bytes": 20591,
-            "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
-            "whole_file_sha256": "7ab..."
+            "checksum": { "algorithm": "sha256", "value": "7ab..." }
           }
         }
       ]

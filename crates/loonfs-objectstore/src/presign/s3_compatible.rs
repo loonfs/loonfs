@@ -14,7 +14,7 @@ use crate::presign::v4::{
 use crate::ObjectStoreError;
 use base64::Engine as _;
 use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::{ChecksumAlgorithm, ContentRef, ContentRefKind, SecretString, StorageChecksum};
+use loonfs_api::{Checksum, ChecksumAlgorithm, ContentRef, ContentRefKind, SecretString};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -198,7 +198,7 @@ impl S3CompatiblePresigner {
         &self,
         object_key: &str,
         provider_upload_id: &str,
-        full_object_checksum: &StorageChecksum,
+        checksum: &Checksum,
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
@@ -208,7 +208,7 @@ impl S3CompatiblePresigner {
             BTreeMap::from([("uploadId".to_owned(), provider_upload_id.to_owned())]),
             BTreeMap::from([(
                 S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
-                base64_crc64nvme(full_object_checksum)?,
+                base64_crc64nvme(checksum)?,
             )]),
             expires_in,
             now,
@@ -441,7 +441,7 @@ impl DirectMultipartIssuer for S3CompatiblePresigner {
             ]),
             BTreeMap::from([(
                 S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
-                base64_crc64nvme(request.part_checksum)?,
+                base64_crc64nvme(request.checksum)?,
             )]),
             request.expires_in,
             now,
@@ -472,19 +472,17 @@ impl DirectGetIssuer for S3CompatiblePresigner {
 }
 
 /// Converts a CRC-64/NVME into the base64 spelling the S3 family signs.
-fn base64_crc64nvme(checksum: &StorageChecksum) -> Result<String> {
+fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
     if checksum.algorithm != ChecksumAlgorithm::Crc64nvme {
         return Err(invalid_direct_put_content(
             "multipart uploads are checksummed with crc64nvme",
         ));
     }
+    checksum
+        .validate()
+        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
     let raw = hex_decode_bytes(&checksum.value)
-        .map_err(|_| invalid_direct_put_content("crc64nvme must be lowercase hex"))?;
-    if raw.len() != ChecksumAlgorithm::Crc64nvme.value_bytes() {
-        return Err(invalid_direct_put_content(
-            "crc64nvme must be 16 hex characters",
-        ));
-    }
+        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
@@ -509,25 +507,17 @@ fn s3_sha256_checksum_header(content_ref: &ContentRef) -> Result<String> {
     // Single PUT is the only direct producer today, and it signs a SHA-256.
     // The CRC algorithms exist in the format for direct multipart, which
     // presigns nothing.
-    if content_ref.storage_checksum.algorithm != ChecksumAlgorithm::Sha256 {
+    if content_ref.checksum.algorithm != ChecksumAlgorithm::Sha256 {
         return Err(invalid_direct_put_content(
-            "direct_put requires a sha256 storage checksum",
+            "direct_put requires a sha256 checksum",
         ));
     }
-    if content_ref.whole_file_sha256.as_deref() != Some(content_ref.storage_checksum.value.as_str())
-    {
-        return Err(invalid_direct_put_content(
-            "direct_put content ref must carry the same sha256 as its storage checksum",
-        ));
-    }
-
-    let digest = hex_decode_bytes(&content_ref.storage_checksum.value)
-        .map_err(|_| invalid_direct_put_content("direct_put sha256 must be lowercase hex"))?;
-    if digest.len() != 32 {
-        return Err(invalid_direct_put_content(
-            "direct_put sha256 must be 64 hex characters",
-        ));
-    }
+    content_ref
+        .checksum
+        .validate()
+        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
+    let digest = hex_decode_bytes(&content_ref.checksum.value)
+        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
 
     Ok(base64::engine::general_purpose::STANDARD.encode(digest))
 }
@@ -558,7 +548,7 @@ mod tests {
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
     use crate::ObjectStoreError;
-    use loonfs_api::{ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, StorageChecksum};
+    use loonfs_api::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind};
     use std::time::{Duration, UNIX_EPOCH};
 
     const CONTENT_KEY: &str =
@@ -781,21 +771,21 @@ mod tests {
             ..content_ref()
         };
         let crc_only = ContentRef {
-            storage_checksum: StorageChecksum {
+            checksum: Checksum {
                 algorithm: ChecksumAlgorithm::Crc64nvme,
                 value: "bbb7305bdf118bcb".to_owned(),
             },
-            whole_file_sha256: None,
             ..content_ref()
         };
-        let disagreeing_digests = ContentRef {
-            whole_file_sha256: Some(
-                "0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
-            ),
+        let malformed_sha256 = ContentRef {
+            checksum: Checksum {
+                algorithm: ChecksumAlgorithm::Sha256,
+                value: "A".repeat(64),
+            },
             ..content_ref()
         };
 
-        for content_ref in [unsupported_kind, crc_only, disagreeing_digests] {
+        for content_ref in [unsupported_kind, crc_only, malformed_sha256] {
             let error = signer
                 .presign_put(
                     PresignedPutRequest {

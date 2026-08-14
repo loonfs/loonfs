@@ -82,8 +82,8 @@ use thiserror::Error;
 
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse, CommittedChange,
-    CompleteUploadRequest, CompleteUploadResponse, DirectPutContentClaim, DirectPutUpload,
-    FilesystemChange, ObjectTransferAccess, UploadContentResponse, UploadMode,
+    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, FilesystemChange,
+    ObjectTransferAccess, UploadContentClaim, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     ActorId, ActorKind, ActorRef, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo,

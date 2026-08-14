@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
-use loonfs_api::StorageChecksum;
+use loonfs_api::Checksum;
 use std::fmt::Debug;
 use std::sync::Arc;
 use thiserror::Error;
@@ -48,7 +48,7 @@ pub struct StoredObjectChecksum {
     /// Complete object length the provider reports.
     pub size_bytes: u64,
     /// Full-object checksum the provider stored with the object.
-    pub storage_checksum: StorageChecksum,
+    pub checksum: Checksum,
 }
 
 /// One part of a client-driven multipart upload, as the client observed the
@@ -64,7 +64,7 @@ pub struct MultipartPart {
     /// Entity tag the provider returned for the accepted part.
     pub etag: String,
     /// Checksum the part was signed and accepted with.
-    pub checksum: StorageChecksum,
+    pub checksum: Checksum,
 }
 
 /// What a provider said about an attempt to assemble a multipart upload.
@@ -301,7 +301,7 @@ pub trait ObjectStore: Send + Sync + Debug {
 
     /// Asks the provider to assemble `parts` into the object at `key`.
     ///
-    /// `full_object_checksum` is supplied as a precondition where the
+    /// `checksum` is supplied as a precondition where the
     /// provider honours one. It is not sufficient evidence on its own:
     /// Cloudflare R2 accepts a wrong claim, assembles the object, and
     /// reports the true checksum, so a caller must read the object's stored
@@ -311,9 +311,9 @@ pub trait ObjectStore: Send + Sync + Debug {
         key: &str,
         provider_upload_id: &str,
         parts: &[MultipartPart],
-        full_object_checksum: &StorageChecksum,
+        checksum: &Checksum,
     ) -> Result<MultipartCompletion> {
-        let (_, _, _, _) = (key, provider_upload_id, parts, full_object_checksum);
+        let (_, _, _, _) = (key, provider_upload_id, parts, checksum);
         Err(ObjectStoreError::Unsupported(
             "client-driven multipart upload",
         ))
@@ -489,10 +489,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         key: &str,
         provider_upload_id: &str,
         parts: &[MultipartPart],
-        full_object_checksum: &StorageChecksum,
+        checksum: &Checksum,
     ) -> Result<MultipartCompletion> {
         self.as_ref()
-            .complete_multipart_upload(key, provider_upload_id, parts, full_object_checksum)
+            .complete_multipart_upload(key, provider_upload_id, parts, checksum)
             .await
     }
 
@@ -577,10 +577,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         key: &str,
         provider_upload_id: &str,
         parts: &[MultipartPart],
-        full_object_checksum: &StorageChecksum,
+        checksum: &Checksum,
     ) -> Result<MultipartCompletion> {
         (*self)
-            .complete_multipart_upload(key, provider_upload_id, parts, full_object_checksum)
+            .complete_multipart_upload(key, provider_upload_id, parts, checksum)
             .await
     }
 

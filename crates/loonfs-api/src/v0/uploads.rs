@@ -3,16 +3,16 @@
 //! presigned-access envelope. Content moves through these shapes; the
 //! metadata that later references it commits through [`super::commits`].
 
-use crate::{ContentRef, NamespaceId, StorageChecksum, UploadId};
+use crate::{Checksum, ChecksumAlgorithm, ContentRef, NamespaceId, UploadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// What a `direct_put` client promises about bytes it has not written yet.
+/// What an upload client claims about a complete payload.
 ///
 /// The server mints the content object's identity — a client cannot name a
 /// key it has not been given — so a direct upload declares only what it can
-/// know about its own bytes. The server signs both into the provider write
-/// and verifies them again at completion.
+/// know about its own bytes. Direct PUT binds the claim into the provider
+/// write; multipart verifies it against the assembled object at completion.
 ///
 /// The digest names its own algorithm because providers do not agree on one:
 /// each binds into a presigned write whatever its API can enforce. The
@@ -22,28 +22,11 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct DirectPutContentClaim {
+pub struct UploadContentClaim {
     /// Complete byte length the client will write.
     pub size_bytes: u64,
-    /// Whole-payload checksum the provider will be made to enforce, in the
-    /// algorithm this deployment advertises.
-    pub storage_checksum: StorageChecksum,
-}
-
-/// Final size and checksum claimed for a direct multipart upload.
-///
-/// The claim is supplied at completion so one-pass and streaming uploaders do
-/// not need to read the payload twice. LoonFS verifies the claim rather than
-/// trusting it. CRC-64/NVME is used because S3-compatible providers report it
-/// for the assembled full object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct DirectMultipartContentClaim {
-    /// Complete byte length the client wrote across every part.
-    pub size_bytes: u64,
-    /// CRC-64/NVME over the complete assembled payload, lowercase hex.
-    pub crc64nvme: String,
+    /// Whole-payload checksum in the algorithm required by this operation.
+    pub checksum: Checksum,
 }
 
 /// What a `direct_multipart` client asks for when it opens a session.
@@ -102,7 +85,7 @@ pub enum BeginUploadRequest {
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectPut"))]
     DirectPut {
         /// Byte length and digest of the payload about to be written.
-        content: DirectPutContentClaim,
+        content: UploadContentClaim,
     },
     /// Write the object in parts through presigned part uploads.
     #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectMultipart"))]
@@ -172,6 +155,9 @@ pub struct DirectMultipartUpload {
     /// Byte length of every part except the last. At most 10,000 parts may
     /// be uploaded, so this bounds the object at `part_size_bytes × 10_000`.
     pub part_size_bytes: u64,
+    /// Checksum algorithm every part and the complete assembled payload must
+    /// use for this session.
+    pub checksum_algorithm: ChecksumAlgorithm,
 }
 
 /// One part's checksum, supplied by the client so the server can sign it
@@ -182,8 +168,8 @@ pub struct DirectMultipartUpload {
 pub struct UploadPartChecksumClaim {
     /// One-based part number, at most the provider's 10,000-part limit.
     pub part_number: u32,
-    /// CRC-64/NVME over this part's bytes, lowercase hex.
-    pub crc64nvme: String,
+    /// Checksum over this part's bytes.
+    pub checksum: Checksum,
 }
 
 /// Request for part-upload capabilities on an open multipart session.
@@ -232,8 +218,8 @@ pub struct CompletedUploadPart {
     pub part_number: u32,
     /// Entity tag the provider returned for the accepted part.
     pub etag: String,
-    /// CRC-64/NVME the part was signed and accepted with, lowercase hex.
-    pub crc64nvme: String,
+    /// Checksum the part was signed and accepted with.
+    pub checksum: Checksum,
 }
 
 /// Stateless proof that a LoonFS server already validated a content ref.
@@ -362,9 +348,9 @@ pub enum CompleteUploadRequest {
     /// Completes a `direct_multipart` session with what it uploaded.
     #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadMultipart"))]
     Multipart {
-        /// The assembled object's length and CRC-64/NVME, which completion
+        /// The assembled object's length and checksum, which completion
         /// verifies against the provider's own reading of the object.
-        multipart: DirectMultipartContentClaim,
+        content: UploadContentClaim,
         /// Every part the client uploaded, in ascending part order. The
         /// server holds no part records of its own, so this list is what it
         /// assembles the object from.
@@ -379,14 +365,8 @@ impl CompleteUploadRequest {
     }
 
     /// Completes a `direct_multipart` session with what it assembled.
-    pub fn for_multipart(
-        claim: DirectMultipartContentClaim,
-        parts: Vec<CompletedUploadPart>,
-    ) -> Self {
-        Self::Multipart {
-            multipart: claim,
-            parts,
-        }
+    pub fn for_multipart(content: UploadContentClaim, parts: Vec<CompletedUploadPart>) -> Self {
+        Self::Multipart { content, parts }
     }
 }
 
@@ -471,10 +451,9 @@ pub struct AbortUploadResponse {
 mod tests {
     use super::{
         BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, DirectMultipartUpload,
-        DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess, UploadMode,
-        UploadSessionStatus,
+        DirectPutUpload, ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSessionStatus,
     };
-    use crate::{ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, StorageChecksum, UploadId};
+    use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
 
     #[test]
@@ -503,8 +482,8 @@ mod tests {
     fn a_begin_request_carrying_another_modes_fields_does_not_decode() {
         for body in [
             r#"{"mode":"service_proxied","multipart":{"part_size_bytes":8388608}}"#,
-            r#"{"mode":"service_proxied","content":{"size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
-            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            r#"{"mode":"service_proxied","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
             // A direct put with nothing to sign is not a direct put.
             r#"{"mode":"direct_put"}"#,
         ] {
@@ -519,9 +498,9 @@ mod tests {
     #[test]
     fn a_completion_mixing_its_two_shapes_does_not_decode() {
         for body in [
-            r#"{"completion":"multipart","multipart":{"size_bytes":5,"crc64nvme":"0123456789abcdef"},"parts":[],"content_ref":{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
-            // Neither multipart field stands without the other.
-            r#"{"completion":"multipart","multipart":{"size_bytes":5,"crc64nvme":"0123456789abcdef"}}"#,
+            r#"{"completion":"multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}},"parts":[],"content_ref":{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            // Neither multipart-completion field stands without the other.
+            r#"{"completion":"multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#,
             r#"{"completion":"multipart","parts":[]}"#,
             r#"{"completion":"content_ref"}"#,
         ] {
@@ -611,8 +590,7 @@ mod tests {
                         "kind": "blob_v1",
                         "content_id": "con_0123456789abcdef0123456789abcdef",
                         "size_bytes": 5,
-                        "storage_checksum": { "algorithm": "sha256", "value": sha256 },
-                        "whole_file_sha256": sha256
+                        "checksum": { "algorithm": "sha256", "value": sha256 }
                     },
                     "access": {
                         "kind": "presigned_url",
@@ -630,6 +608,7 @@ mod tests {
                 upload_id,
                 direct_multipart: DirectMultipartUpload {
                     part_size_bytes: 8 * 1024 * 1024,
+                    checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
                 },
             })
             .expect("serialize multipart response"),
@@ -637,7 +616,10 @@ mod tests {
                 "mode": "direct_multipart",
                 "namespace_id": "demo",
                 "upload_id": "upl_00000000000000000000000000000001",
-                "direct_multipart": { "part_size_bytes": 8 * 1024 * 1024 }
+                "direct_multipart": {
+                    "part_size_bytes": 8 * 1024 * 1024,
+                    "checksum_algorithm": "crc64nvme"
+                }
             })
         );
     }
@@ -662,17 +644,17 @@ mod tests {
     /// A direct-put client declares what it is about to write; it cannot
     /// declare *where*, because the server owns content identity.
     #[test]
-    fn a_direct_put_claim_names_only_size_and_digest() {
+    fn an_upload_content_claim_names_only_size_and_checksum() {
         let request: BeginUploadRequest = serde_json::from_str(
-            r#"{"mode":"direct_put","content":{"size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            r#"{"mode":"direct_put","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
         )
         .expect("decode direct-put begin request");
         assert_eq!(
             request,
             BeginUploadRequest::DirectPut {
-                content: DirectPutContentClaim {
+                content: UploadContentClaim {
                     size_bytes: 5,
-                    storage_checksum: StorageChecksum {
+                    checksum: Checksum {
                         algorithm: ChecksumAlgorithm::Sha256,
                         value: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
                             .to_owned(),
@@ -682,8 +664,8 @@ mod tests {
         );
 
         assert!(
-            serde_json::from_str::<DirectPutContentClaim>(
-                r#"{"size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},"content_id":"con_0123456789abcdef0123456789abcdef"}"#
+            serde_json::from_str::<UploadContentClaim>(
+                r#"{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},"content_id":"con_0123456789abcdef0123456789abcdef"}"#
             )
             .is_err(),
             "a client must not be able to name the content object"
@@ -693,12 +675,12 @@ mod tests {
     /// The claim names its algorithm, so a provider that enforces something
     /// other than SHA-256 is expressible without a wire change.
     #[test]
-    fn a_direct_put_claim_carries_whatever_algorithm_the_provider_enforces() {
-        let claim: DirectPutContentClaim = serde_json::from_str(
-            r#"{"size_bytes":5,"storage_checksum":{"algorithm":"crc32c","value":"a1b2c3d4"}}"#,
+    fn an_upload_content_claim_carries_the_operations_required_algorithm() {
+        let claim: UploadContentClaim = serde_json::from_str(
+            r#"{"size_bytes":5,"checksum":{"algorithm":"crc32c","value":"a1b2c3d4"}}"#,
         )
         .expect("decode a non-sha256 direct-put claim");
-        assert_eq!(claim.storage_checksum.algorithm, ChecksumAlgorithm::Crc32c);
+        assert_eq!(claim.checksum.algorithm, ChecksumAlgorithm::Crc32c);
     }
 
     #[test]

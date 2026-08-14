@@ -12,7 +12,7 @@
 //! to have half-finished.
 
 use loonfs_api::v0::CompletedUploadPart;
-use loonfs_api::{StorageChecksum, UploadId};
+use loonfs_api::{Checksum, ChecksumAlgorithm, UploadId};
 use loonfs_client::{MultipartUploadJournal, MultipartUploadResume};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -32,6 +32,7 @@ const UPLOADS_SUBDIR: &str = "uploads";
 struct UploadState {
     upload_id: String,
     part_size_bytes: u64,
+    checksum_algorithm: ChecksumAlgorithm,
     parts: Vec<StatePart>,
     source: SourceIdentity,
 }
@@ -42,7 +43,7 @@ struct UploadState {
 struct StatePart {
     part_number: u32,
     etag: String,
-    crc64nvme: String,
+    checksum: Checksum,
 }
 
 /// Enough of the local file to notice it is not the same file any more.
@@ -108,7 +109,7 @@ impl UploadJournal {
         local_path: &Path,
         source: SourceIdentity,
     ) -> Option<Self> {
-        let key = StorageChecksum::sha256(
+        let key = Checksum::sha256(
             format!(
                 "{profile}\u{0}{namespace}\u{0}{remote_path}\u{0}{}",
                 local_path.display()
@@ -146,13 +147,14 @@ impl UploadJournal {
         let resume = MultipartUploadResume {
             upload_id,
             part_size_bytes: recorded.part_size_bytes,
+            checksum_algorithm: recorded.checksum_algorithm,
             parts: recorded
                 .parts
                 .iter()
                 .map(|part| CompletedUploadPart {
                     part_number: part.part_number,
                     etag: part.etag.clone(),
-                    crc64nvme: part.crc64nvme.clone(),
+                    checksum: part.checksum.clone(),
                 })
                 .collect(),
         };
@@ -192,10 +194,16 @@ impl UploadJournal {
 }
 
 impl MultipartUploadJournal for UploadJournal {
-    fn began(&self, upload_id: &UploadId, part_size_bytes: u64) {
+    fn began(
+        &self,
+        upload_id: &UploadId,
+        part_size_bytes: u64,
+        checksum_algorithm: ChecksumAlgorithm,
+    ) {
         let state = UploadState {
             upload_id: upload_id.to_string(),
             part_size_bytes,
+            checksum_algorithm,
             parts: Vec::new(),
             source: self.source.clone(),
         };
@@ -213,7 +221,7 @@ impl MultipartUploadJournal for UploadJournal {
         state.parts.push(StatePart {
             part_number: part.part_number,
             etag: part.etag.clone(),
-            crc64nvme: part.crc64nvme.clone(),
+            checksum: part.checksum.clone(),
         });
         self.flush(state);
     }
@@ -261,7 +269,7 @@ mod tests {
         CompletedUploadPart {
             part_number,
             etag: format!("\"etag-{part_number}\""),
-            crc64nvme: "00000000000000".to_owned(),
+            checksum: Checksum::crc64nvme(format!("part-{part_number}").as_bytes()),
         }
     }
 
@@ -278,7 +286,7 @@ mod tests {
         let journal = journal_at(dir.path(), "/big.bin", source.clone());
         assert_eq!(journal.resume(), None, "nothing recorded resumes nothing");
 
-        journal.began(&upload_id(), 1024 * 1024);
+        journal.began(&upload_id(), 1024 * 1024, ChecksumAlgorithm::Crc64nvme);
         journal.part_completed(&part(1));
         journal.part_completed(&part(2));
 
@@ -287,6 +295,7 @@ mod tests {
             .expect("a record of the same upload");
         assert_eq!(resumed.upload_id, upload_id());
         assert_eq!(resumed.part_size_bytes, 1024 * 1024);
+        assert_eq!(resumed.checksum_algorithm, ChecksumAlgorithm::Crc64nvme);
         assert_eq!(
             resumed
                 .parts
@@ -322,7 +331,7 @@ mod tests {
     fn a_source_that_changed_invalidates_its_record() {
         let dir = tempfile::tempdir().expect("tempdir");
         let journal = journal_at(dir.path(), "/big.bin", identity(1024, 7));
-        journal.began(&upload_id(), 1024 * 1024);
+        journal.began(&upload_id(), 1024 * 1024, ChecksumAlgorithm::Crc64nvme);
         journal.part_completed(&part(1));
 
         let rewritten = journal_at(dir.path(), "/big.bin", identity(1024, 8));
@@ -343,6 +352,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let journal = journal_at(dir.path(), "/big.bin", identity(1024, 7));
         std::fs::write(&journal.path, b"{\"upload_id\":").expect("write torn record");
+        assert_eq!(journal.resume(), None);
+        assert!(!journal.path.exists());
+    }
+
+    #[test]
+    fn an_old_upload_journal_cleanly_starts_a_fresh_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = journal_at(dir.path(), "/big.bin", identity(1024, 7));
+        std::fs::write(
+            &journal.path,
+            format!(
+                "{{\"upload_id\":\"{}\",\"part_size_bytes\":1048576,\"parts\":[],\"source\":{{\"size_bytes\":1024,\"modified_ms\":7}}}}",
+                upload_id()
+            ),
+        )
+        .expect("write old journal");
+
         assert_eq!(journal.resume(), None);
         assert!(!journal.path.exists());
     }

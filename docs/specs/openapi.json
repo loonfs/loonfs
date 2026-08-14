@@ -3159,7 +3159,7 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Identity, byte length, and checksum evidence for the object the\ncapability reads. A reader checks the bytes it receives against\n`size_bytes`, and against `whole_file_sha256` when the reference\ncarries one — a direct-multipart object never will, because nobody\never hashed it with SHA-256."
+            "description": "Identity, byte length, and checksum evidence for the object the\ncapability reads. A reader checks the bytes it receives against\n`size_bytes` and recomputes `checksum.algorithm` over the complete\npayload."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -3199,7 +3199,7 @@
             ],
             "properties": {
               "content": {
-                "$ref": "#/components/schemas/DirectPutContentClaim",
+                "$ref": "#/components/schemas/UploadContentClaim",
                 "description": "Byte length and digest of the payload about to be written."
               },
               "mode": {
@@ -3521,9 +3521,28 @@
           }
         }
       },
+      "Checksum": {
+        "type": "object",
+        "description": "An algorithm and its canonical lowercase-hex checksum value.\n\nThe enclosing value defines which bytes the checksum covers.",
+        "required": [
+          "algorithm",
+          "value"
+        ],
+        "properties": {
+          "algorithm": {
+            "$ref": "#/components/schemas/ChecksumAlgorithm",
+            "description": "Algorithm that produced `value`."
+          },
+          "value": {
+            "type": "string",
+            "description": "Lowercase hex of the raw checksum bytes.\n\nThe algorithm is its own field, so the value carries no prefix.\nProvider APIs that report base64 are converted at the adapter."
+          }
+        },
+        "additionalProperties": false
+      },
       "ChecksumAlgorithm": {
         "type": "string",
-        "description": "Supported algorithms for full-object checksums.\n\nFull-object coverage is part of the LoonFS format, so no separate checksum\ntype is stored. Unknown algorithms fail to decode because every in-memory\n`ChecksumAlgorithm` must be recomputable by this build. Adding a variant\nalso requires adding its implementation.",
+        "description": "Supported checksum algorithms.\n\nThe enclosing value defines which bytes a checksum covers. Unknown\nalgorithms fail to decode because every in-memory `ChecksumAlgorithm` must\nbe recomputable by this build. Adding a variant also requires adding its\nimplementation.",
         "enum": [
           "sha256",
           "crc64nvme",
@@ -3673,7 +3692,7 @@
             "title": "CompleteUploadMultipart",
             "description": "Completes a `direct_multipart` session with what it uploaded.",
             "required": [
-              "multipart",
+              "content",
               "parts",
               "completion"
             ],
@@ -3684,9 +3703,9 @@
                   "multipart"
                 ]
               },
-              "multipart": {
-                "$ref": "#/components/schemas/DirectMultipartContentClaim",
-                "description": "The assembled object's length and CRC-64/NVME, which completion\nverifies against the provider's own reading of the object."
+              "content": {
+                "$ref": "#/components/schemas/UploadContentClaim",
+                "description": "The assembled object's length and checksum, which completion\nverifies against the provider's own reading of the object."
               },
               "parts": {
                 "type": "array",
@@ -3736,12 +3755,12 @@
         "required": [
           "part_number",
           "etag",
-          "crc64nvme"
+          "checksum"
         ],
         "properties": {
-          "crc64nvme": {
-            "type": "string",
-            "description": "CRC-64/NVME the part was signed and accepted with, lowercase hex."
+          "checksum": {
+            "$ref": "#/components/schemas/Checksum",
+            "description": "Checksum the part was signed and accepted with."
           },
           "etag": {
             "type": "string",
@@ -3764,14 +3783,18 @@
       },
       "ContentRef": {
         "type": "object",
-        "description": "Pointer to one immutable content object.\n\n`content_id` is identity — *which* object — and the checksums are\nevidence about its bytes. Separating the two is what lets the final\nobject key exist before the first byte is read.\n\nA `ContentRef` is safe to publish only after the referenced bytes are\ndurable in the namespace's content store.",
+        "description": "Pointer to one immutable content object.\n\n`content_id` is identity — *which* object — and the checksum is\nevidence about its bytes. Separating the two is what lets the final\nobject key exist before the first byte is read.\n\nA `ContentRef` is safe to publish only after the referenced bytes are\ndurable in the namespace's content store.",
         "required": [
           "kind",
           "content_id",
           "size_bytes",
-          "storage_checksum"
+          "checksum"
         ],
         "properties": {
+          "checksum": {
+            "$ref": "#/components/schemas/Checksum",
+            "description": "Mandatory checksum over the complete object."
+          },
           "content_id": {
             "$ref": "#/components/schemas/ContentId",
             "description": "Immutable identity of the referenced object."
@@ -3785,17 +3808,6 @@
             "format": "int64",
             "description": "Complete byte length of the referenced content.",
             "minimum": 0
-          },
-          "storage_checksum": {
-            "$ref": "#/components/schemas/StorageChecksum",
-            "description": "Mandatory checksum over the complete object, used to verify the\nstored bytes against this reference without downloading them."
-          },
-          "whole_file_sha256": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "SHA-256 over the complete payload, lowercase hex, when a trusted\nparty computed it.\n\nPresent means the LoonFS write path hashed the whole stream itself,\nor a provider validated a signed whole-object SHA-256 on the write.\nThere are no client-claimed digests: absent means nobody trustworthy\nhashed these bytes, never \"the client did not tell us\"."
           }
         },
         "additionalProperties": false
@@ -3943,34 +3955,18 @@
           "replace"
         ]
       },
-      "DirectMultipartContentClaim": {
-        "type": "object",
-        "description": "Final size and checksum claimed for a direct multipart upload.\n\nThe claim is supplied at completion so one-pass and streaming uploaders do\nnot need to read the payload twice. LoonFS verifies the claim rather than\ntrusting it. CRC-64/NVME is used because S3-compatible providers report it\nfor the assembled full object.",
-        "required": [
-          "size_bytes",
-          "crc64nvme"
-        ],
-        "properties": {
-          "crc64nvme": {
-            "type": "string",
-            "description": "CRC-64/NVME over the complete assembled payload, lowercase hex."
-          },
-          "size_bytes": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Complete byte length the client wrote across every part.",
-            "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
       "DirectMultipartUpload": {
         "type": "object",
         "description": "Part geometry returned for a direct multipart upload.\n\nThe begin response does not include a content reference or part count\nbecause the final payload is not known yet. The server owns the provider\nupload id and returns the content reference only after completion.",
         "required": [
-          "part_size_bytes"
+          "part_size_bytes",
+          "checksum_algorithm"
         ],
         "properties": {
+          "checksum_algorithm": {
+            "$ref": "#/components/schemas/ChecksumAlgorithm",
+            "description": "Checksum algorithm every part and the complete assembled payload must\nuse for this session."
+          },
           "part_size_bytes": {
             "type": "integer",
             "format": "int64",
@@ -3991,27 +3987,6 @@
             "format": "int64",
             "description": "Byte length of every part except the last, or `None` for the\nserver's default.\n\nThe value bounds the object: a provider accepts at most 10,000\nparts, so this session can carry at most `part_size_bytes × 10_000`\nbytes. A client that knows its payload is very large asks for a\nlarger part size; one that does not know its length at all takes the\ndefault and keeps asking for part URLs until its stream ends.",
             "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
-      "DirectPutContentClaim": {
-        "type": "object",
-        "description": "What a `direct_put` client promises about bytes it has not written yet.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. The server signs both into the provider write\nand verifies them again at completion.\n\nThe digest names its own algorithm because providers do not agree on one:\neach binds into a presigned write whatever its API can enforce. The\ndeployment advertises which it is, and a claim in any other algorithm is\nrefused at begin rather than signed into a write the provider would\nreject.",
-        "required": [
-          "size_bytes",
-          "storage_checksum"
-        ],
-        "properties": {
-          "size_bytes": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Complete byte length the client will write.",
-            "minimum": 0
-          },
-          "storage_checksum": {
-            "$ref": "#/components/schemas/StorageChecksum",
-            "description": "Whole-payload checksum the provider will be made to enforce, in the\nalgorithm this deployment advertises."
           }
         },
         "additionalProperties": false
@@ -5989,25 +5964,6 @@
           }
         }
       },
-      "StorageChecksum": {
-        "type": "object",
-        "description": "A checksum computed over the complete bytes of one content object.",
-        "required": [
-          "algorithm",
-          "value"
-        ],
-        "properties": {
-          "algorithm": {
-            "$ref": "#/components/schemas/ChecksumAlgorithm",
-            "description": "Algorithm that produced `value`."
-          },
-          "value": {
-            "type": "string",
-            "description": "Lowercase hex of the raw checksum bytes.\n\nThe algorithm is its own field, so the value carries no prefix.\nProvider APIs that report base64 are converted at the adapter."
-          }
-        },
-        "additionalProperties": false
-      },
       "StoreProbeCheckOutcome": {
         "type": "string",
         "description": "What one contract check concluded about the store.",
@@ -6131,6 +6087,27 @@
           }
         }
       },
+      "UploadContentClaim": {
+        "type": "object",
+        "description": "What an upload client claims about a complete payload.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. Direct PUT binds the claim into the provider\nwrite; multipart verifies it against the assembled object at completion.\n\nThe digest names its own algorithm because providers do not agree on one:\neach binds into a presigned write whatever its API can enforce. The\ndeployment advertises which it is, and a claim in any other algorithm is\nrefused at begin rather than signed into a write the provider would\nreject.",
+        "required": [
+          "size_bytes",
+          "checksum"
+        ],
+        "properties": {
+          "checksum": {
+            "$ref": "#/components/schemas/Checksum",
+            "description": "Whole-payload checksum in the algorithm required by this operation."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Complete byte length the client will write.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "UploadContentResponse": {
         "type": "object",
         "description": "Response after uploading bytes into a session.",
@@ -6165,12 +6142,12 @@
         "description": "One part's checksum, supplied by the client so the server can sign it\ninto that part's upload URL.",
         "required": [
           "part_number",
-          "crc64nvme"
+          "checksum"
         ],
         "properties": {
-          "crc64nvme": {
-            "type": "string",
-            "description": "CRC-64/NVME over this part's bytes, lowercase hex."
+          "checksum": {
+            "$ref": "#/components/schemas/Checksum",
+            "description": "Checksum over this part's bytes."
           },
           "part_number": {
             "type": "integer",

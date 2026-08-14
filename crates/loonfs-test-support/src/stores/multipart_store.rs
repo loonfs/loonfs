@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::{Crc64Nvme, StorageChecksum};
+use loonfs_api::{Checksum, Crc64Nvme};
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
     ObjectStore, ObjectStoreError, PutMode, Result, StoredObjectChecksum,
@@ -95,7 +95,7 @@ impl<S> MultipartStore<S> {
             .get_mut(provider_upload_id)
             .expect("part uploaded into an open multipart upload");
         upload.parts.insert(part_number, bytes.to_vec());
-        format!("\"{}\"", StorageChecksum::crc64nvme(bytes).value)
+        format!("\"{}\"", Checksum::crc64nvme(bytes).value)
     }
 
     /// The part list a well-behaved client would carry to completion.
@@ -109,8 +109,8 @@ impl<S> MultipartStore<S> {
             .iter()
             .map(|(part_number, bytes)| MultipartPart {
                 part_number: *part_number,
-                etag: format!("\"{}\"", StorageChecksum::crc64nvme(bytes).value),
-                checksum: StorageChecksum::crc64nvme(bytes),
+                etag: format!("\"{}\"", Checksum::crc64nvme(bytes).value),
+                checksum: Checksum::crc64nvme(bytes),
             })
             .collect()
     }
@@ -135,7 +135,7 @@ impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
         };
         Ok(Some(StoredObjectChecksum {
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc64nvme(&bytes),
+            checksum: Checksum::crc64nvme(&bytes),
         }))
     }
 
@@ -155,7 +155,7 @@ impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
         key: &str,
         provider_upload_id: &str,
         parts: &[MultipartPart],
-        full_object_checksum: &StorageChecksum,
+        full_object_checksum: &Checksum,
     ) -> Result<MultipartCompletion> {
         let Some(upload) = self.lock().remove(provider_upload_id) else {
             // Consumed already. The object, if any, is the only evidence
@@ -175,7 +175,7 @@ impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
             // Both providers verify a part's checksum on the way in, so a
             // part whose declared checksum does not match its bytes could
             // never have landed.
-            if part.checksum != StorageChecksum::crc64nvme(bytes) {
+            if part.checksum != Checksum::crc64nvme(bytes) {
                 return Err(ObjectStoreError::transport(
                     key,
                     format!(

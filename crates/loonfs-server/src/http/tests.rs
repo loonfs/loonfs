@@ -135,7 +135,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "run_id",
     "service_proxied",
     "size_bytes",
-    "storage_checksum",
+    "checksum",
+    "checksum_algorithm",
     "target_namespace_id",
     "target_seq",
     "to_display_name",
@@ -149,7 +150,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "upload_session_window",
     "validated_content_token",
     "wal_flush",
-    "whole_file_sha256",
 ];
 
 fn replace_file_options() -> PutFileOptions {
@@ -3003,7 +3003,7 @@ mod direct_download {
     use super::*;
     use crate::http::app_with_store_and_direct_transfers;
     use loonfs_api::{
-        ChecksumAlgorithm, RevisionNo, StorageChecksum, FEATURE_DOWNLOADS_DIRECT_GET,
+        Checksum, ChecksumAlgorithm, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
         FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
         FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC32C, FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256,
         LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
@@ -3272,7 +3272,7 @@ mod direct_download {
             };
             Ok(Some(loonfs_objectstore::StoredObjectChecksum {
                 size_bytes: bytes.len() as u64,
-                storage_checksum: StorageChecksum::crc32c(&bytes),
+                checksum: Checksum::crc32c(&bytes),
             }))
         }
 
@@ -3352,10 +3352,6 @@ mod direct_download {
             .expect("download grant");
         assert_eq!(grant.absolute_path.as_str(), "/big.bin");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
-        assert!(
-            grant.content_ref.whole_file_sha256.is_some(),
-            "a proxied write hashes its payload, so the grant names a digest to check against"
-        );
 
         let mut received = Vec::new();
         let written = client
@@ -3512,9 +3508,7 @@ mod direct_download {
     /// multipart is served by the same handler, carried by the same client
     /// ladder, and completed by the same rule as the S3-compatible one. The client learns `crc32c` from the capability document, folds
     /// exactly that digest over the payload in its one measuring pass, and
-    /// the ref the commit records says so — with no `whole_file_sha256`,
-    /// because nobody computed a SHA-256 over these bytes and the format does
-    /// not let one be conjured.
+    /// the ref the commit records carries that full-object checksum.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_crc32c_provider_without_multipart_carries_a_file_end_to_end() {
         let temp_dir = tempdir().expect("tempdir");
@@ -3570,13 +3564,9 @@ mod direct_download {
             .await
             .expect("download grant");
         assert_eq!(
-            grant.content_ref.storage_checksum,
-            StorageChecksum::crc32c(&payload),
+            grant.content_ref.checksum,
+            Checksum::crc32c(&payload),
             "the recorded ref carries the digest the provider was made to enforce"
-        );
-        assert_eq!(
-            grant.content_ref.whole_file_sha256, None,
-            "no trustworthy party hashed these bytes with SHA-256, so the ref claims none"
         );
 
         // And it comes home byte for byte through the read half of the same

@@ -7,8 +7,8 @@ use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
-    AuthoritativePathEntry, ContentId, ContentRef, ContentRefValidationError, ContentStoreId,
-    NamespaceId, Sha256, StorageChecksum, StreamingChecksum,
+    AuthoritativePathEntry, Checksum, ContentId, ContentRef, ContentRefValidationError,
+    ContentStoreId, NamespaceId, Sha256, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteRange, ByteStream, ObjectStore, ObjectStoreError, PutMode};
@@ -161,11 +161,11 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
             actual: stored.size_bytes,
         });
     }
-    if stored.storage_checksum != content_ref.storage_checksum {
+    if stored.checksum != content_ref.checksum {
         return Err(DurableContentValidationError::ContentChecksumMismatch {
             object_key,
-            expected: describe_checksum(&content_ref.storage_checksum),
-            actual: describe_checksum(&stored.storage_checksum),
+            expected: describe_checksum(&content_ref.checksum),
+            actual: describe_checksum(&stored.checksum),
         });
     }
     Ok(())
@@ -239,10 +239,7 @@ pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// must not hold what it reads: chunks are fetched one range at a time and
 /// the verifying digest is folded as they go, so a 50 GiB object costs one
 /// chunk of memory rather than 50 GiB. It verifies exactly what the buffered
-/// read verifies — the declared size, and the reference's trusted whole-file
-/// SHA-256 when it has one, otherwise its own storage checksum, which for an
-/// object this deployment did not hash itself is the only full-object
-/// evidence there is.
+/// read verifies: the declared size and the reference's full-object checksum.
 ///
 /// The object is immutable and named by a random content id, so nothing can
 /// rewrite it under a reader: chunk *n* and chunk *n+1* are always from the
@@ -271,7 +268,7 @@ pub struct FileContentStream<S> {
     /// The checksum the complete object must produce, folded so far.
     digest: StreamingChecksum,
     /// The value `digest` is closed against.
-    expected: StorageChecksum,
+    expected: Checksum,
     /// The verdict on the complete object, once there is one. Kept because a
     /// digest can only be closed once: without it, asking again after the end
     /// would fold a second, empty digest and report a mismatch that is not
@@ -299,7 +296,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     ) -> Result<Self, DurableContentValidationError> {
         let object_key = content_object_key_for_ref(content_store_id, &content_ref)?;
         validate_content_size(&store, &object_key, &content_ref).await?;
-        let expected = content_ref.verifiable_checksum();
+        let expected = content_ref.checksum.clone();
         let digest = StreamingChecksum::for_algorithm(expected.algorithm);
         Ok(Self {
             store,
@@ -510,10 +507,8 @@ pub(crate) fn content_object_key_for_ref(
 
 /// Checks fetched bytes against everything the reference claims about them.
 ///
-/// The whole-file SHA-256 is the check whenever it is present; a reference
-/// that carries only a CRC — which a direct transfer produces, because an
-/// object assembled by the provider or written by the client is never hashed
-/// by us — is verified by that CRC instead.
+/// The reference's checksum is recomputed over the complete payload for every
+/// supported algorithm.
 fn validate_loaded_content_bytes(
     object_key: String,
     content_ref: &ContentRef,
@@ -528,12 +523,12 @@ fn validate_loaded_content_bytes(
         });
     }
 
-    let expected = content_ref.verifiable_checksum();
+    let expected = &content_ref.checksum;
     if !expected.matches(bytes) {
-        let actual = StorageChecksum::compute(expected.algorithm, bytes);
+        let actual = Checksum::compute(expected.algorithm, bytes);
         return Err(DurableContentValidationError::ContentChecksumMismatch {
             object_key,
-            expected: describe_checksum(&expected),
+            expected: describe_checksum(expected),
             actual: describe_checksum(&actual),
         });
     }
@@ -545,7 +540,7 @@ fn validate_loaded_content_bytes(
     })
 }
 
-fn describe_checksum(checksum: &StorageChecksum) -> String {
+fn describe_checksum(checksum: &Checksum) -> String {
     format!("{}:{}", checksum.algorithm, checksum.value)
 }
 
@@ -644,10 +639,8 @@ pub(crate) struct StagedStream {
 ///
 /// The bytes are never held whole: the digest is folded chunk by chunk as
 /// they are forwarded to the store, and the reference is built from that
-/// digest and the length the store reports back. The result carries a
-/// trusted `whole_file_sha256` for the same reason the buffered path's does
-/// — the LoonFS write path hashed the complete payload itself — and it is
-/// the constructor, not a convention, that guarantees it.
+/// digest and the length the store reports back. The constructor guarantees
+/// that the checksum covers the complete payload.
 ///
 /// The write is create-only, exactly like the buffered staging write. Past
 /// the store's multipart threshold the store cannot make that condition part
@@ -792,8 +785,7 @@ mod tests {
     };
     use bytes::Bytes;
     use loonfs_api::{
-        AuthoritativePathEntry, ContentId, ContentRef, ContentRefKind, ContentStoreId,
-        StorageChecksum,
+        AuthoritativePathEntry, Checksum, ContentId, ContentRef, ContentRefKind, ContentStoreId,
     };
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -907,8 +899,7 @@ mod tests {
             kind: ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc32c(bytes),
-            whole_file_sha256: None,
+            checksum: Checksum::crc32c(bytes),
         };
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
@@ -920,7 +911,7 @@ mod tests {
         // Same length, different bytes: only the checksum can tell.
         let (_temp_dir, store, content_store_id) = test_store();
         let planted = ContentRef {
-            storage_checksum: StorageChecksum::crc32c(b"transferred straight to the PROVIDER"),
+            checksum: Checksum::crc32c(b"transferred straight to the PROVIDER"),
             ..content_ref
         };
         put_content_object(&store, &content_store_id, &planted, bytes).await;
@@ -944,8 +935,7 @@ mod tests {
             kind: ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc64nvme(bytes),
-            whole_file_sha256: None,
+            checksum: Checksum::crc64nvme(bytes),
         };
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
@@ -957,7 +947,7 @@ mod tests {
         // Same length, different bytes: only the checksum can tell.
         let (_temp_dir, store, content_store_id) = test_store();
         let planted = ContentRef {
-            storage_checksum: StorageChecksum::crc64nvme(b"provider-assembled BYTES"),
+            checksum: Checksum::crc64nvme(b"provider-assembled BYTES"),
             ..content_ref.clone()
         };
         put_content_object(&store, &content_store_id, &planted, bytes).await;
@@ -1016,8 +1006,7 @@ mod tests {
         // completion check exists to catch on a provider that accepts a
         // wrong claim.
         let mut wrong_checksum = content_ref.clone();
-        wrong_checksum.storage_checksum = StorageChecksum::sha256(b"other bytes");
-        wrong_checksum.whole_file_sha256 = Some(wrong_checksum.storage_checksum.value.clone());
+        wrong_checksum.checksum = Checksum::sha256(b"other bytes");
         assert!(matches!(
             verify_durable_content_checksum(&store, &content_store_id, &wrong_checksum)
                 .await
@@ -1063,7 +1052,7 @@ mod tests {
         );
         assert_ne!(first.object_key, second.object_key);
         assert_eq!(
-            first.content_ref.storage_checksum, second.content_ref.storage_checksum,
+            first.content_ref.checksum, second.content_ref.checksum,
             "identical bytes still carry identical evidence"
         );
         for stored in [&first, &second] {
@@ -1409,8 +1398,7 @@ mod tests {
             kind: ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc32c(&bytes),
-            whole_file_sha256: None,
+            checksum: Checksum::crc32c(&bytes),
         };
         put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
 
@@ -1425,7 +1413,7 @@ mod tests {
 
         let (_temp_dir, store, content_store_id) = test_store();
         let planted = ContentRef {
-            storage_checksum: StorageChecksum::crc32c(&payload(bytes.len() + 1)),
+            checksum: Checksum::crc32c(&payload(bytes.len() + 1)),
             ..content_ref
         };
         put_content_object(&store, &content_store_id, &planted, &bytes).await;
@@ -1456,6 +1444,17 @@ mod tests {
     /// exactly as a hashed one does.
     #[tokio::test]
     async fn a_resumed_crc32c_read_folds_the_prefix_into_the_same_verdict() {
+        assert_resumed_checksum_verification(Checksum::crc32c).await;
+    }
+
+    /// A multipart CRC obeys the same resumed-read contract: the retained
+    /// prefix and fetched suffix close one CRC-64/NVME verdict.
+    #[tokio::test]
+    async fn a_resumed_crc64nvme_read_folds_the_prefix_into_the_same_verdict() {
+        assert_resumed_checksum_verification(Checksum::crc64nvme).await;
+    }
+
+    async fn assert_resumed_checksum_verification(checksum: fn(&[u8]) -> Checksum) {
         let (_temp_dir, inner, content_store_id) = test_store();
         let store = CountingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
@@ -1463,8 +1462,7 @@ mod tests {
             kind: ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc32c(&bytes),
-            whole_file_sha256: None,
+            checksum: checksum(&bytes),
         };
         put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
         let held = TEST_CHUNK_BYTES as usize;
@@ -1525,8 +1523,7 @@ mod tests {
             kind: ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc64nvme(&bytes),
-            whole_file_sha256: None,
+            checksum: Checksum::crc64nvme(&bytes),
         };
         put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
 

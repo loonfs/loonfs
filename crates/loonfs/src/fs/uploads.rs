@@ -18,7 +18,7 @@ use crate::FsWriter;
 use crate::Result;
 use crate::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-    DirectPutContentClaim, MaintenanceJobId, NamespaceId, UploadContentResponse,
+    MaintenanceJobId, NamespaceId, UploadContentClaim, UploadContentResponse,
 };
 use loonfs_api::v0::{
     AbortUploadResponse, DirectMultipartUploadOptions, UploadPartChecksumClaim,
@@ -65,7 +65,7 @@ impl FsWriter {
     pub async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        claim: DirectPutContentClaim,
+        claim: UploadContentClaim,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         let response = self
             .engine(namespace_id)

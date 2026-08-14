@@ -64,21 +64,21 @@ impl<'de> Deserialize<'de> for ContentRefKind {
     }
 }
 
-/// Supported algorithms for full-object checksums.
+/// Supported checksum algorithms.
 ///
-/// Full-object coverage is part of the LoonFS format, so no separate checksum
-/// type is stored. Unknown algorithms fail to decode because every in-memory
-/// `ChecksumAlgorithm` must be recomputable by this build. Adding a variant
-/// also requires adding its implementation.
+/// The enclosing value defines which bytes a checksum covers. Unknown
+/// algorithms fail to decode because every in-memory `ChecksumAlgorithm` must
+/// be recomputable by this build. Adding a variant also requires adding its
+/// implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChecksumAlgorithm {
-    /// SHA-256 over the complete object.
+    /// SHA-256.
     Sha256,
-    /// CRC-64/NVME over the complete object.
+    /// CRC-64/NVME.
     Crc64nvme,
-    /// CRC-32C over the complete object.
+    /// CRC-32C.
     Crc32c,
 }
 
@@ -108,11 +108,13 @@ impl fmt::Display for ChecksumAlgorithm {
     }
 }
 
-/// A checksum computed over the complete bytes of one content object.
+/// An algorithm and its canonical lowercase-hex checksum value.
+///
+/// The enclosing value defines which bytes the checksum covers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct StorageChecksum {
+pub struct Checksum {
     /// Algorithm that produced `value`.
     pub algorithm: ChecksumAlgorithm,
     /// Lowercase hex of the raw checksum bytes.
@@ -122,7 +124,7 @@ pub struct StorageChecksum {
     pub value: String,
 }
 
-impl StorageChecksum {
+impl Checksum {
     /// Builds the `algorithm` checksum for these complete bytes.
     ///
     /// The one-shot forms below are this with the algorithm spelled out, so
@@ -134,17 +136,17 @@ impl StorageChecksum {
         digest.finish()
     }
 
-    /// Builds the SHA-256 storage checksum for these complete bytes.
+    /// Builds the SHA-256 checksum for these bytes.
     pub fn sha256(bytes: &[u8]) -> Self {
         Self::compute(ChecksumAlgorithm::Sha256, bytes)
     }
 
-    /// Builds the CRC-64/NVME storage checksum for these complete bytes.
+    /// Builds the CRC-64/NVME checksum for these bytes.
     pub fn crc64nvme(bytes: &[u8]) -> Self {
         Self::compute(ChecksumAlgorithm::Crc64nvme, bytes)
     }
 
-    /// Builds the CRC-32C storage checksum for these complete bytes.
+    /// Builds the CRC-32C checksum for these bytes.
     pub fn crc32c(bytes: &[u8]) -> Self {
         Self::compute(ChecksumAlgorithm::Crc32c, bytes)
     }
@@ -153,9 +155,54 @@ impl StorageChecksum {
     pub fn matches(&self, bytes: &[u8]) -> bool {
         Self::compute(self.algorithm, bytes).value == self.value
     }
+
+    /// Validates the exact width and lowercase-hex alphabet for `algorithm`.
+    pub fn validate(&self) -> Result<(), ChecksumValidationError> {
+        let expected_len = self.algorithm.value_bytes() * 2;
+        if self.value.len() != expected_len {
+            return Err(ChecksumValidationError::InvalidWidth {
+                algorithm: self.algorithm,
+                expected_len,
+                actual_len: self.value.len(),
+            });
+        }
+        if !self
+            .value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ChecksumValidationError::InvalidAlphabet {
+                algorithm: self.algorithm,
+            });
+        }
+        Ok(())
+    }
 }
 
-/// Incremental full-object checksum for streamed reads and writes.
+/// Describes why a checksum is not in its canonical wire form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub enum ChecksumValidationError {
+    /// The checksum value does not have the exact width for its algorithm.
+    #[error(
+        "checksum for algorithm `{algorithm}` must be {expected_len} hex characters, got {actual_len}"
+    )]
+    InvalidWidth {
+        /// Algorithm whose checksum width was required.
+        algorithm: ChecksumAlgorithm,
+        /// Required number of hexadecimal characters.
+        expected_len: usize,
+        /// Number of characters supplied.
+        actual_len: usize,
+    },
+    /// The checksum value contains a character outside lowercase hexadecimal.
+    #[error("checksum for algorithm `{algorithm}` must be lowercase hex")]
+    InvalidAlphabet {
+        /// Algorithm whose checksum value was rejected.
+        algorithm: ChecksumAlgorithm,
+    },
+}
+
+/// Incremental checksum for streamed reads and writes.
 ///
 /// It supports every [`ChecksumAlgorithm`] used by buffered verification, so
 /// buffered and streaming paths differ only in how bytes are supplied.
@@ -189,7 +236,7 @@ impl StreamingChecksum {
     }
 
     /// Closes the digest over everything fed so far.
-    pub fn finish(self) -> StorageChecksum {
+    pub fn finish(self) -> Checksum {
         match self {
             Self::Sha256(digest) => digest.finish(),
             Self::Crc64nvme(digest) => digest.finish(),
@@ -227,8 +274,8 @@ impl Crc64Nvme {
     /// The value is the big-endian spelling of the 64-bit result, which is
     /// what the raw checksum bytes are on the wire and therefore what the
     /// hex here has to be.
-    pub fn finish(self) -> StorageChecksum {
-        StorageChecksum {
+    pub fn finish(self) -> Checksum {
+        Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
             value: hex_encode_bytes(&self.digest.sum64().to_be_bytes()),
         }
@@ -267,8 +314,8 @@ impl Crc32c {
     /// The value is the big-endian spelling of the 32-bit result, which is
     /// what the raw checksum bytes are on the wire and therefore what the
     /// hex here has to be.
-    pub fn finish(self) -> StorageChecksum {
-        StorageChecksum {
+    pub fn finish(self) -> Checksum {
+        Checksum {
             algorithm: ChecksumAlgorithm::Crc32c,
             value: hex_encode_bytes(&self.crc.to_be_bytes()),
         }
@@ -284,8 +331,8 @@ impl fmt::Debug for Crc32c {
 /// SHA-256 over a payload delivered in pieces.
 ///
 /// The proxied write path folds this over the request body as it forwards
-/// it to object storage, so a reference's trusted whole-file digest exists
-/// without the payload ever being held whole. Pieces must be fed in order.
+/// it to object storage, so a reference's full-object checksum exists without
+/// the payload ever being held whole. Pieces must be fed in order.
 #[derive(Default)]
 pub struct Sha256 {
     digest: Sha2Sha256,
@@ -305,8 +352,8 @@ impl Sha256 {
     }
 
     /// Closes the digest over everything fed so far.
-    pub fn finish(self) -> StorageChecksum {
-        StorageChecksum {
+    pub fn finish(self) -> Checksum {
+        Checksum {
             algorithm: ChecksumAlgorithm::Sha256,
             value: hex_encode_bytes(&self.digest.finalize()),
         }
@@ -328,21 +375,14 @@ pub enum ContentRefValidationError {
         /// Kind spelling carried by the rejected reference.
         kind: String,
     },
-    /// A checksum value was not the algorithm's width in lowercase hex.
-    #[error("invalid {field} for algorithm `{algorithm}`: {reason}")]
-    InvalidChecksum {
-        /// Reference field that carried the rejected value.
-        field: String,
-        /// Algorithm whose width and alphabet the value violated.
-        algorithm: ChecksumAlgorithm,
-        /// Specific rule the value broke.
-        reason: String,
-    },
+    /// The checksum is not in the algorithm's canonical form.
+    #[error("invalid content ref checksum: {0}")]
+    InvalidChecksum(ChecksumValidationError),
 }
 
 /// Pointer to one immutable content object.
 ///
-/// `content_id` is identity — *which* object — and the checksums are
+/// `content_id` is identity — *which* object — and the checksum is
 /// evidence about its bytes. Separating the two is what lets the final
 /// object key exist before the first byte is read.
 ///
@@ -359,18 +399,8 @@ pub struct ContentRef {
     pub content_id: ContentId,
     /// Complete byte length of the referenced content.
     pub size_bytes: u64,
-    /// Mandatory checksum over the complete object, used to verify the
-    /// stored bytes against this reference without downloading them.
-    pub storage_checksum: StorageChecksum,
-    /// SHA-256 over the complete payload, lowercase hex, when a trusted
-    /// party computed it.
-    ///
-    /// Present means the LoonFS write path hashed the whole stream itself,
-    /// or a provider validated a signed whole-object SHA-256 on the write.
-    /// There are no client-claimed digests: absent means nobody trustworthy
-    /// hashed these bytes, never "the client did not tell us".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub whole_file_sha256: Option<String>,
+    /// Mandatory checksum over the complete object.
+    pub checksum: Checksum,
 }
 
 /// Available proof that a payload matches a committed content reference.
@@ -378,8 +408,7 @@ pub struct ContentRef {
 pub enum ContentEvidence<'a> {
     /// Bytes that can be hashed with the committed reference's algorithm.
     Bytes(&'a [u8]),
-    /// A reference that carries only the checksums computed while its payload
-    /// was available.
+    /// A reference carrying checksum evidence about its payload.
     ContentRef(&'a ContentRef),
 }
 
@@ -387,15 +416,13 @@ impl ContentRef {
     /// Builds a reference to a freshly minted content object holding these bytes.
     ///
     /// Every caller of this constructor moves the bytes through the LoonFS
-    /// write path, so the whole-file SHA-256 is trusted by construction.
+    /// write path, so the checksum is trusted by construction.
     pub fn blob_v1(content_id: ContentId, bytes: &[u8]) -> Self {
-        let storage_checksum = StorageChecksum::sha256(bytes);
         Self {
             kind: ContentRefKind::BlobV1,
             content_id,
             size_bytes: bytes.len() as u64,
-            whole_file_sha256: Some(storage_checksum.value.clone()),
-            storage_checksum,
+            checksum: Checksum::sha256(bytes),
         }
     }
 
@@ -403,64 +430,28 @@ impl ContentRef {
     /// payload.
     ///
     /// Accepting the digest object, rather than an arbitrary checksum string,
-    /// ensures that `whole_file_sha256` came from the LoonFS write path.
+    /// ensures that the checksum came from the LoonFS write path.
     pub fn blob_v1_streamed(content_id: ContentId, size_bytes: u64, digest: Sha256) -> Self {
-        let storage_checksum = digest.finish();
         Self {
             kind: ContentRefKind::BlobV1,
             content_id,
             size_bytes,
-            whole_file_sha256: Some(storage_checksum.value.clone()),
-            storage_checksum,
-        }
-    }
-
-    /// Returns the checksum used to verify this content reference.
-    ///
-    /// A trusted whole-file SHA-256 is preferred when present. Otherwise the
-    /// provider's full-object storage checksum is used. All verification paths
-    /// call this method so they use the same evidence.
-    pub fn verifiable_checksum(&self) -> StorageChecksum {
-        match &self.whole_file_sha256 {
-            Some(digest) => StorageChecksum {
-                algorithm: ChecksumAlgorithm::Sha256,
-                value: digest.clone(),
-            },
-            None => self.storage_checksum.clone(),
-        }
-    }
-
-    /// The digest this reference carries under `algorithm`, when it carries
-    /// one at all.
-    ///
-    /// A reference describes its object with the checksum whoever wrote it
-    /// produced, plus a whole-file SHA-256 when the write path hashed the
-    /// bytes itself. Asking for anything else answers `None`: a digest
-    /// nobody computed over these bytes cannot be conjured from the ones
-    /// that were, and a retry comparing against it must refuse rather than
-    /// guess.
-    pub fn digest_under(&self, algorithm: ChecksumAlgorithm) -> Option<&str> {
-        if self.storage_checksum.algorithm == algorithm {
-            return Some(&self.storage_checksum.value);
-        }
-        match algorithm {
-            ChecksumAlgorithm::Sha256 => self.whole_file_sha256.as_deref(),
-            ChecksumAlgorithm::Crc64nvme | ChecksumAlgorithm::Crc32c => None,
+            checksum: digest.finish(),
         }
     }
 
     /// Whether `evidence` proves that a payload has the same bytes as this
     /// reference.
     ///
-    /// Reference evidence returns `false` when it does not carry this
-    /// reference's verification algorithm. A checksum that was never
-    /// computed is not evidence of a match.
+    /// Reference evidence returns `false` when the size or checksum algorithm
+    /// differs. A checksum that was never computed is not evidence of a match.
     pub fn matches_evidence(&self, evidence: ContentEvidence<'_>) -> bool {
-        let expected = self.verifiable_checksum();
         match evidence {
-            ContentEvidence::Bytes(bytes) => expected.matches(bytes),
+            ContentEvidence::Bytes(bytes) => {
+                self.size_bytes == bytes.len() as u64 && self.checksum.matches(bytes)
+            }
             ContentEvidence::ContentRef(reference) => {
-                reference.digest_under(expected.algorithm) == Some(expected.value.as_str())
+                self.size_bytes == reference.size_bytes && self.checksum == reference.checksum
             }
         }
     }
@@ -475,53 +466,18 @@ impl ContentRef {
                 kind: self.kind.as_str().to_owned(),
             });
         }
-        validate_checksum_value(
-            "storage_checksum",
-            self.storage_checksum.algorithm,
-            &self.storage_checksum.value,
-        )?;
-        if let Some(whole_file_sha256) = &self.whole_file_sha256 {
-            validate_checksum_value(
-                "whole_file_sha256",
-                ChecksumAlgorithm::Sha256,
-                whole_file_sha256,
-            )?;
-        }
+        self.checksum
+            .validate()
+            .map_err(ContentRefValidationError::InvalidChecksum)?;
         Ok(())
     }
-}
-
-fn validate_checksum_value(
-    field: &str,
-    algorithm: ChecksumAlgorithm,
-    value: &str,
-) -> Result<(), ContentRefValidationError> {
-    let expected_len = algorithm.value_bytes() * 2;
-    if value.len() != expected_len {
-        return Err(ContentRefValidationError::InvalidChecksum {
-            field: field.to_owned(),
-            algorithm,
-            reason: format!("must be {expected_len} hex characters, got {}", value.len()),
-        });
-    }
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(ContentRefValidationError::InvalidChecksum {
-            field: field.to_owned(),
-            algorithm,
-            reason: "must be lowercase hex".to_owned(),
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ChecksumAlgorithm, ContentEvidence, ContentRef, ContentRefKind, ContentRefValidationError,
-        Crc32c, Crc64Nvme, StorageChecksum, StreamingChecksum,
+        Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentEvidence, ContentRef,
+        ContentRefKind, ContentRefValidationError, Crc32c, Crc64Nvme, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -564,6 +520,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_checksum_shape_round_trips() {
+        for checksum in [
+            Checksum::sha256(b"hello"),
+            Checksum::crc64nvme(b"hello"),
+            Checksum::crc32c(b"hello"),
+        ] {
+            let encoded = serde_json::to_string(&checksum).expect("encode checksum");
+            let decoded: Checksum = serde_json::from_str(&encoded).expect("decode checksum");
+            assert_eq!(decoded, checksum);
+        }
+    }
+
     /// Unknown checksum algorithms are rejected during decoding.
     ///
     /// Content kinds may be preserved by readers without interpretation, but a
@@ -578,7 +547,7 @@ mod tests {
             "kind": "blob_v1",
             "content_id": "con_0123456789abcdef0123456789abcdef",
             "size_bytes": 5,
-            "storage_checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
+            "checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
         }"#;
         assert!(serde_json::from_str::<ContentRef>(json).is_err());
     }
@@ -589,27 +558,27 @@ mod tests {
             "kind": "blob_v1",
             "content_id": "con_0123456789abcdef0123456789abcdef",
             "size_bytes": 5,
-            "storage_checksum": {"algorithm": "sha256", "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},
+            "checksum": {"algorithm": "sha256", "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},
             "checksum_type": "full_object"
         }"#;
         assert!(serde_json::from_str::<ContentRef>(json).is_err());
     }
 
     #[test]
-    fn a_produced_reference_carries_a_trusted_whole_file_sha256() {
+    fn a_content_ref_uses_only_the_checksum_shape() {
         let content_ref = ContentRef::blob_v1(content_id(), b"hello");
 
         assert_eq!(content_ref.kind, ContentRefKind::BlobV1);
         assert_eq!(content_ref.size_bytes, 5);
-        assert_eq!(
-            content_ref.storage_checksum.algorithm,
-            ChecksumAlgorithm::Sha256
-        );
-        assert_eq!(
-            content_ref.whole_file_sha256.as_deref(),
-            Some(content_ref.storage_checksum.value.as_str())
-        );
+        assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Sha256);
         content_ref.validate().expect("produced refs validate");
+
+        let document = serde_json::to_value(&content_ref).expect("encode content ref");
+        let object = document.as_object().expect("content ref object");
+        assert_eq!(object.len(), 4);
+        assert!(object.contains_key("checksum"));
+        assert!(!object.contains_key("storage_checksum"));
+        assert!(!object.contains_key("whole_file_sha256"));
     }
 
     #[test]
@@ -622,21 +591,64 @@ mod tests {
         ));
 
         let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
-        content_ref.storage_checksum = StorageChecksum {
+        content_ref.checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: content_ref.storage_checksum.value.clone(),
+            value: content_ref.checksum.value.clone(),
         };
         assert!(matches!(
             content_ref.validate(),
-            Err(ContentRefValidationError::InvalidChecksum { .. })
+            Err(ContentRefValidationError::InvalidChecksum(_))
         ));
 
         let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
-        content_ref.whole_file_sha256 = Some(content_ref.storage_checksum.value.to_uppercase());
+        content_ref.checksum.value = content_ref.checksum.value.to_uppercase();
         assert!(matches!(
             content_ref.validate(),
-            Err(ContentRefValidationError::InvalidChecksum { .. })
+            Err(ContentRefValidationError::InvalidChecksum(
+                ChecksumValidationError::InvalidAlphabet { .. }
+            ))
         ));
+    }
+
+    #[test]
+    fn checksum_validation_enforces_exact_widths_and_lowercase_hex() {
+        for (algorithm, width) in [
+            (ChecksumAlgorithm::Sha256, 64),
+            (ChecksumAlgorithm::Crc64nvme, 16),
+            (ChecksumAlgorithm::Crc32c, 8),
+        ] {
+            Checksum {
+                algorithm,
+                value: "a".repeat(width),
+            }
+            .validate()
+            .expect("exact lowercase width");
+
+            assert!(matches!(
+                Checksum {
+                    algorithm,
+                    value: "a".repeat(width - 1),
+                }
+                .validate(),
+                Err(ChecksumValidationError::InvalidWidth { .. })
+            ));
+            assert!(matches!(
+                Checksum {
+                    algorithm,
+                    value: "a".repeat(width + 1),
+                }
+                .validate(),
+                Err(ChecksumValidationError::InvalidWidth { .. })
+            ));
+            assert!(matches!(
+                Checksum {
+                    algorithm,
+                    value: "A".repeat(width),
+                }
+                .validate(),
+                Err(ChecksumValidationError::InvalidAlphabet { .. })
+            ));
+        }
     }
 
     /// The catalog check value for CRC-64/NVME. This is the one thing that
@@ -645,12 +657,9 @@ mod tests {
     /// wrong polynomial or byte order would fail every multipart upload.
     #[test]
     fn crc64nvme_matches_its_catalog_check_value() {
+        assert_eq!(Checksum::crc64nvme(b"123456789").value, "ae8b14860a799888");
         assert_eq!(
-            StorageChecksum::crc64nvme(b"123456789").value,
-            "ae8b14860a799888"
-        );
-        assert_eq!(
-            StorageChecksum::crc64nvme(b"").value,
+            Checksum::crc64nvme(b"").value,
             "0000000000000000",
             "the empty payload is the identity"
         );
@@ -664,9 +673,9 @@ mod tests {
     /// compute, so a GCS-minted reference and one produced here agree.
     #[test]
     fn crc32c_matches_its_catalog_check_value() {
-        assert_eq!(StorageChecksum::crc32c(b"123456789").value, "e3069283");
+        assert_eq!(Checksum::crc32c(b"123456789").value, "e3069283");
         assert_eq!(
-            StorageChecksum::crc32c(b"").value,
+            Checksum::crc32c(b"").value,
             "00000000",
             "the empty payload is the identity"
         );
@@ -683,7 +692,7 @@ mod tests {
             streamed.update(chunk);
         }
 
-        assert_eq!(streamed.finish(), StorageChecksum::crc64nvme(&payload));
+        assert_eq!(streamed.finish(), Checksum::crc64nvme(&payload));
     }
 
     /// A resumed read folds a prefix it already holds and then the bytes it
@@ -696,20 +705,20 @@ mod tests {
         streamed.update(&payload[..1500]);
         streamed.update(&payload[1500..]);
 
-        assert_eq!(streamed.finish(), StorageChecksum::crc32c(&payload));
+        assert_eq!(streamed.finish(), Checksum::crc32c(&payload));
     }
 
     /// A verifying reader folds the same checksum the one-shot check
     /// computes, for every algorithm the vocabulary has — a reader that
-    /// disagreed with [`StorageChecksum::matches`] would accept or reject
+    /// disagreed with [`Checksum::matches`] would accept or reject
     /// objects the buffered read would not.
     #[test]
     fn a_streamed_checksum_agrees_with_the_whole_payload_at_once() {
         let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
         for expected in [
-            StorageChecksum::sha256(&payload),
-            StorageChecksum::crc64nvme(&payload),
-            StorageChecksum::crc32c(&payload),
+            Checksum::sha256(&payload),
+            Checksum::crc64nvme(&payload),
+            Checksum::crc32c(&payload),
         ] {
             let mut streaming = StreamingChecksum::for_algorithm(expected.algorithm);
             for chunk in payload.chunks(97) {
@@ -728,48 +737,28 @@ mod tests {
             ChecksumAlgorithm::Crc64nvme,
             ChecksumAlgorithm::Crc32c,
         ] {
-            let expected = StorageChecksum::compute(algorithm, b"hello");
+            let expected = Checksum::compute(algorithm, b"hello");
             assert_eq!(expected.algorithm, algorithm);
             assert!(expected.matches(b"hello"));
             assert!(!expected.matches(b"other"));
         }
     }
 
-    /// The evidence a read holds an object to is one answer, whichever
-    /// surface asks: the trusted whole-file digest when there is one, and
-    /// the reference's own checksum when it is all there is.
     #[test]
-    fn a_reference_names_the_whole_file_digest_as_its_evidence_when_it_has_one() {
-        let hashed = ContentRef::blob_v1(content_id(), b"hello");
-        assert_eq!(
-            hashed.verifiable_checksum(),
-            StorageChecksum::sha256(b"hello")
-        );
-
-        let crc_only = ContentRef {
-            storage_checksum: StorageChecksum::crc32c(b"hello"),
-            whole_file_sha256: None,
-            ..hashed
-        };
-        assert_eq!(
-            crc_only.verifiable_checksum(),
-            StorageChecksum::crc32c(b"hello")
-        );
-    }
-
-    #[test]
-    fn a_reference_compares_bytes_using_its_verifiable_checksum() {
+    fn a_reference_compares_bytes_using_its_checksum_and_size() {
         let bytes = b"retried payload";
         let reference = ContentRef {
             kind: ContentRefKind::BlobV1,
             content_id: content_id(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc32c(bytes),
-            whole_file_sha256: None,
+            checksum: Checksum::crc32c(bytes),
         };
 
         assert!(reference.matches_evidence(ContentEvidence::Bytes(bytes)));
         assert!(!reference.matches_evidence(ContentEvidence::Bytes(b"different payload")));
+        let mut wrong_size = reference.clone();
+        wrong_size.size_bytes += 1;
+        assert!(!wrong_size.matches_evidence(ContentEvidence::Bytes(bytes)));
     }
 
     #[test]
@@ -779,12 +768,15 @@ mod tests {
             kind: ContentRefKind::BlobV1,
             content_id: content_id(),
             size_bytes: bytes.len() as u64,
-            storage_checksum: StorageChecksum::crc32c(bytes),
-            whole_file_sha256: None,
+            checksum: Checksum::crc32c(bytes),
         };
         let sha_reference = ContentRef::blob_v1(content_id(), bytes);
         let matching_crc_reference = ContentRef {
             content_id: content_id(),
+            ..crc_reference.clone()
+        };
+        let different_size = ContentRef {
+            size_bytes: crc_reference.size_bytes + 1,
             ..crc_reference.clone()
         };
 
@@ -792,26 +784,34 @@ mod tests {
         assert!(
             crc_reference.matches_evidence(ContentEvidence::ContentRef(&matching_crc_reference))
         );
+        assert!(!crc_reference.matches_evidence(ContentEvidence::ContentRef(&different_size)));
         assert!(sha_reference.matches_evidence(ContentEvidence::ContentRef(&sha_reference)));
     }
 
     #[test]
-    fn a_crc_only_reference_round_trips_without_a_whole_file_sha256() {
-        let content_ref = ContentRef {
-            kind: ContentRefKind::BlobV1,
-            content_id: content_id(),
-            size_bytes: 11_534_336,
-            storage_checksum: StorageChecksum {
-                algorithm: ChecksumAlgorithm::Crc64nvme,
-                value: "bbb7305bdf118bcb".to_owned(),
+    fn sha_and_crc_references_round_trip() {
+        for content_ref in [
+            ContentRef::blob_v1(content_id(), b"hello"),
+            ContentRef {
+                kind: ContentRefKind::BlobV1,
+                content_id: content_id(),
+                size_bytes: 11_534_336,
+                checksum: Checksum {
+                    algorithm: ChecksumAlgorithm::Crc64nvme,
+                    value: "bbb7305bdf118bcb".to_owned(),
+                },
             },
-            whole_file_sha256: None,
-        };
-        content_ref.validate().expect("crc-only refs are valid");
-
-        let encoded = serde_json::to_string(&content_ref).expect("encode");
-        assert!(!encoded.contains("whole_file_sha256"));
-        let decoded: ContentRef = serde_json::from_str(&encoded).expect("decode");
-        assert_eq!(decoded, content_ref);
+            ContentRef {
+                kind: ContentRefKind::BlobV1,
+                content_id: content_id(),
+                size_bytes: 5,
+                checksum: Checksum::crc32c(b"hello"),
+            },
+        ] {
+            content_ref.validate().expect("content ref is valid");
+            let encoded = serde_json::to_string(&content_ref).expect("encode");
+            let decoded: ContentRef = serde_json::from_str(&encoded).expect("decode");
+            assert_eq!(decoded, content_ref);
+        }
     }
 }

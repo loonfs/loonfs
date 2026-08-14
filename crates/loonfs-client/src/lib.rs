@@ -26,22 +26,21 @@ use loonfs_api::{
         AbortUploadResponse, BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest,
         BeginUploadResponse, ChangesResponse, CommitResponse as ApiCommitResponse,
         CompleteUploadRequest, CompleteUploadResponse, CompletedUploadPart,
-        DirectMultipartContentClaim, DirectMultipartUploadOptions, DirectPutContentClaim,
-        DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse,
-        GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
-        SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest, StoreProbeResponse,
-        UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
-        ValidatedContentToken,
+        DirectMultipartUploadOptions, DisableGrepIndexResponse, EnableGrepIndexResponse,
+        GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess,
+        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest,
+        StoreProbeResponse, UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim,
+        UploadStatusResponse, ValidatedContentToken,
     },
-    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
-    ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef, Crc64Nvme,
+    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, Checksum,
+    ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
     CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteNamespaceResponse, ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest,
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
     NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutRetryAttempt,
     PutRetryErrorClassification, PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo,
-    SecretString, StorageChecksum, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
+    SecretString, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_UPLOADS_DIRECT_MULTIPART, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
@@ -212,7 +211,7 @@ impl DirectDownloadStream {
                         self.path, self.size_bytes, self.expected.size_bytes
                     )));
                 }
-                let expected = self.expected.verifiable_checksum();
+                let expected = &self.expected.checksum;
                 // Closing consumes the digest; `finished` is what keeps this
                 // from running a second time over an empty one.
                 let observed = std::mem::replace(
@@ -220,7 +219,7 @@ impl DirectDownloadStream {
                     StreamingChecksum::for_algorithm(expected.algorithm),
                 )
                 .finish();
-                if observed != expected {
+                if observed != *expected {
                     return Err(ClientError::Protocol(format!(
                         "direct download of `{}` produced {}:{}, not the {}:{} the grant named",
                         self.path,
@@ -250,6 +249,8 @@ pub struct MultipartUploadResume {
     /// the payload exactly as the interrupted one did, or the parts it
     /// sends will not line up with the ones already there.
     pub part_size_bytes: u64,
+    /// Checksum algorithm frozen into the upload session when it began.
+    pub checksum_algorithm: ChecksumAlgorithm,
     /// Metadata for parts that have already been uploaded.
     pub parts: Vec<CompletedUploadPart>,
 }
@@ -260,8 +261,13 @@ pub struct MultipartUploadResume {
 /// after each successful part upload. Implementations may persist this data
 /// before the next network request starts.
 pub trait MultipartUploadJournal: Send + Sync {
-    /// Records a newly opened session and its required part size.
-    fn began(&self, upload_id: &UploadId, part_size_bytes: u64);
+    /// Records a newly opened session and its required part size and checksum algorithm.
+    fn began(
+        &self,
+        upload_id: &UploadId,
+        part_size_bytes: u64,
+        checksum_algorithm: ChecksumAlgorithm,
+    );
     /// Records a part after it has been uploaded successfully.
     fn part_completed(&self, part: &CompletedUploadPart);
 }
@@ -432,7 +438,7 @@ struct PendingPart {
 /// digest, and the parts it was written as.
 struct UploadedObject {
     size_bytes: u64,
-    crc64nvme: StorageChecksum,
+    checksum: Checksum,
     parts: Vec<CompletedUploadPart>,
 }
 
@@ -812,9 +818,7 @@ impl Client {
             body,
             expected: download.content_ref.clone(),
             path: download.absolute_path.clone(),
-            digest: StreamingChecksum::for_algorithm(
-                download.content_ref.verifiable_checksum().algorithm,
-            ),
+            digest: StreamingChecksum::for_algorithm(download.content_ref.checksum.algorithm),
             // The counter measures the whole object, not this response, so
             // the length check at the end lands where it always did.
             size_bytes: start_offset,
@@ -833,10 +837,8 @@ impl Client {
     /// deployment's proxy cap has no other way home.
     ///
     /// Verification is what keeps a direct read no weaker than a proxied
-    /// one: the length always, and the whole-file SHA-256 whenever the
-    /// reference carries one. A direct-multipart object carries none —
-    /// nobody ever hashed it that way — and its length is then the whole
-    /// check, exactly as it is for the server's own reads.
+    /// one: length and the reference's complete-payload checksum are checked
+    /// for every supported algorithm.
     ///
     /// A failure is reported *after* the sink has already received bytes,
     /// because that is the only order a streamed read allows. Callers must
@@ -932,7 +934,7 @@ impl Client {
     pub async fn begin_direct_put(
         &self,
         namespace_id: &NamespaceId,
-        claim: DirectPutContentClaim,
+        claim: UploadContentClaim,
     ) -> Result<BeginUploadResponse> {
         self.begin_upload(
             namespace_id,
@@ -996,7 +998,7 @@ impl Client {
         &self,
         part_number: u32,
         access: &ObjectTransferAccess,
-        crc64nvme: String,
+        checksum: Checksum,
         bytes: Bytes,
     ) -> Result<CompletedUploadPart> {
         let ObjectTransferAccess::PresignedUrl {
@@ -1030,7 +1032,7 @@ impl Client {
         Ok(CompletedUploadPart {
             part_number,
             etag,
-            crc64nvme,
+            checksum,
         })
     }
 
@@ -1455,14 +1457,14 @@ impl Client {
             .await
             .map_err(|error| ClientError::Io(error.to_string()))?;
         let size = MeasuredBytes(measured.size_bytes());
-        let storage_checksum = digest.finish();
+        let checksum = digest.finish();
 
         match self.transport_for_measured(size).await? {
             UploadTransport::DirectPut(_) => {
                 self.direct_put_transfer(
                     namespace_id,
                     size,
-                    storage_checksum,
+                    checksum,
                     DirectPutBody::Rewound(measured.reread().await.map_err(read_back_failed)?),
                 )
                 .await
@@ -1637,15 +1639,15 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         size: MeasuredBytes,
-        storage_checksum: StorageChecksum,
+        checksum: Checksum,
         body: DirectPutBody<'_>,
     ) -> Result<StagedContent> {
         let begin = self
             .begin_direct_put(
                 namespace_id,
-                DirectPutContentClaim {
+                UploadContentClaim {
                     size_bytes: size.0,
-                    storage_checksum,
+                    checksum,
                 },
             )
             .await?;
@@ -1702,8 +1704,12 @@ impl Client {
         // A resumed upload rejoins the session a previous run opened, at the
         // part size that run was given. Asking for a new one would open a
         // second session and orphan the parts already in object storage.
-        let (upload_id, part_size_bytes) = match continuity.resume {
-            Some(resume) => (resume.upload_id.clone(), resume.part_size_bytes),
+        let (upload_id, part_size_bytes, checksum_algorithm) = match continuity.resume {
+            Some(resume) => (
+                resume.upload_id.clone(),
+                resume.part_size_bytes,
+                resume.checksum_algorithm,
+            ),
             None => {
                 let begin = self
                     .begin_direct_multipart(namespace_id, DirectMultipartUploadOptions::default())
@@ -1717,9 +1723,17 @@ impl Client {
                     return Err(negotiated_a_different_upload_mode());
                 };
                 if let Some(journal) = continuity.journal {
-                    journal.began(&upload_id, direct_multipart.part_size_bytes);
+                    journal.began(
+                        &upload_id,
+                        direct_multipart.part_size_bytes,
+                        direct_multipart.checksum_algorithm,
+                    );
                 }
-                (upload_id, direct_multipart.part_size_bytes)
+                (
+                    upload_id,
+                    direct_multipart.part_size_bytes,
+                    direct_multipart.checksum_algorithm,
+                )
             }
         };
         let uploaded = self
@@ -1728,6 +1742,7 @@ impl Client {
                 &upload_id,
                 payload,
                 part_size_bytes,
+                checksum_algorithm,
                 continuity,
             )
             .await;
@@ -1754,9 +1769,9 @@ impl Client {
                 namespace_id,
                 &upload_id,
                 &CompleteUploadRequest::for_multipart(
-                    DirectMultipartContentClaim {
+                    UploadContentClaim {
                         size_bytes: uploaded.size_bytes,
-                        crc64nvme: uploaded.crc64nvme.value,
+                        checksum: uploaded.checksum,
                     },
                     uploaded.parts,
                 ),
@@ -1784,6 +1799,7 @@ impl Client {
         upload_id: &UploadId,
         payload: MultipartPayload<'_>,
         part_size_bytes: u64,
+        checksum_algorithm: ChecksumAlgorithm,
         continuity: UploadContinuity<'_>,
     ) -> Result<UploadedObject> {
         let part_size = usize::try_from(part_size_bytes).map_err(|_| {
@@ -1793,7 +1809,7 @@ impl Client {
             .resume
             .map_or::<&[CompletedUploadPart], _>(&[], |resume| &resume.parts);
         let mut source = payload.into_parts_of(part_size);
-        let mut whole_object = Crc64Nvme::new();
+        let mut whole_object = StreamingChecksum::for_algorithm(checksum_algorithm);
         let mut size_bytes = 0u64;
         let mut parts = Vec::new();
         let mut next_part_number = 1u32;
@@ -1817,7 +1833,7 @@ impl Client {
                 wave.push(PendingPart {
                     claim: UploadPartChecksumClaim {
                         part_number,
-                        crc64nvme: StorageChecksum::crc64nvme(&bytes).value,
+                        checksum: Checksum::compute(checksum_algorithm, &bytes),
                     },
                     bytes,
                 });
@@ -1839,7 +1855,7 @@ impl Client {
         parts.sort_by_key(|part| part.part_number);
         Ok(UploadedObject {
             size_bytes,
-            crc64nvme: whole_object.finish(),
+            checksum: whole_object.finish(),
             parts,
         })
     }
@@ -1907,7 +1923,7 @@ impl Client {
                 .upload_part_via_presigned_url(
                     part_number,
                     &access,
-                    part.claim.crc64nvme.clone(),
+                    part.claim.checksum.clone(),
                     part.bytes.clone(),
                 )
                 .await
@@ -1927,7 +1943,7 @@ impl Client {
                 }
             }
         }
-        self.upload_part_via_presigned_url(part_number, &access, part.claim.crc64nvme, part.bytes)
+        self.upload_part_via_presigned_url(part_number, &access, part.claim.checksum, part.bytes)
             .await
     }
 
@@ -2528,11 +2544,11 @@ mod tests {
         ContentRef::blob_v1(ContentId::generate(), bytes)
     }
 
-    fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
+    fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
         let content_ref = test_content_ref(bytes);
-        DirectPutContentClaim {
+        UploadContentClaim {
             size_bytes: content_ref.size_bytes,
-            storage_checksum: content_ref.storage_checksum,
+            checksum: content_ref.checksum,
         }
     }
 

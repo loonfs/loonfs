@@ -9,7 +9,7 @@
 //! exists and fails.
 
 use crate::object_store::Result;
-use loonfs_api::{ChecksumAlgorithm, ContentRef, StorageChecksum};
+use loonfs_api::{Checksum, ChecksumAlgorithm, ContentRef};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -50,7 +50,7 @@ pub struct PresignedPartRequest<'a> {
     /// One-based part number.
     pub part_number: u32,
     /// Checksum the provider must enforce on this part's bytes.
-    pub part_checksum: &'a StorageChecksum,
+    pub checksum: &'a Checksum,
     /// Lifetime of the issued capability measured from the supplied signing time.
     pub expires_in: Duration,
 }
