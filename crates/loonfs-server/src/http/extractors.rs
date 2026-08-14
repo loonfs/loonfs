@@ -212,11 +212,7 @@ where
     }
 }
 
-/// An authorized JSON-sized request body whose schema is selected later.
-///
-/// Completion uses this extractor because its durable upload session chooses
-/// the body type. Authorization still runs before a byte is read, and body
-/// failures remain inside the API error envelope.
+/// An authorized request body decoded after the upload mode is loaded.
 pub(super) struct UploadBodyBytes(Bytes);
 
 impl UploadBodyBytes {

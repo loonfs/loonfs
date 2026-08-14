@@ -749,8 +749,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
     harness.server.abort();
 }
 
-/// Completion reads the object back against the durable promise before it
-/// hands out a content token, so nothing unproven can reach a commit.
+/// Completion verifies the stored object before issuing a content token.
 async fn assert_gcs_completion_judges_the_object_that_is_there(
     client: &Client,
     namespace_id: &NamespaceId,
@@ -770,7 +769,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
         .await
         .expect("upload the promised bytes");
 
-    // The session completes against the promise it durably owns.
+    // Completion uses the content reference stored in the session.
     let complete = client
         .complete_upload(namespace_id, begin.upload_id())
         .await

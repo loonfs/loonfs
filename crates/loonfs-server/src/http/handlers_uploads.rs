@@ -559,14 +559,14 @@ pub(super) async fn upload_content(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
-        description = "Completes an upload session using the request schema selected by its durable mode. Service-proxied and direct-put sessions accept `{}`; direct-multipart sessions accept the content claim and completed parts. The response may include a short-lived content token for a following file write.",
+        description = "Completes an upload using the body required by its stored mode. Service-proxied and direct-put sessions accept `{}`. Direct-multipart sessions require the content claim and completed parts.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         request_body(
             content = crate::http::openapi::CompleteUploadRequestSchema,
-            description = "The stored session mode selects which strict oneOf variant is accepted."
+            description = "The stored upload mode determines which body is accepted."
         ),
         responses(
             (status = 200, description = "Upload completed", body = CompleteUploadResponse),

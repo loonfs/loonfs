@@ -87,19 +87,13 @@ pub struct BeginDirectMultipartUploadTargetResponse {
     pub target: DirectMultipartUploadTarget,
 }
 
-/// A completion body after the durable session selected and decoded its wire
-/// schema.
-///
-/// This is an integration value, not a wire shape. HTTP callers send either
-/// `{}` or [`CompleteMultipartUploadRequest`], and the stored upload mode
-/// decides which one becomes this value.
+/// Completion data after the request has been decoded for the stored upload
+/// mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedUploadCompletion {
-    /// A service-proxied or direct-PUT session already owns every content
-    /// fact completion needs.
+    /// The session already contains all required content information.
     KnownContent,
-    /// A multipart session learned its whole-object claim and part list while
-    /// uploading.
+    /// Multipart content information supplied at completion.
     Multipart(CompleteMultipartUploadRequest),
 }
 
@@ -882,12 +876,8 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Completes an upload after using its durable transport to resolve the
-/// caller's request shape.
-///
-/// The resolver runs after the session read and terminal-abort check, and
-/// before any provider access or durable write. Keeping that decision inside
-/// the existing session read preserves the completion accounting contract.
+/// Loads the session, decodes completion data for its mode, and completes the
+/// upload. Decoding happens before provider access or durable writes.
 pub(crate) async fn complete_upload_for_mode<S, F>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1401,20 +1391,13 @@ enum CompletionOutcome {
     Unusable(String),
 }
 
-/// The verification plan derived from the upload transport and completion
-/// request.
-///
-/// Building the plan performs no provider calls or durable writes. Each
-/// variant contains all data needed for the verification step.
+/// Information needed to verify an upload before completion.
 enum CompletionPlan<'a> {
-    /// A proxied session, which wrote and checked its own bytes: what it
-    /// recorded staging is the evidence.
+    /// Content previously staged through the server.
     Proxied { staged: Option<&'a ContentRef> },
-    /// A direct-put session, whose bytes went past this server: the object
-    /// that came to rest has to be read back against the promise.
+    /// Directly uploaded content that must be checked at the provider.
     DirectPut { promised: &'a ContentRef },
-    /// A direct-multipart session: the provider still has to assemble the
-    /// object from the parts the client uploaded, and then be proven right.
+    /// Parts the provider must assemble and verify.
     DirectMultipart {
         requested: ContentRef,
         provider_upload_id: &'a str,
@@ -1424,8 +1407,7 @@ enum CompletionPlan<'a> {
 }
 
 impl CompletionPlan<'_> {
-    /// The content a repeated completion must agree with when the request
-    /// still contributes content facts.
+    /// Content a repeated multipart completion must match.
     fn expected_completed_content(&self) -> Option<&ContentRef> {
         match self {
             Self::Proxied { .. } | Self::DirectPut { .. } => None,

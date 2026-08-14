@@ -180,7 +180,7 @@ impl FsWriter {
         .await
     }
 
-    /// Completes a multipart upload and returns proof for later publication.
+    /// Completes a multipart upload and returns its publication proof.
     pub async fn complete_multipart_upload_prepared(
         &self,
         namespace_id: &NamespaceId,
@@ -212,10 +212,7 @@ impl FsWriter {
         Ok(completed)
     }
 
-    /// Completes an upload after its durable mode selects a request decoder.
-    ///
-    /// Server integrations use this with an authorized raw-body extractor so
-    /// decoding does not require a separate upload-session read.
+    /// Completes an upload after decoding its request for the stored mode.
     pub async fn complete_upload_prepared_for_mode<F>(
         &self,
         namespace_id: &NamespaceId,

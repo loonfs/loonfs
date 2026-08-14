@@ -31,8 +31,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&openapi_document())
 }
 
-/// Manual completion request schema: the durable session mode, not a field in
-/// the body, selects one of the two strict wire objects.
+/// OpenAPI schema for the two upload completion bodies.
 pub(super) struct CompleteUploadRequestSchema;
 
 impl utoipa::PartialSchema for CompleteUploadRequestSchema {
@@ -45,9 +44,9 @@ impl utoipa::PartialSchema for CompleteUploadRequestSchema {
                 "CompleteMultipartUploadRequest",
             ))
             .description(Some(
-                "The stored upload session mode selects the accepted variant: service_proxied \
-                 and direct_put use the empty object; direct_multipart uses the content claim \
-                 and completed parts.",
+                "The stored upload mode determines the accepted body. Service-proxied and \
+                 direct-put sessions use an empty object. Direct-multipart sessions provide \
+                 the content claim and completed parts.",
             ))
             .into()
     }

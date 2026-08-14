@@ -320,30 +320,21 @@ pub struct UploadContentResponse {
     pub content_ref: ContentRef,
 }
 
-/// Request to complete a service-proxied or `direct_put` upload.
-///
-/// The durable session already owns the content reference and selects this
-/// schema, so the caller has nothing to repeat.
+/// Empty request used when the upload session already contains the content
+/// reference.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CompleteKnownContentUploadRequest {}
 
-/// Request to complete a `direct_multipart` upload.
-///
-/// The durable session selects this schema and owns the content object's
-/// identity. The caller supplies only what became known while uploading the
-/// parts.
+/// Information required to complete a `direct_multipart` upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CompleteMultipartUploadRequest {
-    /// The assembled object's length and checksum, which completion verifies
-    /// against the provider's own reading of the object.
+    /// Expected length and checksum of the assembled object.
     pub content: UploadContentClaim,
-    /// Every part the client uploaded, in ascending part order. The server
-    /// holds no part records of its own, so this list is what it assembles the
-    /// object from.
+    /// Uploaded parts in ascending part order.
     pub parts: Vec<CompletedUploadPart>,
 }
 
@@ -474,8 +465,7 @@ mod tests {
         }
     }
 
-    /// Each completion body is strict even though the stored session, rather
-    /// than a request tag, chooses which one the server decodes.
+    /// Completion request fields must match the stored upload mode.
     #[test]
     fn completion_request_shapes_reject_fields_the_session_did_not_select() {
         assert_eq!(

@@ -1059,10 +1059,10 @@ A browser calling a presigned URL is talking to the provider, not to LoonFS,
 so cross-origin access is governed by the bucket's or container's own CORS
 configuration rather than by anything this API sets.
 
-After the client uploads bytes to the presigned URL, it calls complete with
-`{}`. The server reads the content reference from the durable session, then
-reads the stored object's size and checksum from the provider and compares
-them. A mismatch fails the completion and deletes the unpublished object.
+After uploading to the presigned URL, the client completes the session with
+`{}`. The server loads the expected content reference from the session and
+compares it with the object's size and checksum at the provider. A mismatch
+fails completion and deletes the unpublished object.
 If the provider metadata request fails, the server returns `server_error`
 without changing the object or session, so the client can retry. The server
 does not download the object during this check.
@@ -1138,10 +1138,9 @@ resulting content reference stores that complete-object checksum.
 }
 ```
 
-The request lists every part once in ascending order. It does not include a
-content reference; the server returns the reference after completion.
-Service-proxied and direct-PUT completion requests are `{}` because their
-durable sessions already own every content fact completion needs.
+The request lists every part once in ascending order. The server returns the
+content reference after completion. Service-proxied and direct-PUT sessions
+use `{}` because the session already stores the required content information.
 
 The server asks the provider to assemble the object, then reads its stored size
 and checksum and compares them with the completion request. This read is
@@ -1819,12 +1818,9 @@ only the fields for that mode:
 `direct_multipart` accepts an optional `multipart` object and otherwise uses
 the default part size.
 
-The stored session mode selects the completion request schema. Service-proxied
-and direct-PUT sessions accept only `{}`. Multipart sessions require `content`
-and `parts`. Both shapes reject unknown fields, so a multipart body sent to a
-direct-PUT session, `{}` sent to a multipart session, and the retired
-`completion` or echoed `content_ref` fields fail with `invalid_request` and a
-field-specific message.
+The stored upload mode determines the completion body. Service-proxied and
+direct-PUT sessions accept only `{}`. Multipart sessions require `content` and
+`parts`. Unknown, missing, or mode-specific fields return `invalid_request`.
 
 The begin-upload *response* is tagged the same way, in the same `mode`, and
 carries its transport's field and no other's: `service_proxied` carries
