@@ -567,11 +567,10 @@ The metadata rows store attribution as follows:
   initial empty state at revision 0 is not persisted and has neither value.
 - Directory bind and unbind rows store neither an actor nor a timestamp.
 
-Each timestamp comes from the commit that created or updated the corresponding
-metadata row. It is informational only. Renaming or moving an item does not
-change any timestamp, and directories do not have a modification time.
-Sequence numbers determine ordering. The format does not define a rename time
-or a directory modification time.
+Each timestamp comes from the commit that wrote the metadata row. Timestamps
+are informational; sequence numbers determine ordering. Renaming or moving an
+item does not change a timestamp, and directories do not have a modification
+time.
 
 ### 2.2 Inode kinds
 
@@ -997,14 +996,12 @@ in ascending row-key order (adjacent equal keys permitted); readers reject a
 segment whose rows are out of order as malformed. Readers load the referenced
 runs, then replay only the visible WAL chain after the manifest's `head_seq`.
 
-The WAL preserves ordered history even when multiple logical commits are
-stored in one segment. Each logical commit envelope records `commit_id`,
-`semantic_commit_fingerprint`, required `actor`, `committed_at_ms`, optional
-`message`, and normalized metadata deltas such as inode creation, direntry
-bind/unbind, file revision append, and subtree tombstone rows. The `actor`
-object contains `kind` (`user`, `service`, or `system`) and `id`, and it is
-recorded once per commit. Validation inputs and operation results are not
-persisted in the WAL. Checkpoints keep replay bounded as history grows.
+The WAL preserves commit order even when a segment contains several commits.
+Each commit stores `commit_id`, `semantic_commit_fingerprint`, `actor`,
+`committed_at_ms`, an optional `message`, and its metadata changes. The actor
+contains a `kind` and `id` and is stored once per commit, not once per change.
+Validation inputs and operation results are not stored. Checkpoints keep replay
+bounded as history grows.
 
 #### 2.9.1 Resolving the metadata basis
 
@@ -1399,10 +1396,6 @@ can prove its retry is the same request (API spec, section 5.2). Reference
 values are pinned by tests in `loonfs-api` (`commit_identity.rs`); those
 literals must never change within scheme `v1`.
 
-Actor references use stable opaque application-owned ids such as `usr_8f3c`.
-Do not use email addresses or display names because profile changes and
-deletions never rewrite filesystem history.
-
 ### 3.4 Server authority
 
 The server is authoritative for commit validation.
@@ -1526,22 +1519,16 @@ A namespace may advance a retention floor to say:
 Clients older than the retention floor must re-bootstrap from a fresh
 checkpoint instead of replaying from an obsolete cursor.
 
-#### 3.8.1 Attribution retention contract
+#### 3.8.1 Attribution and retention
 
-For every retained commit, LoonFS promises an attributed change-feed entry.
-LoonFS also promises attributed retained projections for the inode creator,
-each file revision actor, the current attribute updater, and the active
-deleter.
+Retained commits keep their actor in the change feed and in metadata for inode
+creation, file revisions, current attributes, and active deletions.
 
-LoonFS does not promise that every historical move or rename remains queryable
-forever. A partner that needs an all-time activity record must consume the
-change feed into its own store before the retention floor passes the commit.
-That store keys changes by `(namespace_id, committed_seq)` and keys event
-targets by `inode_id`, not by path. `committed_seq` is never reused within a
-namespace. `commit_id` is not a unique key over all time: its uniqueness is
-enforced only while the commit's receipt is retained (the receipt horizon),
-so a caller-supplied id can legally recur after the retention floor passes
-its receipt. Sinks store `commit_id` as a correlation field, not as the key.
+Moves and renames below the retention floor may no longer be available. A
+consumer that needs permanent history must copy the change feed before the
+floor advances. It keys changes by `(namespace_id, committed_seq)` and targets
+by `inode_id`, not by path. It may store `commit_id` for correlation, but not
+as a permanent key because the id may be reused after its receipt is removed.
 
 The retention floor may advance only after the system has enough verified
 material to keep replay safe at or after that point: advancement derives its

@@ -422,40 +422,25 @@ available.
 
 ### Actor attribution
 
-The actor is the application-asserted identity of who caused a mutation.
-LoonFS records one actor on each logical commit and copies that reference onto
-the retained facts that the commit creates.
-
-The shared bearer token proves that a request came from the credential holder.
-It does not prove that the named actor initiated the action. Keep LoonFS behind
-a trusted backend. That backend must authenticate its user, authorize the
-namespace and operation, and then assert the actor.
-
-Use stable opaque actor ids such as usr_8f3c. Do not use email addresses or
-display names because profile changes and deletions never rewrite filesystem
-history.
+Every commit includes an actor with a `kind` and `id`. The application chooses
+this value, and LoonFS stores it on the commit and the metadata created by that
+commit. LoonFS does not authenticate the actor. The application must
+authenticate the user and authorize the operation before sending the request.
+Use a stable internal ID, not an email address or display name.
 
 Actor kind and actor id are part of the semantic commit fingerprint. Reusing a
 `commit_id` with a different actor id or kind fails with
-`commit_id_reuse_conflict`. The observational commit timestamp is not part of
-the fingerprint, so a retry at a later time keeps the same identity.
+`commit_id_reuse_conflict`. The commit timestamp is not part of the
+fingerprint.
 
-Attribution fields in v0 responses have these meanings:
+Responses expose attribution through these fields:
 
-- `created_by` is the actor on the commit that created the inode.
-- `created_at_ms` is the observational wall-clock stamp on the commit that
-  created the inode.
-- `revision_actor` is the actor on the commit that created the current file
-  revision; directories do not carry this field.
-- A revision's `actor` is the actor on the commit that created that revision.
-- `attributes.updated_by` is the actor on the commit that created the current
-  persisted attributes revision; synthetic revision 0 has no updater.
-- A trash entry's `deleted_by` is the actor on the commit that created its
-  active deletion generation.
-
-The CLI uses `service/loonfs-cli` when no actor is supplied by flags,
-environment, or profile. This actor identifies the tool, not the human running
-it.
+- `created_by` and `created_at_ms` come from the commit that created an inode.
+- `revision_actor` identifies the actor for the current file revision. Each
+  revision-history entry also has an `actor`. Directories have neither field.
+- `attributes.updated_by` identifies who last changed the stored attributes.
+  The initial empty attributes at revision 0 have no updater.
+- `deleted_by` identifies the actor for an active trash entry.
 
 ### 5.2 Commit responses and safe retry
 
