@@ -913,9 +913,12 @@ becomes provenance only.
 A checkpoint is a durable pin to a namespace manifest version, stored as a
 first-class record under `checkpoints/` — never inside a manifest, and never
 an input to latest visibility. A record carries its basis facts (manifest id,
-seq, payload checksum, head commit id), a required tagged `owner` — a `user`
-owner with a name label, or a `fork` owner naming the target namespace the
-pin protects — an optional `expires_at_ms`, and a tagged lifecycle `state`.
+seq, payload checksum, head commit id), a required tagged `owner`, and a
+tagged lifecycle `state`. A `user` owner carries a name label and an optional
+`expires_at_ms`; a `fork` owner carries the target namespace the pin protects
+and a required `expires_at_ms`. There is no expiry field at the record's top
+level.
+
 Creation is write-then-verify: write the record active, then verify — under
 the self-enforced verify budget — that the floor has not passed the basis and
 the basis manifest still loads; on failure release the record and retry
@@ -946,17 +949,18 @@ pins over one basis are distinct records with independent lifecycles.
 
 No checkpoint state transition consults a provider object timestamp. Every
 instant the lifecycle depends on lives in the record: `created_at_ms` for the
-create-vs-collect grace, `expires_at_ms` for the release, and
+create-vs-collect grace, `owner.expires_at_ms` for the release, and
 `released_at_ms` for the deletion.
 
-`expires_at_ms` means "GC may release this without asking anyone". A user pin
-carries the caller's `ttl_ms`, or nothing at all, in which case it is held
-until released. A fork-owned record always carries one: it is the lease for a
-single fork attempt (section 3.9.2), and letting it pass is how an abandoned
-attempt becomes collectable; a fork-owned record read without one is rejected
-at decode, like any other corruption. An active record whose expiry has passed
-still pins and still serves — until the pass that releases it, it is a root,
-and answering from it is answering from state that is provably still there.
+An owner's `expires_at_ms` means "GC may release this without asking anyone".
+A user pin carries the caller's `ttl_ms`, or nothing at all, in which case it
+is held until released. A fork owner structurally requires one: it is the
+lease for a single fork attempt (section 3.9.2), and letting it pass is how an
+abandoned attempt becomes collectable; a fork owner without one fails ordinary
+strict deserialization as a missing field. An active record whose expiry has
+passed still pins and still serves — until the pass that releases it, it is a
+root, and answering from it is answering from state that is provably still
+there.
 
 Explicit release is user-owned only, and it is idempotent: releasing an
 already-released or already-deleted record leaves the same end state. Owner
@@ -1594,13 +1598,13 @@ request supplies only the new namespace id; the server supplies the mutation
 context. The protocol is:
 
 1. Read and verify the source head and its WAL visibility chain.
-2. Create a verified fork-owned source checkpoint at that head (owner: the
-   target namespace id) under a freshly generated id, with a lease:
+2. Create a verified fork-owned source checkpoint at that head under a freshly
+   generated id. Its owner carries the target namespace id and
    `expires_at_ms = now + FORK_CHECKPOINT_LEASE_MS`. This record is the
    reachability root that keeps the source's basis manifest and tables alive
-   for as long as the target lives; nothing under the target's prefix
-   protects them. Every attempt takes its own record; no attempt reuses,
-   refreshes, or revives an earlier one's.
+   for as long as the target lives; nothing under the target's prefix protects
+   them. Every attempt takes its own record; no attempt reuses, refreshes, or
+   revives an earlier one's.
 3. Read the manifest that record pins for the target's fork sequence and next
    inode id, then build the complete active target head: the source's
    `content_store_id` copied verbatim from the source head,
@@ -1608,7 +1612,8 @@ context. The protocol is:
    and payload checksum, the source checkpoint id, and the fork sequence.
    Write it with create-if-absent.
 4. Read the source checkpoint record once. The fork succeeds only if the
-   record is active **and** `expires_at_ms > now + FORK_GUARD_MARGIN_MS`.
+   record is active **and** its fork owner's
+   `expires_at_ms > now + FORK_GUARD_MARGIN_MS`.
    Otherwise delete the target through the ordinary namespace-delete path and
    return the checkpoint failure.
 

@@ -220,8 +220,7 @@ impl std::fmt::Display for CheckpointRecordLifecycle {
     }
 }
 
-/// Durable owner of a checkpoint record: the party whose lifecycle decides
-/// when the pin is released.
+/// Durable owner and expiry policy of a checkpoint record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CheckpointOwner {
@@ -231,6 +230,9 @@ pub enum CheckpointOwner {
     User {
         /// Operator-facing label that need not be unique.
         name: String,
+        /// When garbage collection may release the pin without an explicit request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at_ms: Option<u64>,
     },
     /// A fork target keeping its source basis alive. Released once the
     /// target namespace is terminally deleted, or once the attempt's lease
@@ -239,7 +241,19 @@ pub enum CheckpointOwner {
     Fork {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,
+        /// Lease bounding the fork attempt before its target head is installed.
+        expires_at_ms: u64,
     },
+}
+
+impl CheckpointOwner {
+    /// When garbage collection may release this record without asking its owner.
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        match self {
+            Self::User { expires_at_ms, .. } => *expires_at_ms,
+            Self::Fork { expires_at_ms, .. } => Some(*expires_at_ms),
+        }
+    }
 }
 
 /// A checkpoint record: pins one metadata manifest (its basis) so garbage
@@ -250,7 +264,8 @@ pub enum CheckpointOwner {
 /// record is written `active`, then the basis manifest is re-verified
 /// against the floor, and a failed verification flips the record to
 /// `released`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckpointRecordState {
     /// Freshly generated record identity, one per logical pin. Nothing
     /// derives it, and no caller supplies it, so a new pin can never land on
@@ -270,69 +285,10 @@ pub struct CheckpointRecordState {
     pub head_commit_id: CommitId,
     /// Unix-millisecond creation stamp used by GC grace policy, never validity ordering.
     pub created_at_ms: u64,
-    /// When garbage collection may release this record without asking anyone.
-    ///
-    /// A user pin carries the caller's `ttl_ms`, or nothing at all, in which
-    /// case it is held until released. A fork-owned record always carries
-    /// one: it is the lease covering a single fork attempt, and its expiry
-    /// is how an abandoned attempt becomes collectable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at_ms: Option<u64>,
-    /// Party whose durable lifecycle determines when this pin can be released.
+    /// Party and expiry policy that determine when this pin can be released.
     pub owner: CheckpointOwner,
     /// Current lifecycle, advanced only by the one-way release compare-and-swap.
     pub state: CheckpointRecordLifecycle,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictCheckpointRecordState {
-    checkpoint_id: CheckpointId,
-    namespace_id: NamespaceId,
-    manifest_id: ManifestId,
-    manifest_object_id: ManifestObjectId,
-    manifest_head_seq: ChangeSeq,
-    manifest_payload_checksum: String,
-    head_commit_id: CommitId,
-    created_at_ms: u64,
-    #[serde(default)]
-    expires_at_ms: Option<u64>,
-    owner: CheckpointOwner,
-    state: CheckpointRecordLifecycle,
-}
-
-impl<'de> Deserialize<'de> for CheckpointRecordState {
-    /// Decodes a checkpoint record and validates that every fork-owned record
-    /// has an expiry.
-    ///
-    /// The expiry bounds an abandoned fork attempt whose target head was never
-    /// installed. Without it, the source basis could remain pinned forever, so
-    /// such a record is rejected as corrupt.
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let record = StrictCheckpointRecordState::deserialize(deserializer)?;
-        if matches!(record.owner, CheckpointOwner::Fork { .. }) && record.expires_at_ms.is_none() {
-            return Err(serde::de::Error::custom(format!(
-                "checkpoint record `{}` is fork-owned but has no lease expiry",
-                record.checkpoint_id
-            )));
-        }
-        Ok(Self {
-            checkpoint_id: record.checkpoint_id,
-            namespace_id: record.namespace_id,
-            manifest_id: record.manifest_id,
-            manifest_object_id: record.manifest_object_id,
-            manifest_head_seq: record.manifest_head_seq,
-            manifest_payload_checksum: record.manifest_payload_checksum,
-            head_commit_id: record.head_commit_id,
-            created_at_ms: record.created_at_ms,
-            expires_at_ms: record.expires_at_ms,
-            owner: record.owner,
-            state: record.state,
-        })
-    }
 }
 
 /// Links one accepted WAL segment to its immutable object and verified sequence range.

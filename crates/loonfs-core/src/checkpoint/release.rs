@@ -31,6 +31,7 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
     };
     if let CheckpointOwner::Fork {
         target_namespace_id,
+        ..
     } = &loaded.state.owner
     {
         return Err(CoreError::InvalidCheckpointRequest(format!(

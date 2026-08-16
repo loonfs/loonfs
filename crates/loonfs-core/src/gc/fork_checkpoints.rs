@@ -89,6 +89,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     }
     let CheckpointOwner::Fork {
         target_namespace_id,
+        ..
     } = &record.owner
     else {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);

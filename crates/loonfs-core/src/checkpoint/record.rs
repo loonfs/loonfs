@@ -298,9 +298,9 @@ mod tests {
             head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
                 .expect("commit id"),
             created_at_ms: 1,
-            expires_at_ms: None,
             owner: CheckpointOwner::User {
                 name: "test".to_owned(),
+                expires_at_ms: None,
             },
             state: CheckpointRecordLifecycle::Active {},
         }

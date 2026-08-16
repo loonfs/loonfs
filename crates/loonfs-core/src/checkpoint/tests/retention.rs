@@ -515,8 +515,9 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let owner = || loonfs_api::wire::control::CheckpointOwner::User {
+    let owner = |expires_at_ms| loonfs_api::wire::control::CheckpointOwner::User {
         name: "test-pin".to_owned(),
+        expires_at_ms,
     };
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -534,7 +535,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     .expect("write");
 
     let first =
-        super::create::create_checkpoint(&store, &namespace_id, owner(), Some(10_000), &context)
+        super::create::create_checkpoint(&store, &namespace_id, owner(Some(10_000)), &context)
             .await
             .expect("create checkpoint")
             .checkpoint;
@@ -544,16 +545,11 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     later_context.now_ms = 2_000;
     let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
     for expiry in [Some(99_000), Some(5_000), None] {
-        let next = super::create::create_checkpoint(
-            &store,
-            &namespace_id,
-            owner(),
-            expiry,
-            &later_context,
-        )
-        .await
-        .expect("create checkpoint")
-        .checkpoint;
+        let next =
+            super::create::create_checkpoint(&store, &namespace_id, owner(expiry), &later_context)
+                .await
+                .expect("create checkpoint")
+                .checkpoint;
         assert!(
             minted.insert(next.checkpoint_id.clone()),
             "each pin gets an id of its own"
@@ -564,7 +560,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             .expect("read checkpoint record")
             .expect("record exists")
             .state;
-        assert_eq!(record.expires_at_ms, expiry);
+        assert_eq!(record.owner.expires_at_ms(), expiry);
         assert_eq!(record.created_at_ms, 2_000);
         assert_eq!(
             record.state,
@@ -580,7 +576,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         .expect("record exists")
         .state;
     assert_eq!(original.created_at_ms, 1_000, "creation instant is history");
-    assert_eq!(original.expires_at_ms, Some(10_000));
+    assert_eq!(original.owner.expires_at_ms(), Some(10_000));
     assert_eq!(
         original.state,
         loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
@@ -615,8 +611,8 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
         &namespace_id,
         loonfs_api::wire::control::CheckpointOwner::User {
             name: "test-pin".to_owned(),
+            expires_at_ms: Some(context.now_ms),
         },
-        Some(context.now_ms),
         &context,
     )
     .await
@@ -753,9 +749,9 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
         manifest_payload_checksum: "sha256:stale".to_owned(),
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         created_at_ms: context.now_ms,
-        expires_at_ms: None,
         owner: loonfs_api::wire::control::CheckpointOwner::User {
             name: "test-pin".to_owned(),
+            expires_at_ms: None,
         },
         state: loonfs_api::wire::control::CheckpointRecordLifecycle::Active {},
     };

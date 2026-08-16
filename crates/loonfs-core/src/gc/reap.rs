@@ -36,7 +36,8 @@ pub(super) enum CheckpointSweep {
 /// instant its lifecycle depends on.
 pub(super) fn lease_expired(record: &CheckpointRecordState, now_ms: u64) -> bool {
     record
-        .expires_at_ms
+        .owner
+        .expires_at_ms()
         .is_some_and(|expires_at_ms| expires_at_ms <= now_ms)
 }
 

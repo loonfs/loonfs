@@ -1081,8 +1081,8 @@ mod tests {
             &namespace_id,
             loonfs_api::wire::control::CheckpointOwner::User {
                 name: "test-pin".to_owned(),
+                expires_at_ms: None,
             },
-            None,
             &writer,
         )
         .await

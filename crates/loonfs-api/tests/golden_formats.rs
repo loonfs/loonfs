@@ -575,9 +575,9 @@ fn control_objects_match_golden_bytes() {
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
-            expires_at_ms: None,
             owner: CheckpointOwner::User {
                 name: "nightly".to_owned(),
+                expires_at_ms: None,
             },
             state: CheckpointRecordLifecycle::Active {},
         },
@@ -597,9 +597,9 @@ fn control_objects_match_golden_bytes() {
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
-            expires_at_ms: Some(2_463_000),
             owner: CheckpointOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
+                expires_at_ms: 2_463_000,
             },
             state: CheckpointRecordLifecycle::Active {},
         },
@@ -657,9 +657,9 @@ fn control_objects_match_golden_bytes() {
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
-            expires_at_ms: Some(9_000),
             owner: CheckpointOwner::User {
                 name: "nightly".to_owned(),
+                expires_at_ms: Some(9_000),
             },
             state: CheckpointRecordLifecycle::Released {
                 released_at_ms: 9_000,
@@ -880,11 +880,9 @@ fn active_checkpoint_records_reject_release_stamps() {
     );
 }
 
-/// A fork-owned record is the lease over one fork attempt, and letting the
-/// lease pass is the only way an attempt that never installed its target
-/// head becomes collectable. Without an expiry the pin is immortal, so it is
-/// not a record that decodes — while a user pin without one is ordinary,
-/// held until someone releases it.
+/// A fork-owned record is the lease over one fork attempt, and its shape
+/// requires the expiry that makes an abandoned attempt collectable. A user
+/// pin without an expiry remains an ordinary permanent pin.
 #[test]
 fn fork_checkpoint_records_reject_a_missing_lease_expiry() {
     let message = assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
@@ -892,13 +890,15 @@ fn fork_checkpoint_records_reject_a_missing_lease_expiry() {
         ControlObjectKind::CheckpointRecord,
         |payload| {
             payload
+                .get_mut("owner")
+                .expect("owner")
                 .as_object_mut()
-                .expect("payload object")
+                .expect("owner object")
                 .remove("expires_at_ms");
         },
     );
     assert!(
-        message.contains("fork-owned but has no lease expiry"),
+        message.contains("missing field `expires_at_ms`"),
         "unexpected refusal: {message}"
     );
 }
@@ -1177,9 +1177,9 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 manifest_payload_checksum: sha256_digest(b"manifest"),
                 head_commit_id: commit_id(),
                 created_at_ms: 3_000,
-                expires_at_ms: None,
                 owner: CheckpointOwner::User {
                     name: "nightly".to_owned(),
+                    expires_at_ms: None,
                 },
                 state: CheckpointRecordLifecycle::Released {
                     released_at_ms: 4_000,

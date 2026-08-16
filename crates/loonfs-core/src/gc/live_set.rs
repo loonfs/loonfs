@@ -354,6 +354,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             CheckpointOwner::User { .. } => lease_expired(&record, now_ms),
             CheckpointOwner::Fork {
                 target_namespace_id,
+                ..
             } => {
                 if !budget.try_charge() {
                     return Ok(LiveSetCollection::BudgetExhausted);

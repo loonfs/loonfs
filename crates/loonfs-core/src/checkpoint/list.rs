@@ -115,11 +115,12 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
             continue;
         }
         let record = loaded.state;
+        let expires_at_ms = record.owner.expires_at_ms();
         checkpoints.push(Checkpoint {
             checkpoint_id: record.checkpoint_id,
             owner: super::checkpoint_owner_summary(record.owner),
             created_at_ms: record.created_at_ms,
-            expires_at_ms: record.expires_at_ms,
+            expires_at_ms,
             checkpoint_seq: record.manifest_head_seq,
             manifest_id: record.manifest_id,
         });

@@ -39,7 +39,6 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     owner: CheckpointOwner,
-    expires_at_ms: Option<u64>,
     context: &MutationContext,
 ) -> Result<CreateCheckpointResponse> {
     // Checkpoint creation pins a manifest version as a first-class record
@@ -55,7 +54,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     //    budget.
     // 4. On verification failure, release the record — terminally — and
     //    retry against a newer basis under a new id.
-    validate_checkpoint_owner(&owner, expires_at_ms)?;
+    validate_checkpoint_owner(&owner)?;
     let timer = StdMonotonicTimer::default();
     let mut saw_root_cas_race = false;
     for _publication_attempt in 0..CONTENTION_RETRY_LIMIT {
@@ -77,7 +76,6 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             manifest_payload_checksum: basis.manifest_payload_checksum.clone(),
             head_commit_id: basis.head_commit_id.clone(),
             created_at_ms: context.now_ms,
-            expires_at_ms,
             owner: owner.clone(),
             state: CheckpointRecordLifecycle::Active {},
         };
@@ -107,13 +105,14 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
             <= CHECKPOINT_VERIFY_BUDGET_MS;
         if verification == CheckpointBasisVerification::Verified && within_budget {
+            let expires_at_ms = record.owner.expires_at_ms();
             return Ok(CreateCheckpointResponse {
                 namespace_id: namespace_id.clone(),
                 checkpoint: Checkpoint {
                     checkpoint_id: record.checkpoint_id,
                     owner: super::checkpoint_owner_summary(record.owner),
                     created_at_ms: record.created_at_ms,
-                    expires_at_ms: record.expires_at_ms,
+                    expires_at_ms,
                     checkpoint_seq: record.manifest_head_seq,
                     manifest_id: record.manifest_id,
                 },
@@ -134,9 +133,9 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     }
 }
 
-fn validate_checkpoint_owner(owner: &CheckpointOwner, expires_at_ms: Option<u64>) -> Result<()> {
+fn validate_checkpoint_owner(owner: &CheckpointOwner) -> Result<()> {
     match owner {
-        CheckpointOwner::User { name } => {
+        CheckpointOwner::User { name, .. } => {
             if name.is_empty() {
                 return Err(CoreError::InvalidCheckpointRequest(
                     "checkpoint name must not be empty".to_owned(),
@@ -149,19 +148,7 @@ fn validate_checkpoint_owner(owner: &CheckpointOwner, expires_at_ms: Option<u64>
             }
             Ok(())
         }
-        CheckpointOwner::Fork { .. } => {
-            // A fork record is leased: the expiry bounds the attempt, not
-            // the finished fork. Once the target head exists, the live
-            // target protects the record whatever the lease says, and an
-            // attempt that never got that far is exactly what the lease is
-            // for (`namespace/fork.rs`).
-            if expires_at_ms.is_none() {
-                return Err(CoreError::InvalidCheckpointRequest(
-                    "fork-owned checkpoints must carry a lease expiry".to_owned(),
-                ));
-            }
-            Ok(())
-        }
+        CheckpointOwner::Fork { .. } => Ok(()),
     }
 }
 
