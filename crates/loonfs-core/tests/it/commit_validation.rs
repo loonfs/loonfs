@@ -13,7 +13,7 @@ use futures::stream::BoxStream;
 use loonfs_api::{
     v0::{FilesystemChange, UploadSessionStatus},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
-    NamespaceId, RevisionNo,
+    InodeId, NamespaceId, RevisionNo,
 };
 use loonfs_core::content::{
     mint_content_token, store_bytes_as_content, verify_content_token, ContentTokenError,
@@ -414,6 +414,69 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
+/// A rejected candidate returns any inode IDs it reserved, so the next
+/// accepted candidate can use them.
+#[tokio::test]
+async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    let responses = submit_commits_batch(
+        &store,
+        &namespace_id,
+        vec![
+            CommitRequest::single(
+                commit_id("keep-first-allocation"),
+                loonfs_test_support::test_actor(),
+                None,
+                create_dir("/first"),
+            ),
+            CommitRequest {
+                commit_id: commit_id("discard-allocation"),
+                actor: loonfs_test_support::test_actor(),
+                message: None,
+                operations: vec![create_dir("/discarded"), delete_path("/missing")],
+            },
+            CommitRequest::single(
+                commit_id("reuse-discarded-allocation"),
+                loonfs_test_support::test_actor(),
+                None,
+                create_dir("/second"),
+            ),
+        ],
+        &context,
+    )
+    .await;
+
+    let [first, rejected, second] = responses.as_slice() else {
+        panic!("expected three batch results")
+    };
+    first.as_ref().expect("first candidate commits");
+    assert_eq!(
+        rejected
+            .as_ref()
+            .expect_err("second candidate is rejected")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    second.as_ref().expect("third candidate commits");
+    assert_eq!(
+        resolve_path(&store, &namespace_id, "/second")
+            .await
+            .expect("second directory")
+            .inode_id,
+        InodeId(3)
+    );
+    resolve_path(&store, &namespace_id, "/discarded")
+        .await
+        .expect_err("rejected candidate publishes nothing");
+}
+
 #[tokio::test]
 async fn mutation_paths_reject_invalid_display_names() {
     assert!(DisplayName::parse("a/b").is_err());
@@ -518,10 +581,9 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
     );
 }
 
-/// Validation precedes content coverage, uniformly (owner decision with the
-/// single-pass commit preparation): a put whose caller-supplied revision
-/// guard is stale answers for the stale guard even when its content proof is
-/// also missing, and nothing is read from the content store either way.
+/// Validation runs before content coverage. A put with both a stale revision
+/// guard and missing content proof returns the stale revision without reading
+/// from the content store.
 #[tokio::test]
 async fn a_guarded_put_reports_the_stale_revision_before_missing_content_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");

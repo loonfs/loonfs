@@ -24,8 +24,6 @@
 mod batch;
 mod candidates;
 mod changes;
-#[cfg(test)]
-mod prepare_tests;
 mod publish_view;
 mod uploads;
 
