@@ -611,14 +611,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
-        crate::protocol::upload_content(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            bytes,
-            &self.mutation_context()?,
-        )
-        .await
+        crate::protocol::upload_content(&self.store, &self.namespace_id, upload_id, bytes).await
     }
 
     /// Uploads content that arrives as a stream into an upload session,
@@ -628,14 +621,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         upload_id: &UploadId,
         body: ByteStream,
     ) -> Result<UploadContentResponse> {
-        crate::protocol::upload_streamed_content(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            body,
-            &self.mutation_context()?,
-        )
-        .await
+        crate::protocol::upload_streamed_content(&self.store, &self.namespace_id, upload_id, body)
+            .await
     }
 
     /// Completes a service-proxied or direct-PUT upload session.

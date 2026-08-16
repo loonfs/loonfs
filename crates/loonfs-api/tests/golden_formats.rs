@@ -734,7 +734,7 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_44444444444444444444444444444444"),
             created_at_ms: 1_000,
             transport: UploadSessionTransport::ServiceProxied {
-                staging: ProxiedStaging::Claimed { at_ms: 1_500 },
+                staging: ProxiedStaging::Claimed,
             },
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
@@ -833,6 +833,17 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
             payload["transport"]["staging"]["content_ref"]["field_from_the_future"] =
                 serde_json::Value::from(true);
         },
+    );
+    let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_claimed.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| {
+            payload["transport"]["staging"]["at_ms"] = serde_json::Value::from(1_500);
+        },
+    );
+    assert!(
+        message.contains("unknown field `at_ms`"),
+        "unexpected refusal: {message}"
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_direct_multipart.v1.json",

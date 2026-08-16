@@ -1782,9 +1782,9 @@ object's final key is known from birth and belongs to exactly one session.
 The session chooses a `transport` when it opens and never changes it:
 
 - `service_proxied`: `staging`, the staging sub-state for the bytes the service
-  receives. It is `idle`, `claimed { at_ms }` while one request owns the
-  upload, or `staged { content_ref }` after validation. The upload-session
-  lease bounds an abandoned claim.
+  receives. It is `idle`, `claimed` while one request owns the upload, or
+  `staged { content_ref }` after validation. The upload-session lease bounds
+  an abandoned claim.
 - `direct_put`: `promised_content`, the content reference the presigned write
   is signed against. The provider enforces its checksum, and completion
   verifies the stored object against the same reference.
