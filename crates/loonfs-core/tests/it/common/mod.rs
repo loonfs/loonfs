@@ -9,7 +9,7 @@ use loonfs_core::cache::{
     DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
 use loonfs_core::control::load_namespace_read_anchor;
-use loonfs_core::{MutationContext, NamespaceEngine, RuntimeReadContext};
+use loonfs_core::{MutationContext, NamespaceWriterEngine, RuntimeReadContext};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -24,11 +24,8 @@ pub(crate) fn namespace_engine<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> NamespaceEngine<&'a S> {
-    NamespaceEngine::builder(store)
-        .namespace_id(namespace_id.clone())
-        .writer_id(context.writer_id.clone())
-        .build()
+) -> NamespaceWriterEngine<&'a S> {
+    NamespaceWriterEngine::writer(store, namespace_id.clone(), context.writer_id.clone())
         .expect("build namespace engine")
 }
 

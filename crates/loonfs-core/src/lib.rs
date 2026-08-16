@@ -27,10 +27,7 @@
 //! let store = LocalFsStore::new(std::env::temp_dir()).expect("store");
 //! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
 //!
-//! let engine = NamespaceEngine::builder(store)
-//!     .namespace_id(namespace.clone())
-//!     .writer_id("example-writer")
-//!     .build()
+//! let engine = NamespaceEngine::writer(store, namespace.clone(), "example-writer")
 //!     .expect("engine");
 //! let _ = engine.bootstrap_namespace(BootstrapOptions::default());
 //!
@@ -167,14 +164,10 @@ pub use checkpoint::{
 };
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
-pub use protocol::{
-    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
-    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
-    ResolvedUploadCompletion,
+pub use engine::{
+    NamespaceEngine, NamespaceEngineBuildError, NamespaceReaderEngine, NamespaceWriterEngine,
+    ReadOnly, Writable,
 };
-// The builder pair is reachable through `NamespaceEngine::builder()` and its
-// `build()`, so both stay public even though no caller names them directly.
-pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
 pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
     WriterFence,
@@ -184,6 +177,11 @@ pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, MAX_RESOLVE_CURRENT_FILES,
+};
+pub use protocol::{
+    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
+    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
+    ResolvedUploadCompletion,
 };
 // The streaming read `loonfs`'s reader handle returns, and the chunk size it
 // reads in.

@@ -14,8 +14,8 @@ use loonfs_api::{
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{
-    BootstrapOptions, Error as CoreError, ErrorCode, MetadataReorganizeOutcome, NamespaceEngine,
-    RuntimeReadContext,
+    BootstrapOptions, Error as CoreError, ErrorCode, MetadataReorganizeOutcome,
+    NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use tempfile::{tempdir, TempDir};
 struct VisibilityHarness {
     _temp_dir: TempDir,
     store: Arc<LocalFsStore>,
-    engine: NamespaceEngine<Arc<LocalFsStore>>,
+    engine: NamespaceWriterEngine<Arc<LocalFsStore>>,
 }
 
 impl VisibilityHarness {
@@ -32,11 +32,12 @@ impl VisibilityHarness {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
-        let engine = NamespaceEngine::builder(Arc::clone(&store))
-            .namespace_id(namespace_id)
-            .writer_id("visibility-equivalence")
-            .build()
-            .expect("build namespace engine");
+        let engine = NamespaceWriterEngine::writer(
+            Arc::clone(&store),
+            namespace_id,
+            "visibility-equivalence",
+        )
+        .expect("build namespace engine");
         engine
             .bootstrap_namespace(BootstrapOptions::default())
             .await
@@ -59,7 +60,7 @@ impl VisibilityHarness {
         let mut results = self
             .engine
             .publish_namespace_commits_batch(vec![candidate])
-            .await;
+            .await?;
         assert_eq!(results.len(), 1, "one candidate must produce one result");
         results.pop().expect("one publish result")
     }

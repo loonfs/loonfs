@@ -349,7 +349,7 @@ impl ReadCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<(
-        loonfs_core::NamespaceEngine<crate::SharedObjectStore>,
+        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
         let anchor = self.head_for_metadata_read(namespace_id).await?;

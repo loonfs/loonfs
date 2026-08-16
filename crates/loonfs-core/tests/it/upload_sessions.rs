@@ -113,14 +113,15 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
         .await
         .expect("a live namespace admits uploads");
 
-    loonfs_core::NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("store"))
-        .namespace_id(namespace_id.clone())
-        .writer_id("writer-a")
-        .build()
-        .expect("engine")
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
-        .await
-        .expect("delete namespace");
+    loonfs_core::NamespaceWriterEngine::writer(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        namespace_id.clone(),
+        "writer-a",
+    )
+    .expect("engine")
+    .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+    .await
+    .expect("delete namespace");
 
     let deleted_error = begin_upload(&store, &namespace_id, &context)
         .await
