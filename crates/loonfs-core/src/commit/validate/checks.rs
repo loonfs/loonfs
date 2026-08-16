@@ -15,40 +15,28 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 
-/// Running counters shared by every validation pass over one commit's
-/// operations, so a pass that validates the operations in slices numbers
-/// delta positions exactly as a pass over the whole list does.
-pub(crate) struct OpValidationCursor {
-    op_index: u32,
-    next_delta_index: u32,
-}
-
-impl OpValidationCursor {
-    pub(crate) fn new() -> Self {
-        Self {
-            op_index: 0,
-            next_delta_index: 0,
-        }
-    }
-}
-
 /// Validates `ops` in order against `metadata_state`, folding each accepted
 /// operation into it so the next one observes what the previous would
 /// persist.
+///
+/// `next_op_index` and `next_delta_index` are the commit's running numbering:
+/// the planner validates one semantic operation's compiled ops at a time and
+/// carries both counters across calls, so positions number exactly as one
+/// pass over the whole list would.
 pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     ops: &[PlannedOp],
     metadata_state: &mut PublishValidationView<'_, S>,
-    cursor: &mut OpValidationCursor,
+    next_op_index: &mut u32,
+    next_delta_index: &mut u32,
     committed_seq: ChangeSeq,
     actor: &ActorRef,
     committed_at_ms: u64,
 ) -> Result<Vec<ValidatedOp>, CoreError> {
     let mut validated_ops = Vec::with_capacity(ops.len());
-    let next_delta_index = &mut cursor.next_delta_index;
 
     for planned in ops {
-        let op_index = cursor.op_index;
-        cursor.op_index = op_index
+        let op_index = *next_op_index;
+        *next_op_index = op_index
             .checked_add(1)
             .ok_or(CommitValidationError::OpIndexOverflow)?;
         // Race checks belong to the operation that carries them and are

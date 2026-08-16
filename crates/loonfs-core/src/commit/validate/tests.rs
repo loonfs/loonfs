@@ -1,5 +1,5 @@
-//! Commit validation tests using the production plan-building entry point
-//! over an in-memory metadata view.
+//! Commit validation tests driving the operation validator directly over an
+//! in-memory metadata view.
 //!
 //! These exercise the planning IR directly, so they live in the crate rather
 //! than in an integration test: the IR is internal, and callers reach it only
@@ -7,8 +7,9 @@
 
 #![allow(clippy::panic)]
 
-use super::super::{CommitIr, CommitOp, PlannedOp};
-use super::validate_commit_for_publish;
+use super::super::{CommitOp, CommitPrecondition, PlannedOp, ValidatedCommitPlan};
+use super::checks::validate_ops;
+use super::view::PublishValidationView;
 use crate::commit::{
     materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator,
 };
@@ -17,9 +18,9 @@ use crate::metadata::{InMemoryMetadataView, MetadataState};
 use loonfs_api::wire::control::{HeadState, WriterBlock};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, CommitId, ContentId,
-    ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WriterEpoch,
-    MAX_PUBLIC_INTEGER,
+    next_public_ordinal, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
+    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    RevisionNo, WriterEpoch, MAX_PUBLIC_INTEGER,
 };
 
 fn test_display_name(value: impl AsRef<str>) -> DisplayName {
@@ -203,14 +204,14 @@ fn validation_context(
 }
 
 async fn build_commit_plan(
-    request: &CommitIr,
+    ops: &[PlannedOp],
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
     let accepted_rows = MetadataState::default();
     let mut allocator = InodeAllocator::new(context.head.next_inode_id);
     let mut allocation = allocator.begin_candidate();
-    for planned in &request.ops {
+    for planned in ops {
         let assigned = match &planned.op {
             CommitOp::CreateDirectory { child_inode_id, .. }
             | CommitOp::CreateFile { child_inode_id, .. } => Some(*child_inode_id),
@@ -224,24 +225,46 @@ async fn build_commit_plan(
             );
         }
     }
-    let result = validate_commit_for_publish(
-        request,
-        test_fingerprint(),
-        committed_at_ms,
-        &context.head,
+    let committed_seq = next_public_ordinal(context.head.seq.0)
+        .map(ChangeSeq)
+        .expect("test heads stay under the sequence cap");
+    let mut metadata_state = PublishValidationView::new(
         InMemoryMetadataView::in_memory(context.metadata_state, None, context.head.seq),
         &accepted_rows,
+        committed_seq,
+    );
+    let mut next_op_index = 0_u32;
+    let mut next_delta_index = 0_u32;
+    let result = validate_ops(
+        ops,
+        &mut metadata_state,
+        &mut next_op_index,
+        &mut next_delta_index,
+        committed_seq,
+        &loonfs_test_support::test_actor(),
+        committed_at_ms,
     )
     .await;
 
-    let validated = result.map_err(|error| match error {
+    let validated_ops = result.map_err(|error| match error {
         CoreError::CommitValidation(error) => error,
         error => panic!("unexpected validation dependency error: {error}"),
     })?;
     let resulting_next_inode_id = allocator
         .commit_candidate(allocation)
         .expect("commit test allocation");
-    Ok(validated.finish(resulting_next_inode_id))
+    Ok(ValidatedCommitPlan {
+        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+        commit_id: CommitId::parse("validated-commit").expect("valid commit id"),
+        actor: loonfs_test_support::test_actor(),
+        writer_epoch: context.head.writer_epoch,
+        message: None,
+        semantic_identity: test_fingerprint(),
+        apply_after_seq: context.head.seq,
+        assigned_seq: committed_seq,
+        validated_ops,
+    }
+    .finish(resulting_next_inode_id))
 }
 
 /// Every attribute update carries its own revision guard, whether or not the
@@ -255,20 +278,11 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() 
         wal_append_attributes(0, InodeId(2), 2, &[("owner", "grace")]),
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(3));
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("stale-attributes").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        // The op alone, with no explicit precondition: the guard rides the
-        // operation itself.
-        ops: planned(vec![CommitOp::UpdateAttributes {
-            inode_id: InodeId(2),
-            base_attributes_revision_no: AttributeRevisionNo(1),
-            attributes: test_attributes(&[("owner", "hopper")]),
-        }]),
-        message: None,
-    };
+    let request = planned(vec![CommitOp::UpdateAttributes {
+        inode_id: InodeId(2),
+        base_attributes_revision_no: AttributeRevisionNo(1),
+        attributes: test_attributes(&[("owner", "hopper")]),
+    }]);
 
     let error = build_commit_plan(&request, 4_200, &context)
         .await
@@ -302,17 +316,12 @@ async fn a_first_attribute_write_states_revision_zero() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = |base: u64| CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("first-attributes").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![CommitOp::UpdateAttributes {
+    let request = |base: u64| {
+        planned(vec![CommitOp::UpdateAttributes {
             inode_id: InodeId(2),
             base_attributes_revision_no: AttributeRevisionNo(base),
             attributes: test_attributes(&[("owner", "ada")]),
-        }]),
-        message: None,
+        }])
     };
 
     build_commit_plan(&request(0), 4_200, &context)
@@ -340,18 +349,11 @@ async fn a_first_attribute_write_states_revision_zero() {
 async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("missing-attributes").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![CommitOp::UpdateAttributes {
-            inode_id: InodeId(9),
-            base_attributes_revision_no: AttributeRevisionNo(0),
-            attributes: test_attributes(&[("owner", "ada")]),
-        }]),
-        message: None,
-    };
+    let request = planned(vec![CommitOp::UpdateAttributes {
+        inode_id: InodeId(9),
+        base_attributes_revision_no: AttributeRevisionNo(0),
+        attributes: test_attributes(&[("owner", "ada")]),
+    }]);
 
     let error = build_commit_plan(&request, 4_200, &context)
         .await
@@ -381,18 +383,11 @@ async fn stale_revision_precondition_is_rejected() {
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("stale-revision").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![CommitOp::ReplaceFile {
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-3"),
-        }]),
-        message: None,
-    };
+    let request = planned(vec![CommitOp::ReplaceFile {
+        inode_id: InodeId(3),
+        base_revision_no: RevisionNo(1),
+        content_ref: content_ref("content-3"),
+    }]);
 
     let error = build_commit_plan(&request, 4_200, &context)
         .await
@@ -407,35 +402,97 @@ async fn stale_revision_precondition_is_rejected() {
     ));
 }
 
+/// The validator independently refuses a create whose name is already
+/// bound, whatever compiled it: the check does not lean on planning having
+/// looked first.
+#[tokio::test]
+async fn a_create_for_a_bound_name_is_rejected() {
+    let metadata_state = metadata_state_after(&[wal_create_directory(
+        0,
+        InodeId(2),
+        InodeId(1),
+        "docs".to_owned(),
+    )]);
+    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let request = planned(vec![CommitOp::CreateDirectory {
+        child_inode_id: InodeId(3),
+        parent_inode_id: InodeId(1),
+        display_name: test_display_name("docs"),
+    }]);
+
+    let error = build_commit_plan(&request, 4_200, &context)
+        .await
+        .expect_err("the name is already bound");
+    assert!(matches!(
+        error,
+        CommitValidationError::CreateChildNameCollision {
+            parent_inode_id: InodeId(1),
+            child_inode_id: InodeId(2),
+            ..
+        }
+    ));
+}
+
+/// A `BindingIs` race check whose observed binding no longer exists is
+/// refused before the operation that carries it runs.
+#[tokio::test]
+async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
+    let metadata_state = metadata_state_after(&[wal_create_directory(
+        0,
+        InodeId(2),
+        InodeId(1),
+        "docs".to_owned(),
+    )]);
+    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
+    let request = vec![PlannedOp {
+        preconditions: vec![CommitPrecondition::BindingIs {
+            parent_inode_id: InodeId(1),
+            name_key: NameKey::parse("missing.txt").expect("valid name key"),
+            child_inode_id: InodeId(9),
+            bind_seq: ChangeSeq(1),
+            bind_delta_index: 0,
+        }],
+        op: CommitOp::Rename {
+            inode_id: InodeId(2),
+            new_parent_inode_id: InodeId(1),
+            new_display_name: test_display_name("renamed"),
+        },
+    }];
+
+    let error = build_commit_plan(&request, 4_200, &context)
+        .await
+        .expect_err("the observed binding is gone");
+    assert!(matches!(
+        error,
+        CommitValidationError::BindingPreconditionMissing {
+            parent_inode_id: InodeId(1),
+            ..
+        }
+    ));
+}
+
 #[tokio::test]
 async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("preview-rollback").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![
-            CommitOp::CreateDirectory {
-                child_inode_id: InodeId(2),
-                parent_inode_id: InodeId(1),
-                display_name: test_display_name("docs"),
-            },
-            CommitOp::CreateFile {
-                child_inode_id: InodeId(3),
-                parent_inode_id: InodeId(2),
-                display_name: test_display_name("readme.txt"),
-                content_ref: content_ref("content-1"),
-            },
-            CommitOp::ReplaceFile {
-                inode_id: InodeId(99),
-                base_revision_no: RevisionNo(1),
-                content_ref: content_ref("content-2"),
-            },
-        ]),
-        message: None,
-    };
+    let request = planned(vec![
+        CommitOp::CreateDirectory {
+            child_inode_id: InodeId(2),
+            parent_inode_id: InodeId(1),
+            display_name: test_display_name("docs"),
+        },
+        CommitOp::CreateFile {
+            child_inode_id: InodeId(3),
+            parent_inode_id: InodeId(2),
+            display_name: test_display_name("readme.txt"),
+            content_ref: content_ref("content-1"),
+        },
+        CommitOp::ReplaceFile {
+            inode_id: InodeId(99),
+            base_revision_no: RevisionNo(1),
+            content_ref: content_ref("content-2"),
+        },
+    ]);
 
     let error = build_commit_plan(&request, 4_200, &context)
         .await
@@ -477,19 +534,12 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let create_error = build_commit_plan(
-        &CommitIr {
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            commit_id: CommitId::parse("create-under-tombstone").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
-            writer_epoch: WriterEpoch(1),
-            ops: planned(vec![CommitOp::CreateFile {
-                child_inode_id: InodeId(4),
-                parent_inode_id: InodeId(2),
-                display_name: test_display_name("new.txt"),
-                content_ref: content_ref("content-2"),
-            }]),
-            message: None,
-        },
+        &planned(vec![CommitOp::CreateFile {
+            child_inode_id: InodeId(4),
+            parent_inode_id: InodeId(2),
+            display_name: test_display_name("new.txt"),
+            content_ref: content_ref("content-2"),
+        }]),
         4_200,
         &context,
     )
@@ -508,18 +558,11 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     );
 
     let replace_error = build_commit_plan(
-        &CommitIr {
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            commit_id: CommitId::parse("replace-under-tombstone").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
-            writer_epoch: WriterEpoch(1),
-            ops: planned(vec![CommitOp::ReplaceFile {
-                inode_id: InodeId(3),
-                base_revision_no: RevisionNo(1),
-                content_ref: content_ref("content-2"),
-            }]),
-            message: None,
-        },
+        &planned(vec![CommitOp::ReplaceFile {
+            inode_id: InodeId(3),
+            base_revision_no: RevisionNo(1),
+            content_ref: content_ref("content-2"),
+        }]),
         4_200,
         &context,
     )
@@ -547,18 +590,11 @@ async fn restore_revision_validation_rejects_missing_inode() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("restore-missing-inode").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![CommitOp::RestoreRevision {
-            inode_id: InodeId(99),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(1),
-        }]),
-        message: None,
-    };
+    let request = planned(vec![CommitOp::RestoreRevision {
+        inode_id: InodeId(99),
+        source_revision_no: RevisionNo(1),
+        base_revision_no: RevisionNo(1),
+    }]);
 
     let error = build_commit_plan(&request, 4_200, &context)
         .await
@@ -580,18 +616,11 @@ async fn restore_revision_validation_rejects_non_file_target() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("restore-non-file").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![CommitOp::RestoreRevision {
-            inode_id: InodeId(2),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(1),
-        }]),
-        message: None,
-    };
+    let request = planned(vec![CommitOp::RestoreRevision {
+        inode_id: InodeId(2),
+        source_revision_no: RevisionNo(1),
+        base_revision_no: RevisionNo(1),
+    }]);
 
     let error = build_commit_plan(&request, 4_200, &context)
         .await
@@ -621,18 +650,11 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let stale_base = build_commit_plan(
-        &CommitIr {
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            commit_id: CommitId::parse("restore-stale-base").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
-            writer_epoch: WriterEpoch(1),
-            ops: planned(vec![CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(1),
-                base_revision_no: RevisionNo(1),
-            }]),
-            message: None,
-        },
+        &planned(vec![CommitOp::RestoreRevision {
+            inode_id: InodeId(3),
+            source_revision_no: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
+        }]),
         4_200,
         &context,
     )
@@ -648,18 +670,11 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     ));
 
     let missing_source = build_commit_plan(
-        &CommitIr {
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
-            writer_epoch: WriterEpoch(1),
-            ops: planned(vec![CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(99),
-                base_revision_no: RevisionNo(2),
-            }]),
-            message: None,
-        },
+        &planned(vec![CommitOp::RestoreRevision {
+            inode_id: InodeId(3),
+            source_revision_no: RevisionNo(99),
+            base_revision_no: RevisionNo(2),
+        }]),
         4_200,
         &context,
     )
@@ -691,25 +706,18 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     // The restore must resolve to the very object the replace attached, so
     // the expectation is that reference itself.
     let expected = content_ref("content-2");
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![
-            CommitOp::ReplaceFile {
-                inode_id: InodeId(3),
-                base_revision_no: RevisionNo(1),
-                content_ref: expected.clone(),
-            },
-            CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(2),
-                base_revision_no: RevisionNo(2),
-            },
-        ]),
-        message: None,
-    };
+    let request = planned(vec![
+        CommitOp::ReplaceFile {
+            inode_id: InodeId(3),
+            base_revision_no: RevisionNo(1),
+            content_ref: expected.clone(),
+        },
+        CommitOp::RestoreRevision {
+            inode_id: InodeId(3),
+            source_revision_no: RevisionNo(2),
+            base_revision_no: RevisionNo(2),
+        },
+    ]);
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("replace then restore in same request should validate");
@@ -741,25 +749,18 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("restore-after-restore-same-request").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![
-            CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(1),
-                base_revision_no: RevisionNo(2),
-            },
-            CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(3),
-                base_revision_no: RevisionNo(3),
-            },
-        ]),
-        message: None,
-    };
+    let request = planned(vec![
+        CommitOp::RestoreRevision {
+            inode_id: InodeId(3),
+            source_revision_no: RevisionNo(1),
+            base_revision_no: RevisionNo(2),
+        },
+        CommitOp::RestoreRevision {
+            inode_id: InodeId(3),
+            source_revision_no: RevisionNo(3),
+            base_revision_no: RevisionNo(3),
+        },
+    ]);
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("restore then restore in same request should validate");
@@ -799,18 +800,11 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let error = build_commit_plan(
-        &CommitIr {
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            commit_id: CommitId::parse("restore-under-tombstone").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
-            writer_epoch: WriterEpoch(1),
-            ops: planned(vec![CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(1),
-                base_revision_no: RevisionNo(1),
-            }]),
-            message: None,
-        },
+        &planned(vec![CommitOp::RestoreRevision {
+            inode_id: InodeId(3),
+            source_revision_no: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
+        }]),
         4_200,
         &context,
     )
@@ -859,18 +853,11 @@ async fn restore_revision_overflow_is_rejected() {
             &deltas,
         );
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitIr {
-        namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("restore-overflow").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        ops: planned(vec![CommitOp::RestoreRevision {
-            inode_id: InodeId(2),
-            source_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
-            base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
-        }]),
-        message: None,
-    };
+    let request = planned(vec![CommitOp::RestoreRevision {
+        inode_id: InodeId(2),
+        source_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
+        base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
+    }]);
 
     let error = build_commit_plan(&request, 4_200, &context)
         .await

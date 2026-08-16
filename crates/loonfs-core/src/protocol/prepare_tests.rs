@@ -1,27 +1,26 @@
-//! Differential proof that the single-pass commit preparation matches the
-//! two-pass production pipeline candidate for candidate.
+//! Scenario corpus for the single-pass commit preparation, converted from
+//! the differential harness that proved the pass equal to the retired
+//! two-pass pipeline.
 //!
-//! Each scenario runs the same candidates through both pipelines against one
-//! loaded publish view, with accepted commits folded into each side's
+//! Each scenario runs its candidates through the per-candidate preparation
+//! against one loaded publish view, with accepted commits folded into the
 //! session so later candidates observe earlier ones. Accepted candidates
-//! must agree on the whole prepared commit — plan, materialized deltas, WAL
-//! record, and the durable segment bytes the records encode to — and
-//! rejected candidates must agree on the exact wire error: code, rendered
-//! message (which carries any `operation N:` attribution), and structured
-//! details.
+//! must encode to durable segment records that survive the codec round
+//! trip, and rejected candidates must carry the exact wire error: code,
+//! rendered message (which carries any `operation N:` attribution), and
+//! structured details.
 //!
-//! The one sanctioned divergence — a single-operation request that is both
-//! invalid and content-uncovered, decided by the repo owner to report the
-//! validation error — is excluded from the equality corpus and pinned by its
-//! own test at the bottom.
+//! The owner-decided precedence — validation first, uniformly, even for a
+//! single-operation request that is also content-uncovered — is pinned by
+//! the test at the bottom and at the API surface in
+//! `tests/it/commit_validation.rs`.
 
 #![allow(clippy::panic)]
 
 use super::candidates::validate_commit_content_references;
 use super::publish_view::{load_publish_metadata_view, PublishMetadataView, PublishTailOptions};
 use crate::commit::{
-    materialize_commit, wal_payload_from_materialized_commit, CommitIr, CommitPlan,
-    MaterializedCommit,
+    materialize_commit, wal_payload_from_materialized_commit, CommitPlan, MaterializedCommit,
 };
 use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate, ContentPreparation};
 use crate::context::MutationContext;
@@ -32,7 +31,8 @@ use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSess
 use crate::storage::content::{store_bytes_as_content, StoredContent};
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use loonfs_api::wire::wal::{
-    encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
+    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitPayload,
+    WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
     AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, CommitId,
@@ -43,12 +43,10 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
-/// One admitted candidate, fully prepared: the plan, its materialization,
-/// and the WAL record it would publish.
+/// One admitted candidate, fully prepared: the plan and its materialization.
 struct PreparedCandidate {
     plan: CommitPlan,
     materialized: MaterializedCommit,
-    payload: WalCommitPayload,
 }
 
 /// The comparable surface of a rejection: everything a caller can observe.
@@ -67,8 +65,7 @@ fn rejection_shape(error: &CoreError) -> RejectionShape {
     }
 }
 
-/// What a probe candidate must resolve to on the single-pass path (after the
-/// two paths have been proven equal on it).
+/// What a probe candidate must resolve to.
 enum Expect {
     Accept,
     Reject {
@@ -78,8 +75,8 @@ enum Expect {
     },
 }
 
-/// Request-limit and content-preparation admission, shared verbatim by both
-/// pipelines (`candidates::validate_new_primary` order).
+/// Request-limit and content-preparation admission, in
+/// `candidates::validate_new_primary` order.
 fn admit_new_primary(candidate: &CommitCandidate) -> Result<()> {
     candidate.validate_request_limits()?;
     match candidate.content_preparation() {
@@ -88,73 +85,10 @@ fn admit_new_primary(candidate: &CommitCandidate) -> Result<()> {
     }
 }
 
-/// The production two-pass pipeline for one candidate, in `batch.rs` order:
-/// plan, coverage, validate, accept.
-async fn prepare_candidate_two_pass(
-    session: &mut PublishPlanningSession,
-    view: &PublishMetadataView<'_, LocalFsStore>,
-    namespace_id: &NamespaceId,
-    candidate: &CommitCandidate,
-    committed_at_ms: u64,
-) -> Result<PreparedCandidate> {
-    admit_new_primary(candidate)?;
-    let semantic_identity = candidate.semantic_identity(namespace_id)?;
-    let mutation = candidate.request();
-    let mut allocation = session.begin_candidate();
-    let planned = match session
-        .plan_commit(
-            mutation,
-            view.metadata_view(),
-            committed_at_ms,
-            &mut allocation,
-        )
-        .await
-    {
-        Ok(planned) => planned,
-        Err(error) => {
-            session.discard_candidate(allocation);
-            return Err(error);
-        }
-    };
-    let request = CommitIr {
-        namespace_id: namespace_id.clone(),
-        commit_id: mutation.commit_id.clone(),
-        actor: mutation.actor.clone(),
-        writer_epoch: view.acquired_writer.writer_epoch,
-        ops: planned.ops,
-        message: mutation.message.clone(),
-    };
-    if let Err(error) = validate_commit_content_references(candidate, view.content_store_id()) {
-        session.discard_candidate(allocation);
-        return Err(error);
-    }
-    let validated = match session
-        .validate_commit(
-            &request,
-            semantic_identity,
-            view.metadata_view(),
-            committed_at_ms,
-        )
-        .await
-    {
-        Ok(validated) => validated,
-        Err(error) => {
-            session.discard_candidate(allocation);
-            return Err(error);
-        }
-    };
-    let resulting_next_inode_id = session.commit_candidate(allocation)?;
-    Ok(accept(
-        session,
-        validated.finish(resulting_next_inode_id),
-        committed_at_ms,
-    ))
-}
-
-/// The single-pass pipeline for one candidate: merged plan-and-validate,
-/// then coverage (validation first, uniformly — the owner-decided
-/// precedence), then accept.
-async fn prepare_candidate_single_pass(
+/// The per-candidate preparation in `batch.rs` order: merged
+/// plan-and-validate, then coverage (validation first, uniformly — the
+/// owner-decided precedence), then accept.
+async fn prepare_candidate(
     session: &mut PublishPlanningSession,
     view: &PublishMetadataView<'_, LocalFsStore>,
     namespace_id: &NamespaceId,
@@ -200,20 +134,16 @@ fn accept(
     let materialized = materialize_commit(plan.clone(), committed_at_ms);
     let payload = wal_payload_from_materialized_commit(&materialized);
     session.apply_accepted_commit(&payload, &materialized.commit);
-    PreparedCandidate {
-        plan,
-        materialized,
-        payload,
-    }
+    PreparedCandidate { plan, materialized }
 }
 
 /// Encodes the accepted records as one durable segment with a pinned segment
-/// id, so equal preparations produce byte-identical durable output.
-fn encode_segment_with_pinned_id(
+/// id and requires the durable codec to round-trip them unchanged.
+fn assert_accepted_records_round_trip(
     namespace_id: &NamespaceId,
     writer_epoch: WriterEpoch,
     records: &[MaterializedCommit],
-) -> Vec<u8> {
+) {
     let payload_records: Vec<WalCommitPayload> = records
         .iter()
         .map(wal_payload_from_materialized_commit)
@@ -229,26 +159,31 @@ fn encode_segment_with_pinned_id(
         base_head_seq: ChangeSeq(start_seq.0.checked_sub(1).expect("non-zero start seq")),
         start_seq,
         end_seq,
-        records: payload_records,
+        records: payload_records.clone(),
     };
     let envelope = WalSegmentEnvelope::from_payload(payload).expect("wal envelope");
-    encode_wal_segment_envelope_zstd(&envelope).expect("wal segment bytes")
+    let encoded = encode_wal_segment_envelope_zstd(&envelope).expect("wal segment bytes");
+    let decoded = decode_wal_segment_envelope_zstd(&encoded).expect("decode wal segment");
+    assert_eq!(
+        decoded.payload.records, payload_records,
+        "accepted records must survive the durable codec unchanged"
+    );
 }
 
-struct DifferentialFixture {
+struct PrepareFixture {
     _temp_dir: tempfile::TempDir,
     store: LocalFsStore,
     namespace_id: NamespaceId,
     context: MutationContext,
 }
 
-impl DifferentialFixture {
+impl PrepareFixture {
     async fn new() -> Self {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = MutationContext {
-            writer_id: "differential".to_owned(),
+            writer_id: "prepare-corpus".to_owned(),
             now_ms: 1,
         };
         bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -300,73 +235,36 @@ impl DifferentialFixture {
         view
     }
 
-    /// Runs every probe through both pipelines against `view`, requiring the
-    /// outcomes to be identical, then requiring the accepted sets to encode
-    /// to byte-identical durable segments. Returns the single-pass outcomes
-    /// for scenario-specific assertions.
+    /// Runs every probe through the per-candidate preparation against
+    /// `view`, requiring each outcome to match its expectation, then
+    /// requiring the accepted set to round-trip through the durable codec.
+    /// Returns the outcomes for scenario-specific assertions.
     async fn run_against_view(
         &self,
         view: &PublishMetadataView<'_, LocalFsStore>,
         probes: Vec<(CommitCandidate, Expect)>,
     ) -> Vec<std::result::Result<CommitPlan, RejectionShape>> {
-        let mut two_pass = PublishPlanningSession::new(&view.head);
-        let mut single_pass = PublishPlanningSession::new(&view.head);
+        let mut session = PublishPlanningSession::new(&view.head);
         let committed_at_ms = 4_200;
-        let mut two_pass_accepted: Vec<MaterializedCommit> = Vec::new();
-        let mut single_pass_accepted: Vec<MaterializedCommit> = Vec::new();
+        let mut accepted: Vec<MaterializedCommit> = Vec::new();
         let mut outcomes = Vec::new();
         for (index, (candidate, expect)) in probes.into_iter().enumerate() {
             let commit_id = candidate.commit_id().clone();
-            let old = prepare_candidate_two_pass(
-                &mut two_pass,
+            let outcome = match prepare_candidate(
+                &mut session,
                 view,
                 &self.namespace_id,
                 &candidate,
                 committed_at_ms,
             )
-            .await;
-            let new = prepare_candidate_single_pass(
-                &mut single_pass,
-                view,
-                &self.namespace_id,
-                &candidate,
-                committed_at_ms,
-            )
-            .await;
-            let outcome = match (old, new) {
-                (Ok(old), Ok(new)) => {
-                    assert_eq!(
-                        old.plan, new.plan,
-                        "probe {index} (`{commit_id}`): prepared plans diverge"
-                    );
-                    assert_eq!(
-                        old.materialized, new.materialized,
-                        "probe {index} (`{commit_id}`): materialized deltas diverge"
-                    );
-                    assert_eq!(
-                        old.payload, new.payload,
-                        "probe {index} (`{commit_id}`): WAL records diverge"
-                    );
-                    two_pass_accepted.push(old.materialized);
-                    let plan = new.plan.clone();
-                    single_pass_accepted.push(new.materialized);
+            .await
+            {
+                Ok(prepared) => {
+                    let plan = prepared.plan.clone();
+                    accepted.push(prepared.materialized);
                     Ok(plan)
                 }
-                (Err(old), Err(new)) => {
-                    let old = rejection_shape(&old);
-                    let new = rejection_shape(&new);
-                    assert_eq!(
-                        old, new,
-                        "probe {index} (`{commit_id}`): rejections diverge"
-                    );
-                    Err(new)
-                }
-                (old, new) => panic!(
-                    "probe {index} (`{commit_id}`): acceptance diverges \
-                     (two-pass ok: {}, single-pass ok: {})",
-                    old.is_ok(),
-                    new.is_ok()
-                ),
+                Err(error) => Err(rejection_shape(&error)),
             };
             match (&outcome, expect) {
                 (Ok(_), Expect::Accept) => {}
@@ -406,24 +304,11 @@ impl DifferentialFixture {
             }
             outcomes.push(outcome);
         }
-        assert_eq!(
-            two_pass_accepted.len(),
-            single_pass_accepted.len(),
-            "accepted counts diverge"
-        );
-        if !single_pass_accepted.is_empty() {
-            assert_eq!(
-                encode_segment_with_pinned_id(
-                    &self.namespace_id,
-                    view.acquired_writer.writer_epoch,
-                    &two_pass_accepted,
-                ),
-                encode_segment_with_pinned_id(
-                    &self.namespace_id,
-                    view.acquired_writer.writer_epoch,
-                    &single_pass_accepted,
-                ),
-                "durable segment bytes diverge"
+        if !accepted.is_empty() {
+            assert_accepted_records_round_trip(
+                &self.namespace_id,
+                view.acquired_writer.writer_epoch,
+                &accepted,
             );
         }
         outcomes
@@ -529,8 +414,8 @@ fn uncovered_content_ref(seed: &str) -> ContentRef {
 /// restore, move, copy, attribute update, file delete, subtree delete, and
 /// undelete.
 #[tokio::test]
-async fn every_semantic_operation_prepares_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn every_semantic_operation_prepares_and_observes_earlier_candidates() {
+    let fixture = PrepareFixture::new().await;
     let seed_content = fixture.stage(b"seed").await;
     // Seed seq 1: /undel (inode 2) with gone.txt (inode 3); seq 2: delete
     // the file; seq 3: /docs (inode 4) with seed.txt (inode 5).
@@ -680,8 +565,8 @@ async fn every_semantic_operation_prepares_identically() {
 /// create then rename, delete then a recreate that must observe the
 /// deletion, and repeated destination names.
 #[tokio::test]
-async fn compositions_in_one_commit_prepare_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn compositions_in_one_commit_observe_their_own_operations() {
+    let fixture = PrepareFixture::new().await;
     let seed_content = fixture.stage(b"seed").await;
     fixture
         .seed(vec![covered(
@@ -788,8 +673,8 @@ async fn compositions_in_one_commit_prepare_identically() {
 /// A directory rename into its own subtree is refused, alone and as a named
 /// operation of a longer request.
 #[tokio::test]
-async fn rename_cycles_prepare_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn rename_cycles_are_refused() {
+    let fixture = PrepareFixture::new().await;
     fixture
         .seed(vec![
             uncovered("seed-cyc", vec![create_dir("/cyc")]),
@@ -839,8 +724,8 @@ async fn rename_cycles_prepare_identically() {
 /// Revision, attribute, and binding preconditions fail identically, with
 /// `operation_index` only on multi-operation requests.
 #[tokio::test]
-async fn precondition_failures_prepare_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn precondition_failures_name_the_failing_operation() {
+    let fixture = PrepareFixture::new().await;
     let seed_content = fixture.stage(b"seed").await;
     fixture
         .seed(vec![
@@ -968,8 +853,8 @@ async fn precondition_failures_prepare_identically() {
 /// including multi-operation requests where validation already failed first
 /// on both paths.
 #[tokio::test]
-async fn content_coverage_prepares_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn content_coverage_is_checked_after_validation() {
+    let fixture = PrepareFixture::new().await;
     let seed_content = fixture.stage(b"seed").await;
     fixture
         .seed(vec![covered(
@@ -1074,8 +959,8 @@ async fn content_coverage_prepares_identically() {
 /// candidate after a rejected one reuses the discarded inode ids on both
 /// paths.
 #[tokio::test]
-async fn allocation_rollback_prepares_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn allocation_rollback_reuses_discarded_inode_ids() {
+    let fixture = PrepareFixture::new().await;
     let outcomes = fixture
         .run(vec![
             (
@@ -1117,8 +1002,8 @@ async fn allocation_rollback_prepares_identically() {
 /// An undelete scoped to a superseded deletion generation is refused
 /// identically.
 #[tokio::test]
-async fn undelete_generation_mismatch_prepares_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn undelete_scoped_to_a_superseded_generation_is_refused() {
+    let fixture = PrepareFixture::new().await;
     let seed_content = fixture.stage(b"seed").await;
     fixture
         .seed(vec![
@@ -1163,8 +1048,8 @@ async fn undelete_generation_mismatch_prepares_identically() {
 /// A subtree delete inside a request covers the paths beneath it for the
 /// operations that follow, identically on both paths.
 #[tokio::test]
-async fn in_commit_tombstones_cover_later_operations_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn in_commit_tombstones_cover_later_operations() {
+    let fixture = PrepareFixture::new().await;
     let seed_content = fixture.stage(b"seed").await;
     fixture
         .seed(vec![covered(
@@ -1198,8 +1083,8 @@ async fn in_commit_tombstones_cover_later_operations_identically() {
 
 /// An empty request is refused before any planning on both paths.
 #[tokio::test]
-async fn an_empty_request_prepares_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn an_empty_request_is_refused_before_planning() {
+    let fixture = PrepareFixture::new().await;
     fixture
         .run(vec![(
             uncovered("probe-empty", Vec::new()),
@@ -1215,8 +1100,8 @@ async fn an_empty_request_prepares_identically() {
 /// An exhausted namespace sequence reports the planner's pinned shape on
 /// both paths.
 #[tokio::test]
-async fn sequence_exhaustion_prepares_identically() {
-    let fixture = DifferentialFixture::new().await;
+async fn sequence_exhaustion_reports_the_planner_shape() {
+    let fixture = PrepareFixture::new().await;
     let mut view = fixture.load_view().await;
     view.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
     fixture
@@ -1234,13 +1119,14 @@ async fn sequence_exhaustion_prepares_identically() {
         .await;
 }
 
-/// THE sanctioned divergence (decided by the repo owner): a single-operation
-/// request that is both invalid and content-uncovered reported the coverage
-/// error under the two-pass pipeline and reports the validation error under
-/// the single pass. Validation-first, uniformly.
+/// The owner-decided precedence: a single-operation request that is both
+/// invalid and content-uncovered reports the validation error, not the
+/// coverage error the retired two-pass pipeline reported. Validation-first,
+/// uniformly. The API surface pins the same decision in
+/// `tests/it/commit_validation.rs`.
 #[tokio::test]
-async fn single_op_validation_error_now_precedes_coverage_by_owner_decision() {
-    let fixture = DifferentialFixture::new().await;
+async fn single_op_validation_error_precedes_coverage_by_owner_decision() {
+    let fixture = PrepareFixture::new().await;
     let seed_content = fixture.stage(b"seed").await;
     fixture
         .seed(vec![covered(
@@ -1255,8 +1141,7 @@ async fn single_op_validation_error_now_precedes_coverage_by_owner_decision() {
         .await;
 
     let view = fixture.load_view().await;
-    let mut two_pass = PublishPlanningSession::new(&view.head);
-    let mut single_pass = PublishPlanningSession::new(&view.head);
+    let mut session = PublishPlanningSession::new(&view.head);
     let candidate = uncovered(
         "probe-invalid-and-uncovered",
         vec![FilesystemOperation::PutFile {
@@ -1267,8 +1152,8 @@ async fn single_op_validation_error_now_precedes_coverage_by_owner_decision() {
         }],
     );
 
-    let old = prepare_candidate_two_pass(
-        &mut two_pass,
+    let rejection = prepare_candidate(
+        &mut session,
         &view,
         &fixture.namespace_id,
         &candidate,
@@ -1277,27 +1162,15 @@ async fn single_op_validation_error_now_precedes_coverage_by_owner_decision() {
     .await
     .err()
     .map(|error| rejection_shape(&error))
-    .expect("two-pass rejection");
-    assert_eq!(old.code, ErrorCode::ContentNotPrepared);
-
-    let new = prepare_candidate_single_pass(
-        &mut single_pass,
-        &view,
-        &fixture.namespace_id,
-        &candidate,
-        4_200,
-    )
-    .await
-    .err()
-    .map(|error| rejection_shape(&error))
-    .expect("single-pass rejection");
-    assert_eq!(new.code, ErrorCode::StaleRevision);
+    .expect("rejection");
+    assert_eq!(rejection.code, ErrorCode::StaleRevision);
     assert!(
-        new.message.contains("expected revision 99"),
-        "the validation error names the stale guard: {new:?}"
+        rejection.message.contains("expected revision 99"),
+        "the validation error names the stale guard: {rejection:?}"
     );
     assert_eq!(
-        new.details
+        rejection
+            .details
             .as_ref()
             .and_then(|details| details.operation_index),
         None,

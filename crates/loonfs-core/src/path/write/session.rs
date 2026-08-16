@@ -3,10 +3,6 @@
 
 use super::intent::CommitRequest;
 use super::planner::prepare_commit_against_publish_view;
-#[cfg(test)]
-use super::planner::{plan_commit_against_publish_view, PlannedCommit};
-#[cfg(test)]
-use crate::commit::{validate_commit_for_publish, CommitIr};
 use crate::commit::{
     CandidateAllocation, CommitFingerprint, CommitPlan, InodeAllocator, ValidatedCommitPlan,
 };
@@ -58,47 +54,6 @@ impl PublishPlanningSession {
 
     pub(crate) fn discard_candidate(&self, allocation: CandidateAllocation) {
         self.inode_allocator.discard_candidate(allocation);
-    }
-
-    /// The retained first half of the two-pass differential baseline.
-    #[cfg(test)]
-    pub(crate) async fn plan_commit<S: ObjectStore + ?Sized>(
-        &self,
-        request: &CommitRequest,
-        base_view: MetadataView<'_, '_, S>,
-        committed_at_ms: u64,
-        allocation: &mut CandidateAllocation,
-    ) -> Result<PlannedCommit> {
-        let cached_view = base_view.with_durable_cache(&self.durable_cache);
-        plan_commit_against_publish_view(
-            request,
-            &self.head,
-            cached_view,
-            &self.accepted_rows,
-            committed_at_ms,
-            allocation,
-        )
-        .await
-    }
-
-    /// The retained second half of the two-pass differential baseline.
-    #[cfg(test)]
-    pub(crate) async fn validate_commit<S: ObjectStore + ?Sized>(
-        &self,
-        request: &CommitIr,
-        semantic_identity: CommitFingerprint,
-        base_view: MetadataView<'_, '_, S>,
-        committed_at_ms: u64,
-    ) -> Result<ValidatedCommitPlan> {
-        validate_commit_for_publish(
-            request,
-            semantic_identity,
-            committed_at_ms,
-            &self.head,
-            base_view.with_durable_cache(&self.durable_cache),
-            &self.accepted_rows,
-        )
-        .await
     }
 
     /// Plans and validates a mutation request in one pass, producing the
@@ -251,6 +206,10 @@ mod tests {
             .inode_id
     }
 
+    fn test_fingerprint() -> CommitFingerprint {
+        CommitFingerprint::new_unchecked("v1:sha256:test".to_owned())
+    }
+
     /// Two plans through one session share the durable-layer memo: the
     /// second plan's path walk answers from cache instead of re-scanning
     /// the manifest for the components both paths share.
@@ -294,8 +253,9 @@ mod tests {
         );
         let mut first_allocation = session.begin_candidate();
         session
-            .plan_commit(
+            .prepare_commit(
                 &first_request,
+                test_fingerprint(),
                 view.projected_metadata_view(),
                 1,
                 &mut first_allocation,
@@ -318,8 +278,9 @@ mod tests {
         );
         let mut second_allocation = session.begin_candidate();
         session
-            .plan_commit(
+            .prepare_commit(
                 &second_request,
+                test_fingerprint(),
                 view.projected_metadata_view(),
                 1,
                 &mut second_allocation,
