@@ -15,17 +15,10 @@ use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PreparedControlWrite {
-    pub object_key: String,
-    pub encoded_bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PreparedCommitHeadPublish {
     pub resulting_head: HeadState,
-    /// The physical write is kept together because its key and bytes are the
-    /// only encoded representation the store operation needs.
-    pub write: PreparedControlWrite,
+    pub object_key: String,
+    pub encoded_bytes: Vec<u8>,
 }
 
 pub(crate) fn prepare_commit_head_publish(
@@ -119,10 +112,8 @@ pub(crate) fn prepare_commit_head_publish(
 
     Ok(PreparedCommitHeadPublish {
         resulting_head,
-        write: PreparedControlWrite {
-            object_key,
-            encoded_bytes,
-        },
+        object_key,
+        encoded_bytes,
     })
 }
 
@@ -154,12 +145,12 @@ pub(crate) async fn publish_commit_head<S: ObjectStore + ?Sized>(
 
     store
         .compare_and_swap(
-            &prepared.write.object_key,
+            &prepared.object_key,
             expected_head_etag,
-            Bytes::copy_from_slice(&prepared.write.encoded_bytes),
+            Bytes::copy_from_slice(&prepared.encoded_bytes),
         )
         .await
-        .map_err(|error| map_object_store_error(&prepared.write.object_key, error))
+        .map_err(|error| map_object_store_error(&prepared.object_key, error))
 }
 
 fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHeadPublishError {
@@ -316,7 +307,7 @@ mod tests {
             Some(wal.envelope.pointer(wal.object_key.clone()))
         );
         assert_eq!(
-            prepared.write.object_key,
+            prepared.object_key,
             wal_head(&prepared.resulting_head.namespace_id),
         );
         let expected_envelope = HeadStateEnvelope::from_state(
@@ -325,7 +316,7 @@ mod tests {
         )
         .expect("head envelope");
         assert_eq!(
-            prepared.write.encoded_bytes,
+            prepared.encoded_bytes,
             encode_control_object(&expected_envelope).expect("encoded head"),
         );
     }

@@ -199,7 +199,7 @@ mod tests {
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::path::read::{load_metadata_view, ReadLoadContext};
+    use crate::path::read::load_current_metadata_view;
     use crate::path::write::ops::{delete_path, put_file_bytes};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::{
@@ -322,7 +322,7 @@ mod tests {
         namespace_id: &NamespaceId,
         request: &CommitRequest,
     ) -> Result<TestPlannedCommit> {
-        let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest())
+        let view = load_current_metadata_view(store, namespace_id)
             .await
             .expect("metadata view");
         let empty_overlay = MetadataState::default();
@@ -356,7 +356,7 @@ mod tests {
         commit_id: &str,
         planned: TestPlannedCommit,
     ) -> Result<ValidatedCommitPlan> {
-        let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest()).await?;
+        let view = load_current_metadata_view(store, namespace_id).await?;
         let empty_overlay = MetadataState::default();
         validate_commit_for_publish(
             &CommitIr {
@@ -434,7 +434,7 @@ mod tests {
         .await
         .expect("put file");
 
-        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+        let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("metadata view");
         let resolved = view

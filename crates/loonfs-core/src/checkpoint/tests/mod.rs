@@ -56,9 +56,7 @@ use crate::namespace::control::{
 };
 use crate::namespace::status::load_namespace_head_summary;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
-use crate::path::read::{
-    load_metadata_view, resolve_current_files, CurrentFileState, ReadLoadContext,
-};
+use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
 use crate::path::write::ops::{
     delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
 };
@@ -397,7 +395,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
         .iter()
         .map(|inode| inode.inode_id)
         .collect();
-    let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest())
+    let view = load_current_metadata_view(store, namespace_id)
         .await
         .expect("load the read view");
     resolve_current_files(&view, &inode_ids)
