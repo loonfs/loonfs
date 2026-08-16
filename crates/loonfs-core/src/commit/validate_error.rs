@@ -1,18 +1,12 @@
 //! [`CommitValidationError`]: every way a commit request can fail
 //! validation.
 
-use loonfs_api::{
-    AttributeRevisionNo, ChangeSeq, InodeId, InodeKind, NameKey, RevisionNo, WriterEpoch,
-};
+use loonfs_api::{AttributeRevisionNo, ChangeSeq, InodeId, InodeKind, NameKey, RevisionNo};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum CommitValidationError {
-    #[error("commit contains no operations")]
-    EmptyCommit,
-    #[error("commit namespace does not match the namespace head")]
-    NamespaceMismatch,
     #[error("name precondition parent inode `{parent_inode_id}` is missing")]
     NamePreconditionParentMissing { parent_inode_id: InodeId },
     #[error(
@@ -264,15 +258,8 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         base_attributes_revision_no: AttributeRevisionNo,
     },
-    #[error("stale writer epoch: requested `{requested}` but active is `{active}`")]
-    StaleWriterEpoch {
-        active: WriterEpoch,
-        requested: WriterEpoch,
-    },
     #[error("validated preview apply failed: {0}")]
     ValidatedPreviewApplyFailed(String),
-    #[error("sequence number cannot exceed 9007199254740991")]
-    SeqOverflow,
     #[error("next inode id counter overflow")]
     NextInodeOverflow,
     #[error("op index overflow")]

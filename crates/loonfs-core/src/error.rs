@@ -555,11 +555,6 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             actual_revision_no: *actual,
             ..ErrorDetails::default()
         }),
-        CommitValidationError::StaleWriterEpoch { active, requested } => Some(ErrorDetails {
-            fenced_epoch: Some(*requested),
-            active_writer_epoch: Some(*active),
-            ..ErrorDetails::default()
-        }),
         CommitValidationError::UndeleteInodeMissing { inode_id }
         | CommitValidationError::UndeleteTargetNotDeleted { inode_id } => Some(ErrorDetails {
             inode_id: Some(*inode_id),
@@ -789,13 +784,9 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::UndeleteGenerationMismatch { .. } => ErrorCode::NotDeleted,
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
         CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidRequest,
-        CommitValidationError::StaleWriterEpoch { .. } => ErrorCode::WriterFenced,
-        CommitValidationError::EmptyCommit
-        | CommitValidationError::NamespaceMismatch
-        | CommitValidationError::ValidatedPreviewApplyFailed(_)
+        CommitValidationError::ValidatedPreviewApplyFailed(_)
         | CommitValidationError::RestoreRevisionOverflow { .. }
         | CommitValidationError::ReplaceFileRevisionOverflow { .. }
-        | CommitValidationError::SeqOverflow
         | CommitValidationError::NextInodeOverflow
         | CommitValidationError::OpIndexOverflow
         | CommitValidationError::DeltaIndexOverflow => ErrorCode::ServerError,

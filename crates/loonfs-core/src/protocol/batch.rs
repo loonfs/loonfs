@@ -129,9 +129,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                     continue;
                 }
             };
-            let request = candidate_request.request;
-            let semantic_identity = candidate_request.semantic_identity;
+            let validated = candidate_request.validated;
             let allocation = candidate_request.allocation;
+            // Validation first, uniformly: coverage is checked once the
+            // whole request has planned and validated.
             if let Err(error) =
                 validate_commit_content_references(candidate, view.content_store_id())
             {
@@ -139,21 +140,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 outcomes[index] = Some(Err(error));
                 continue;
             }
-            let validated = {
-                let span = tracing::debug_span!("loonfs.phase", phase = "validate_commit");
-                match session
-                    .validate_commit(&request, view.metadata_view(), context.now_ms)
-                    .instrument(span)
-                    .await
-                {
-                    Ok(validated) => validated,
-                    Err(error) => {
-                        session.discard_candidate(allocation);
-                        outcomes[index] = Some(Err(error));
-                        continue;
-                    }
-                }
-            };
             let resulting_next_inode_id = match session.commit_candidate(allocation) {
                 Ok(resulting_next_inode_id) => resulting_next_inode_id,
                 Err(error) => {
@@ -163,8 +149,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
             let plan = {
                 let _span =
-                    tracing::debug_span!("loonfs.phase", phase = "CommitPlan::prepare").entered();
-                validated.prepare(request, semantic_identity, resulting_next_inode_id)
+                    tracing::debug_span!("loonfs.phase", phase = "CommitPlan::finish").entered();
+                validated.finish(resulting_next_inode_id)
             };
             let materialized = {
                 let _span =

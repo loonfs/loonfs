@@ -11,20 +11,14 @@ use super::plan_restore::plan_publish_restore_revision;
 use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
 use super::planning_helpers::{PlannedOperation, PublishPathPlanningView};
 use crate::commit::{
-    validate_ops, CandidateAllocation, CommitFingerprint, OpValidationCursor, PlannedOp,
-    PublishValidationView,
+    validate_ops, CandidateAllocation, CommitFingerprint, PublishValidationView,
+    ValidatedCommitPlan, ValidatedOp,
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{next_public_ordinal, ChangeSeq, NamespaceId, MAX_PUBLIC_INTEGER};
 use loonfs_objectstore::ObjectStore;
-
-/// One mutation request compiled into a commit's operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlannedCommit {
-    pub(crate) ops: Vec<PlannedOp>,
-}
 
 /// Computes the semantic fingerprint of a mutation request.
 ///
@@ -45,24 +39,28 @@ pub(crate) fn commit_fingerprint(
     .map_err(|err| CoreError::Internal(format!("failed to fingerprint mutation: {err}")))
 }
 
-/// Compiles a mutation request into one ordered commit plan.
+/// Compiles and validates a mutation request into one commit in a single
+/// pass.
 ///
-/// Each operation sees the effects of all earlier operations in the same
-/// request. This allows sequences such as creating a directory and then
-/// writing into it.
+/// Each semantic operation is planned against the view and its compiled
+/// operations are immediately validated, with accepted effects applied to the
+/// shared view so later operations observe earlier ones. The first failure
+/// aborts the request; multi-operation requests attach the failing
+/// operation's index, while single-operation requests return the raw error.
 ///
-/// The first failure aborts the request. Multi-operation requests validate
-/// each operation here so the returned error can include its operation
-/// index. Single-operation requests rely on the final commit-plan
-/// validation.
-pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
+/// The commit's identity moves into the returned [`ValidatedCommitPlan`]:
+/// the head is the already-guarded source of the namespace and writer epoch
+/// (`load_publish_metadata_view` fences on epoch equality, and the batch
+/// rejects namespace mismatches before admission).
+pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
     request: &CommitRequest,
+    semantic_identity: CommitFingerprint,
     head: &HeadState,
     base_view: MetadataView<'_, '_, S>,
     accepted_rows: &MetadataState,
     committed_at_ms: u64,
     allocation: &mut CandidateAllocation,
-) -> Result<PlannedCommit> {
+) -> Result<ValidatedCommitPlan> {
     if request.operations.is_empty() {
         return Err(CoreError::InvalidCommitRequest(
             "mutation request carries no operations".to_owned(),
@@ -77,8 +75,9 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
         })?;
 
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
-    let mut cursor = OpValidationCursor::new();
-    let mut ops: Vec<PlannedOp> = Vec::new();
+    let mut next_op_index = 0_u32;
+    let mut next_delta_index = 0_u32;
+    let mut validated_ops: Vec<ValidatedOp> = Vec::new();
     let operation_count = request.operations.len();
     for (index, operation) in request.operations.iter().enumerate() {
         let unit = {
@@ -91,22 +90,31 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
                 .map_err(|error| attribute(error, index, operation_count))?
         };
         let unit_ops = unit.into_planned_ops();
-        if operation_count > 1 {
-            validate_ops(
-                &unit_ops,
-                &mut resolved,
-                &mut cursor,
-                committed_seq,
-                &request.actor,
-                committed_at_ms,
-            )
-            .await
-            .map_err(|error| attribute(error, index, operation_count))?;
-        }
-        ops.extend(unit_ops);
+        let validated_unit = validate_ops(
+            &unit_ops,
+            &mut resolved,
+            &mut next_op_index,
+            &mut next_delta_index,
+            committed_seq,
+            &request.actor,
+            committed_at_ms,
+        )
+        .await
+        .map_err(|error| attribute(error, index, operation_count))?;
+        validated_ops.extend(validated_unit);
     }
 
-    Ok(PlannedCommit { ops })
+    Ok(ValidatedCommitPlan {
+        namespace_id: head.namespace_id.clone(),
+        commit_id: request.commit_id.clone(),
+        actor: request.actor.clone(),
+        writer_epoch: head.writer_epoch,
+        message: request.message.clone(),
+        semantic_identity,
+        apply_after_seq: head.seq,
+        assigned_seq: committed_seq,
+        validated_ops,
+    })
 }
 
 async fn plan_operation<S: ObjectStore + ?Sized>(
@@ -192,11 +200,7 @@ fn attribute(error: CoreError, index: usize, operation_count: usize) -> CoreErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{
-        validate_commit_for_publish, CandidateAllocation, CommitIr, CommitOp,
-        CommitValidationError, InodeAllocator, ValidatedCommitPlan,
-    };
-    use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
+    use crate::commit::{CandidateAllocation, InodeAllocator};
     use crate::context::MutationContext;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::read::load_current_metadata_view;
@@ -206,21 +210,12 @@ mod tests {
         AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     };
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use std::ops::Deref;
     use tempfile::tempdir;
 
     #[derive(Debug)]
-    struct TestPlannedCommit {
-        commit: PlannedCommit,
+    struct TestPreparedCommit {
+        ops: Vec<ValidatedOp>,
         allocation: CandidateAllocation,
-    }
-
-    impl Deref for TestPlannedCommit {
-        type Target = PlannedCommit;
-
-        fn deref(&self) -> &Self::Target {
-            &self.commit
-        }
     }
 
     fn test_context() -> MutationContext {
@@ -321,15 +316,16 @@ mod tests {
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         request: &CommitRequest,
-    ) -> Result<TestPlannedCommit> {
+    ) -> Result<TestPreparedCommit> {
         let view = load_current_metadata_view(store, namespace_id)
             .await
             .expect("metadata view");
         let empty_overlay = MetadataState::default();
         let allocator = InodeAllocator::new(view.head().next_inode_id);
         let mut allocation = allocator.begin_candidate();
-        let commit = plan_commit_against_publish_view(
+        let validated = prepare_commit_against_publish_view(
             request,
+            CommitFingerprint::new_unchecked("v1:sha256:test".to_owned()),
             view.head(),
             view.projected_metadata_view(),
             &empty_overlay,
@@ -337,86 +333,20 @@ mod tests {
             &mut allocation,
         )
         .await?;
-        Ok(TestPlannedCommit { commit, allocation })
+        Ok(TestPreparedCommit {
+            ops: validated.validated_ops,
+            allocation,
+        })
     }
 
     async fn plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         request: &CommitRequest,
-    ) -> TestPlannedCommit {
+    ) -> TestPreparedCommit {
         try_plan_against_current_state(store, namespace_id, request)
             .await
             .expect("plan")
-    }
-
-    async fn validate_planned_against_current_state(
-        store: &LocalFsStore,
-        namespace_id: &NamespaceId,
-        commit_id: &str,
-        planned: TestPlannedCommit,
-    ) -> Result<ValidatedCommitPlan> {
-        let view = load_current_metadata_view(store, namespace_id).await?;
-        let empty_overlay = MetadataState::default();
-        validate_commit_for_publish(
-            &CommitIr {
-                namespace_id: namespace_id.clone(),
-                commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
-                writer_epoch: view.head().writer_epoch,
-                ops: planned.commit.ops,
-                message: None,
-            },
-            1,
-            view.head(),
-            view.projected_metadata_view(),
-            &empty_overlay,
-        )
-        .await
-    }
-
-    async fn publish_operation(
-        store: &LocalFsStore,
-        namespace_id: &NamespaceId,
-        commit_id: &str,
-        operation: FilesystemOperation,
-        context: &MutationContext,
-    ) -> Result<loonfs_api::CommitResponse> {
-        let candidate = CommitCandidate::new(CommitRequest::single(
-            CommitId::parse(commit_id).expect("valid commit id"),
-            loonfs_test_support::test_actor(),
-            None,
-            operation,
-        ));
-        publish_namespace_commits_batch(store, namespace_id, vec![candidate], context)
-            .await
-            .pop()
-            .expect("one candidate produces one outcome")
-    }
-
-    #[tokio::test]
-    async fn a_planned_directory_create_loses_if_another_commit_claims_the_name() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        let planned =
-            plan_against_current_state(&store, &namespace_id, &request(create_dir("/docs"))).await;
-        publish_operation(
-            &store,
-            &namespace_id,
-            "competing-mkdir",
-            create_dir("/docs"),
-            &context,
-        )
-        .await
-        .expect("competing create");
-
-        let error =
-            validate_planned_against_current_state(&store, &namespace_id, "stale-mkdir", planned)
-                .await
-                .expect_err("the planned name is no longer free");
-        assert!(matches!(
-            error,
-            CoreError::CommitValidation(CommitValidationError::CreateChildNameCollision { .. })
-        ));
     }
 
     #[tokio::test]
@@ -443,168 +373,6 @@ mod tests {
             .await
             .expect("resolve created file");
         assert_eq!(resolved.absolute_path, "/docs/nested/a.txt");
-    }
-
-    #[tokio::test]
-    async fn a_planned_move_loses_if_the_source_is_rebound() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        let seed_commit_id = CommitId::parse("seed-file").expect("valid commit id");
-        put_file_bytes(
-            &store,
-            &namespace_id,
-            "/docs/a.txt",
-            b"hello",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&seed_commit_id),
-        )
-        .await
-        .expect("seed file");
-
-        let planned = plan_against_current_state(
-            &store,
-            &namespace_id,
-            &request(FilesystemOperation::MovePath {
-                from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                behavior: DestinationBehavior::NoReplace,
-            }),
-        )
-        .await;
-        crate::path::write::ops::move_path(
-            &store,
-            &namespace_id,
-            "/docs/a.txt",
-            "/docs/c.txt",
-            &context,
-            Some(&CommitId::parse("competing-move").expect("valid commit id")),
-        )
-        .await
-        .expect("competing move");
-
-        let error =
-            validate_planned_against_current_state(&store, &namespace_id, "stale-move", planned)
-                .await
-                .expect_err("the source binding changed");
-        assert!(matches!(
-            error,
-            CoreError::CommitValidation(CommitValidationError::BindingPreconditionMissing { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_planned_copy_loses_if_the_source_revision_changes() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        let seed_commit_id = CommitId::parse("seed-copy-source").expect("valid commit id");
-        put_file_bytes(
-            &store,
-            &namespace_id,
-            "/docs/a.txt",
-            b"hello",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&seed_commit_id),
-        )
-        .await
-        .expect("seed file");
-
-        let planned = plan_against_current_state(
-            &store,
-            &namespace_id,
-            &request(FilesystemOperation::CopyPath {
-                from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                to_path: AbsolutePath::parse("/docs/copy.txt").expect("path"),
-                behavior: DestinationBehavior::NoReplace,
-            }),
-        )
-        .await;
-        put_file_bytes(
-            &store,
-            &namespace_id,
-            "/docs/a.txt",
-            b"new contents",
-            DestinationBehavior::Replace,
-            &context,
-            Some(&CommitId::parse("competing-replace").expect("valid commit id")),
-        )
-        .await
-        .expect("competing replace");
-
-        let error =
-            validate_planned_against_current_state(&store, &namespace_id, "stale-copy", planned)
-                .await
-                .expect_err("the source revision changed");
-        assert!(matches!(
-            error,
-            CoreError::CommitValidation(
-                CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
-            )
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_planned_attribute_update_loses_if_another_update_publishes_first() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        put_file_bytes(
-            &store,
-            &namespace_id,
-            "/docs/a.txt",
-            b"hello",
-            DestinationBehavior::NoReplace,
-            &context,
-            Some(&CommitId::parse("seed-attributes").expect("valid commit id")),
-        )
-        .await
-        .expect("seed file");
-
-        let planned = plan_against_current_state(
-            &store,
-            &namespace_id,
-            &request(FilesystemOperation::UpdateAttributes {
-                path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                set: std::collections::BTreeMap::from([(
-                    loonfs_api::AttributeKey::parse("owner").expect("valid attribute key"),
-                    loonfs_api::AttributeValue::parse("ada").expect("valid attribute value"),
-                )]),
-                remove: Vec::new(),
-                expected_inode_id: None,
-                expected_attributes_revision_no: None,
-            }),
-        )
-        .await;
-        publish_operation(
-            &store,
-            &namespace_id,
-            "competing-attributes",
-            FilesystemOperation::UpdateAttributes {
-                path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                set: std::collections::BTreeMap::from([(
-                    loonfs_api::AttributeKey::parse("owner").expect("valid attribute key"),
-                    loonfs_api::AttributeValue::parse("grace").expect("valid attribute value"),
-                )]),
-                remove: Vec::new(),
-                expected_inode_id: None,
-                expected_attributes_revision_no: None,
-            },
-            &context,
-        )
-        .await
-        .expect("competing attribute update");
-
-        let error = validate_planned_against_current_state(
-            &store,
-            &namespace_id,
-            "stale-attributes",
-            planned,
-        )
-        .await
-        .expect_err("the attribute revision changed");
-        assert!(matches!(
-            error,
-            CoreError::CommitValidation(
-                CommitValidationError::UpdateAttributesBaseRevisionMismatch { .. }
-            )
-        ));
     }
 
     #[tokio::test]
@@ -722,8 +490,8 @@ mod tests {
 
         assert_eq!(planned.ops.len(), 2);
         assert!(matches!(
-            &planned.ops[0].op,
-            CommitOp::CreateDirectory {
+            &planned.ops[0],
+            ValidatedOp::CreateDir {
                 child_inode_id: InodeId(2),
                 parent_inode_id: InodeId(1),
                 ..
@@ -733,8 +501,8 @@ mod tests {
         // re-creating it, and validation receives the exact ID planning
         // assigned to the file.
         assert!(matches!(
-            &planned.ops[1].op,
-            CommitOp::CreateFile {
+            &planned.ops[1],
+            ValidatedOp::CreateFile {
                 child_inode_id: InodeId(3),
                 parent_inode_id,
                 display_name,
@@ -790,10 +558,10 @@ mod tests {
 
         // The name is free once the delete is applied, so the put creates a
         // fresh file rather than failing with a destination conflict.
-        assert!(matches!(planned.ops[0].op, CommitOp::DeleteFile { .. }));
+        assert!(matches!(planned.ops[0], ValidatedOp::DeleteFile { .. }));
         assert!(matches!(
-            &planned.ops[1].op,
-            CommitOp::CreateFile { display_name, .. } if display_name.as_str() == "tmp.txt"
+            &planned.ops[1],
+            ValidatedOp::CreateFile { display_name, .. } if display_name.as_str() == "tmp.txt"
         ));
     }
 

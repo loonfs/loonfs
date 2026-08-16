@@ -13,15 +13,13 @@ use futures::stream::BoxStream;
 use loonfs_api::{
     v0::{FilesystemChange, UploadSessionStatus},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
-    NamespaceId, RevisionNo,
+    InodeId, NamespaceId, RevisionNo,
 };
 use loonfs_core::content::{
     mint_content_token, store_bytes_as_content, verify_content_token, ContentTokenError,
 };
 use loonfs_core::limits::CONTENT_RECEIPT_TTL_MS;
-use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, ContentPreparationError, FilesystemOperation,
-};
+use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{Error as CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -416,6 +414,69 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
+/// A rejected candidate returns any inode IDs it reserved, so the next
+/// accepted candidate can use them.
+#[tokio::test]
+async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    let responses = submit_commits_batch(
+        &store,
+        &namespace_id,
+        vec![
+            CommitRequest::single(
+                commit_id("keep-first-allocation"),
+                loonfs_test_support::test_actor(),
+                None,
+                create_dir("/first"),
+            ),
+            CommitRequest {
+                commit_id: commit_id("discard-allocation"),
+                actor: loonfs_test_support::test_actor(),
+                message: None,
+                operations: vec![create_dir("/discarded"), delete_path("/missing")],
+            },
+            CommitRequest::single(
+                commit_id("reuse-discarded-allocation"),
+                loonfs_test_support::test_actor(),
+                None,
+                create_dir("/second"),
+            ),
+        ],
+        &context,
+    )
+    .await;
+
+    let [first, rejected, second] = responses.as_slice() else {
+        panic!("expected three batch results")
+    };
+    first.as_ref().expect("first candidate commits");
+    assert_eq!(
+        rejected
+            .as_ref()
+            .expect_err("second candidate is rejected")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    second.as_ref().expect("third candidate commits");
+    assert_eq!(
+        resolve_path(&store, &namespace_id, "/second")
+            .await
+            .expect("second directory")
+            .inode_id,
+        InodeId(3)
+    );
+    resolve_path(&store, &namespace_id, "/discarded")
+        .await
+        .expect_err("rejected candidate publishes nothing");
+}
+
 #[tokio::test]
 async fn mutation_paths_reject_invalid_display_names() {
     assert!(DisplayName::parse("a/b").is_err());
@@ -520,11 +581,11 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
     );
 }
 
-/// Content coverage is checked before the commit plan validates operations,
-/// so a put whose caller-supplied revision guard is also stale answers for
-/// the missing proof, and nothing is read.
+/// Validation runs before content coverage. A put with both a stale revision
+/// guard and missing content proof returns the stale revision without reading
+/// from the content store.
 #[tokio::test]
-async fn a_guarded_put_fails_unprepared_before_revision_validation_without_content_reads() {
+async fn a_guarded_put_reports_the_stale_revision_before_missing_content_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -564,12 +625,17 @@ async fn a_guarded_put_fails_unprepared_before_revision_validation_without_conte
     .into_iter()
     .next()
     .expect("one result")
-    .expect_err("unprepared content should win before stale revision");
+    .expect_err("the stale revision guard should win before unprepared content");
+    assert_eq!(error.code(), ErrorCode::StaleRevision);
     assert!(matches!(
         error,
-        CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
-            content_id
-        }) if content_id == missing_content.content_id
+        CoreError::CommitValidation(
+            loonfs_core::commit::CommitValidationError::ReplaceFileBaseRevisionMismatch {
+                expected: RevisionNo(99),
+                actual: Some(RevisionNo(1)),
+                ..
+            }
+        )
     ));
     assert_eq!(guarded_store.content_store_access_count(), 0);
 }
