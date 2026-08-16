@@ -6,7 +6,6 @@ use crate::metadata::{CommitReceiptRecord, MetadataState};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
 use loonfs_api::{next_public_ordinal, ChangeSeq, InodeId, NamespaceId, WriterEpoch};
-use loonfs_objectstore::keys::wal_segment;
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &HeadState,
@@ -99,21 +98,8 @@ fn validate_replay_record(
 pub(super) fn validate_wal_segment_for_replay(
     expected_namespace_id: &NamespaceId,
     expected_base_head_seq: ChangeSeq,
-    object_key: &str,
     envelope: &WalSegmentEnvelope,
 ) -> Result<(), WalReplayError> {
-    // The id shape is validated on decode: `segment_id` is a typed
-    // `WalSegmentId`, so only well-formed ids can reach this point.
-    let expected_object_key =
-        wal_segment(&envelope.payload.namespace_id, &envelope.payload.segment_id);
-
-    if object_key != expected_object_key {
-        return Err(WalReplayError::ObjectKeyMismatch {
-            expected: expected_object_key,
-            actual: object_key.to_owned(),
-        });
-    }
-
     if &envelope.payload.namespace_id != expected_namespace_id {
         return Err(WalReplayError::NamespaceMismatch {
             expected: expected_namespace_id.clone(),

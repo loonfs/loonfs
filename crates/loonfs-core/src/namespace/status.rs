@@ -85,12 +85,12 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
 
 /// Summarizes a live namespace head.
 ///
-/// The WAL tail is counted from the head's chain pointers
-/// (`recent_segments`, published under the same CAS as the tip and long
-/// enough to name every segment a legal unflushed tail can hold); no segment
-/// body is read. A head that under-describes its own tail fails the summary
-/// rather than being walked. The count is for inspection and maintenance
-/// gating — replay consumers load the validated chain instead.
+/// The WAL tail is counted from the head's tip and predecessor hints
+/// (`recent_segments`, published under the same CAS and long enough to name
+/// every predecessor a legal unflushed tail can hold); no segment body is
+/// read. A head that under-describes its own tail fails the summary rather
+/// than being walked. The count is for inspection and maintenance gating —
+/// replay consumers load the validated chain instead.
 pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,

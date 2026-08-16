@@ -7,8 +7,9 @@ use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, NamespaceId};
+use loonfs_objectstore::keys::wal_segment;
 use loonfs_objectstore::ObjectStore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Hinted segments fetched at once. The head names every segment a legal
 /// unflushed tail can hold, so a replay's whole gap is usually hinted and
@@ -17,14 +18,18 @@ pub(super) const RECENT_SEGMENT_PREFETCH_CONCURRENCY: usize = 32;
 
 /// The hinted segment keys that cover the replay gap, newest first.
 fn hints_in_gap(
+    namespace_id: &NamespaceId,
+    tip: &WalSegmentPointer,
     hints: &[WalSegmentPointer],
     stop_after_seq: ChangeSeq,
     head_seq: ChangeSeq,
 ) -> Vec<String> {
-    hints
-        .iter()
+    let mut seen = HashSet::new();
+    std::iter::once(tip)
+        .chain(hints)
         .filter(|pointer| pointer.end_seq > stop_after_seq && pointer.end_seq <= head_seq)
-        .map(|pointer| pointer.object_key.clone())
+        .map(|pointer| wal_segment(namespace_id, &pointer.segment_id))
+        .filter(|object_key| seen.insert(object_key.clone()))
         .collect()
 }
 
@@ -186,7 +191,13 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
     }
 
     let stop_after_seq = request.stop_after_seq.unwrap_or(request.chain_base_seq);
-    let in_gap = hints_in_gap(request.recent_segments, stop_after_seq, request.head_seq);
+    let in_gap = hints_in_gap(
+        request.namespace_id,
+        &pointer,
+        request.recent_segments,
+        stop_after_seq,
+        request.head_seq,
+    );
     // `fetches` counts every segment-body request, including prefetches, and
     // never exceeds `max_segment_fetches`. Prefetch consumes its share first;
     // the chain walk uses the remaining budget. Because hints are ordered from
@@ -204,7 +215,7 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
             break;
         }
 
-        let object_key = pointer.object_key.clone();
+        let object_key = wal_segment(request.namespace_id, &pointer.segment_id);
         let encoded_bytes = match prefetched.remove(&object_key) {
             // The prefetch already paid for this body, so consuming it
             // costs nothing further.
@@ -278,7 +289,6 @@ fn finish_chain(
         validate_wal_segment_for_replay(
             request.namespace_id,
             expected_base_seq,
-            segment.object_key(),
             segment.envelope(),
         )?;
         expected_base_seq = segment.envelope().payload.end_seq;
@@ -299,7 +309,7 @@ fn validate_pointer_matches_envelope(
     object_key: &str,
     envelope: &WalSegmentEnvelope,
 ) -> Result<(), WalChainLoadError> {
-    if envelope.pointer(object_key.to_owned()) != *pointer {
+    if envelope.pointer() != *pointer {
         return Err(WalChainLoadError::PointerMismatch {
             object_key: object_key.to_owned(),
         });
@@ -309,9 +319,10 @@ fn validate_pointer_matches_envelope(
 
 /// Counts visible WAL-tail segments from the pointers stored in the head.
 ///
-/// Head publication updates `visible_wal_tip` and `recent_segments` in the
-/// same compare-and-swap, so a contiguous pointer list from the tip describes
-/// the complete legal tail. The function performs no object-store reads.
+/// Head publication updates `visible_wal_tip` and its `recent_segments`
+/// predecessor hints in the same compare-and-swap, so those pointers together
+/// describe the complete legal tail. The function performs no object-store
+/// reads.
 ///
 /// If the head does not describe its complete tail, the namespace is
 /// reported as corrupt rather than triggering an unbounded foreground chain
@@ -362,25 +373,19 @@ pub(crate) fn count_visible_wal_tail_segments(
         return Ok(count);
     }
 
-    // A decoded head always begins its accelerator at its tip. This request
-    // carries a plain pointer slice rather than a head, and the count reads
-    // no segment bodies, so it checks that relationship here rather than
-    // assuming it.
-    if request.recent_segments.first() == Some(&tip) {
-        for pointer in &request.recent_segments[1..] {
-            if pointer.end_seq.0 + 1 != oldest_counted.start_seq.0 {
-                // Contiguity break: nothing below is described.
-                break;
-            }
-            if pointer.end_seq <= stop_after_seq {
-                // Fully folded: the tail ends right above this pointer.
-                return Ok(count);
-            }
-            count += 1;
-            oldest_counted = pointer;
-            if pointer_reaches_base(oldest_counted, stop_after_seq) {
-                return Ok(count);
-            }
+    for pointer in request.recent_segments {
+        if pointer.end_seq.0 + 1 != oldest_counted.start_seq.0 {
+            // Contiguity break: nothing below is described.
+            break;
+        }
+        if pointer.end_seq <= stop_after_seq {
+            // Fully folded: the tail ends right above this pointer.
+            return Ok(count);
+        }
+        count += 1;
+        oldest_counted = pointer;
+        if pointer_reaches_base(oldest_counted, stop_after_seq) {
+            return Ok(count);
         }
     }
 

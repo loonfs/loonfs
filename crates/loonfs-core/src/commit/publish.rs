@@ -76,7 +76,7 @@ pub(crate) fn prepare_commit_head_publish(
     }
 
     let object_key = wal_head(&current_head.namespace_id);
-    let new_tip = wal.envelope.pointer(wal.object_key.clone());
+    let new_tip = wal.envelope.pointer();
     let resulting_head = HeadState {
         namespace_id: current_head.namespace_id.clone(),
         // The head is the only durable home of the namespace's content
@@ -90,7 +90,7 @@ pub(crate) fn prepare_commit_head_publish(
         writer_epoch: current_head.writer_epoch,
         writer: current_head.writer.clone(),
         next_inode_id: plan.resulting_next_inode_id,
-        recent_segments: next_recent_segments(current_head, new_tip.clone()),
+        recent_segments: next_recent_segments(current_head),
         visible_wal_tip: Some(new_tip),
         state: current_head.state,
     };
@@ -117,18 +117,13 @@ pub(crate) fn prepare_commit_head_publish(
     })
 }
 
-/// Rebuilds the head's replay accelerator: newest first, tip included,
-/// capped at [`RECENT_SEGMENTS_LIMIT`]. Readers reaching past it walk the
-/// chain links, which remain the only history authority.
-///
-/// Head decoding rejects a head whose accelerator does not begin at its own
-/// tip. Prepending the new tip to that list therefore keeps it gap-free.
-fn next_recent_segments(
-    current_head: &HeadState,
-    new_tip: WalSegmentPointer,
-) -> Vec<WalSegmentPointer> {
+/// Rebuilds the head's predecessor accelerator below the newly published
+/// tip, newest first and capped at [`RECENT_SEGMENTS_LIMIT`]. Readers
+/// reaching past it walk the chain links, which remain the only history
+/// authority.
+fn next_recent_segments(current_head: &HeadState) -> Vec<WalSegmentPointer> {
     let mut recent = Vec::with_capacity(RECENT_SEGMENTS_LIMIT);
-    recent.push(new_tip);
+    recent.extend(current_head.visible_wal_tip.iter().cloned());
     recent.extend(current_head.recent_segments.iter().cloned());
     recent.truncate(RECENT_SEGMENTS_LIMIT);
     recent
@@ -172,7 +167,6 @@ fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHead
 mod tests {
     use super::*;
     use crate::commit::CommitFingerprint;
-    use loonfs_objectstore::keys::wal_segment as wal_segment_key;
 
     #[test]
     fn head_cas_transport_failure_maps_to_unknown_outcome_not_failure() {
@@ -284,8 +278,6 @@ mod tests {
         };
         let envelope = WalSegmentEnvelope::from_payload(payload).expect("wal envelope");
         PreparedWalSegment {
-            object_key: wal_segment_key(&namespace_id, &segment_id),
-            segment_id,
             envelope,
             encoded_bytes: Vec::new(),
         }
@@ -304,7 +296,7 @@ mod tests {
         assert_eq!(prepared.resulting_head.seq, ChangeSeq(9));
         assert_eq!(
             prepared.resulting_head.visible_wal_tip,
-            Some(wal.envelope.pointer(wal.object_key.clone()))
+            Some(wal.envelope.pointer())
         );
         assert_eq!(
             prepared.object_key,
@@ -374,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn head_publish_prepends_the_tip_to_the_prior_accelerator() {
+    fn head_publish_moves_the_old_tip_into_predecessor_hints() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let mut current_head = head(namespace_id.clone(), ChangeSeq(7));
         let prior = wal_segment(
@@ -384,25 +376,22 @@ mod tests {
             ChangeSeq(7),
             2,
         );
-        let prior_tip = prior.envelope.pointer(prior.object_key.clone());
+        let prior_tip = prior.envelope.pointer();
         current_head.visible_wal_tip = Some(prior_tip.clone());
-        current_head.recent_segments = vec![prior_tip.clone()];
+        current_head.recent_segments = Vec::new();
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(9), 2);
 
         let prepared =
             prepare_commit_head_publish(&current_head, &plan, &wal).expect("prepare head publish");
 
-        let new_tip = wal.envelope.pointer(wal.object_key.clone());
-        assert_eq!(
-            prepared.resulting_head.recent_segments,
-            vec![new_tip.clone(), prior_tip]
-        );
+        let new_tip = wal.envelope.pointer();
+        assert_eq!(prepared.resulting_head.recent_segments, vec![prior_tip]);
         assert_eq!(prepared.resulting_head.visible_wal_tip, Some(new_tip));
     }
 
     #[test]
-    fn head_publish_prepends_the_tip_and_truncates_recent_segments() {
+    fn head_publish_prepends_the_old_tip_and_truncates_predecessor_hints() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let limit = u64::try_from(RECENT_SEGMENTS_LIMIT).expect("limit fits a sequence");
         let mut current_head = head(namespace_id.clone(), ChangeSeq(limit));
@@ -414,9 +403,11 @@ mod tests {
                 ChangeSeq(index + 1),
                 1,
             );
-            segment.envelope.pointer(segment.object_key.clone())
+            segment.envelope.pointer()
         };
-        // A list already at the cap: the tip has to displace something.
+        let old_tip = filler(limit);
+        current_head.visible_wal_tip = Some(old_tip.clone());
+        // A predecessor list already at the cap: the old tip has to displace something.
         current_head.recent_segments = (0..limit).rev().map(filler).collect();
         let oldest = current_head
             .recent_segments
@@ -437,7 +428,11 @@ mod tests {
 
         let recent = &prepared.resulting_head.recent_segments;
         assert_eq!(recent.len(), RECENT_SEGMENTS_LIMIT);
-        assert_eq!(recent[0], wal.envelope.pointer(wal.object_key.clone()));
+        assert_eq!(recent[0], old_tip);
+        assert_eq!(
+            prepared.resulting_head.visible_wal_tip,
+            Some(wal.envelope.pointer())
+        );
         assert!(!recent.contains(&oldest), "oldest hint must fall off");
     }
 
@@ -547,14 +542,13 @@ mod tests {
     /// the cap is justified by are measured rather than estimated.
     fn encoded_head_bytes(namespace: &str, newest_seq: u64) -> usize {
         let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
-        let segments: Vec<WalSegmentPointer> = (0..RECENT_SEGMENTS_LIMIT)
+        let segments: Vec<WalSegmentPointer> = (0..=RECENT_SEGMENTS_LIMIT)
             .map(|index| {
                 let offset = u64::try_from(index).expect("test index");
                 let seq = ChangeSeq(newest_seq - offset);
                 let segment_id = WalSegmentId::parse(format!("{:020}-{offset:016x}", seq.0))
                     .expect("valid segment id");
                 WalSegmentPointer {
-                    object_key: wal_segment_key(&namespace_id, &segment_id),
                     segment_id,
                     start_seq: seq,
                     end_seq: seq,
@@ -564,7 +558,7 @@ mod tests {
             .collect();
         let mut state = head(namespace_id, ChangeSeq(newest_seq));
         state.visible_wal_tip = segments.first().cloned();
-        state.recent_segments = segments;
+        state.recent_segments = segments.into_iter().skip(1).collect();
 
         let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, state)
             .expect("head envelope");

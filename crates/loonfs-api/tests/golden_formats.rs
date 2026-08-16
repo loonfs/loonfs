@@ -228,7 +228,6 @@ fn sample_attributes() -> Attributes {
 
 fn sample_wal_pointer() -> WalSegmentPointer {
     WalSegmentPointer {
-        object_key: "namespaces/demo/wal/00000000000000000002-fedcba9876543210.wal.zst".to_owned(),
         segment_id: WalSegmentId::parse("00000000000000000002-fedcba9876543210")
             .expect("valid segment id"),
         start_seq: ChangeSeq(1),
@@ -386,7 +385,7 @@ fn sample_head_state() -> HeadState {
         }),
         next_inode_id: InodeId(10),
         visible_wal_tip: Some(sample_wal_pointer()),
-        recent_segments: vec![sample_wal_pointer()],
+        recent_segments: Vec::new(),
         state: NamespaceState::Active,
     }
 }
@@ -1408,6 +1407,47 @@ fn wal_decode_tolerates_additive_payload_fields() {
     let decoded = decode_wal_segment_envelope_zstd(&rezstd(&future_document))
         .expect("additive payload fields must remain readable");
     assert_eq!(decoded.payload, envelope.payload);
+}
+
+#[test]
+fn wal_decode_rejects_old_key_bearing_predecessor_pointer() {
+    let document = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
+    let document_value: ciborium::Value =
+        ciborium::de::from_reader(document.as_slice()).expect("decode document map");
+    let payload_bytes = document_value
+        .as_map()
+        .expect("document is a map")
+        .iter()
+        .find(|(key, _)| key.as_text() == Some("payload"))
+        .and_then(|(_, value)| value.as_bytes())
+        .expect("payload is a byte string");
+    let mut payload: ciborium::Value =
+        ciborium::de::from_reader(payload_bytes.as_slice()).expect("decode payload");
+    cbor_map_of(cbor_entry(&mut payload, "prev_visible_segment")).push((
+        ciborium::Value::from("object_key"),
+        ciborium::Value::from(
+            "namespaces/demo/wal/segments/00000000000000000002-fedcba9876543210.wal.zst",
+        ),
+    ));
+    let mut key_bearing_payload = Vec::new();
+    ciborium::ser::into_writer(&payload, &mut key_bearing_payload)
+        .expect("encode old key-bearing payload");
+
+    let with_payload = with_cbor_document_entry(&document, "payload", |value| {
+        *value = ciborium::Value::Bytes(key_bearing_payload.clone());
+    });
+    let key_bearing_document =
+        with_cbor_document_entry(&with_payload, "payload_checksum", |value| {
+            *value = ciborium::Value::from(sha256_digest(&key_bearing_payload));
+        });
+
+    let error = decode_wal_segment_envelope_zstd(&rezstd(&key_bearing_document))
+        .expect_err("version-one predecessor pointers reject the former stored object key");
+    assert!(
+        matches!(&error, EnvelopeCodecError::PayloadDecode(message)
+            if message.contains("unknown field") && message.contains("object_key")),
+        "unexpected corruption error: {error}"
+    );
 }
 
 #[test]

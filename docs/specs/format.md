@@ -91,6 +91,22 @@ The required durable object families and standard key patterns are:
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
+The WAL subtree has one mutable head, one optional mutable floor, and the
+immutable segment collection:
+
+```text
+namespaces/{namespace_id}/wal/
+├── head.json
+├── floor.json
+└── segments/{segment_id}.wal.zst
+```
+
+For example, segment `00000000000000000002-fedcba9876543210` in namespace
+`demo` is always stored at
+`namespaces/demo/wal/segments/00000000000000000002-fedcba9876543210.wal.zst`.
+Pointers never store this key; every store boundary derives it from the
+namespace and `segment_id`.
+
 These key shapes are part of the interoperable storage contract.
 Implementations may keep additional private control-plane objects — queues,
 scheduler state, coordination records — outside the key families above;
@@ -206,11 +222,12 @@ The metadata log has six rules.
    values.
 3. Distinct client commit requests remain distinct logical commits even when
    they are stored in the same WAL segment.
-4. The visible WAL chain must be deterministically recoverable from the head
-   plus referenced segment metadata. A head field such as
-   `wal_tip_segment_id`, together with segment metadata such as `segment_id`,
-   `start_seq`, `end_seq`, `base_head_seq`, and `prev_visible_segment_id`, is
-   one conforming shape. Equivalent semantics are acceptable.
+4. The visible WAL chain is deterministically recoverable from the head's
+   `visible_wal_tip` and the `prev_visible_segment` pointer inside each
+   verified segment. Every pointer stores only `segment_id`, `start_seq`,
+   `end_seq`, and `payload_checksum`; its object key is derived from the
+   namespace and `segment_id`. The bounded `recent_segments` predecessor
+   hints accelerate reads but never define chain history.
 5. `segment_id` must be unique and never reused within a namespace
    incarnation. It is a stream-positioned id (section 1.3): the ordered
    prefix is the segment's `start_seq` so listings and reclamation scans
@@ -874,11 +891,45 @@ including at minimum:
 - `next_inode_id`
 - `visible_wal_tip` and the bounded `recent_segments` accelerator
 
-`recent_segments` always begins at `visible_wal_tip`. A head published before
-the namespace's first commit carries neither, and every head published after
-it carries the tip as the accelerator's first entry, because one
-compare-and-swap writes both. A head that disagrees with itself is corrupt,
-and decoding rejects it.
+Every WAL pointer has this v1 shape, including `visible_wal_tip`, head hints,
+and segment predecessor links:
+
+```json
+{
+  "segment_id": "00000000000000000002-fedcba9876543210",
+  "start_seq": 2,
+  "end_seq": 2,
+  "payload_checksum": "sha256:<64 lowercase hex>"
+}
+```
+
+The head stores the tip once. `recent_segments` is a bounded newest-first
+list of pointers strictly below `visible_wal_tip`: publication replaces it
+with the old tip followed by the old predecessor hints, truncated to the
+limit. A head before its first commit carries neither. A head after its first
+commit carries a tip and may have no predecessor hints. For example:
+
+```json
+{
+  "visible_wal_tip": {
+    "segment_id": "00000000000000000003-aaaaaaaaaaaaaaaa",
+    "start_seq": 3,
+    "end_seq": 3,
+    "payload_checksum": "sha256:<64 lowercase hex>"
+  },
+  "recent_segments": [
+    {
+      "segment_id": "00000000000000000002-fedcba9876543210",
+      "start_seq": 2,
+      "end_seq": 2,
+      "payload_checksum": "sha256:<64 lowercase hex>"
+    }
+  ]
+}
+```
+
+Chain links remain the history authority. The tip plus hints may prefetch or
+count the bounded tail; hints never become GC roots by themselves.
 
 `wal/floor.json` is the symmetrical pair to the head — the earliest retained
 commit boundary next to the latest visible one. It records `floor_seq` and
@@ -1162,8 +1213,8 @@ This is the success boundary.
    as an orphan and rebuild the commit as a fresh segment; otherwise
    **CAS-update** the namespace head to advance `seq`, `next_inode_id`, the
    visible WAL tip, and `recent_segments` (the bounded newest-first
-   accelerator over the visible chain, tip included; chain links remain the
-   only history authority).
+   predecessor accelerator below the tip; chain links remain the only
+   history authority).
 7. If step 5 or step 6 fails, the publication fails. A WAL segment written
    before a failed CAS — or abandoned over budget — is orphaned and harmless.
 
