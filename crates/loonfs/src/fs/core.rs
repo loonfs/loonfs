@@ -26,7 +26,7 @@ use loonfs_core::cache::{
     WalTailProjectionCacheConfig,
 };
 use loonfs_core::time::current_time_ms;
-use loonfs_core::{MutationContext, NamespaceEngine};
+use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -270,11 +270,8 @@ impl ReadCore {
     pub(crate) fn reader_engine(
         &self,
         namespace_id: &NamespaceId,
-    ) -> NamespaceEngine<SharedObjectStore> {
-        NamespaceEngine::builder(self.inner.store.clone())
-            .namespace_id(namespace_id.clone())
-            .build_reader()
-            .expect("a namespace id is the reader engine's only requirement")
+    ) -> NamespaceReaderEngine<SharedObjectStore> {
+        NamespaceReaderEngine::reader(self.inner.store.clone(), namespace_id.clone())
     }
 
     /// A mutating engine bound to one actor identity.
@@ -282,12 +279,13 @@ impl ReadCore {
         &self,
         actor: &WriterIdentity,
         namespace_id: &NamespaceId,
-    ) -> NamespaceEngine<SharedObjectStore> {
-        NamespaceEngine::builder(self.inner.store.clone())
-            .namespace_id(namespace_id.clone())
-            .writer_id(actor.writer_id.clone())
-            .build()
-            .expect("a validated actor identity should build a namespace engine")
+    ) -> NamespaceWriterEngine<SharedObjectStore> {
+        NamespaceWriterEngine::writer(
+            self.inner.store.clone(),
+            namespace_id.clone(),
+            actor.writer_id.clone(),
+        )
+        .expect("a validated actor identity should build a namespace engine")
     }
 }
 

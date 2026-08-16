@@ -15,7 +15,7 @@ use loonfs_api::{
     ContentEvidence, EffectiveLimit, ErrorCode, PutRetryAttempt, PutRetryErrorClassification,
     PutRetryReceipt,
 };
-use loonfs_core::NamespaceEngine;
+use loonfs_core::NamespaceWriterEngine;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ impl FsWriter {
     pub(crate) fn engine(
         &self,
         namespace_id: &NamespaceId,
-    ) -> NamespaceEngine<crate::SharedObjectStore> {
+    ) -> NamespaceWriterEngine<crate::SharedObjectStore> {
         self.core.writer_engine(&self.bits.identity, namespace_id)
     }
 

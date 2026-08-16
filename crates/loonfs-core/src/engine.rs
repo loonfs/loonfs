@@ -68,26 +68,38 @@ fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_
     )
 }
 
-/// The actor identity a mutating engine publishes under.
+/// The actor identity a writable engine publishes under.
 #[derive(Debug)]
 struct EngineWriter {
     writer_id: String,
 }
 
+/// Marks an engine that exposes read operations only.
+#[derive(Debug)]
+pub struct ReadOnly;
+
+/// Marks an engine that exposes mutations under one writer identity.
+#[derive(Debug)]
+pub struct Writable {
+    writer: EngineWriter,
+}
+
+/// A namespace engine that exposes read operations only.
+pub type NamespaceReaderEngine<S> = NamespaceEngine<S, ReadOnly>;
+
+/// A namespace engine that exposes both read and mutation operations.
+pub type NamespaceWriterEngine<S> = NamespaceEngine<S, Writable>;
+
 /// A namespace-scoped core API.
 ///
-/// `NamespaceEngine` owns an object store handle plus, for a mutating engine,
-/// the writer identity used for mutations. It is the main entrypoint for
-/// direct reads, path writes, explicit commits, uploads, checkpoints, and
-/// retention work.
-///
-/// An engine built by [`NamespaceEngineBuilder::build_reader`] carries no
-/// writer identity: it serves reads, and every mutation refuses.
+/// `NamespaceEngine` owns an object store handle and exposes operations
+/// selected by its mode. Use [`NamespaceEngine::reader`] for reads only or
+/// [`NamespaceEngine::writer`] for reads and mutations.
 #[derive(Debug)]
-pub struct NamespaceEngine<S> {
+pub struct NamespaceEngine<S, M> {
     store: S,
     namespace_id: NamespaceId,
-    writer: Option<EngineWriter>,
+    mode: M,
     /// A narrowed per-step row budget, so a test can reach a frozen base
     /// without writing the hundred thousand rows the shipped budget admits.
     /// See [`Self::starve_reorganization_row_budget`].
@@ -95,7 +107,84 @@ pub struct NamespaceEngine<S> {
     reorganization_row_budget: Option<std::num::NonZeroUsize>,
 }
 
-impl<S: ObjectStore> NamespaceEngine<S> {
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    /// Returns the namespace this engine is bound to.
+    pub fn namespace_id(&self) -> &NamespaceId {
+        &self.namespace_id
+    }
+
+    /// Returns the current wall-clock time.
+    fn now_ms(&self) -> Result<u64> {
+        current_time_ms()
+    }
+
+    /// Stats one path against the pinned runtime read context.
+    pub async fn resolve_path(
+        &self,
+        path: impl AsRef<str>,
+        options: StatPathOptions,
+        context: &RuntimeReadContext,
+    ) -> Result<AuthoritativePathEntry> {
+        let view = self.load_read_view(context).await?;
+        view.resolve_path(path.as_ref(), options.include_attributes.into())
+            .await
+    }
+
+    /// Lists one directory page against the pinned runtime read context.
+    pub async fn list_path_page(
+        &self,
+        path: impl AsRef<str>,
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
+        context: &RuntimeReadContext,
+    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+        let view = self.load_read_view(context).await?;
+        view.list_path_page(path.as_ref(), request, options.include_attributes.into())
+            .await
+    }
+}
+
+impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
+    /// Creates a read-only engine bound to `namespace_id`.
+    pub fn reader(store: S, namespace_id: NamespaceId) -> Self {
+        Self {
+            store,
+            namespace_id,
+            mode: ReadOnly,
+            #[cfg(any(test, feature = "test-support"))]
+            reorganization_row_budget: None,
+        }
+    }
+}
+
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
+    /// Creates a writable engine bound to `namespace_id` and `writer_id`.
+    pub fn writer(
+        store: S,
+        namespace_id: NamespaceId,
+        writer_id: impl Into<String>,
+    ) -> std::result::Result<Self, NamespaceEngineBuildError> {
+        let writer_id = writer_id.into();
+        if writer_id.trim().is_empty() {
+            return Err(NamespaceEngineBuildError::EmptyWriter);
+        }
+
+        Ok(Self {
+            store,
+            namespace_id,
+            mode: Writable {
+                writer: EngineWriter { writer_id },
+            },
+            #[cfg(any(test, feature = "test-support"))]
+            reorganization_row_budget: None,
+        })
+    }
+
+    /// Returns the writer id used for epoch acquisition and commit publication.
+    pub fn writer_id(&self) -> &str {
+        self.mode.writer.writer_id.as_str()
+    }
+
     /// The reorganization budgets this engine plans and compacts under.
     fn metadata_lsm_policy(&self) -> crate::checkpoint::MetadataLsmPolicy {
         let policy = crate::checkpoint::MetadataLsmPolicy::default();
@@ -125,28 +214,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> Self {
         self.reorganization_row_budget = Some(max_decoded_input_rows_per_step);
         self
-    }
-    /// Starts an engine builder for the supplied object store.
-    ///
-    /// The builder requires a namespace id, and a writer id unless it is
-    /// finished with [`NamespaceEngineBuilder::build_reader`].
-    pub fn builder(store: S) -> NamespaceEngineBuilder<S> {
-        NamespaceEngineBuilder {
-            store,
-            namespace_id: None,
-            writer_id: None,
-        }
-    }
-
-    /// Returns the namespace this engine is bound to.
-    pub fn namespace_id(&self) -> &NamespaceId {
-        &self.namespace_id
-    }
-
-    /// Returns the writer id used for epoch acquisition and commit
-    /// publication, or `None` for a read-only engine.
-    pub fn writer_id(&self) -> Option<&str> {
-        self.writer.as_ref().map(|writer| writer.writer_id.as_str())
     }
 
     /// Creates the namespace if it does not already exist.
@@ -195,32 +262,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
         .await
     }
+}
 
-    /// Stats one path against the pinned runtime read context.
-    pub async fn resolve_path(
-        &self,
-        path: impl AsRef<str>,
-        options: StatPathOptions,
-        context: &RuntimeReadContext,
-    ) -> Result<AuthoritativePathEntry> {
-        let view = self.load_read_view(context).await?;
-        view.resolve_path(path.as_ref(), options.include_attributes.into())
-            .await
-    }
-
-    /// Lists one directory page against the pinned runtime read context.
-    pub async fn list_path_page(
-        &self,
-        path: impl AsRef<str>,
-        request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
-        context: &RuntimeReadContext,
-    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
-        let view = self.load_read_view(context).await?;
-        view.list_path_page(path.as_ref(), request, options.include_attributes.into())
-            .await
-    }
-
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads file content against the pinned runtime read context.
     pub async fn read_file(
         &self,
@@ -467,26 +511,27 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
         .await
     }
+}
 
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Publishes already-classified mutation candidates as one batch: one WAL
     /// segment, one head compare-and-swap, one result per candidate in order.
     pub async fn publish_namespace_commits_batch(
         &self,
         candidates: Vec<CommitCandidate>,
-    ) -> Vec<Result<CommitResponse>> {
-        let context = match self.mutation_context() {
-            Ok(context) => context,
-            Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
-        };
-        crate::commit_engine::publish_namespace_commits_batch(
+    ) -> Result<Vec<Result<CommitResponse>>> {
+        let context = self.mutation_context()?;
+        Ok(crate::commit_engine::publish_namespace_commits_batch(
             &self.store,
             &self.namespace_id,
             candidates,
             &context,
         )
-        .await
+        .await)
     }
+}
 
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads up to `limit` committed changes after `after_seq`.
     pub async fn list_changes_after(
         &self,
@@ -495,7 +540,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> Result<ChangesResponse> {
         crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq, limit).await
     }
+}
 
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Starts a durable upload session with explicit transport options.
     pub async fn begin_upload(&self, request: BeginUploadRequest) -> Result<BeginUploadResponse> {
         crate::protocol::begin_upload(
@@ -537,7 +584,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
         .await
     }
+}
 
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Validates a group of multipart parts and returns the information needed
     /// to sign their upload URLs. This method does not write durable state.
     pub async fn direct_multipart_part_targets(
@@ -553,7 +602,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
         .await
     }
+}
 
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Uploads whole-file content into an upload session.
     pub async fn upload_content(
         &self,
@@ -761,7 +812,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
         .await
     }
+}
 
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads an upload session. For a completed upload, it also creates a new
     /// receipt so the caller can retry publication without uploading the content
     /// again.
@@ -783,7 +836,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
         .await
     }
+}
 
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates or reuses a named checkpoint for the current namespace head.
     ///
     /// The checkpoint pins a manifest for retention and provenance. If the head
@@ -806,7 +861,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
         .await
     }
+}
 
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Lists one page of active checkpoints in ascending id order. Expired
     /// records remain visible until garbage collection releases them.
     pub async fn list_checkpoints_page(
@@ -815,7 +872,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> Result<Page<loonfs_api::Checkpoint, CheckpointPageCursor>> {
         crate::checkpoint::list_checkpoints_page(&self.store, &self.namespace_id, request).await
     }
+}
 
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Releases a user-owned checkpoint by id.
     ///
     /// Idempotent: releasing an already-released or reaped record succeeds.
@@ -910,87 +969,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Builds the mutation context for this engine. Read-only engines return an
-    /// internal error because they have no writer identity.
+    /// Builds the mutation context for this engine's writer identity.
     fn mutation_context(&self) -> Result<MutationContext> {
-        let writer = self.writer.as_ref().ok_or_else(|| {
-            crate::error::CoreError::Internal(
-                "engine built without writer identity cannot mutate".to_owned(),
-            )
-        })?;
         Ok(MutationContext {
-            writer_id: writer.writer_id.clone(),
+            writer_id: self.mode.writer.writer_id.clone(),
             now_ms: self.now_ms()?,
-        })
-    }
-
-    /// Returns the current wall-clock time without requiring writer identity.
-    fn now_ms(&self) -> Result<u64> {
-        current_time_ms()
-    }
-}
-
-/// Builder for [`NamespaceEngine`].
-///
-/// The builder keeps construction explicit: choose a namespace, choose the
-/// writer identity, then build the engine.
-#[derive(Debug)]
-pub struct NamespaceEngineBuilder<S> {
-    store: S,
-    namespace_id: Option<NamespaceId>,
-    writer_id: Option<String>,
-}
-
-impl<S: ObjectStore> NamespaceEngineBuilder<S> {
-    /// Sets the namespace this engine will operate on.
-    pub fn namespace_id(mut self, namespace_id: NamespaceId) -> Self {
-        self.namespace_id = Some(namespace_id);
-        self
-    }
-
-    /// Sets the writer identity used for epoch acquisition and commits.
-    pub fn writer_id(mut self, writer_id: impl Into<String>) -> Self {
-        self.writer_id = Some(writer_id.into());
-        self
-    }
-
-    /// Builds a mutating engine after required fields are present.
-    pub fn build(self) -> std::result::Result<NamespaceEngine<S>, NamespaceEngineBuildError> {
-        let namespace_id = self
-            .namespace_id
-            .ok_or(NamespaceEngineBuildError::MissingNamespace)?;
-        let writer_id = self
-            .writer_id
-            .ok_or(NamespaceEngineBuildError::MissingWriter)?;
-        if writer_id.trim().is_empty() {
-            return Err(NamespaceEngineBuildError::EmptyWriter);
-        }
-
-        Ok(NamespaceEngine {
-            store: self.store,
-            namespace_id,
-            writer: Some(EngineWriter { writer_id }),
-            #[cfg(any(test, feature = "test-support"))]
-            reorganization_row_budget: None,
-        })
-    }
-
-    /// Builds a read-only engine: no writer identity at all.
-    ///
-    /// Only the namespace is required. Any writer identity set on the
-    /// builder is dropped — a read-only engine carries none by definition.
-    pub fn build_reader(
-        self,
-    ) -> std::result::Result<NamespaceEngine<S>, NamespaceEngineBuildError> {
-        let namespace_id = self
-            .namespace_id
-            .ok_or(NamespaceEngineBuildError::MissingNamespace)?;
-        Ok(NamespaceEngine {
-            store: self.store,
-            namespace_id,
-            writer: None,
-            #[cfg(any(test, feature = "test-support"))]
-            reorganization_row_budget: None,
         })
     }
 }
@@ -998,12 +981,6 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
 /// Error returned when a [`NamespaceEngine`] cannot be built.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum NamespaceEngineBuildError {
-    /// A namespace id was not supplied.
-    #[error("namespace is required")]
-    MissingNamespace,
-    /// A writer id was not supplied.
-    #[error("writer identity is required")]
-    MissingWriter,
     /// The writer id was empty or whitespace.
     #[error("writer identity must not be empty")]
     EmptyWriter,
@@ -1021,14 +998,11 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 
-        let engine = NamespaceEngine::builder(store)
-            .namespace_id(namespace_id.clone())
-            .writer_id("writer-a")
-            .build()
+        let engine = NamespaceEngine::writer(store, namespace_id.clone(), "writer-a")
             .expect("engine builds");
 
         assert_eq!(engine.namespace_id(), &namespace_id);
-        assert_eq!(engine.writer_id(), Some("writer-a"));
+        assert_eq!(engine.writer_id(), "writer-a");
     }
 
     #[test]
@@ -1037,32 +1011,29 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 
-        let engine = NamespaceEngine::builder(store)
-            .namespace_id(namespace_id.clone())
-            .build_reader()
-            .expect("reader engine builds without a writer");
+        let engine = NamespaceEngine::reader(store, namespace_id.clone());
 
         assert_eq!(engine.namespace_id(), &namespace_id);
-        assert_eq!(engine.writer_id(), None);
     }
 
     #[tokio::test]
     async fn reader_engine_still_serves_reads() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("store"))
-            .namespace_id(namespace_id.clone())
-            .writer_id("writer-a")
-            .build()
-            .expect("engine builds")
-            .bootstrap_namespace(BootstrapOptions::default())
-            .await
-            .expect("bootstrap namespace");
+        NamespaceEngine::writer(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_id.clone(),
+            "writer-a",
+        )
+        .expect("engine builds")
+        .bootstrap_namespace(BootstrapOptions::default())
+        .await
+        .expect("bootstrap namespace");
 
-        let reader = NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("store"))
-            .namespace_id(namespace_id.clone())
-            .build_reader()
-            .expect("reader engine builds");
+        let reader = NamespaceEngine::reader(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_id.clone(),
+        );
         let changes = reader
             .list_changes_after(
                 ChangeSeq(0),
@@ -1079,12 +1050,12 @@ mod tests {
     async fn reader_engine_reads_upload_status_without_writer_identity() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer =
-            NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("writer store"))
-                .namespace_id(namespace_id.clone())
-                .writer_id("writer-a")
-                .build()
-                .expect("writer engine builds");
+        let writer = NamespaceEngine::writer(
+            LocalFsStore::new(temp_dir.path()).expect("writer store"),
+            namespace_id.clone(),
+            "writer-a",
+        )
+        .expect("writer engine builds");
         writer
             .bootstrap_namespace(BootstrapOptions::default())
             .await
@@ -1094,11 +1065,10 @@ mod tests {
             .await
             .expect("begin upload");
 
-        let reader =
-            NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("reader store"))
-                .namespace_id(namespace_id)
-                .build_reader()
-                .expect("reader engine builds");
+        let reader = NamespaceEngine::reader(
+            LocalFsStore::new(temp_dir.path()).expect("reader store"),
+            namespace_id,
+        );
         let (status, receipt) = reader
             .read_upload_status(begun.upload_id())
             .await
@@ -1108,42 +1078,16 @@ mod tests {
         assert!(receipt.is_none());
     }
 
-    #[tokio::test]
-    async fn reader_engine_refuses_to_mutate() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let reader = NamespaceEngine::builder(store)
-            .namespace_id(NamespaceId::parse("demo").expect("valid namespace id"))
-            .build_reader()
-            .expect("reader engine builds");
-
-        let error = reader
-            .flush_wal()
-            .await
-            .expect_err("a reader-built engine must refuse mutations");
-        assert!(
-            error
-                .to_string()
-                .contains("engine built without writer identity cannot mutate"),
-            "unexpected error: {error}"
-        );
-    }
-
     #[test]
-    fn namespace_engine_builder_rejects_missing_required_fields() {
+    fn namespace_engine_writer_rejects_blank_identity() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let err = NamespaceEngine::builder(store)
-            .build()
-            .expect_err("missing namespace");
-        assert_eq!(err, NamespaceEngineBuildError::MissingNamespace);
-
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let err = NamespaceEngine::builder(store)
-            .namespace_id(NamespaceId::parse("demo").expect("valid namespace id"))
-            .build()
-            .expect_err("missing writer");
-        assert_eq!(err, NamespaceEngineBuildError::MissingWriter);
+        let err = NamespaceEngine::writer(
+            store,
+            NamespaceId::parse("demo").expect("valid namespace id"),
+            "  ",
+        )
+        .expect_err("blank writer identity");
+        assert_eq!(err, NamespaceEngineBuildError::EmptyWriter);
     }
 }

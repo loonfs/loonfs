@@ -400,7 +400,8 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
             )
             .await,
         ])
-        .await;
+        .await
+        .expect("build mutation context");
     results[0]
         .as_ref()
         .expect("delete of durable file succeeds");

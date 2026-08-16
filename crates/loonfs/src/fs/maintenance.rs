@@ -61,7 +61,7 @@ impl FsAdmin {
     fn engine(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs_core::NamespaceEngine<SharedObjectStore> {
+    ) -> loonfs_core::NamespaceWriterEngine<SharedObjectStore> {
         let engine = self.core.writer_engine(&self.actor, namespace_id);
         #[cfg(test)]
         let engine = match self.reorganization_row_budget {
