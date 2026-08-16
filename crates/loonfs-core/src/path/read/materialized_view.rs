@@ -344,11 +344,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<AuthoritativeFileBytes> {
         let (entry, content_ref) = self.resolve_file_content(absolute_path).await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
-        let read = read_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
-        Ok(AuthoritativeFileBytes {
-            entry,
-            bytes: read.bytes,
-        })
+        let bytes = read_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
+        Ok(AuthoritativeFileBytes { entry, bytes })
     }
 
     /// Resolves a path to the file it names and the content reference its
@@ -630,12 +627,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             committed_at_ms: revision.committed_at_ms,
         };
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
-        let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
-            .await?;
-        Ok(AuthoritativeFileBytes {
-            entry,
-            bytes: read.bytes,
-        })
+        let bytes =
+            read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
+                .await?;
+        Ok(AuthoritativeFileBytes { entry, bytes })
     }
 
     pub(crate) async fn read_file_revision_bytes_for_inode(
@@ -647,9 +642,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<Vec<u8>> {
         let revision = self.revision_for_inode(inode_id, revision_no).await?;
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
-        let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
-            .await?;
-        Ok(read.bytes)
+        Ok(
+            read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
+                .await?,
+        )
     }
 
     #[tracing::instrument(

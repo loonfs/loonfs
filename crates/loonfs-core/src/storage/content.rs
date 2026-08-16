@@ -2,13 +2,17 @@
 //! validating references, and verified read-back.
 
 use crate::error::CoreError;
-use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
+#[cfg(any(test, feature = "test-support"))]
+use crate::namespace::catalog::load_namespace_content_store_id;
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use futures::StreamExt;
+#[cfg(any(test, feature = "test-support"))]
+use loonfs_api::NamespaceId;
 use loonfs_api::{
     AuthoritativePathEntry, Checksum, ContentId, ContentRef, ContentRefValidationError,
-    ContentStoreId, NamespaceId, Sha256, StreamingChecksum,
+    ContentStoreId, Sha256, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteRange, ByteStream, ObjectStore, ObjectStoreError, PutMode};
@@ -17,29 +21,38 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ValidatedDurableContent {
-    pub content_ref: ContentRef,
-    pub object_key: String,
-    pub file_size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ReadDurableContent {
-    pub validated: ValidatedDurableContent,
-    pub bytes: Vec<u8>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StoredContent {
-    pub content_store_id: ContentStoreId,
-    pub object_key: String,
-    pub content_ref: ContentRef,
-    pub file_size_bytes: u64,
+    content_store_id: ContentStoreId,
+    #[cfg(any(test, feature = "test-support"))]
+    object_key: String,
+    content_ref: ContentRef,
+    #[cfg(any(test, feature = "test-support"))]
     #[serde(skip)]
     _write_acknowledged: StoredContentWriteAcknowledgement,
 }
 
+impl StoredContent {
+    pub fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
+    }
+
+    pub fn into_content_ref(self) -> ContentRef {
+        self.content_ref
+    }
+
+    #[cfg(test)]
+    pub(crate) fn content_store_id(&self) -> &ContentStoreId {
+        &self.content_store_id
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn object_key(&self) -> &str {
+        &self.object_key
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredContentWriteAcknowledgement;
 
@@ -78,7 +91,7 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
-) -> Result<ValidatedDurableContent, DurableContentValidationError> {
+) -> Result<(), DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
     validate_content_size(store, &object_key, content_ref).await?;
 
@@ -92,6 +105,7 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
 /// [`store_bytes_as_content`] or [`store_bytes_as_content_with_store_id`]. The
 /// verified catalog prevents pairing that acknowledgement with an unrelated
 /// namespace binding.
+#[cfg(any(test, feature = "test-support"))]
 pub fn prepare_stored_content(
     catalog: &VerifiedNamespaceCatalogEntry,
     stored_content: StoredContent,
@@ -487,12 +501,11 @@ pub(crate) async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
-) -> Result<ReadDurableContent, DurableContentValidationError> {
+) -> Result<Vec<u8>, DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
     let bytes = load_required_object(store, &object_key).await?;
-    let validated = validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
-
-    Ok(ReadDurableContent { validated, bytes })
+    validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
+    Ok(bytes)
 }
 
 pub(crate) fn content_object_key_for_ref(
@@ -513,7 +526,7 @@ fn validate_loaded_content_bytes(
     object_key: String,
     content_ref: &ContentRef,
     bytes: &[u8],
-) -> Result<ValidatedDurableContent, DurableContentValidationError> {
+) -> Result<(), DurableContentValidationError> {
     let actual_size = bytes.len() as u64;
     if actual_size != content_ref.size_bytes {
         return Err(DurableContentValidationError::ContentLengthMismatch {
@@ -533,11 +546,7 @@ fn validate_loaded_content_bytes(
         });
     }
 
-    Ok(ValidatedDurableContent {
-        content_ref: content_ref.clone(),
-        object_key,
-        file_size_bytes: actual_size,
-    })
+    Ok(())
 }
 
 fn describe_checksum(checksum: &Checksum) -> String {
@@ -587,6 +596,7 @@ async fn validate_content_size<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "write_content_blob", key_class = "content_blob")
 )]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -596,22 +606,12 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store_bytes_as_content_with_store_id(store, content_store_id, bytes).await
 }
 
-/// Plants durable content for a caller that already knows the namespace's
-/// content-store binding.
+/// Test fixture for planting durable content without an upload session.
 ///
-/// Every call mints its own content identity, so two writers staging the
-/// same bytes produce two objects rather than racing for one key. Sharing a
-/// key was free deduplication and also a free existence oracle: anyone
-/// allowed to upload could learn whether specific known bytes were already
-/// in a shared content store. Retry idempotency, the thing that dedup was
-/// quietly providing, belongs to the upload session instead.
-///
-/// So does reclamation, which is why this is a fixture rather than a write
-/// path. The object it writes belongs to no session, and a session record is
-/// the only handle anything has on a content object before metadata names
-/// one — so nothing will ever collect it. Production staging opens a session
-/// ([`crate::protocol::stage_owned_bytes`]); immortal bytes are what a test
-/// wants and what a namespace does not.
+/// Every call mints a fresh identity. Production staging uses
+/// [`crate::protocol::stage_owned_bytes`] so the object has a durable owner
+/// before it is written and can later become eligible for reclamation.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
@@ -753,9 +753,10 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
 
     Ok(StoredContent {
         content_store_id,
+        #[cfg(any(test, feature = "test-support"))]
         object_key,
-        file_size_bytes: content_ref.size_bytes,
         content_ref,
+        #[cfg(any(test, feature = "test-support"))]
         _write_acknowledged: StoredContentWriteAcknowledgement,
     })
 }
@@ -804,11 +805,9 @@ mod tests {
         let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
-        let validated = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+        validate_durable_content_reference(&store, &content_store_id, &content_ref)
             .await
             .expect("validate content ref");
-        assert_eq!(validated.content_ref, content_ref);
-        assert_eq!(validated.file_size_bytes, bytes.len() as u64);
     }
 
     #[tokio::test]
@@ -833,11 +832,10 @@ mod tests {
         let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
-        let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
+        let bytes = read_durable_content_bytes(&store, &content_store_id, &content_ref)
             .await
             .expect("read empty content ref");
-        assert_eq!(read.bytes, bytes);
-        assert_eq!(read.validated.file_size_bytes, 0);
+        assert!(bytes.is_empty());
     }
 
     #[tokio::test]
@@ -906,7 +904,7 @@ mod tests {
         let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
             .await
             .expect("a crc32c-only reference verifies by its crc");
-        assert_eq!(read.bytes, bytes);
+        assert_eq!(read, bytes);
 
         // Same length, different bytes: only the checksum can tell.
         let (_temp_dir, store, content_store_id) = test_store();
@@ -942,7 +940,7 @@ mod tests {
         let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
             .await
             .expect("a crc-only reference verifies by its crc");
-        assert_eq!(read.bytes, bytes);
+        assert_eq!(read, bytes);
 
         // Same length, different bytes: only the checksum can tell.
         let (_temp_dir, store, content_store_id) = test_store();
@@ -1047,18 +1045,20 @@ mod tests {
             .expect("second stage");
 
         assert_ne!(
-            first.content_ref.content_id, second.content_ref.content_id,
+            first.content_ref().content_id,
+            second.content_ref().content_id,
             "each staging write owns its own content object"
         );
-        assert_ne!(first.object_key, second.object_key);
+        assert_ne!(first.object_key(), second.object_key());
         assert_eq!(
-            first.content_ref.checksum, second.content_ref.checksum,
+            first.content_ref().checksum,
+            second.content_ref().checksum,
             "identical bytes still carry identical evidence"
         );
         for stored in [&first, &second] {
             assert_eq!(
                 store
-                    .get(&stored.object_key, None)
+                    .get(stored.object_key(), None)
                     .await
                     .expect("read staged object")
                     .expect("staged object exists"),

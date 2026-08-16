@@ -588,7 +588,7 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
             operations: vec![
                 FilesystemOperation::PutFile {
                     path: path("/docs/a.txt"),
-                    content_ref: content.content_ref.clone(),
+                    content_ref: content.content_ref().clone(),
                     behavior: DestinationBehavior::NoReplace,
                     expected_revision_no: None,
                 },

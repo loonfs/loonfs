@@ -33,7 +33,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
     let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
         .await
         .expect("load namespace catalog");
-    let prepared = prepare_existing_content_ref(store, &catalog, content.content_ref)
+    let prepared = prepare_existing_content_ref(store, &catalog, content.into_content_ref())
         .await
         .expect("prepare existing content");
     let content_ref = prepared.content_ref().clone();

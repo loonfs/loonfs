@@ -106,7 +106,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             let prepared = loonfs_core::content::prepare_existing_content_ref(
                 &store,
                 &catalog,
-                stored.content_ref,
+                stored.into_content_ref(),
             )
             .await
             .expect("prepare existing content");

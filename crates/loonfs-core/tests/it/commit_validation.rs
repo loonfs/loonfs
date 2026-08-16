@@ -23,7 +23,6 @@ use loonfs_core::publish::{
     CommitCandidate, CommitRequest, ContentPreparationError, FilesystemOperation,
 };
 use loonfs_core::{Error as CoreError, ErrorCode};
-use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -165,7 +164,7 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
             commit_id("put-cold-content"),
             loonfs_test_support::test_actor(),
             None,
-            put_file("/docs/hello.txt", content.content_ref),
+            put_file("/docs/hello.txt", content.into_content_ref()),
         ))],
         &context,
     )
@@ -204,13 +203,13 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
                 commit_id("put-shared-a"),
                 loonfs_test_support::test_actor(),
                 None,
-                put_file("/docs/a.txt", content.content_ref.clone()),
+                put_file("/docs/a.txt", content.content_ref().clone()),
             )),
             CommitCandidate::new(CommitRequest::single(
                 commit_id("put-shared-b"),
                 loonfs_test_support::test_actor(),
                 None,
-                put_file("/docs/b.txt", content.content_ref),
+                put_file("/docs/b.txt", content.into_content_ref()),
             )),
         ],
         &context,
@@ -394,7 +393,7 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
                 commit_id("create-child-before-empty-check"),
                 loonfs_test_support::test_actor(),
                 None,
-                put_file("/docs/child.txt", content.content_ref),
+                put_file("/docs/child.txt", content.into_content_ref()),
             ),
             CommitRequest::single(
                 commit_id("delete-dir-with-stale-empty-check"),
@@ -439,7 +438,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         &store,
         &namespace_id("demo"),
         commit_id("restore-create"),
-        put_file("/restore.txt", first.content_ref.clone()),
+        put_file("/restore.txt", first.content_ref().clone()),
         &context,
     )
     .await
@@ -454,7 +453,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         commit_id("restore-replace"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/restore.txt").expect("path"),
-            content_ref: second.content_ref,
+            content_ref: second.into_content_ref(),
             behavior: DestinationBehavior::Replace,
             expected_revision_no: None,
         },
@@ -464,10 +463,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
     .expect("replace file");
 
     store
-        .delete(&content_blob(
-            &first.content_store_id,
-            &first.content_ref.content_id,
-        ))
+        .delete(first.object_key())
         .await
         .expect("delete first content");
 
@@ -640,8 +636,8 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
             message: Some("import reports".to_owned()),
             operations: vec![
                 create_dir("/reports"),
-                put_file("/reports/a.txt", first.content_ref.clone()),
-                put_file("/reports/b.txt", second.content_ref.clone()),
+                put_file("/reports/a.txt", first.content_ref().clone()),
+                put_file("/reports/b.txt", second.content_ref().clone()),
             ],
         },
         &context,
@@ -915,8 +911,8 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
             actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
-                replace(second.content_ref.clone(), 1),
-                replace(third.content_ref.clone(), 2),
+                replace(second.content_ref().clone(), 1),
+                replace(third.content_ref().clone(), 2),
             ],
         },
         &context,
@@ -934,8 +930,8 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
             actor: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
-                replace(second.content_ref, 3),
-                replace(third.content_ref, 3),
+                replace(second.into_content_ref(), 3),
+                replace(third.into_content_ref(), 3),
             ],
         },
         &context,

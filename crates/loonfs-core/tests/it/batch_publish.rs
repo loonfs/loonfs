@@ -392,7 +392,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                     "recreate-cycled",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
-                        content_ref: staged.content_ref,
+                        content_ref: staged.into_content_ref(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },
@@ -562,7 +562,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
             "ack-lost-put",
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/ack.txt").expect("path"),
-                content_ref: content.content_ref.clone(),
+                content_ref: content.content_ref().clone(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
             },
@@ -606,7 +606,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         "retry-after-orphan",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/retry.txt").expect("path"),
-            content_ref: content.content_ref,
+            content_ref: content.into_content_ref(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },
@@ -744,7 +744,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     "accept-a",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: content.content_ref.clone(),
+                        content_ref: content.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },
@@ -760,7 +760,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     "reject-speculative",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: content.content_ref.clone(),
+                        content_ref: content.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },
@@ -859,7 +859,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                     "accept-a",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: content.content_ref.clone(),
+                        content_ref: content.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },
@@ -873,7 +873,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                     "reject-speculative",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: content.content_ref.clone(),
+                        content_ref: content.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },
@@ -1106,14 +1106,14 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("load namespace catalog");
-    let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref.clone())
+    let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref().clone())
         .await
         .expect("prepare content");
     let put = commit_request(
         "over-proof-replay",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/proof-replay.txt").expect("path"),
-            content_ref: stored.content_ref,
+            content_ref: stored.into_content_ref(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },
@@ -1176,14 +1176,14 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("load namespace catalog");
-    let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref.clone())
+    let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref().clone())
         .await
         .expect("prepare content");
     let put = commit_request(
         "over-proof-duplicate",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/batch-proof.txt").expect("path"),
-            content_ref: stored.content_ref,
+            content_ref: stored.into_content_ref(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },
@@ -1451,7 +1451,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         "same-path-request",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/same/path.txt").expect("path"),
-            content_ref: content.content_ref.clone(),
+            content_ref: content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },
@@ -1731,7 +1731,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
-                        content_ref: content.content_ref.clone(),
+                        content_ref: content.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },
@@ -1747,7 +1747,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     .expect("single response")
     .expect("first commit");
     store
-        .delete(&content.object_key)
+        .delete(content.object_key())
         .await
         .expect("delete committed content blob");
 
@@ -1763,7 +1763,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
-                content_ref: content.content_ref,
+                content_ref: content.into_content_ref(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
             },
