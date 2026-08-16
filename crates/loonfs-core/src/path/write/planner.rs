@@ -10,12 +10,12 @@ use super::plan_delete::plan_publish_delete_path;
 use super::plan_restore::plan_publish_restore_revision;
 use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
 use super::planning_helpers::{PlannedOperation, PublishPathPlanningView};
-use crate::commit::{
-    validate_ops, CandidateAllocation, CommitFingerprint, OpValidationCursor, PlannedOp,
-    PublishValidationView,
-};
 #[cfg(test)]
-use crate::commit::{ValidatedCommitPlan, ValidatedOp};
+use crate::commit::PlannedOp;
+use crate::commit::{
+    validate_ops, CandidateAllocation, CommitFingerprint, OpValidationCursor,
+    PublishValidationView, ValidatedCommitPlan, ValidatedOp,
+};
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
@@ -23,6 +23,7 @@ use loonfs_api::{next_public_ordinal, ChangeSeq, NamespaceId, MAX_PUBLIC_INTEGER
 use loonfs_objectstore::ObjectStore;
 
 /// One mutation request compiled into a commit's operations.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlannedCommit {
     pub(crate) ops: Vec<PlannedOp>,
@@ -57,6 +58,10 @@ pub(crate) fn commit_fingerprint(
 /// each operation here so the returned error can include its operation
 /// index. Single-operation requests rely on the final commit-plan
 /// validation.
+///
+/// Retained as the differential baseline for the single pass below; deleted
+/// once the differential corpus converts to invariant tests.
+#[cfg(test)]
 pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
     request: &CommitRequest,
     head: &HeadState,
@@ -124,7 +129,6 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
 /// the head is the already-guarded source of the namespace and writer epoch
 /// (`load_publish_metadata_view` fences on epoch equality, and the batch
 /// rejects namespace mismatches before admission).
-#[cfg(test)]
 pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
     request: &CommitRequest,
     semantic_identity: CommitFingerprint,

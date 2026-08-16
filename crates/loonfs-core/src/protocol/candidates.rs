@@ -1,9 +1,9 @@
-//! Per-candidate admission for publish batches: request conversion,
-//! commit-id validation, and duplicate resolution against durable receipts
-//! and same-batch primaries.
+//! Per-candidate admission for publish batches: single-pass commit
+//! preparation, commit-id validation, and duplicate resolution against
+//! durable receipts and same-batch primaries.
 
 use super::publish_view::PublishMetadataView;
-use crate::commit::{CandidateAllocation, CommitFingerprint, CommitIr as CoreCommitRequest};
+use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan};
 use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
@@ -14,16 +14,16 @@ use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
-pub(super) struct CandidateCoreRequest {
-    pub(super) request: CoreCommitRequest,
-    pub(super) semantic_identity: CommitFingerprint,
+pub(super) struct PreparedCandidateCommit {
+    pub(super) validated: ValidatedCommitPlan,
     pub(super) allocation: CandidateAllocation,
 }
 
 /// How one batch candidate resolved during admission.
 pub(super) enum CandidateAdmission {
-    /// A new primary request, ready for validation and materialization.
-    Prepared(CandidateCoreRequest),
+    /// A new primary request, planned and validated in one pass, ready for
+    /// content coverage and materialization.
+    Prepared(PreparedCandidateCommit),
     /// A same-batch duplicate of the primary at the given outcome slot; the
     /// alias slot inherits the primary's final outcome.
     AliasOf(usize),
@@ -119,7 +119,7 @@ impl BatchDedup {
     }
 }
 
-/// Converts one batch candidate into a core commit request, resolving
+/// Prepares one batch candidate as a validated commit plan, resolving
 /// commit-id reuse against durable receipts and same-batch primaries.
 ///
 /// Hard failures return `Err`; the caller settles the candidate's outcome
@@ -149,33 +149,25 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     }
     validate_new_primary(candidate)?;
     let mut allocation = session.begin_candidate();
-    let planned = match session
-        .plan_commit(
+    match session
+        .prepare_commit(
             mutation,
+            semantic_identity,
             view.metadata_view(),
             committed_at_ms,
             &mut allocation,
         )
         .await
     {
-        Ok(planned) => planned,
+        Ok(validated) => Ok(CandidateAdmission::Prepared(PreparedCandidateCommit {
+            validated,
+            allocation,
+        })),
         Err(error) => {
             session.discard_candidate(allocation);
-            return Err(error);
+            Err(error)
         }
-    };
-    Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
-        request: CoreCommitRequest {
-            namespace_id: namespace_id.clone(),
-            commit_id: mutation.commit_id.clone(),
-            actor: mutation.actor.clone(),
-            writer_epoch: view.acquired_writer.writer_epoch,
-            ops: planned.ops,
-            message: mutation.message.clone(),
-        },
-        semantic_identity,
-        allocation,
-    }))
+    }
 }
 
 fn validate_new_primary(candidate: &CommitCandidate) -> Result<()> {

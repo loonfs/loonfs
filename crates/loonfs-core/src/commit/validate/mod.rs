@@ -5,11 +5,13 @@
 //! layers rows accepted earlier in the commit over the loaded metadata.
 
 mod checks;
+#[cfg(test)]
 mod plan_build;
 #[cfg(test)]
 mod tests;
 mod view;
 
 pub(crate) use checks::{validate_ops, OpValidationCursor};
+#[cfg(test)]
 pub(crate) use plan_build::validate_commit_for_publish;
 pub(crate) use view::PublishValidationView;

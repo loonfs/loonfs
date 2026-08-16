@@ -2,12 +2,13 @@
 //! order, each seeing the rows earlier candidates would persist.
 
 use super::intent::CommitRequest;
-#[cfg(test)]
 use super::planner::prepare_commit_against_publish_view;
+#[cfg(test)]
 use super::planner::{plan_commit_against_publish_view, PlannedCommit};
+#[cfg(test)]
+use crate::commit::{validate_commit_for_publish, CommitIr};
 use crate::commit::{
-    validate_commit_for_publish, CandidateAllocation, CommitFingerprint, CommitIr, CommitPlan,
-    InodeAllocator, ValidatedCommitPlan,
+    CandidateAllocation, CommitFingerprint, CommitPlan, InodeAllocator, ValidatedCommitPlan,
 };
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
@@ -59,6 +60,8 @@ impl PublishPlanningSession {
         self.inode_allocator.discard_candidate(allocation);
     }
 
+    /// The retained first half of the two-pass differential baseline.
+    #[cfg(test)]
     pub(crate) async fn plan_commit<S: ObjectStore + ?Sized>(
         &self,
         request: &CommitRequest,
@@ -78,6 +81,8 @@ impl PublishPlanningSession {
         .await
     }
 
+    /// The retained second half of the two-pass differential baseline.
+    #[cfg(test)]
     pub(crate) async fn validate_commit<S: ObjectStore + ?Sized>(
         &self,
         request: &CommitIr,
@@ -98,7 +103,6 @@ impl PublishPlanningSession {
 
     /// Plans and validates a mutation request in one pass, producing the
     /// validated plan that only awaits the accepted allocation position.
-    #[cfg(test)]
     pub(crate) async fn prepare_commit<S: ObjectStore + ?Sized>(
         &self,
         request: &CommitRequest,

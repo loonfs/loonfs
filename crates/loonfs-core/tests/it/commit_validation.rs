@@ -19,9 +19,7 @@ use loonfs_core::content::{
     mint_content_token, store_bytes_as_content, verify_content_token, ContentTokenError,
 };
 use loonfs_core::limits::CONTENT_RECEIPT_TTL_MS;
-use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, ContentPreparationError, FilesystemOperation,
-};
+use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{Error as CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -520,11 +518,12 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
     );
 }
 
-/// Content coverage is checked before the commit plan validates operations,
-/// so a put whose caller-supplied revision guard is also stale answers for
-/// the missing proof, and nothing is read.
+/// Validation precedes content coverage, uniformly (owner decision with the
+/// single-pass commit preparation): a put whose caller-supplied revision
+/// guard is stale answers for the stale guard even when its content proof is
+/// also missing, and nothing is read from the content store either way.
 #[tokio::test]
-async fn a_guarded_put_fails_unprepared_before_revision_validation_without_content_reads() {
+async fn a_guarded_put_reports_the_stale_revision_before_missing_content_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -564,12 +563,17 @@ async fn a_guarded_put_fails_unprepared_before_revision_validation_without_conte
     .into_iter()
     .next()
     .expect("one result")
-    .expect_err("unprepared content should win before stale revision");
+    .expect_err("the stale revision guard should win before unprepared content");
+    assert_eq!(error.code(), ErrorCode::StaleRevision);
     assert!(matches!(
         error,
-        CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
-            content_id
-        }) if content_id == missing_content.content_id
+        CoreError::CommitValidation(
+            loonfs_core::commit::CommitValidationError::ReplaceFileBaseRevisionMismatch {
+                expected: RevisionNo(99),
+                actual: Some(RevisionNo(1)),
+                ..
+            }
+        )
     ));
     assert_eq!(guarded_store.content_store_access_count(), 0);
 }
