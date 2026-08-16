@@ -58,10 +58,10 @@ pub struct RuntimeReadContext {
     pub tail_cache: Arc<WalTailProjectionCache>,
 }
 
-fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_> {
+fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_, '_> {
     ReadLoadContext::pinned_head(
         &context.head,
-        Some(context.head_etag.as_str()),
+        context.head_etag.as_str(),
         &context.basis,
         Some(&context.table_cache),
         Some(&context.tail_cache),

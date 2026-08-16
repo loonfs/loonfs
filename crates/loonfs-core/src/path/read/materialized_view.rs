@@ -57,52 +57,30 @@ impl From<bool> for AttributeProjection {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum ReadViewContext<'a> {
-    /// Fresh head+root read with no caches: the shape embedded unit tests
-    /// exercise; production reads always pin an anchor.
-    #[cfg(test)]
-    Latest,
-    PinnedHead {
-        head: &'a HeadState,
-        head_etag: Option<&'a str>,
-        /// Basis pinned together with the head when the snapshot was
-        /// taken. The live root may have moved past a pinned head; the
-        /// pinned pair stays consistent (any manifest at or below the
-        /// pinned seq serves it, with WAL replay covering the rest).
-        basis: &'a MetadataBasis,
-    },
+pub(crate) struct ReadLoadContext<'anchor, 'cache> {
+    head: &'anchor HeadState,
+    head_etag: &'anchor str,
+    /// Basis pinned together with the head when the snapshot was taken. The
+    /// live root may have moved past a pinned head; the pinned pair stays
+    /// consistent (any manifest at or below the pinned seq serves it, with
+    /// WAL replay covering the rest).
+    basis: &'anchor MetadataBasis,
+    table_cache: Option<&'cache MetadataTableCache>,
+    tail_cache: Option<&'cache WalTailProjectionCache>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct ReadLoadContext<'a> {
-    view: ReadViewContext<'a>,
-    table_cache: Option<&'a MetadataTableCache>,
-    tail_cache: Option<&'a WalTailProjectionCache>,
-}
-
-impl<'a> ReadLoadContext<'a> {
-    #[cfg(test)]
-    pub(crate) fn latest() -> Self {
-        Self {
-            view: ReadViewContext::Latest,
-            table_cache: None,
-            tail_cache: None,
-        }
-    }
-
+impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
     pub(crate) fn pinned_head(
-        head: &'a HeadState,
-        head_etag: Option<&'a str>,
-        basis: &'a MetadataBasis,
-        table_cache: Option<&'a MetadataTableCache>,
-        tail_cache: Option<&'a WalTailProjectionCache>,
+        head: &'anchor HeadState,
+        head_etag: &'anchor str,
+        basis: &'anchor MetadataBasis,
+        table_cache: Option<&'cache MetadataTableCache>,
+        tail_cache: Option<&'cache WalTailProjectionCache>,
     ) -> Self {
         Self {
-            view: ReadViewContext::PinnedHead {
-                head,
-                head_etag,
-                basis,
-            },
+            head,
+            head_etag,
+            basis,
             table_cache,
             tail_cache,
         }
@@ -131,28 +109,34 @@ struct ReadAnchor {
 pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
-    context: ReadLoadContext<'a>,
+    context: ReadLoadContext<'_, 'a>,
 ) -> Result<LoadedMetadataView<'a, S>> {
-    match context.view {
-        #[cfg(test)]
-        ReadViewContext::Latest => {
-            let loaded = read_head_and_metadata_basis(store, namespace_id)
-                .await
-                .map_err(MetadataProjectionLoadError::LoadHead)?;
-            LoadedMetadataView::load_at_head(
-                store,
-                namespace_id,
-                loaded.head.state,
-                &loaded.basis,
-                context,
-            )
-            .await
-        }
-        ReadViewContext::PinnedHead { head, basis, .. } => {
-            LoadedMetadataView::load_at_head(store, namespace_id, head.clone(), basis, context)
-                .await
-        }
-    }
+    LoadedMetadataView::load_at_head(
+        store,
+        namespace_id,
+        context.head.clone(),
+        context.basis,
+        context,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    namespace_id: &NamespaceId,
+) -> Result<LoadedMetadataView<'a, S>> {
+    let loaded = read_head_and_metadata_basis(store, namespace_id)
+        .await
+        .map_err(MetadataProjectionLoadError::LoadHead)?;
+    let context = ReadLoadContext::pinned_head(
+        &loaded.head.state,
+        &loaded.head.etag,
+        &loaded.basis,
+        None,
+        None,
+    );
+    load_metadata_view(store, namespace_id, context).await
 }
 
 /// Where one file's bytes actually live, for a host that is about to
@@ -216,7 +200,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         namespace_id: &NamespaceId,
         head: HeadState,
         basis: &MetadataBasis,
-        load_context: ReadLoadContext<'a>,
+        load_context: ReadLoadContext<'_, 'a>,
     ) -> Result<Self> {
         if &head.namespace_id != namespace_id {
             return Err(CoreError::NamespaceCorrupt(format!(
@@ -246,21 +230,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             manifest_id,
             manifest_head_seq: manifest_head.seq,
         };
-        let cache_key = match load_context.view {
-            #[cfg(test)]
-            ReadViewContext::Latest => None,
-            ReadViewContext::PinnedHead { head_etag, .. } => {
-                head_etag.map(|etag| WalTailProjectionCacheKey {
-                    namespace_id: namespace_id.clone(),
-                    manifest_id,
-                    manifest_head_seq: manifest_head.seq,
-                    head_seq: head.seq,
-                    head_etag: etag.to_owned(),
-                })
-            }
+        let cache_key = WalTailProjectionCacheKey {
+            namespace_id: namespace_id.clone(),
+            manifest_id,
+            manifest_head_seq: manifest_head.seq,
+            head_seq: head.seq,
+            head_etag: load_context.head_etag.to_owned(),
         };
-        if let (Some(cache), Some(key)) = (load_context.tail_cache, cache_key.as_ref()) {
-            if let Some(wal_tail_rows) = cache.get(key) {
+        if let Some(cache) = load_context.tail_cache {
+            if let Some(wal_tail_rows) = cache.get(&cache_key) {
                 return Ok(Self {
                     namespace_id: namespace_id.clone(),
                     content_store_id: catalog_entry.content_store_id().clone(),
@@ -300,8 +278,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             })
         }?;
         let wal_tail_rows = Arc::new(replayed.resulting_metadata_state);
-        if let (Some(cache), Some(key)) = (load_context.tail_cache, cache_key) {
-            cache.insert(key, Arc::clone(&wal_tail_rows));
+        if let Some(cache) = load_context.tail_cache {
+            cache.insert(cache_key, Arc::clone(&wal_tail_rows));
         }
         Ok(Self {
             namespace_id: namespace_id.clone(),
@@ -1066,7 +1044,7 @@ mod tests {
     #[tokio::test]
     async fn an_entry_build_projects_grouped_attributes_or_none() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+        let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("load view");
 
@@ -1117,7 +1095,7 @@ mod tests {
     #[tokio::test]
     async fn a_listing_reads_attributes_only_when_it_projects_them() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+        let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("load view");
         let directory = AbsolutePath::parse("/docs").expect("path");
@@ -1162,7 +1140,7 @@ mod tests {
     #[tokio::test]
     async fn a_projected_listing_reads_its_attributes_in_one_wave() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+        let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("load view");
 

@@ -41,7 +41,7 @@ use crate::commit_engine::delete_namespace;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
-use crate::path::read::{load_metadata_view, AttributeProjection, ReadLoadContext};
+use crate::path::read::{load_current_metadata_view, AttributeProjection};
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -140,7 +140,7 @@ async fn now_after_newest_object(
 }
 
 async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
-    load_metadata_view(store, namespace_id, ReadLoadContext::latest())
+    load_current_metadata_view(store, namespace_id)
         .await
         .expect("load latest view")
         .resolve_path("/", AttributeProjection::Omit)
@@ -597,7 +597,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         store.head(&basis_key).await.expect("head basis").is_some(),
         "fork basis must survive while the clone lives"
     );
-    let clone_view = load_metadata_view(&store, &clone, ReadLoadContext::latest())
+    let clone_view = load_current_metadata_view(&store, &clone)
         .await
         .expect("load clone view");
     clone_view
@@ -2047,7 +2047,7 @@ async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
     let before_fold = namespace_key_set(&inner, &namespace_id).await;
     let store = aged_before_now(inner, before_fold);
 
-    let pinned = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+    let pinned = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("pin a read anchor");
 
@@ -2930,7 +2930,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
 
     assert_eq!(report.deleted_wal_segments, 1);
     // Latest reads replay the retained tail over the root basis.
-    let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+    let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("load view");
     view.resolve_path("/docs/two.txt", AttributeProjection::Omit)
@@ -3151,7 +3151,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     assert!(!after_fold.degraded_retention);
 
     stat_root(&store, &namespace_id).await;
-    let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+    let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("load view");
     for round in 0..3 {
@@ -3893,7 +3893,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     )
     .await
     .is_ok());
-    load_metadata_view(&store, &clone, ReadLoadContext::latest())
+    load_current_metadata_view(&store, &clone)
         .await
         .expect("target readable after every pass")
         .resolve_path("/docs/one.txt", AttributeProjection::Omit)
@@ -4034,7 +4034,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         CheckpointRecordLifecycle::Active {},
         "the abandoned record is untouched; its lease ends it"
     );
-    load_metadata_view(&store, &clone, ReadLoadContext::latest())
+    load_current_metadata_view(&store, &clone)
         .await
         .expect("target readable after retry")
         .resolve_path("/docs/one.txt", AttributeProjection::Omit)

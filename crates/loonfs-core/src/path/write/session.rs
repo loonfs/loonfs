@@ -119,7 +119,7 @@ mod tests {
     use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::load_namespace_head_control;
-    use crate::path::read::{load_metadata_view, ReadLoadContext};
+    use crate::path::read::load_current_metadata_view;
     use crate::storage::content::store_bytes_as_content;
     use crate::storage::content_admission::{ContentAdmission, PreparedContent};
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
@@ -211,17 +211,13 @@ mod tests {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> InodeId {
-        crate::path::read::load_metadata_view(
-            store,
-            namespace_id,
-            crate::path::read::ReadLoadContext::latest(),
-        )
-        .await
-        .expect("load view")
-        .resolve_path(absolute_path, crate::path::read::AttributeProjection::Omit)
-        .await
-        .expect("visible path")
-        .inode_id
+        crate::path::read::load_current_metadata_view(store, namespace_id)
+            .await
+            .expect("load view")
+            .resolve_path(absolute_path, crate::path::read::AttributeProjection::Omit)
+            .await
+            .expect("visible path")
+            .inode_id
     }
 
     /// Two plans through one session share the durable-layer memo: the
@@ -249,7 +245,7 @@ mod tests {
         .remove(0)
         .expect("seed publish");
 
-        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+        let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("load metadata view");
         let session = PublishPlanningSession::new(view.head());
@@ -490,18 +486,14 @@ mod tests {
             .as_ref()
             .expect("delete sees the create from the same batch");
 
-        crate::path::read::load_metadata_view(
-            &store,
-            &namespace_id,
-            crate::path::read::ReadLoadContext::latest(),
-        )
-        .await
-        .expect("load view")
-        .resolve_path(
-            "/docs/doomed.txt",
-            crate::path::read::AttributeProjection::Omit,
-        )
-        .await
-        .expect_err("deleted file is no longer visible");
+        crate::path::read::load_current_metadata_view(&store, &namespace_id)
+            .await
+            .expect("load view")
+            .resolve_path(
+                "/docs/doomed.txt",
+                crate::path::read::AttributeProjection::Omit,
+            )
+            .await
+            .expect_err("deleted file is no longer visible");
     }
 }
