@@ -25,6 +25,8 @@ mod batch;
 mod candidates;
 mod changes;
 mod publish_view;
+#[cfg(test)]
+mod single_pass_differential;
 mod uploads;
 
 pub(crate) use self::batch::{

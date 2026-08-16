@@ -226,6 +226,7 @@ async fn build_commit_plan(
     }
     let result = validate_commit_for_publish(
         request,
+        test_fingerprint(),
         committed_at_ms,
         &context.head,
         InMemoryMetadataView::in_memory(context.metadata_state, None, context.head.seq),
@@ -240,7 +241,7 @@ async fn build_commit_plan(
     let resulting_next_inode_id = allocator
         .commit_candidate(allocation)
         .expect("commit test allocation");
-    Ok(validated.prepare(request.clone(), test_fingerprint(), resulting_next_inode_id))
+    Ok(validated.finish(resulting_next_inode_id))
 }
 
 /// Every attribute update carries its own revision guard, whether or not the

@@ -142,7 +142,12 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let validated = {
                 let span = tracing::debug_span!("loonfs.phase", phase = "validate_commit");
                 match session
-                    .validate_commit(&request, view.metadata_view(), context.now_ms)
+                    .validate_commit(
+                        &request,
+                        semantic_identity,
+                        view.metadata_view(),
+                        context.now_ms,
+                    )
                     .instrument(span)
                     .await
                 {
@@ -164,7 +169,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let plan = {
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "CommitPlan::prepare").entered();
-                validated.prepare(request, semantic_identity, resulting_next_inode_id)
+                validated.finish(resulting_next_inode_id)
             };
             let materialized = {
                 let _span =

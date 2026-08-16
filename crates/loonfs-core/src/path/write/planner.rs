@@ -14,6 +14,8 @@ use crate::commit::{
     validate_ops, CandidateAllocation, CommitFingerprint, OpValidationCursor, PlannedOp,
     PublishValidationView,
 };
+#[cfg(test)]
+use crate::commit::{ValidatedCommitPlan, ValidatedOp};
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
@@ -107,6 +109,83 @@ pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
     }
 
     Ok(PlannedCommit { ops })
+}
+
+/// Compiles and validates a mutation request into one commit in a single
+/// pass.
+///
+/// Each semantic operation is planned against the view and its compiled
+/// operations are immediately validated, with accepted effects applied to the
+/// shared view so later operations observe earlier ones. The first failure
+/// aborts the request; multi-operation requests attach the failing
+/// operation's index, while single-operation requests return the raw error.
+///
+/// The commit's identity moves into the returned [`ValidatedCommitPlan`]:
+/// the head is the already-guarded source of the namespace and writer epoch
+/// (`load_publish_metadata_view` fences on epoch equality, and the batch
+/// rejects namespace mismatches before admission).
+#[cfg(test)]
+pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
+    request: &CommitRequest,
+    semantic_identity: CommitFingerprint,
+    head: &HeadState,
+    base_view: MetadataView<'_, '_, S>,
+    accepted_rows: &MetadataState,
+    committed_at_ms: u64,
+    allocation: &mut CandidateAllocation,
+) -> Result<ValidatedCommitPlan> {
+    if request.operations.is_empty() {
+        return Err(CoreError::InvalidCommitRequest(
+            "mutation request carries no operations".to_owned(),
+        ));
+    }
+    let committed_seq = next_public_ordinal(head.seq.0)
+        .map(ChangeSeq)
+        .ok_or_else(|| {
+            CoreError::Internal(format!(
+                "namespace sequence cannot exceed {MAX_PUBLIC_INTEGER}"
+            ))
+        })?;
+
+    let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
+    let mut cursor = OpValidationCursor::new();
+    let mut validated_ops: Vec<ValidatedOp> = Vec::new();
+    let operation_count = request.operations.len();
+    for (index, operation) in request.operations.iter().enumerate() {
+        let unit = {
+            let resolution_view = resolved.view();
+            let view = PublishPathPlanningView {
+                metadata_state: &resolution_view,
+            };
+            plan_operation(operation, &view, allocation)
+                .await
+                .map_err(|error| attribute(error, index, operation_count))?
+        };
+        let unit_ops = unit.into_planned_ops();
+        let validated_unit = validate_ops(
+            &unit_ops,
+            &mut resolved,
+            &mut cursor,
+            committed_seq,
+            &request.actor,
+            committed_at_ms,
+        )
+        .await
+        .map_err(|error| attribute(error, index, operation_count))?;
+        validated_ops.extend(validated_unit);
+    }
+
+    Ok(ValidatedCommitPlan {
+        namespace_id: head.namespace_id.clone(),
+        commit_id: request.commit_id.clone(),
+        actor: request.actor.clone(),
+        writer_epoch: head.writer_epoch,
+        message: request.message.clone(),
+        semantic_identity,
+        apply_after_seq: head.seq,
+        assigned_seq: committed_seq,
+        validated_ops,
+    })
 }
 
 async fn plan_operation<S: ObjectStore + ?Sized>(
@@ -367,6 +446,7 @@ mod tests {
                 ops: planned.commit.ops,
                 message: None,
             },
+            CommitFingerprint::new_unchecked("v1:sha256:test".to_owned()),
             1,
             view.head(),
             view.projected_metadata_view(),

@@ -2,10 +2,12 @@
 //! order, each seeing the rows earlier candidates would persist.
 
 use super::intent::CommitRequest;
+#[cfg(test)]
+use super::planner::prepare_commit_against_publish_view;
 use super::planner::{plan_commit_against_publish_view, PlannedCommit};
 use crate::commit::{
-    validate_commit_for_publish, CandidateAllocation, CommitIr, CommitPlan, InodeAllocator,
-    ValidatedCommitPlan,
+    validate_commit_for_publish, CandidateAllocation, CommitFingerprint, CommitIr, CommitPlan,
+    InodeAllocator, ValidatedCommitPlan,
 };
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
@@ -79,15 +81,40 @@ impl PublishPlanningSession {
     pub(crate) async fn validate_commit<S: ObjectStore + ?Sized>(
         &self,
         request: &CommitIr,
+        semantic_identity: CommitFingerprint,
         base_view: MetadataView<'_, '_, S>,
         committed_at_ms: u64,
     ) -> Result<ValidatedCommitPlan> {
         validate_commit_for_publish(
             request,
+            semantic_identity,
             committed_at_ms,
             &self.head,
             base_view.with_durable_cache(&self.durable_cache),
             &self.accepted_rows,
+        )
+        .await
+    }
+
+    /// Plans and validates a mutation request in one pass, producing the
+    /// validated plan that only awaits the accepted allocation position.
+    #[cfg(test)]
+    pub(crate) async fn prepare_commit<S: ObjectStore + ?Sized>(
+        &self,
+        request: &CommitRequest,
+        semantic_identity: CommitFingerprint,
+        base_view: MetadataView<'_, '_, S>,
+        committed_at_ms: u64,
+        allocation: &mut CandidateAllocation,
+    ) -> Result<ValidatedCommitPlan> {
+        prepare_commit_against_publish_view(
+            request,
+            semantic_identity,
+            &self.head,
+            base_view.with_durable_cache(&self.durable_cache),
+            &self.accepted_rows,
+            committed_at_ms,
+            allocation,
         )
         .await
     }

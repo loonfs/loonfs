@@ -1,7 +1,7 @@
 //! [`CommitPlan`]: one normalized, validated commit, ready to materialize
 //! into WAL deltas.
 
-use super::{CommitFingerprint, CommitIr};
+use super::CommitFingerprint;
 
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::{
@@ -26,44 +26,38 @@ pub struct CommitPlan {
 
 /// Validation output before the candidate-local inode allocation is accepted.
 ///
-/// Identity stays on the request until acceptance, so this value cannot carry
-/// an independently identified copy that later needs an equality check.
+/// The request's identity moves in here the moment validation succeeds, so
+/// there is never an independently identified copy that later needs an
+/// equality check; only the accepted allocation's resulting position is
+/// still missing, and [`Self::finish`] adds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedCommitPlan {
-    apply_after_seq: ChangeSeq,
-    assigned_seq: ChangeSeq,
-    validated_ops: Vec<ValidatedOp>,
+    pub(crate) namespace_id: NamespaceId,
+    pub(crate) commit_id: CommitId,
+    pub(crate) actor: ActorRef,
+    pub(crate) writer_epoch: WriterEpoch,
+    pub(crate) message: Option<String>,
+    pub(crate) semantic_identity: CommitFingerprint,
+    pub(crate) apply_after_seq: ChangeSeq,
+    pub(crate) assigned_seq: ChangeSeq,
+    pub(crate) validated_ops: Vec<ValidatedOp>,
 }
 
 impl ValidatedCommitPlan {
-    pub(crate) fn new(
-        apply_after_seq: ChangeSeq,
-        assigned_seq: ChangeSeq,
-        validated_ops: Vec<ValidatedOp>,
-    ) -> Self {
-        Self {
-            apply_after_seq,
-            assigned_seq,
-            validated_ops,
-        }
-    }
-
-    /// Adds the result of accepting the candidate allocation and consumes the
-    /// request into the one prepared representation.
-    pub(crate) fn prepare(
-        self,
-        request: CommitIr,
-        semantic_identity: CommitFingerprint,
-        resulting_next_inode_id: InodeId,
-    ) -> CommitPlan {
-        let CommitIr {
+    /// Adds the result of accepting the candidate allocation, completing the
+    /// one prepared representation.
+    pub(crate) fn finish(self, resulting_next_inode_id: InodeId) -> CommitPlan {
+        let Self {
             namespace_id,
             commit_id,
             actor,
             writer_epoch,
-            ops: _,
             message,
-        } = request;
+            semantic_identity,
+            apply_after_seq,
+            assigned_seq,
+            validated_ops,
+        } = self;
         CommitPlan {
             namespace_id,
             commit_id,
@@ -71,9 +65,9 @@ impl ValidatedCommitPlan {
             writer_epoch,
             message,
             semantic_identity,
-            apply_after_seq: self.apply_after_seq,
-            assigned_seq: self.assigned_seq,
-            validated_ops: self.validated_ops,
+            apply_after_seq,
+            assigned_seq,
+            validated_ops,
             resulting_next_inode_id,
         }
     }
@@ -174,34 +168,30 @@ pub(crate) enum ValidatedOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{CommitOp, PlannedOp};
 
     #[test]
-    fn preparing_validated_plan_moves_identity_into_one_owner() {
-        let request = CommitIr {
+    fn finishing_validated_plan_moves_identity_into_one_owner() {
+        let semantic_identity = CommitFingerprint::new_unchecked("v1:sha256:test".to_owned());
+        let validated = ValidatedCommitPlan {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(7),
-            ops: vec![PlannedOp::unchecked(CommitOp::CreateDirectory {
-                child_inode_id: InodeId(2),
-                parent_inode_id: InodeId(1),
-                display_name: DisplayName::parse("docs").expect("valid display name"),
-            })],
             message: Some("create docs".to_owned()),
+            semantic_identity: semantic_identity.clone(),
+            apply_after_seq: ChangeSeq(3),
+            assigned_seq: ChangeSeq(4),
+            validated_ops: Vec::new(),
         };
-        let semantic_identity = CommitFingerprint::new_unchecked("v1:sha256:test".to_owned());
-        let plan = ValidatedCommitPlan::new(ChangeSeq(3), ChangeSeq(4), Vec::new()).prepare(
-            request,
-            semantic_identity.clone(),
-            InodeId(3),
-        );
+        let plan = validated.finish(InodeId(3));
 
         assert_eq!(plan.namespace_id.as_str(), "demo");
         assert_eq!(plan.commit_id.as_str(), "commit-a");
         assert_eq!(plan.writer_epoch, WriterEpoch(7));
         assert_eq!(plan.message.as_deref(), Some("create docs"));
         assert_eq!(plan.semantic_identity, semantic_identity);
+        assert_eq!(plan.apply_after_seq, ChangeSeq(3));
+        assert_eq!(plan.assigned_seq, ChangeSeq(4));
         assert_eq!(plan.resulting_next_inode_id, InodeId(3));
     }
 }
