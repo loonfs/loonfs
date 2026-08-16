@@ -3,15 +3,13 @@
 
 use loonfs_api::wire::control::{HeadState, WalSegmentPointer};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalSegmentEnvelope};
-use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalSegmentId, WriterEpoch};
+use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PreparedWalSegment {
-    pub object_key: String,
-    pub segment_id: WalSegmentId,
     pub envelope: WalSegmentEnvelope,
     pub encoded_bytes: Vec<u8>,
 }
@@ -92,7 +90,7 @@ impl ValidatedWalSegment {
     }
 
     pub(crate) fn pointer(&self) -> WalSegmentPointer {
-        self.envelope.pointer(self.object_key.clone())
+        self.envelope.pointer()
     }
 
     pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {
@@ -199,8 +197,6 @@ pub(crate) struct ReplayedWalTail {
 pub enum WalReplayError {
     #[error("WAL codec error: {0}")]
     Codec(String),
-    #[error("WAL object key mismatch: expected `{expected}`, actual `{actual}`")]
-    ObjectKeyMismatch { expected: String, actual: String },
     #[error("WAL segment namespace mismatch: expected `{expected}`, actual `{actual}`")]
     NamespaceMismatch {
         expected: NamespaceId,

@@ -8,7 +8,6 @@ use loonfs_api::wire::wal::{
     encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{next_public_ordinal, ChangeSeq, NamespaceId, WalSegmentId, WriterEpoch};
-use loonfs_objectstore::keys::wal_segment;
 
 pub(crate) fn prepare_wal_segment(
     namespace_id: NamespaceId,
@@ -76,11 +75,7 @@ pub(crate) fn prepare_wal_segment(
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
     let encoded_bytes = encode_wal_segment_envelope_zstd(&envelope)
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
-    let object_key = wal_segment(&envelope.payload.namespace_id, &segment_id);
-
     Ok(PreparedWalSegment {
-        object_key,
-        segment_id,
         envelope,
         encoded_bytes,
     })

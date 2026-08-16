@@ -981,15 +981,20 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         "the rejection lands before the segment PUT, so nothing new is written"
     );
 
-    // The whole legal tail is named by the head, so no reader has to walk
-    // predecessor links to reach any of it.
+    // The whole legal tail is named by the tip plus its predecessor hints,
+    // so no reader has to discover a key by walking an unhinted link.
     let head = read_head_object(&store, &namespace_id)
         .await
         .expect("read head")
         .state;
-    assert_eq!(head.recent_segments.len(), boundary);
-    assert_eq!(head.recent_segments.first(), head.visible_wal_tip.as_ref());
-    for pair in head.recent_segments.windows(2) {
+    assert_eq!(head.recent_segments.len(), boundary - 1);
+    let described_tail = head
+        .visible_wal_tip
+        .iter()
+        .chain(head.recent_segments.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(described_tail.len(), boundary);
+    for pair in described_tail.windows(2) {
         let [newer, older] = pair else {
             unreachable!("windows(2) yields pairs")
         };

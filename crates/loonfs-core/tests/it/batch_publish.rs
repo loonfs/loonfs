@@ -482,7 +482,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     }
     store
         .put_if_absent(
-            "namespaces/demo/wal/00000000000000000099-9999999999999999.wal.zst",
+            "namespaces/demo/wal/segments/00000000000000000099-9999999999999999.wal.zst",
             wal_bytes,
         )
         .await
@@ -640,15 +640,16 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         .visible_wal_tip
         .as_ref()
         .expect("visible wal tip");
-    assert!(wal_keys.contains(&visible_tip.object_key));
+    let visible_key = loonfs_objectstore::keys::wal_segment(&namespace_id, &visible_tip.segment_id);
+    assert!(wal_keys.contains(&visible_key));
     let orphan_keys = wal_keys
         .iter()
-        .filter(|key| *key != &visible_tip.object_key)
+        .filter(|key| *key != &visible_key)
         .collect::<Vec<_>>();
     assert_eq!(orphan_keys.len(), 1);
 
     let visible_wal = store
-        .get(&visible_tip.object_key, None)
+        .get(&visible_key, None)
         .await
         .expect("read visible wal")
         .expect("visible wal exists");

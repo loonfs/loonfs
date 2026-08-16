@@ -23,6 +23,7 @@ use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
+use loonfs_objectstore::keys::wal_segment;
 use loonfs_objectstore::{ImmutableWriteError, ObjectMetadata, ObjectStore};
 use tracing::Instrument;
 
@@ -299,8 +300,12 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
             records,
         )
         .map_err(|error| CoreError::Internal(format!("wal build failed: {error}")))?;
+        let object_key = wal_segment(
+            &wal.envelope.payload.namespace_id,
+            &wal.envelope.payload.segment_id,
+        );
         store
-            .put_immutable_verified(&wal.object_key, Bytes::copy_from_slice(&wal.encoded_bytes))
+            .put_immutable_verified(&object_key, Bytes::copy_from_slice(&wal.encoded_bytes))
             .await
             .map_err(wal_immutable_write_error)?;
         Ok(wal)

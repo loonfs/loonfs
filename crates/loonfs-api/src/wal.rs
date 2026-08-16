@@ -230,10 +230,9 @@ impl WalSegmentEnvelope {
         })
     }
 
-    /// Projects the integrity and sequence metadata needed to link this stored segment from a head.
-    pub fn pointer(&self, object_key: String) -> WalSegmentPointer {
+    /// Projects the identity, integrity, and sequence metadata needed to link this segment.
+    pub fn pointer(&self) -> WalSegmentPointer {
         WalSegmentPointer {
-            object_key,
             segment_id: self.payload.segment_id.clone(),
             start_seq: self.payload.start_seq,
             end_seq: self.payload.end_seq,
