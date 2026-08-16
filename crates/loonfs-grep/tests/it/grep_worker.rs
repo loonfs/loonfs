@@ -10,7 +10,7 @@ use loonfs::{
     FsWriter, GcConfig, MaintenancePlan, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
     RuntimeError, SharedObjectStore,
 };
-use loonfs_api::wire::control::CheckpointRecordLifecycle;
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
 use loonfs_api::{
     sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId,
     MAX_PUBLIC_INTEGER,
@@ -699,10 +699,13 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
         .await
         .expect("backfill checkpoint record");
     assert!(
-        record.expires_at_ms.is_some(),
+        record.owner.expires_at_ms().is_some(),
         "the backfill pin carries a ttl"
     );
-    record.expires_at_ms = Some(record.created_at_ms);
+    let CheckpointOwner::User { expires_at_ms, .. } = &mut record.owner else {
+        panic!("the backfill pin is user-owned");
+    };
+    *expires_at_ms = Some(record.created_at_ms);
     let expired = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::CheckpointRecord,
         record,

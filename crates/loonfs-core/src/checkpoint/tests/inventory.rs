@@ -54,8 +54,8 @@ async fn pin_named<S: ObjectStore + ?Sized>(
         namespace_id,
         CheckpointOwner::User {
             name: name.to_owned(),
+            expires_at_ms,
         },
-        expires_at_ms,
         context,
     )
     .await

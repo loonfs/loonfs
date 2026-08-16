@@ -92,11 +92,12 @@ fn checkpoint_owner_summary(
     owner: loonfs_api::wire::control::CheckpointOwner,
 ) -> loonfs_api::CheckpointOwnerSummary {
     match owner {
-        loonfs_api::wire::control::CheckpointOwner::User { name } => {
+        loonfs_api::wire::control::CheckpointOwner::User { name, .. } => {
             loonfs_api::CheckpointOwnerSummary::User { name }
         }
         loonfs_api::wire::control::CheckpointOwner::Fork {
             target_namespace_id,
+            ..
         } => loonfs_api::CheckpointOwnerSummary::Fork {
             target_namespace_id,
         },

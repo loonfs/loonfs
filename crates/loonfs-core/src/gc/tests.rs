@@ -428,8 +428,8 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
         &namespace_id,
         CheckpointOwner::User {
             name: "other-pin".to_owned(),
+            expires_at_ms: None,
         },
-        None,
         &setup,
     )
     .await
@@ -3234,8 +3234,8 @@ async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
             &namespace_id,
             CheckpointOwner::User {
                 name: name.to_owned(),
+                expires_at_ms: Some(setup.now_ms + GRACE_MS),
             },
-            Some(setup.now_ms + GRACE_MS),
             &setup,
         )
         .await
@@ -3316,8 +3316,8 @@ async fn a_release_that_loses_its_etag_retains_without_erroring() {
         &namespace_id,
         CheckpointOwner::User {
             name: "short-lived".to_owned(),
+            expires_at_ms: Some(setup.now_ms + GRACE_MS),
         },
-        Some(setup.now_ms + GRACE_MS),
         &setup,
     )
     .await
@@ -3443,8 +3443,8 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
         &namespace_id,
         CheckpointOwner::User {
             name: "short-lived".to_owned(),
+            expires_at_ms: Some(setup.now_ms + GRACE_MS),
         },
-        Some(setup.now_ms + GRACE_MS),
         &setup,
     )
     .await
@@ -3455,8 +3455,8 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
         &namespace_id,
         CheckpointOwner::User {
             name: "long-lived".to_owned(),
+            expires_at_ms: Some(u64::MAX),
         },
-        Some(u64::MAX),
         &setup,
     )
     .await
@@ -3532,8 +3532,8 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &namespace_id,
         CheckpointOwner::User {
             name: "keeper".to_owned(),
+            expires_at_ms: None,
         },
-        None,
         &setup,
     )
     .await
@@ -3544,8 +3544,8 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &namespace_id,
         CheckpointOwner::User {
             name: "releaser".to_owned(),
+            expires_at_ms: None,
         },
-        None,
         &setup,
     )
     .await
@@ -3858,7 +3858,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
     assert!(
-        fork_record.expires_at_ms.is_some(),
+        fork_record.owner.expires_at_ms().is_some(),
         "a fork record carries the attempt's lease"
     );
     // Only the fork-owned record can protect the basis after this.
@@ -3868,7 +3868,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .expect("advance root past the fork basis");
 
     // Every clock: inside the lease, one tick past it, and absurdly past it.
-    let lease = fork_record.expires_at_ms.expect("lease");
+    let lease = fork_record.owner.expires_at_ms().expect("lease");
     for now_ms in [
         now_after_newest_object(&store, &source, GRACE_MS + 1).await,
         lease,
@@ -3934,8 +3934,8 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
         &source,
         CheckpointOwner::Fork {
             target_namespace_id: clone.clone(),
+            expires_at_ms: lease,
         },
-        Some(lease),
         &attempt,
     )
     .await
@@ -4012,8 +4012,8 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         &source,
         CheckpointOwner::Fork {
             target_namespace_id: clone.clone(),
+            expires_at_ms: setup.now_ms + FORK_CHECKPOINT_LEASE_MS,
         },
-        Some(setup.now_ms + FORK_CHECKPOINT_LEASE_MS),
         &setup,
     )
     .await

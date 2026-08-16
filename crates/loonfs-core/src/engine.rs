@@ -855,8 +855,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         crate::checkpoint::create_checkpoint(
             &self.store,
             &self.namespace_id,
-            CheckpointOwner::User { name },
-            expires_at_ms,
+            CheckpointOwner::User {
+                name,
+                expires_at_ms,
+            },
             &context,
         )
         .await

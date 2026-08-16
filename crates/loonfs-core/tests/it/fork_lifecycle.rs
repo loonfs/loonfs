@@ -402,7 +402,10 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert!(
         matches!(
             &source_record.owner,
-            CheckpointOwner::Fork { target_namespace_id }
+            CheckpointOwner::Fork {
+                target_namespace_id,
+                ..
+            }
                 if *target_namespace_id == clone_namespace_id
         ),
         "fork record is owned by its target namespace"
@@ -1103,7 +1106,10 @@ impl ReleasePinAfterHeadStore {
                     };
                 }
                 ForkPinAfterHead::LeaseAtTheGuardMargin { now_ms } => {
-                    record.expires_at_ms = Some(now_ms + loonfs_core::limits::FORK_GUARD_MARGIN_MS);
+                    let CheckpointOwner::Fork { expires_at_ms, .. } = &mut record.owner else {
+                        unreachable!("the record was checked as fork-owned")
+                    };
+                    *expires_at_ms = now_ms + loonfs_core::limits::FORK_GUARD_MARGIN_MS;
                 }
             }
             let rewritten = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
