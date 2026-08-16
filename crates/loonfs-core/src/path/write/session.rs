@@ -236,8 +236,8 @@ mod tests {
             vec![put_file_candidate(
                 "seed-docs",
                 "/docs/seed.txt",
-                &staged.content_store_id,
-                staged.content_ref.clone(),
+                staged.content_store_id(),
+                staged.content_ref().clone(),
             )],
             &context,
         )
@@ -256,7 +256,7 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: staged.content_ref.clone(),
+                content_ref: staged.content_ref().clone(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
             },
@@ -280,7 +280,7 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                content_ref: staged.content_ref.clone(),
+                content_ref: staged.content_ref().clone(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
             },
@@ -325,14 +325,14 @@ mod tests {
                 put_file_candidate(
                     "create-wide-a",
                     "/wide/a.txt",
-                    &staged.content_store_id,
-                    staged.content_ref.clone(),
+                    staged.content_store_id(),
+                    staged.content_ref().clone(),
                 ),
                 put_file_candidate(
                     "create-wide-b",
                     "/wide/b.txt",
-                    &staged.content_store_id,
-                    staged.content_ref.clone(),
+                    staged.content_store_id(),
+                    staged.content_ref().clone(),
                 ),
             ],
             &context,
@@ -429,14 +429,14 @@ mod tests {
                 put_file_candidate(
                     "create-a-first",
                     "/docs/a.txt",
-                    &staged.content_store_id,
-                    staged.content_ref.clone(),
+                    staged.content_store_id(),
+                    staged.content_ref().clone(),
                 ),
                 put_file_candidate(
                     "create-a-second",
                     "/docs/a.txt",
-                    &staged.content_store_id,
-                    staged.content_ref.clone(),
+                    staged.content_store_id(),
+                    staged.content_ref().clone(),
                 ),
             ],
             &context,
@@ -463,8 +463,8 @@ mod tests {
                 put_file_candidate(
                     "create-doomed",
                     "/docs/doomed.txt",
-                    &staged.content_store_id,
-                    staged.content_ref.clone(),
+                    staged.content_store_id(),
+                    staged.content_ref().clone(),
                 ),
                 CommitCandidate::new(CommitRequest::single(
                     CommitId::parse("delete-doomed").expect("valid commit id"),

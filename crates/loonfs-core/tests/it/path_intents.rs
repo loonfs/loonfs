@@ -1055,7 +1055,7 @@ async fn path_intents_cover_basic_mutations() {
         CommitId::parse("put-path").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            content_ref: content.content_ref.clone(),
+            content_ref: content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },
@@ -1142,7 +1142,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: content.content_ref,
+                        content_ref: content.into_content_ref(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },

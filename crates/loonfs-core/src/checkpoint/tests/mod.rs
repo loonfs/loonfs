@@ -137,7 +137,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
     let stored = store_bytes_as_content(store, namespace_id, b"body\n")
         .await
         .expect("store content");
-    let content_ref = stored.content_ref.clone();
+    let content_ref = stored.content_ref().clone();
     let catalog = load_namespace_catalog_entry(store, namespace_id)
         .await
         .expect("load namespace catalog");

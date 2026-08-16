@@ -249,7 +249,7 @@ pub(crate) mod commit_split_support {
             test_commit_id(commit_id),
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse(absolute_path).expect("path"),
-                content_ref: content.content_ref,
+                content_ref: content.into_content_ref(),
                 behavior,
                 expected_revision_no: None,
             },

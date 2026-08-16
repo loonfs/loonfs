@@ -96,7 +96,7 @@ impl VisibilityHarness {
         let stored = store_bytes_as_content(&self.store, self.namespace_id(), bytes)
             .await
             .expect("stage content");
-        let content_ref = stored.content_ref.clone();
+        let content_ref = stored.content_ref().clone();
         let catalog =
             loonfs_core::control::load_namespace_catalog_entry(&self.store, self.namespace_id())
                 .await

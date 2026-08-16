@@ -131,7 +131,7 @@ impl TestHarness {
         loonfs_core::content::store_bytes_as_content(&self.store, &self.namespace_id, bytes)
             .await
             .expect("stage content")
-            .content_ref
+            .into_content_ref()
     }
 }
 
@@ -957,7 +957,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
         loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"duplicate content")
             .await
             .expect("stage content")
-            .content_ref;
+            .into_content_ref();
     let intent = put_request("in-flight-put", "/file.txt", content_ref.clone());
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates publication and duplicate join.
@@ -1026,7 +1026,7 @@ async fn stale_head_retry_preserves_content_admission() {
         loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"retry content")
             .await
             .expect("stage content")
-            .content_ref;
+            .into_content_ref();
     let intent = put_request("retry-put", "/file.txt", content_ref.clone());
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates publication retries.
@@ -1062,7 +1062,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
         loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"mixed content")
             .await
             .expect("stage content")
-            .content_ref;
+            .into_content_ref();
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates mixed-batch publication.
     let prepared = prepare_content(&store, &namespace_id, &content_ref).await;

@@ -707,7 +707,8 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         }
     };
 
-    record_staged_content(store, namespace_id, upload_id, stored.content_ref, false).await
+    let content_ref = stored.into_content_ref();
+    record_staged_content(store, namespace_id, upload_id, content_ref, false).await
 }
 
 /// Records a staging result and releases its claim in the same
@@ -1041,7 +1042,7 @@ pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
         store,
         catalog,
         &session.upload_id,
-        stored.content_ref,
+        stored.into_content_ref(),
         context,
     )
     .await

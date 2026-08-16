@@ -385,13 +385,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> Result<Vec<u8>> {
         let catalog = self.live_catalog(context)?;
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
-        let read = crate::storage::content::read_durable_content_bytes(
+        Ok(crate::storage::content::read_durable_content_bytes(
             &self.store,
             catalog.content_store_id(),
             content_ref,
         )
-        .await?;
-        Ok(read.bytes)
+        .await?)
     }
 
     /// Returns the namespace catalog derived from the pinned head after checking

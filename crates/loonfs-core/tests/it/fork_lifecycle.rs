@@ -902,7 +902,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         CommitId::parse("before-delete").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/keep.txt").expect("path"),
-            content_ref: content.content_ref.clone(),
+            content_ref: content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },
@@ -939,7 +939,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         CommitId::parse("after-delete").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/late.txt").expect("path"),
-            content_ref: content.content_ref.clone(),
+            content_ref: content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },

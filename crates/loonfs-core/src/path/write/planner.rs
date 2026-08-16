@@ -682,7 +682,7 @@ mod tests {
             &namespace_id,
             &request(FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/dead/new.txt").expect("path"),
-                content_ref: staged.content_ref,
+                content_ref: staged.into_content_ref(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
             }),
@@ -711,7 +711,7 @@ mod tests {
                     create_dir("/reports"),
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/reports/a.txt").expect("path"),
-                        content_ref: staged.content_ref.clone(),
+                        content_ref: staged.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },
@@ -779,7 +779,7 @@ mod tests {
                     },
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
-                        content_ref: staged.content_ref.clone(),
+                        content_ref: staged.content_ref().clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
                     },
