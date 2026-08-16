@@ -551,7 +551,6 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    now_ms: u64,
 ) -> Result<StagingSlot> {
     update_upload_session(
         store,
@@ -572,7 +571,7 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
                 };
                 match staging {
                     ProxiedStaging::Idle => {
-                        *staging = ProxiedStaging::Claimed { at_ms: now_ms };
+                        *staging = ProxiedStaging::Claimed;
                         Ok(UploadSessionUpdate::Replace {
                             next: Box::new(state),
                             outcome: StagingSlot::Claimed,
@@ -580,9 +579,7 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
                     }
                     // Another request is writing the object right now. Its
                     // bytes and digest are not this request's to displace.
-                    ProxiedStaging::Claimed { .. } => {
-                        Err(CoreError::UploadContentConflict { upload_id })
-                    }
+                    ProxiedStaging::Claimed => Err(CoreError::UploadContentConflict { upload_id }),
                     ProxiedStaging::Staged(content_ref) => Ok(UploadSessionUpdate::Noop(
                         StagingSlot::AlreadyStaged(content_ref.clone()),
                     )),
@@ -616,7 +613,7 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
             let UploadSessionTransport::ServiceProxied { staging } = &mut state.transport else {
                 return Ok(UploadSessionUpdate::Noop(()));
             };
-            if !matches!(staging, ProxiedStaging::Claimed { .. }) {
+            if !matches!(staging, ProxiedStaging::Claimed) {
                 return Ok(UploadSessionUpdate::Noop(()));
             }
             *staging = ProxiedStaging::Idle;
@@ -657,7 +654,6 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     bytes: &[u8],
-    context: &MutationContext,
 ) -> Result<UploadContentResponse> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
@@ -682,7 +678,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     };
     // The claim is what makes the write exclusive, so it is taken before any
     // byte is written and released by the same swap that records the result.
-    match claim_staging_slot(store, namespace_id, upload_id, context.now_ms).await? {
+    match claim_staging_slot(store, namespace_id, upload_id).await? {
         StagingSlot::AlreadyStaged(staged) if staged == content_ref => return Ok(response),
         StagingSlot::AlreadyStaged(_) => {
             return Err(CoreError::UploadContentConflict {
@@ -760,7 +756,7 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                             Err(CoreError::UploadContentConflict { upload_id })
                         }
                     }
-                    ProxiedStaging::Idle | ProxiedStaging::Claimed { .. } => {
+                    ProxiedStaging::Idle | ProxiedStaging::Claimed => {
                         *staging = ProxiedStaging::Staged(content_ref);
                         Ok(UploadSessionUpdate::Replace {
                             next: Box::new(state),
@@ -787,7 +783,6 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     body: ByteStream,
-    context: &MutationContext,
 ) -> Result<UploadContentResponse> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
@@ -809,7 +804,7 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     // without writing it decides the question: the same bytes are one
     // upload arriving twice, and different bytes are a conflict either way.
     // Taking the claim is what establishes that nothing else is writing.
-    match claim_staging_slot(store, namespace_id, upload_id, context.now_ms).await? {
+    match claim_staging_slot(store, namespace_id, upload_id).await? {
         StagingSlot::AlreadyStaged(staged) => {
             let content_ref = identify_streamed_payload(loaded.content_id.clone(), body).await?;
             if staged != content_ref {
@@ -1456,7 +1451,7 @@ fn completion_plan<'a>(
         ) => Ok(CompletionPlan::Proxied {
             staged: match staging {
                 ProxiedStaging::Staged(content_ref) => Some(content_ref),
-                ProxiedStaging::Idle | ProxiedStaging::Claimed { .. } => None,
+                ProxiedStaging::Idle | ProxiedStaging::Claimed => None,
             },
         }),
         (
@@ -1637,7 +1632,7 @@ mod tests {
         )
         .await
         .expect("begin upload");
-        let staged = upload_content(store, &namespace_id, begin.upload_id(), BYTES, context)
+        let staged = upload_content(store, &namespace_id, begin.upload_id(), BYTES)
             .await
             .expect("stage upload");
         let content_store_id = load_namespace_content_store_id(store, &namespace_id)
@@ -1950,7 +1945,7 @@ mod tests {
         )
         .await
         .expect("complete");
-        let error = upload_content(&store, &namespace_id, &upload_id, BYTES, &context(2_000))
+        let error = upload_content(&store, &namespace_id, &upload_id, BYTES)
             .await
             .expect_err("a completed session takes no more bytes");
         assert!(matches!(error, CoreError::UploadAlreadyCompleted { .. }));
@@ -1972,15 +1967,9 @@ mod tests {
         )
         .await
         .expect("abort");
-        let error = upload_content(
-            &store,
-            &namespace_id,
-            aborted.upload_id(),
-            BYTES,
-            &context(3_000),
-        )
-        .await
-        .expect_err("an aborted session takes no more bytes");
+        let error = upload_content(&store, &namespace_id, aborted.upload_id(), BYTES)
+            .await
+            .expect_err("an aborted session takes no more bytes");
         assert!(matches!(error, CoreError::UploadNotFound { .. }));
     }
 

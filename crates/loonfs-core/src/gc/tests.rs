@@ -367,15 +367,10 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("begin upload");
-    let staged = crate::protocol::upload_content(
-        store,
-        namespace_id,
-        begin.upload_id(),
-        b"racing upload\n",
-        context,
-    )
-    .await
-    .expect("stage upload");
+    let staged =
+        crate::protocol::upload_content(store, namespace_id, begin.upload_id(), b"racing upload\n")
+            .await
+            .expect("stage upload");
     let content_store_id =
         crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
             .await
@@ -953,10 +948,9 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("begin upload");
-    let staged =
-        crate::protocol::upload_content(store, namespace_id, begin.upload_id(), bytes, context)
-            .await
-            .expect("stage upload");
+    let staged = crate::protocol::upload_content(store, namespace_id, begin.upload_id(), bytes)
+        .await
+        .expect("stage upload");
     let content_store_id =
         crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
             .await

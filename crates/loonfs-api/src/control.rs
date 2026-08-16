@@ -527,10 +527,7 @@ pub enum ProxiedStaging {
     /// No request owns the staging slot and no content has been staged.
     Idle,
     /// One request owns the staging slot.
-    Claimed {
-        /// Time at which the request claimed exclusive access.
-        at_ms: u64,
-    },
+    Claimed,
     /// Content that passed validation and was recorded by the session.
     Staged(ContentRef),
 }
@@ -544,13 +541,13 @@ impl Serialize for ProxiedStaging {
         #[serde(tag = "kind", rename_all = "snake_case")]
         enum Shape<'a> {
             Idle {},
-            Claimed { at_ms: u64 },
+            Claimed {},
             Staged { content_ref: &'a ContentRef },
         }
 
         match self {
             Self::Idle => Shape::Idle {}.serialize(serializer),
-            Self::Claimed { at_ms } => Shape::Claimed { at_ms: *at_ms }.serialize(serializer),
+            Self::Claimed => Shape::Claimed {}.serialize(serializer),
             Self::Staged(content_ref) => Shape::Staged { content_ref }.serialize(serializer),
         }
     }
@@ -818,7 +815,7 @@ impl From<StrictUploadSessionTransport> for UploadSessionTransport {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StrictProxiedStaging {
     Idle {},
-    Claimed { at_ms: u64 },
+    Claimed {},
     Staged { content_ref: StrictContentRef },
 }
 
@@ -826,7 +823,7 @@ impl From<StrictProxiedStaging> for ProxiedStaging {
     fn from(staging: StrictProxiedStaging) -> Self {
         match staging {
             StrictProxiedStaging::Idle {} => Self::Idle,
-            StrictProxiedStaging::Claimed { at_ms } => Self::Claimed { at_ms },
+            StrictProxiedStaging::Claimed {} => Self::Claimed,
             StrictProxiedStaging::Staged { content_ref } => Self::Staged(content_ref.into()),
         }
     }
