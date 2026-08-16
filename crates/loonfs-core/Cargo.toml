@@ -34,5 +34,14 @@ loonfs-test-support = { path = "../loonfs-test-support" }
 tempfile.workspace = true
 tokio.workspace = true
 
+# The integration harness uses this crate's test-support helpers, which a bare
+# `cargo test -p loonfs-core` does not enable; declaring the requirement makes
+# that invocation skip the target instead of failing to compile it. Workspace
+# runs still execute it because `loonfs`'s dev-dependencies enable the feature.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["test-support"]
+
 [lints]
 workspace = true
