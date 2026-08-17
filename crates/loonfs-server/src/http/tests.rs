@@ -3499,7 +3499,7 @@ mod direct_download {
         assert_eq!(inode_grant.inode_id, entry.inode_id);
         assert_eq!(inode_grant.content_ref, grant.content_ref);
         let mut stream = client
-            .open_direct_download_by_inode(&inode_grant, 0)
+            .open_direct_download_by_inode(&inode_grant)
             .await
             .expect("open inode grant");
         let mut inode_received = Vec::new();

@@ -3,6 +3,7 @@
 
 use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
 use loonfs::RuntimeCacheConfig;
+use loonfs_api::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
 use loonfs_api::SecretString;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, StoreConfigError};
@@ -21,11 +22,6 @@ pub(crate) enum AuthPolicy<'a> {
     Unauthenticated,
     BearerToken(&'a str),
 }
-
-/// Environment fallback for [`ServerConfig::auth_token`].
-const AUTH_TOKEN_ENV: &str = "LOONFS_AUTH_TOKEN";
-/// Environment fallback for [`ServerConfig::content_token_secret`].
-const CONTENT_TOKEN_SECRET_ENV: &str = "LOONFS_CONTENT_TOKEN_SECRET";
 
 /// The server config file.
 ///
@@ -186,9 +182,10 @@ fn default_max_concurrent_maintenance() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
 }
 
-/// What a config with no `[grep]` table asks for: nothing composed, no
-/// query plane advertised, no index job registered. Saying `[grep]` at all
-/// is what opts a deployment in.
+/// Default used when no `[grep]` table is present.
+///
+/// This disables grep routes and maintenance until the deployment explicitly
+/// configures grep.
 fn grep_absent() -> GrepConfig {
     GrepConfig {
         mode: GrepMode::Disabled,

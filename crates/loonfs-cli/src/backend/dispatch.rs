@@ -239,7 +239,7 @@ impl ResolvedTarget {
                     stream: Box::new(
                         target
                             .client
-                            .open_direct_download(&grant, start_offset)
+                            .open_direct_download_at(&grant, start_offset)
                             .await?,
                     ),
                     resumed_from: start_offset,

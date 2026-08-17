@@ -5,6 +5,7 @@ use crate::args::{ActorKindArg, InitArgs, ProfileCreateArgs, ProfileUpdateArgs, 
 use crate::config::{non_empty_env, ProfileActorConfig, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
+use loonfs_api::env::AUTH_TOKEN_ENV;
 use loonfs_api::{ActorId, ActorKind, SecretString};
 use loonfs_objectstore::{
     ConfiguredObjectStoreKind, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV, SESSION_TOKEN_ENV,
@@ -42,11 +43,6 @@ const AWS_REGIONS: &[&str] = &[
 ];
 
 // --- ambient credentials ---
-
-/// Environment variable a remote profile's bearer token comes from. The
-/// provider credential names are the store config's own, so the CLI and the
-/// server read one set of variables.
-const AUTH_TOKEN_ENV: &str = "LOONFS_AUTH_TOKEN";
 
 /// Credentials this process's environment happens to carry.
 ///
@@ -481,8 +477,7 @@ fn build_embedded_profile(
             bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
             account_id: require_or_prompt(spec.account_id.as_ref(), "account-id", runtime)?,
             endpoint_url: require_or_prompt(spec.endpoint_url.as_ref(), "endpoint-url", runtime)?,
-            // R2 speaks the S3 API, so its credentials arrive under the same
-            // environment names.
+            // R2 uses the S3 API and the same credential environment variables.
             access_key_id: require_or_prompt_secret(
                 spec.access_key_id.as_ref(),
                 ambient.access_key_id.as_ref(),
