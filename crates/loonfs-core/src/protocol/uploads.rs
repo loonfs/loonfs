@@ -317,8 +317,10 @@ fn multipart_session_upload(session: &UploadSessionState) -> Result<(&str, Check
     }
 }
 
-/// Builds a claimed content reference: multipart fixes the checksum algorithm,
-/// while direct PUT accepts the algorithm supplied by the client.
+/// Builds a content reference from a client's upload claim.
+///
+/// Multipart uploads require the provider's checksum algorithm. Direct PUT
+/// uploads accept the algorithm in the claim.
 fn claimed_content_ref(
     content_id: ContentId,
     claim: &UploadContentClaim,

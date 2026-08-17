@@ -643,7 +643,7 @@ string_id! {
 }
 
 string_id! {
-    /// Durable id for one grep root manifest generation.
+    /// Identifies one stored grep manifest.
     GrepManifestId,
     prefix = "gmf"
 }

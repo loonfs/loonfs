@@ -271,11 +271,12 @@ impl FsReader {
     /// [`CheckpointFilesPage::checkpoint_seq`] is what
     /// [`Self::list_changes`] reports. Directories are not returned.
     ///
-    /// A checkpoint that was released, expired, or reaped answers
-    /// `checkpoint_unavailable`; the enumeration never silently falls back
-    /// to current state. A consumer that loses its checkpoint takes a new
-    /// one and starts over.
-    /// This reads a checkpoint snapshot, not the latest metadata view, so it does not count as one.
+    /// A released, expired, or reaped checkpoint returns
+    /// `checkpoint_unavailable`. The caller must create a new checkpoint and
+    /// restart instead of silently reading current state.
+    ///
+    /// This does not increment the latest-metadata-view metric because it
+    /// reads a checkpoint snapshot.
     pub async fn list_checkpoint_files_page(
         &self,
         namespace_id: &NamespaceId,
@@ -314,13 +315,13 @@ impl FsReader {
 
     /// Reads one immutable content object by reference.
     ///
-    /// `max_bytes` is this caller's own budget, checked against the
-    /// reference's declared size before any fetch, and deliberately
-    /// independent of the deployment's configured download limit — a
-    /// consumer that streams work through a fixed buffer says so here. The
-    /// fetched bytes are verified against the reference's size and digest,
-    /// and a mismatch fails the read.
-    /// This reads immutable content, not the latest metadata view, so it does not count as one.
+    /// `max_bytes` is checked against the declared size before fetching. It is
+    /// independent of the deployment's download limit so callers can apply a
+    /// smaller memory budget. The read fails if the returned size or digest
+    /// does not match the reference.
+    ///
+    /// This does not increment the latest-metadata-view metric because it
+    /// reads immutable content directly.
     pub async fn read_content_ref(
         &self,
         namespace_id: &NamespaceId,

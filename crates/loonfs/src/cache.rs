@@ -357,8 +357,7 @@ impl ReadCore {
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
-    /// Opens a pinned read of the latest metadata view and records it in the
-    /// runtime cache counters.
+    /// Pins the latest metadata view and records the read in cache metrics.
     pub(crate) async fn pinned_metadata_read(
         &self,
         namespace_id: &NamespaceId,
