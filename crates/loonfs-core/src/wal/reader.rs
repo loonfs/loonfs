@@ -16,6 +16,38 @@ use std::collections::{HashMap, HashSet};
 /// this is what decides how many round trips it costs.
 pub(super) const RECENT_SEGMENT_PREFETCH_CONCURRENCY: usize = 32;
 
+impl WalChainLoadRequest<'_> {
+    fn tip_and_stop(&self) -> Result<Option<(WalSegmentPointer, ChangeSeq)>, WalChainLoadError> {
+        if self.chain_base_seq > self.head_seq {
+            return Err(WalChainLoadError::InvalidSeqRange {
+                chain_base_seq: self.chain_base_seq,
+                head_seq: self.head_seq,
+            });
+        }
+        if self.chain_base_seq == self.head_seq {
+            return Ok(None);
+        }
+        let tip = self
+            .visible_tip
+            .clone()
+            .ok_or(WalChainLoadError::MissingVisibleTip {
+                namespace_id: self.namespace_id.clone(),
+                seq: self.head_seq,
+            })?;
+        if tip.end_seq != self.head_seq {
+            return Err(WalChainLoadError::TipEndSeqMismatch {
+                expected: self.head_seq,
+                actual: tip.end_seq,
+            });
+        }
+        let stop_after_seq = self.stop_after_seq.unwrap_or(self.chain_base_seq);
+        if tip.end_seq <= stop_after_seq {
+            return Ok(None);
+        }
+        Ok(Some((tip, stop_after_seq)))
+    }
+}
+
 /// The hinted segment keys that cover the replay gap, newest first.
 fn hints_in_gap(
     namespace_id: &NamespaceId,
@@ -158,35 +190,13 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
     request: &WalChainLoadRequest<'_>,
     max_segment_fetches: Option<usize>,
 ) -> Result<WalkedChain, WalChainLoadError> {
-    if request.chain_base_seq > request.head_seq {
-        return Err(WalChainLoadError::InvalidSeqRange {
-            chain_base_seq: request.chain_base_seq,
-            head_seq: request.head_seq,
-        });
-    }
-    if request.chain_base_seq == request.head_seq {
+    let Some((mut pointer, stop_after_seq)) = request.tip_and_stop()? else {
         return Ok(WalkedChain {
             segments: Vec::new(),
             fetches: 0,
             limit_reached: false,
         });
-    }
-
-    let mut pointer = request
-        .visible_tip
-        .clone()
-        .ok_or(WalChainLoadError::MissingVisibleTip {
-            namespace_id: request.namespace_id.clone(),
-            seq: request.head_seq,
-        })?;
-    if pointer.end_seq != request.head_seq {
-        return Err(WalChainLoadError::TipEndSeqMismatch {
-            expected: request.head_seq,
-            actual: pointer.end_seq,
-        });
-    }
-
-    let stop_after_seq = request.stop_after_seq.unwrap_or(request.chain_base_seq);
+    };
     let in_gap = hints_in_gap(
         request.namespace_id,
         &pointer,
@@ -338,34 +348,11 @@ fn validate_pointer_matches_envelope(
     fields(phase = "count_wal_tail_segments", key_class = "wal_segment")
 )]
 pub(crate) fn count_visible_wal_tail_segments(
-    request: WalChainLoadRequest<'_>,
+    request: &WalChainLoadRequest<'_>,
 ) -> Result<u64, WalChainLoadError> {
-    if request.chain_base_seq > request.head_seq {
-        return Err(WalChainLoadError::InvalidSeqRange {
-            chain_base_seq: request.chain_base_seq,
-            head_seq: request.head_seq,
-        });
-    }
-    if request.chain_base_seq == request.head_seq {
+    let Some((tip, stop_after_seq)) = request.tip_and_stop()? else {
         return Ok(0);
-    }
-    let tip = request
-        .visible_tip
-        .clone()
-        .ok_or(WalChainLoadError::MissingVisibleTip {
-            namespace_id: request.namespace_id.clone(),
-            seq: request.head_seq,
-        })?;
-    if tip.end_seq != request.head_seq {
-        return Err(WalChainLoadError::TipEndSeqMismatch {
-            expected: request.head_seq,
-            actual: tip.end_seq,
-        });
-    }
-    let stop_after_seq = request.stop_after_seq.unwrap_or(request.chain_base_seq);
-    if tip.end_seq <= stop_after_seq {
-        return Ok(0);
-    }
+    };
 
     let mut count: u64 = 1;
     // Oldest pointer counted so far: the run has to keep descending from

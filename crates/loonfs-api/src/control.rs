@@ -994,6 +994,15 @@ where
     )
 }
 
+/// Encodes state in a control-object envelope.
+pub fn encode_control_state<T: Serialize>(
+    kind: ControlObjectKind,
+    state: &T,
+) -> Result<Vec<u8>, EnvelopeCodecError> {
+    let envelope = ControlObjectEnvelope::from_state(kind, state)?;
+    encode_control_object(&envelope)
+}
+
 /// Decodes and verifies a durable JSON control object of `expected_kind`.
 ///
 /// Decoding fails for invalid JSON, an unknown or mismatched kind, an

@@ -187,7 +187,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
             } => {
                 let source_binding =
                     resolve_current_binding_for_mutation(metadata_state, *inode_id).await?;
-                let inode = metadata_state.inode_at_seq(*inode_id).await?.ok_or(
+                let inode = metadata_state.view().inode_at_seq(*inode_id).await?.ok_or(
                     CommitValidationError::RenameInodeMissing {
                         inode_id: *inode_id,
                     },
@@ -421,7 +421,12 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
 ) -> Result<SubtreeTombstoneRecord, CoreError> {
     // A child of a deleted directory is covered by its ancestor's tombstone,
     // not its own — recover the directory, not the child.
-    if metadata_state.inode_at_seq(inode_id).await?.is_none() {
+    if metadata_state
+        .view()
+        .inode_at_seq(inode_id)
+        .await?
+        .is_none()
+    {
         return Err(CommitValidationError::UndeleteInodeMissing { inode_id }.into());
     }
     // Only a deletion from a strictly earlier commit is recoverable.
@@ -434,7 +439,11 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let Some(active) = metadata_state.active_subtree_tombstone(inode_id).await? else {
+    let Some(active) = metadata_state
+        .view()
+        .active_subtree_tombstone(inode_id)
+        .await?
+    else {
         return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
     };
     // Recovery is scoped to the deletion the caller observed, never whatever
@@ -456,7 +465,12 @@ async fn validate_attributes_target_visible<S: ObjectStore + ?Sized>(
     metadata_state: &PublishValidationView<'_, S>,
     inode_id: InodeId,
 ) -> Result<(), CoreError> {
-    if metadata_state.visible_inode(inode_id).await?.is_none() {
+    if metadata_state
+        .view()
+        .visible_inode(inode_id)
+        .await?
+        .is_none()
+    {
         return Err(CommitValidationError::UpdateAttributesInodeMissing { inode_id }.into());
     }
 
@@ -474,7 +488,10 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     expected: AttributeRevisionNo,
 ) -> Result<Attributes, CoreError> {
-    let (actual, attributes) = metadata_state.attributes_at_seq(inode_id).await?;
+    let (actual, attributes) = metadata_state
+        .view()
+        .attributes_at_visible_seq(inode_id)
+        .await?;
     if actual != expected {
         return Err(
             CommitValidationError::UpdateAttributesBaseRevisionMismatch {
@@ -498,6 +515,7 @@ async fn validate_inode_kind<S: ObjectStore + ?Sized>(
     wrong_kind: impl FnOnce(InodeKind) -> CommitValidationError,
 ) -> Result<InodeRecord, CoreError> {
     let inode = metadata_state
+        .view()
         .inode_at_seq(inode_id)
         .await?
         .ok_or_else(missing)?;
@@ -515,7 +533,11 @@ async fn validate_not_covered_by_tombstone<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     covered: impl FnOnce(&SubtreeTombstoneRecord) -> CommitValidationError,
 ) -> Result<(), CoreError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
+    if let Some(tombstone) = metadata_state
+        .view()
+        .covering_subtree_tombstone(inode_id)
+        .await?
+    {
         return Err(covered(&tombstone).into());
     }
 
@@ -576,6 +598,7 @@ async fn validate_name_absent<S: ObjectStore + ?Sized>(
 
     let name_key = NameKey::for_display_name(display_name);
     if let Some(existing) = metadata_state
+        .view()
         .visible_child(parent_inode_id, &name_key)
         .await?
     {
@@ -646,6 +669,7 @@ async fn validate_child_name_absent_precondition<S: ObjectStore + ?Sized>(
     validate_name_precondition_parent(metadata_state, parent_inode_id).await?;
 
     if let Some(existing) = metadata_state
+        .view()
         .visible_child(parent_inode_id, name_key)
         .await?
     {
@@ -671,6 +695,7 @@ async fn validate_binding_is_precondition<S: ObjectStore + ?Sized>(
     validate_name_precondition_parent(metadata_state, parent_inode_id).await?;
 
     let Some(existing) = metadata_state
+        .view()
         .visible_child(parent_inode_id, name_key)
         .await?
     else {
@@ -726,6 +751,7 @@ async fn validate_directory_empty_precondition<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
+        .view()
         .visible_inode(inode_id)
         .await?
         .ok_or(CommitValidationError::DirectoryEmptyPreconditionInodeMissing { inode_id })?;
@@ -739,7 +765,7 @@ async fn validate_directory_empty_precondition<S: ObjectStore + ?Sized>(
         );
     }
 
-    if metadata_state.has_visible_children(inode_id).await? {
+    if metadata_state.view().has_visible_children(inode_id).await? {
         return Err(CommitValidationError::DirectoryEmptyPreconditionNotEmpty { inode_id }.into());
     }
 
@@ -751,6 +777,7 @@ async fn resolve_current_binding_for_mutation<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
 ) -> Result<ResolvedBinding, CoreError> {
     let binding = metadata_state
+        .view()
         .current_parent_binding_for_child(inode_id)
         .await?
         .ok_or(CommitValidationError::SourceBindingMissing { inode_id })?;
@@ -777,6 +804,7 @@ async fn validate_file_base_revision_is<S: ObjectStore + ?Sized>(
     validate_inode_kind(metadata_state, inode_id, InodeKind::File, missing, not_file).await?;
 
     let actual_revision_no = metadata_state
+        .view()
         .latest_revision_record(inode_id)
         .await?
         .map(|revision| revision.revision_no);
@@ -841,6 +869,7 @@ async fn validate_restore_source_revision<S: ObjectStore + ?Sized>(
     source_revision_no: RevisionNo,
 ) -> Result<RevisionRecord, CoreError> {
     Ok(metadata_state
+        .view()
         .revision_at_head(inode_id, source_revision_no)
         .await?
         .ok_or(
@@ -860,6 +889,7 @@ async fn validate_rename_does_not_cycle<S: ObjectStore + ?Sized>(
         return Ok(());
     }
     if metadata_state
+        .view()
         .would_create_directory_cycle(inode.inode_id, new_parent_inode_id)
         .await?
     {

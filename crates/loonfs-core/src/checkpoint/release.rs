@@ -11,7 +11,7 @@
 use super::record::{read_checkpoint_record, release_checkpoint_record};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
+use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::{CheckpointId, NamespaceId, ReleaseCheckpointResponse};
 use loonfs_objectstore::ObjectStore;
 
@@ -38,15 +38,6 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
             "checkpoint `{checkpoint_id}` is owned by fork target `{target_namespace_id}`; \
              it is released by deleting that namespace, not by this operation"
         )));
-    }
-    if matches!(
-        loaded.state.state,
-        CheckpointRecordLifecycle::Released { .. }
-    ) {
-        return Ok(ReleaseCheckpointResponse {
-            namespace_id: namespace_id.clone(),
-            checkpoint_id: checkpoint_id.clone(),
-        });
     }
     release_checkpoint_record(store, namespace_id, checkpoint_id, context.now_ms).await?;
     Ok(ReleaseCheckpointResponse {

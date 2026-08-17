@@ -23,8 +23,6 @@ pub enum WalBuildError {
         record: NamespaceId,
         segment: NamespaceId,
     },
-    #[error("WAL build base head seq mismatch: request `{request}`, plan `{plan}`")]
-    BaseHeadSeqMismatch { request: ChangeSeq, plan: ChangeSeq },
     #[error("non-contiguous WAL seq: expected `{expected}`, actual `{actual}`")]
     NonContiguousSeq {
         expected: ChangeSeq,

@@ -2,7 +2,7 @@
 //! change feed, and the whole-namespace reads a consumer that derives its
 //! own data from the filesystem walks.
 
-use super::core::{default_page_limit, file_revisions_page_response};
+use super::core::{default_page_limit, encode_next_cursor, file_revisions_page_response};
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::FsReader;
 use crate::Result;
@@ -14,8 +14,7 @@ use crate::{
     RevisionNo, RuntimeError, SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::{
-    encode_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageRequest,
-    PaginationPolicy,
+    AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageRequest, PaginationPolicy,
 };
 
 impl FsReader {
@@ -144,11 +143,7 @@ impl FsReader {
         let (mut response, next_cursor) = self
             .list_path_entries_page_typed(namespace_id, absolute_path, request, options)
             .await?;
-        response.next_cursor = next_cursor
-            .as_ref()
-            .map(encode_cursor)
-            .transpose()
-            .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+        response.next_cursor = encode_next_cursor(next_cursor.as_ref())?;
         Ok(response)
     }
 
@@ -383,12 +378,7 @@ impl FsReader {
             .inner
             .cache_stats
             .record_latest_metadata_view_read();
-        let next_cursor = page
-            .next_cursor
-            .as_ref()
-            .map(encode_cursor)
-            .transpose()
-            .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+        let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
         Ok(loonfs_api::ListTrashResponse {
             namespace_id: namespace_id.clone(),
             head_seq: read_context.head.seq,

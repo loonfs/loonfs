@@ -2,7 +2,7 @@
 
 use super::error::ApiResponseError;
 use super::handlers_filesystem::{
-    buffered_download_response, decode_file_revisions_page_cursor, parse_include_attributes,
+    buffered_download_response, decode_optional_cursor, parse_include_attributes,
     parse_revision_no, resolve_page_limit, PageQuery,
 };
 use super::{authorize, AppPath, AppQuery, AppState, NamespaceIdPath};
@@ -132,7 +132,7 @@ pub(super) async fn list_file_revisions_by_inode(
             inode_id,
             PageRequest::<FileRevisionsPageCursor> {
                 limit: resolve_page_limit(query.limit)?,
-                cursor: decode_file_revisions_page_cursor(query.cursor)?,
+                cursor: decode_optional_cursor(query.cursor)?,
             },
         )
         .await

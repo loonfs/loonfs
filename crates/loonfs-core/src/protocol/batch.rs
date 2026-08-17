@@ -80,20 +80,17 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     if view.head.namespace_id != *namespace_id {
-        return PublishBatchAgainstViewResult::unchanged(
-            (0..candidates.len())
-                .map(|_| {
-                    Err(CoreError::Internal(
-                        "publish view namespace mismatch".to_owned(),
-                    ))
-                })
-                .collect(),
-        );
+        return PublishBatchAgainstViewResult::unchanged(vec![
+            Err(CoreError::Internal(
+                "publish view namespace mismatch".to_owned()
+            ));
+            candidates.len()
+        ]);
     }
-    let mut outcomes: Vec<Option<Result<ApiCommitResponse>>> =
-        (0..candidates.len()).map(|_| None).collect();
+    let mut outcomes: Vec<Option<Result<ApiCommitResponse>>> = vec![None; candidates.len()];
     let mut session = PublishPlanningSession::new(&view.head);
-    let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
+    let mut accepted_indexes = Vec::new();
+    let mut accepted_commits = Vec::new();
     let mut dedup = BatchDedup::default();
 
     let prepare_span = tracing::debug_span!(
@@ -172,41 +169,38 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                         .entered();
                 session.apply_accepted_commit(&preview, &materialized.commit);
             }
-            accepted.push((index, materialized));
+            accepted_indexes.push(index);
+            accepted_commits.push(materialized);
         }
     }
     .instrument(prepare_span.clone())
     .await;
     prepare_span.record(
         "accepted_count",
-        u64::try_from(accepted.len()).unwrap_or(u64::MAX),
+        u64::try_from(accepted_commits.len()).unwrap_or(u64::MAX),
     );
     drop(prepare_span);
 
-    if accepted.is_empty() {
+    if accepted_commits.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(dedup.finish(outcomes));
     }
-    let records = accepted
-        .iter()
-        .map(|(_, record)| record.clone())
-        .collect::<Vec<_>>();
-    let accepted_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+    let accepted_count = u64::try_from(accepted_commits.len()).unwrap_or(u64::MAX);
     let put_started_ms = timer.monotonic_now_ms();
     let wal = match write_batch_wal_segment(
         store,
         namespace_id,
         view,
-        &records,
+        &accepted_commits,
         batch_size,
         accepted_count,
     )
     .await
     {
         Ok(wal) => wal,
-        Err(error) => return abort_batch(outcomes, &dedup, &accepted, &error),
+        Err(error) => return abort_batch(outcomes, &dedup, &accepted_indexes, &error),
     };
 
-    let last_plan = &records
+    let last_plan = &accepted_commits
         .last()
         .expect("accepted records should be non-empty")
         .commit;
@@ -215,7 +209,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         Ok(value) => value,
         Err(error) => {
             let error = CoreError::Internal(format!("head publish preparation failed: {error}"));
-            return abort_batch(outcomes, &dedup, &accepted, &error);
+            return abort_batch(outcomes, &dedup, &accepted_indexes, &error);
         }
     };
     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(put_started_ms);
@@ -224,7 +218,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             elapsed_ms,
             budget_ms: WAL_PUBLISH_BUDGET_MS,
         });
-        return abort_batch(outcomes, &dedup, &accepted, &error);
+        return abort_batch(outcomes, &dedup, &accepted_indexes, &error);
     }
     let head_etag = match cas_batch_head(
         store,
@@ -236,21 +230,25 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     .await
     {
         Ok(metadata) => metadata.etag,
-        Err(error) => return abort_batch(outcomes, &dedup, &accepted, &error),
+        Err(error) => return abort_batch(outcomes, &dedup, &accepted_indexes, &error),
     };
 
-    let records = wal.envelope.payload.records.clone();
-    for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
+    let wal_records = wal.envelope.payload.records.clone();
+    for (accepted_index, (outcome_index, record)) in accepted_indexes
+        .into_iter()
+        .zip(accepted_commits)
+        .enumerate()
+    {
         outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
             namespace_id: namespace_id.clone(),
             commit_id: record.commit.commit_id,
-            committed_seq: records[accepted_index].seq,
+            committed_seq: wal_records[accepted_index].seq,
         }));
     }
     PublishBatchAgainstViewResult {
         results: dedup.finish(outcomes),
         effect: PublishViewEffect::Advanced {
-            records,
+            records: wal_records,
             head: head_publish.resulting_head,
             head_etag,
         },
@@ -264,10 +262,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
 fn abort_batch(
     mut outcomes: Vec<Option<Result<ApiCommitResponse>>>,
     dedup: &BatchDedup,
-    accepted: &[(usize, MaterializedCommit)],
+    accepted_indexes: &[usize],
     error: &CoreError,
 ) -> PublishBatchAgainstViewResult {
-    fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, accepted, error);
+    fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, accepted_indexes, error);
     PublishBatchAgainstViewResult {
         results: dedup.finish(outcomes),
         effect: PublishViewEffect::Invalidated,
@@ -378,14 +376,14 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
 /// their primary's final outcome.
 fn fail_outcomes_contingent_on_unpublished_batch(
     outcomes: &mut [Option<Result<ApiCommitResponse>>],
-    accepted: &[(usize, MaterializedCommit)],
+    accepted_indexes: &[usize],
     error: &CoreError,
 ) {
-    let Some(first_accepted_index) = accepted.first().map(|(index, _)| *index) else {
+    let Some(first_accepted_index) = accepted_indexes.first().copied() else {
         return;
     };
-    for (index, _) in accepted {
-        outcomes[*index] = Some(Err(error.clone()));
+    for &index in accepted_indexes {
+        outcomes[index] = Some(Err(error.clone()));
     }
     for outcome in outcomes.iter_mut().skip(first_accepted_index + 1) {
         if matches!(outcome, Some(Err(_))) {

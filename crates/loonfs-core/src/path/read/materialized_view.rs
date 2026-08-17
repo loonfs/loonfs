@@ -489,22 +489,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .session()
             .active_deletions_page(start_after, request.limit.limit_plus_one())
             .await?;
-        let has_more = deletions.len() > request.limit.as_usize();
-        if has_more {
-            deletions.truncate(request.limit.as_usize());
-        }
-        let next_cursor = if has_more {
-            let last = deletions
-                .last()
-                .expect("non-zero page limit with more entries must return an item");
-            Some(TrashPageCursor {
+        let next_cursor = request
+            .limit
+            .finish_page(&mut deletions, |last| TrashPageCursor {
                 head_seq: self.head.seq,
                 last_deleted_at_seq: last.deleted_at_seq,
                 last_root_inode_id: last.root_inode_id,
-            })
-        } else {
-            None
-        };
+            });
         // The entry keeps parent, key, and name as separate optional fields,
         // so it projects all three out of the one binding the deletion
         // recorded.
@@ -566,24 +557,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .session()
             .revisions_for_inode_page_desc(inode_id, start_after, request.limit.limit_plus_one())
             .await?;
-        let has_more = revision_records.len() > request.limit.as_usize();
-        if has_more {
-            revision_records.truncate(request.limit.as_usize());
-        }
-        let next_cursor = if has_more {
-            let last = revision_records
-                .last()
-                .expect("non-zero page limit with more revisions must return an item");
-            Some(FileRevisionsPageCursor {
-                head_seq: self.head.seq,
-                inode_id,
-                last_revision_no: last.revision_no,
-                last_committed_seq: last.committed_seq,
-                last_revision_delta_index: last.revision_delta_index,
-            })
-        } else {
-            None
-        };
+        let next_cursor =
+            request
+                .limit
+                .finish_page(&mut revision_records, |last| FileRevisionsPageCursor {
+                    head_seq: self.head.seq,
+                    inode_id,
+                    last_revision_no: last.revision_no,
+                    last_committed_seq: last.committed_seq,
+                    last_revision_delta_index: last.revision_delta_index,
+                });
         let revisions = revision_records
             .into_iter()
             .map(|revision| FileRevision {
@@ -718,23 +701,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .instrument(select_span.clone())
             .await?;
         select_span.record("list_page_children_returned", children.len() as u64);
-        let has_more = children.len() > request.limit.as_usize();
-        if has_more {
-            children.truncate(request.limit.as_usize());
-        }
-
-        let next_cursor = if has_more {
-            let last = children
-                .last()
-                .expect("non-zero page limit with more children must return an item");
-            Some(DirectoryPageCursor {
+        let next_cursor = request
+            .limit
+            .finish_page(&mut children, |last| DirectoryPageCursor {
                 head_seq: self.head.seq,
                 directory_inode_id: resolved.inode_id,
                 last_name_key: last.binding.name_key.clone(),
-            })
-        } else {
-            None
-        };
+            });
 
         let build_span = tracing::debug_span!(
             "loonfs.phase",

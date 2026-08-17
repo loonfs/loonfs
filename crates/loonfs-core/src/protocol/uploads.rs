@@ -37,8 +37,8 @@ use loonfs_api::v0::{
     UploadPartChecksumClaim, UploadSessionResponse, UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, NamespaceState, ProxiedStaging,
-    UploadSessionEnvelope, UploadSessionLifecycle, UploadSessionState, UploadSessionTransport,
+    encode_control_state, ControlObjectKind, NamespaceState, ProxiedStaging,
+    UploadSessionLifecycle, UploadSessionState, UploadSessionTransport,
 };
 use loonfs_api::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId,
@@ -472,14 +472,14 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
             expires_at_ms: context.now_ms.saturating_add(UPLOAD_SESSION_LEASE_MS),
         },
     };
-    let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
-        .map_err(|err| {
-            CoreError::Internal(format!("failed to build upload session envelope: {err}"))
-        })?;
-    let encoded = encode_control_object(&envelope).map_err(|err| {
-        CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
-    })?;
     let object_key = upload_session(namespace_id, &upload_id);
+    let encoded =
+        encode_control_state(ControlObjectKind::UploadSession, &state).map_err(|error| {
+            CoreError::Codec {
+                object_key: object_key.clone(),
+                message: error.to_string(),
+            }
+        })?;
     // An upload session is mutable control state, so its first lifecycle state is a conditional create.
     store
         .put_if_absent(&object_key, Bytes::from(encoded))
@@ -644,6 +644,28 @@ fn transport_name(transport: &UploadSessionTransport) -> &'static str {
     }
 }
 
+async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+) -> Result<(ContentStoreId, UploadSessionState)> {
+    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
+    let session = read_upload_session_state(store, namespace_id, upload_id).await?;
+    if let Some(error) = terminal_session_error(&session.state, upload_id.clone()) {
+        return Err(error);
+    }
+    if !matches!(
+        session.transport,
+        UploadSessionTransport::ServiceProxied { .. }
+    ) {
+        return Err(CoreError::InvalidUploadContent(format!(
+            "{} sessions must be completed after using the presigned URLs",
+            transport_name(&session.transport)
+        )));
+    }
+    Ok((content_store_id, session))
+}
+
 /// Stores bytes in a service-proxied upload session.
 ///
 /// Retries to the same session use the same object identity. Matching bytes
@@ -655,20 +677,8 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     bytes: &[u8],
 ) -> Result<UploadContentResponse> {
-    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
-    if let Some(error) = terminal_session_error(&loaded.state, upload_id.clone()) {
-        return Err(error);
-    }
-    if !matches!(
-        loaded.transport,
-        UploadSessionTransport::ServiceProxied { .. }
-    ) {
-        return Err(CoreError::InvalidUploadContent(format!(
-            "{} sessions must be completed after using the presigned URLs",
-            transport_name(&loaded.transport)
-        )));
-    }
+    let (content_store_id, loaded) =
+        read_open_proxied_session(store, namespace_id, upload_id).await?;
 
     // The claim is what makes the write exclusive, so it is taken before any
     // byte is written and released by the same swap that records the result.
@@ -785,20 +795,8 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     body: ByteStream,
 ) -> Result<UploadContentResponse> {
-    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
-    if let Some(error) = terminal_session_error(&loaded.state, upload_id.clone()) {
-        return Err(error);
-    }
-    if !matches!(
-        loaded.transport,
-        UploadSessionTransport::ServiceProxied { .. }
-    ) {
-        return Err(CoreError::InvalidUploadContent(format!(
-            "{} sessions must be completed after using the presigned URLs",
-            transport_name(&loaded.transport)
-        )));
-    }
+    let (content_store_id, loaded) =
+        read_open_proxied_session(store, namespace_id, upload_id).await?;
 
     // A session that has already staged content must not have its object
     // rewritten while the answer is being worked out. Reading the body
@@ -1148,6 +1146,7 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
             let upload_id = upload_id.to_owned();
             async move {
                 let mode = upload_mode(&state.transport);
+                let abandoned = AbandonedUpload::of(&state);
                 let aborted = |aborted_at_ms| UploadSessionResponse {
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.clone(),
@@ -1155,13 +1154,9 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
                     status: UploadSessionStatus::Aborted { aborted_at_ms },
                 };
                 match state.state {
-                    UploadSessionLifecycle::Aborted { aborted_at_ms } => {
-                        let abandoned = AbandonedUpload::of(&state);
-                        Ok(UploadSessionUpdate::Noop((
-                            aborted(aborted_at_ms),
-                            abandoned,
-                        )))
-                    }
+                    UploadSessionLifecycle::Aborted { aborted_at_ms } => Ok(
+                        UploadSessionUpdate::Noop((aborted(aborted_at_ms), abandoned)),
+                    ),
                     // Completion is final in the other direction: the
                     // content may already be published, so an abort cannot
                     // quietly succeed over it.
@@ -1169,7 +1164,6 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
                         Err(CoreError::UploadAlreadyCompleted { upload_id })
                     }
                     UploadSessionLifecycle::Open { .. } => {
-                        let abandoned = AbandonedUpload::of(&state);
                         state.state = UploadSessionLifecycle::Aborted {
                             aborted_at_ms: now_ms,
                         };
@@ -1258,11 +1252,7 @@ pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
             completed_at_ms,
             content_ref,
         } => (
-            UploadSessionStatus::Completed {
-                completed_at_ms,
-                content_ref: content_ref.clone(),
-                content_token: None,
-            },
+            completed_status(&content_ref, completed_at_ms),
             receipt_within_window(
                 namespace_id,
                 content_store_id,
@@ -1311,11 +1301,7 @@ fn completed_upload(
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             mode,
-            status: UploadSessionStatus::Completed {
-                completed_at_ms,
-                content_ref: content_ref.clone(),
-                content_token: None,
-            },
+            status: completed_status(content_ref, completed_at_ms),
         },
         prepared: PreparedContent::from_admission(ContentAdmission::for_durable_content_write(
             content_store_id.clone(),
@@ -1328,6 +1314,14 @@ fn completed_upload(
             completed_at_ms,
             now_ms,
         ),
+    }
+}
+
+fn completed_status(content_ref: &ContentRef, completed_at_ms: u64) -> UploadSessionStatus {
+    UploadSessionStatus::Completed {
+        completed_at_ms,
+        content_ref: content_ref.clone(),
+        content_token: None,
     }
 }
 

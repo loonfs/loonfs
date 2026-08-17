@@ -328,25 +328,10 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndexStatusResponse, BackendError> {
-        let root = self
-            .grep_worker()
-            .root_state(namespace_id)
+        self.grep_worker()
+            .index_status(namespace_id)
             .await
-            .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?;
-        let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
-            Some(root) => (
-                GrepIndexLifecycle::from(root.lifecycle()),
-                root.index().next_run_ordinal,
-                root.index().reorganize.is_some(),
-            ),
-            None => (GrepIndexLifecycle::Disabled, 0, false),
-        };
-        Ok(GrepIndexStatusResponse {
-            namespace_id: namespace_id.clone(),
-            lifecycle,
-            next_run_ordinal,
-            reorganize_pending,
-        })
+            .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
     }
 
     pub(super) async fn gc_grep_index(

@@ -44,6 +44,15 @@ impl EffectiveLimit {
     pub fn limit_plus_one(self) -> usize {
         self.as_usize().saturating_add(1)
     }
+
+    /// Truncates an overfilled page and builds a cursor from its last row.
+    pub fn finish_page<R, C>(self, rows: &mut Vec<R>, cursor: impl FnOnce(&R) -> C) -> Option<C> {
+        if rows.len() <= self.as_usize() {
+            return None;
+        }
+        rows.truncate(self.as_usize());
+        rows.last().map(cursor)
+    }
 }
 
 /// Fixed pagination contract for endpoints with potentially unbounded results.

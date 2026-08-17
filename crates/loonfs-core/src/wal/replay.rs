@@ -152,29 +152,25 @@ pub(super) fn validate_wal_segment_for_replay(
     Ok(())
 }
 
-fn replay_next_inode_id(current_next_inode_id: InodeId, deltas: &[WalDelta]) -> InodeId {
-    deltas
-        .iter()
-        .fold(current_next_inode_id, |next_inode_id, delta| match delta {
-            WalDelta::CreateInode { inode_id, .. } => {
-                InodeId(next_inode_id.0.max(inode_id.0.saturating_add(1)))
-            }
-            // Every other delta names an inode that already exists, so none
-            // of them moves the allocation counter.
-            WalDelta::BindDirentry { .. }
-            | WalDelta::UnbindDirentry { .. }
-            | WalDelta::AppendFileRevision { .. }
-            | WalDelta::TombstoneSubtree { .. }
-            | WalDelta::RevokeSubtreeTombstone { .. }
-            | WalDelta::AppendAttributesRevision { .. } => next_inode_id,
-        })
-}
-
 fn replay_next_inode_id_from_commit_deltas(
     current_next_inode_id: InodeId,
     deltas: &[WalCommitDelta],
 ) -> InodeId {
-    deltas.iter().fold(current_next_inode_id, |next, delta| {
-        replay_next_inode_id(next, std::slice::from_ref(&delta.delta))
-    })
+    deltas
+        .iter()
+        .fold(current_next_inode_id, |next_inode_id, delta| {
+            match &delta.delta {
+                WalDelta::CreateInode { inode_id, .. } => {
+                    InodeId(next_inode_id.0.max(inode_id.0.saturating_add(1)))
+                }
+                // Other delta types reference existing inodes and do not
+                // allocate IDs.
+                WalDelta::BindDirentry { .. }
+                | WalDelta::UnbindDirentry { .. }
+                | WalDelta::AppendFileRevision { .. }
+                | WalDelta::TombstoneSubtree { .. }
+                | WalDelta::RevokeSubtreeTombstone { .. }
+                | WalDelta::AppendAttributesRevision { .. } => next_inode_id,
+            }
+        })
 }

@@ -7,8 +7,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use loonfs_api::v0::{
-    GrepGcRequest, GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse, GrepRequest,
-    GrepResponse,
+    GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, GrepRequest, GrepResponse,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -183,29 +182,13 @@ async fn read_grep_index_status(
     state: &AppState,
     namespace_id: &NamespaceId,
 ) -> Result<GrepIndexStatusResponse, ApiResponseError> {
-    let root = state
+    state
         .grep_worker
         .as_ref()
         .expect("grep routes should carry a grep worker")
-        .root_state(namespace_id)
+        .index_status(namespace_id)
         .await
-        .map_err(|error| map_grep_error(namespace_id, error))?;
-    let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
-        Some(root) => (
-            GrepIndexLifecycle::from(root.lifecycle()),
-            root.index().next_run_ordinal,
-            root.index().reorganize.is_some(),
-        ),
-        // No root was ever published, which is the same answer as a root
-        // that was disabled: nothing is being maintained here.
-        None => (GrepIndexLifecycle::Disabled, 0, false),
-    };
-    Ok(GrepIndexStatusResponse {
-        namespace_id: namespace_id.clone(),
-        lifecycle,
-        next_run_ordinal,
-        reorganize_pending,
-    })
+        .map_err(|error| map_grep_error(namespace_id, error))
 }
 
 #[cfg_attr(

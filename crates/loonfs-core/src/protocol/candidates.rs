@@ -173,10 +173,6 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
 fn validate_new_primary(candidate: &CommitCandidate) -> Result<()> {
     // For new primaries, request limits precede rejected content preparation.
     candidate.validate_request_limits()?;
-    reject_failed_content_preparation(candidate)
-}
-
-fn reject_failed_content_preparation(candidate: &CommitCandidate) -> Result<()> {
     match candidate.content_preparation() {
         ContentPreparation::Ready(_) => Ok(()),
         ContentPreparation::Rejected(error) => Err(error.clone().into()),

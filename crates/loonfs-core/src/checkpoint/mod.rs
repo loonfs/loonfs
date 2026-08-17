@@ -88,10 +88,11 @@ pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{Readahead, VerifiedMetadataTables};
 pub(crate) use self::streaming_compaction::run_metadata_compaction_job;
 
-fn checkpoint_owner_summary(
-    owner: loonfs_api::wire::control::CheckpointOwner,
-) -> loonfs_api::CheckpointOwnerSummary {
-    match owner {
+fn checkpoint_summary(
+    record: loonfs_api::wire::control::CheckpointRecordState,
+) -> loonfs_api::Checkpoint {
+    let expires_at_ms = record.owner.expires_at_ms();
+    let owner = match record.owner {
         loonfs_api::wire::control::CheckpointOwner::User { name, .. } => {
             loonfs_api::CheckpointOwnerSummary::User { name }
         }
@@ -101,5 +102,13 @@ fn checkpoint_owner_summary(
         } => loonfs_api::CheckpointOwnerSummary::Fork {
             target_namespace_id,
         },
+    };
+    loonfs_api::Checkpoint {
+        checkpoint_id: record.checkpoint_id,
+        owner,
+        created_at_ms: record.created_at_ms,
+        expires_at_ms,
+        checkpoint_seq: record.manifest_head_seq,
+        manifest_id: record.manifest_id,
     }
 }

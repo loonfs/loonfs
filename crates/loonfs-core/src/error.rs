@@ -192,6 +192,8 @@ pub enum CoreError {
         message: String,
         class: StoreFailureClass,
     },
+    #[error("failed to encode `{object_key}`: {message}")]
+    Codec { object_key: String, message: String },
     /// Non-store internal failure (codec, overflow, invariant breach). Same
     /// wire code as [`ErrorCode::ServerError`]; the message is the detail.
     #[error("internal error: {0}")]
@@ -369,7 +371,9 @@ impl CoreError {
             CoreError::DurableContent(error) => classify_durable_content_error(error),
             CoreError::WriterEpoch(error) => classify_writer_epoch_acquire_error(error),
             CoreError::CommitValidation(error) => classify_commit_validation_error(error),
-            CoreError::WalBuild(_) | CoreError::Internal(_) => ErrorCode::ServerError,
+            CoreError::WalBuild(_) | CoreError::Codec { .. } | CoreError::Internal(_) => {
+                ErrorCode::ServerError
+            }
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
                 classify_store_failure(*class)
             }

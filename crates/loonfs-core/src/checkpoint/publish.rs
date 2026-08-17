@@ -7,9 +7,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::control::{read_metadata_root_object, read_metadata_root_object_if_present};
 use bytes::Bytes;
-use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, MetadataRootEnvelope, MetadataRootState,
-};
+use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, MetadataRootState};
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -167,14 +165,13 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             manifest_payload_checksum: manifest.payload_checksum.clone(),
             updated_at_ms,
         };
-        let envelope =
-            MetadataRootEnvelope::from_state(ControlObjectKind::MetadataRoot, next.clone())
-                .map_err(|err| {
-                    CoreError::Internal(format!("failed to build metadata root envelope: {err}"))
-                })?;
-        let encoded = encode_control_object(&envelope).map_err(|err| {
-            CoreError::Internal(format!("failed to encode metadata root object: {err}"))
-        })?;
+        let encoded =
+            encode_control_state(ControlObjectKind::MetadataRoot, &next).map_err(|error| {
+                CoreError::Codec {
+                    object_key: loaded.object_key.clone(),
+                    message: error.to_string(),
+                }
+            })?;
         match store
             .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
             .await
@@ -220,13 +217,13 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
         manifest_payload_checksum: manifest.payload_checksum.clone(),
         updated_at_ms,
     };
-    let envelope = MetadataRootEnvelope::from_state(ControlObjectKind::MetadataRoot, next.clone())
-        .map_err(|err| {
-            CoreError::Internal(format!("failed to build metadata root envelope: {err}"))
+    let encoded =
+        encode_control_state(ControlObjectKind::MetadataRoot, &next).map_err(|error| {
+            CoreError::Codec {
+                object_key: object_key.clone(),
+                message: error.to_string(),
+            }
         })?;
-    let encoded = encode_control_object(&envelope).map_err(|err| {
-        CoreError::Internal(format!("failed to encode metadata root object: {err}"))
-    })?;
     // The metadata root is mutable control state, so its first publication is a conditional create.
     match store.put_if_absent(&object_key, Bytes::from(encoded)).await {
         Ok(_) => Ok(Some(next)),

@@ -27,6 +27,7 @@ use loonfs::{
     FsReader, PassBudget, RuntimeError, StoreFailureClass, DEFAULT_GC_MAX_OBJECTS,
     GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
 };
+use loonfs_api::v0::{GrepIndexLifecycle, GrepIndexStatusResponse};
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
@@ -95,16 +96,12 @@ pub struct GramIndexBuildPolicy {
 impl Default for GramIndexBuildPolicy {
     fn default() -> Self {
         Self {
-            max_files_per_step: NonZeroUsize::new(256)
-                .expect("default file budget should be nonzero"),
-            max_content_bytes_per_step: NonZeroU64::new(64 * 1024 * 1024)
-                .expect("default content budget should be nonzero"),
-            max_rows_per_segment: NonZeroUsize::new(65_536)
-                .expect("default segment row budget should be nonzero"),
-            max_l0_runs: NonZeroUsize::new(8).expect("default delta run limit should be nonzero"),
-            max_mid_runs: NonZeroUsize::new(8).expect("default mid run limit should be nonzero"),
-            max_decoded_input_rows_per_step: NonZeroUsize::new(131_072)
-                .expect("default reorganize row budget should be nonzero"),
+            max_files_per_step: const { NonZeroUsize::new(256).unwrap() },
+            max_content_bytes_per_step: const { NonZeroU64::new(64 * 1024 * 1024).unwrap() },
+            max_rows_per_segment: const { NonZeroUsize::new(65_536).unwrap() },
+            max_l0_runs: const { NonZeroUsize::new(8).unwrap() },
+            max_mid_runs: const { NonZeroUsize::new(8).unwrap() },
+            max_decoded_input_rows_per_step: const { NonZeroUsize::new(131_072).unwrap() },
         }
     }
 }
@@ -269,10 +266,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Enables grep by pinning a checkpoint and CAS-publishing a fresh
     /// backfilling root. Enabling an active root is idempotent.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
-        if let Some(current) = load_grep_root(&self.store, namespace_id)
-            .await
-            .map_err(GrepError::from)?
-        {
+        if let Some(current) = load_grep_root(&self.store, namespace_id).await? {
             if !matches!(
                 current.manifest_state().lifecycle(),
                 GrepLifecycle::Disabled
@@ -344,10 +338,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// candidates and are never deleted synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         ensure_live_namespace(&self.reads(namespace_id)).await?;
-        let Some(current) = load_grep_root(&self.store, namespace_id)
-            .await
-            .map_err(GrepError::from)?
-        else {
+        let Some(current) = load_grep_root(&self.store, namespace_id).await? else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
         if matches!(
@@ -366,7 +357,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexState::new(None, current.manifest_state().index().next_run_ordinal),
             Vec::new(),
         )
-        .map_err(core_state_error)?;
+        .map_err(|error| core_state_error(namespace_id, error))?;
         match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
@@ -386,10 +377,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildReport> {
-        let Some(current) = load_grep_root(&self.store, namespace_id)
-            .await
-            .map_err(GrepError::from)?
-        else {
+        let Some(current) = load_grep_root(&self.store, namespace_id).await? else {
             return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
         };
         let reads = self.reads(namespace_id);
@@ -455,8 +443,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// and a caller waiting on a captured target both ask.
     pub async fn lifecycle(&self, namespace_id: &NamespaceId) -> Result<GrepLifecycle> {
         Ok(load_grep_root(&self.store, namespace_id)
-            .await
-            .map_err(GrepError::from)?
+            .await?
             .map_or(GrepLifecycle::Disabled, |root| {
                 root.manifest_state().lifecycle().clone()
             }))
@@ -469,9 +456,31 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
     ) -> Result<Option<GrepManifestState>> {
         Ok(load_grep_root(&self.store, namespace_id)
-            .await
-            .map_err(GrepError::from)?
+            .await?
             .map(|root| root.manifest_state().clone()))
+    }
+
+    /// Returns the public lifecycle summary for the durable grep root.
+    pub async fn index_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<GrepIndexStatusResponse> {
+        let root = self.root_state(namespace_id).await?;
+        let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
+            Some(root) => (
+                GrepIndexLifecycle::from(root.lifecycle()),
+                root.index().next_run_ordinal,
+                root.index().reorganize.is_some(),
+            ),
+            // A missing root means indexing has not been enabled.
+            None => (GrepIndexLifecycle::Disabled, 0, false),
+        };
+        Ok(GrepIndexStatusResponse {
+            namespace_id: namespace_id.clone(),
+            lifecycle,
+            next_run_ordinal,
+            reorganize_pending,
+        })
     }
 
     async fn seed_root(
@@ -649,7 +658,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             ),
             segments,
         )
-        .map_err(core_state_error)?;
+        .map_err(|error| core_state_error(namespace_id, error))?;
         ensure_publication_budget(&timer, publication_started_ms)?;
         match self.advance_root(&current, &next).await {
             Ok(_) => {
@@ -699,7 +708,7 @@ fn backfilling_root(
         GrepIndexState::new(None, next_run_ordinal),
         Vec::new(),
     )
-    .map_err(core_state_error)
+    .map_err(|error| core_state_error(namespace_id, error))
 }
 
 /// The two answers that mean "the state this projection was built from is
@@ -1094,10 +1103,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepReorganizeReport> {
-        let Some(current) = load_grep_root(&self.store, namespace_id)
-            .await
-            .map_err(GrepError::from)?
-        else {
+        let Some(current) = load_grep_root(&self.store, namespace_id).await? else {
             return Ok(reorganize_report(
                 namespace_id,
                 GrepReorganizeOutcome::NotEnabled,
@@ -1240,7 +1246,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexState::new(reorganize, next_run_ordinal),
             segments,
         )
-        .map_err(core_state_error)?;
+        .map_err(|error| core_state_error(namespace_id, error))?;
         ensure_publication_budget(&timer, publication_started_ms)?;
         match self.advance_root(&current, &next).await {
             Ok(_) => Ok(reorganize_report(
@@ -1790,8 +1796,15 @@ fn ensure_publication_budget(timer: &impl MonotonicTimer, started_ms: u64) -> Re
     .into())
 }
 
-fn core_state_error(error: crate::root::GrepManifestStateError) -> GrepError {
-    CoreError::Internal(format!("failed to build grep root state: {error}")).into()
+fn core_state_error(
+    namespace_id: &NamespaceId,
+    error: crate::root::GrepManifestStateError,
+) -> GrepError {
+    CoreError::Codec {
+        object_key: root_key(namespace_id),
+        message: error.to_string(),
+    }
+    .into()
 }
 
 fn next_grep_run_ordinal(current: u64) -> Result<u64> {

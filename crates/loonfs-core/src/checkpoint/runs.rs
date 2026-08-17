@@ -127,20 +127,19 @@ pub(crate) struct MetadataLsmPolicy {
 impl Default for MetadataLsmPolicy {
     fn default() -> Self {
         Self {
-            max_l0_runs: NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_L0_RUNS)
-                .expect("default L0 run limit should be nonzero"),
-            max_rows_per_segment: NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT)
-                .expect("default segment row budget should be nonzero"),
-            max_input_runs_per_step: NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_RUNS)
-                .expect("default reorganization run budget should be nonzero"),
-            max_decoded_input_rows_per_step: NonZeroUsize::new(
-                DEFAULT_MAX_REORGANIZATION_INPUT_ROWS,
-            )
-            .expect("default reorganization row budget should be nonzero"),
-            max_decoded_input_bytes_per_step: NonZeroUsize::new(
-                DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
-            )
-            .expect("default reorganization byte budget should be nonzero"),
+            max_l0_runs: const { NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_L0_RUNS).unwrap() },
+            max_rows_per_segment: const {
+                NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT).unwrap()
+            },
+            max_input_runs_per_step: const {
+                NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_RUNS).unwrap()
+            },
+            max_decoded_input_rows_per_step: const {
+                NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_ROWS).unwrap()
+            },
+            max_decoded_input_bytes_per_step: const {
+                NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_BYTES).unwrap()
+            },
         }
     }
 }

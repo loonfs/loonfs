@@ -1101,18 +1101,17 @@ impl NamespacePublisher {
     // Monotonic time is used only to wait between CAS attempts.
     async fn await_cas_slot(&self, claim: bool) {
         loop {
-            let sleep_until = self.lock_state().next_allowed_cas_at;
-            let arrived = sleep_until.is_none_or(|instant| instant <= Instant::now());
-            if arrived {
-                if claim {
-                    let mut state = self.lock_state();
-                    state.next_allowed_cas_at = Some(Instant::now() + self.min_publish_interval);
-                }
-                return;
+            let Some(sleep_until) = self.lock_state().next_allowed_cas_at else {
+                break;
+            };
+            if sleep_until <= Instant::now() {
+                break;
             }
-            if let Some(sleep_until) = sleep_until {
-                tokio::time::sleep_until(sleep_until).await;
-            }
+            tokio::time::sleep_until(sleep_until).await;
+        }
+        if claim {
+            let mut state = self.lock_state();
+            state.next_allowed_cas_at = Some(Instant::now() + self.min_publish_interval);
         }
     }
 
