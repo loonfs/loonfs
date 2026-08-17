@@ -266,14 +266,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads file content against the pinned runtime read context.
-    pub async fn read_file(
+    pub async fn get_file(
         &self,
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes> {
         let view = self.load_read_view(context).await?;
-        view.read_file_bytes(&self.store, path.as_ref(), max_content_bytes)
+        view.get_file_bytes(&self.store, path.as_ref(), max_content_bytes)
             .await
     }
 
@@ -429,7 +429,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Vec<u8>> {
         let catalog = self.live_catalog(context)?;
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
-        Ok(crate::storage::content::read_durable_content_bytes(
+        Ok(crate::storage::content::get_durable_content_bytes(
             &self.store,
             catalog.content_store_id(),
             content_ref,
@@ -470,7 +470,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Reads one revision's content by path against the pinned runtime
     /// read context.
-    pub async fn read_file_revision(
+    pub async fn get_file_revision(
         &self,
         path: impl AsRef<str>,
         revision_no: RevisionNo,
@@ -478,12 +478,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes> {
         let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes(&self.store, path.as_ref(), revision_no, max_content_bytes)
+        view.get_file_revision_bytes(&self.store, path.as_ref(), revision_no, max_content_bytes)
             .await
     }
 
     /// Reads one revision's content against the pinned runtime read context.
-    pub async fn read_file_revision_for_inode(
+    pub async fn get_file_revision_for_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -491,7 +491,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         max_content_bytes: Option<u64>,
     ) -> Result<Vec<u8>> {
         let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes_for_inode(
+        view.get_file_revision_bytes_for_inode(
             &self.store,
             inode_id,
             revision_no,
@@ -968,7 +968,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 /// Error returned when a [`NamespaceEngine`] cannot be built.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum NamespaceEngineBuildError {
     /// The writer id was empty or whitespace.
     #[error("writer identity must not be empty")]

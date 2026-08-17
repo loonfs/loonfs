@@ -4,7 +4,7 @@
 //! deadlines, continuations, and shutdown. The parent module handles async
 //! execution, permits, and timers.
 
-use super::{MaintenanceClock, MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepResult};
+use super::{MaintenanceClock, MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepReport};
 use crate::NamespaceId;
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -63,7 +63,7 @@ pub(crate) enum StepOutcome {
     /// The executor answered. The result decides what happens to the key:
     /// its conclusion when to run again, its continuation where to resume,
     /// its not-before time when a deadline it saw comes due.
-    Concluded(MaintenanceStepResult),
+    Concluded(MaintenanceStepReport),
     /// The executor failed. The key is retried after its backoff, from
     /// wherever its last step left it.
     Failed,
@@ -741,12 +741,12 @@ mod tests {
     }
 
     fn concluded(conclusion: MaintenanceStepConclusion) -> StepOutcome {
-        StepOutcome::Concluded(MaintenanceStepResult::concluded(conclusion))
+        StepOutcome::Concluded(MaintenanceStepReport::concluded(conclusion))
     }
 
     /// A conclusion that also tells the runner where the step stopped.
     fn continuing(conclusion: MaintenanceStepConclusion, continuation: &str) -> StepOutcome {
-        StepOutcome::Concluded(MaintenanceStepResult {
+        StepOutcome::Concluded(MaintenanceStepReport {
             conclusion,
             continuation: Some(continuation.to_owned()),
             not_before_ms: None,
@@ -1258,7 +1258,7 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(
                 &key,
-                StepOutcome::Concluded(MaintenanceStepResult {
+                StepOutcome::Concluded(MaintenanceStepReport {
                     conclusion: MaintenanceStepConclusion::Idle,
                     continuation: None,
                     not_before_ms: Some(NOW + 60_000),
@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(
                 &key,
-                StepOutcome::Concluded(MaintenanceStepResult {
+                StepOutcome::Concluded(MaintenanceStepReport {
                     conclusion: MaintenanceStepConclusion::Progressed,
                     continuation: None,
                     not_before_ms: Some(NOW + 30_000),

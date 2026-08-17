@@ -40,7 +40,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::{
     METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS, METADATA_COMPACTION_LEASE_EXPIRY_MS,
 };
-use crate::timing::MonotonicTimer;
+use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, MetadataCompactionLeaseState,

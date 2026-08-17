@@ -36,7 +36,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_adapter_builds_expected_wal_payload() {
+    fn wal_payload_adapter_builds_expected_payload() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),

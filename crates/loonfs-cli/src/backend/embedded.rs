@@ -344,7 +344,7 @@ impl EmbeddedBackend {
             .garbage_collect_namespace(
                 namespace_id,
                 current_unix_ms()?,
-                &loonfs_grep::GrepGcRequest {
+                &loonfs_grep::GrepGcOptions {
                     max_objects: request.max_objects,
                     cursor: request.cursor.clone(),
                 },

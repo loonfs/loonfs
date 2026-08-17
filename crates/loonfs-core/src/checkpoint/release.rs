@@ -8,7 +8,7 @@
 //! records are not releasable here: their release is decided by garbage
 //! collection from the fork target's fate.
 
-use super::record::{read_checkpoint_record, release_checkpoint_record};
+use super::record::{load_checkpoint_record, release_checkpoint_record};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::CheckpointOwner;
@@ -21,7 +21,7 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     context: &MutationContext,
 ) -> Result<ReleaseCheckpointResponse> {
-    let Some(loaded) = read_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
+    let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
         // Already reaped (or never created): the end state — no active pin
         // under this id — already holds, so release is idempotent success.
         return Ok(ReleaseCheckpointResponse {

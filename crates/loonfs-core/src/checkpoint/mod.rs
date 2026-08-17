@@ -81,7 +81,7 @@ pub(crate) use self::load::{
     load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
     LoadedMetadataBasis,
 };
-pub(crate) use self::record::read_checkpoint_record;
+pub(crate) use self::record::load_checkpoint_record;
 pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;

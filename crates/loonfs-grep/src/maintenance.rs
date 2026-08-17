@@ -7,12 +7,12 @@
 
 use crate::root::{load_grep_root, GrepLifecycle};
 use crate::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcReport, GrepGcRequest,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcOptions, GrepGcReport,
     GrepReorganizeOutcome, GrepWorker,
 };
 use loonfs::{
     current_time_ms, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion,
-    MaintenanceStepResult, NamespaceId, Result, RuntimeError,
+    MaintenanceStepReport, NamespaceId, Result, RuntimeError,
 };
 use loonfs_api::ErrorCode;
 use loonfs_objectstore::ObjectStore;
@@ -68,29 +68,29 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         &self,
         namespace_id: &NamespaceId,
         _continuation: Option<&str>,
-    ) -> Result<MaintenanceStepResult> {
+    ) -> Result<MaintenanceStepReport> {
         let build = match self.worker.build_step(namespace_id, self.policy).await {
             Ok(report) => report.outcome,
             Err(error) if has_nothing_to_index(&error) => {
-                return Ok(MaintenanceStepResult::concluded(
+                return Ok(MaintenanceStepReport::concluded(
                     MaintenanceStepConclusion::NotEnabled,
                 ))
             }
             Err(error) => return Err(step_failure(namespace_id, "grep_build", error)),
         };
         let GrepBuildOutcome::UpToDate { .. } = build else {
-            return Ok(MaintenanceStepResult::concluded(build_conclusion(&build)));
+            return Ok(MaintenanceStepReport::concluded(build_conclusion(&build)));
         };
         let reorganize = match self.worker.reorganize_step(namespace_id, self.policy).await {
             Ok(report) => report.outcome,
             Err(error) if has_nothing_to_index(&error) => {
-                return Ok(MaintenanceStepResult::concluded(
+                return Ok(MaintenanceStepReport::concluded(
                     MaintenanceStepConclusion::NotEnabled,
                 ))
             }
             Err(error) => return Err(step_failure(namespace_id, "grep_reorganize", error)),
         };
-        Ok(MaintenanceStepResult::concluded(reorganize_conclusion(
+        Ok(MaintenanceStepReport::concluded(reorganize_conclusion(
             &reorganize,
         )))
     }
@@ -169,8 +169,8 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
         &self,
         namespace_id: &NamespaceId,
         continuation: Option<&str>,
-    ) -> Result<MaintenanceStepResult> {
-        let request = GrepGcRequest {
+    ) -> Result<MaintenanceStepReport> {
+        let request = GrepGcOptions {
             // The pass resolves the absent candidate budget to the per-step
             // default, which is what bounds it.
             max_objects: None,
@@ -195,7 +195,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
                     error = %error,
                     "grep collection rejected its resume position; restarting the pass"
                 );
-                return Ok(MaintenanceStepResult::concluded(
+                return Ok(MaintenanceStepReport::concluded(
                     MaintenanceStepConclusion::Superseded,
                 ));
             }
@@ -222,7 +222,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
 fn grep_gc_step_result(
     report: GrepGcReport,
     submitted_cursor: Option<&str>,
-) -> MaintenanceStepResult {
+) -> MaintenanceStepReport {
     let conclusion = match report.next_cursor.as_deref() {
         Some(next_cursor) if Some(next_cursor) == submitted_cursor => {
             MaintenanceStepConclusion::Blocked
@@ -234,7 +234,7 @@ fn grep_gc_step_result(
         None if report.namespace_degraded => MaintenanceStepConclusion::Blocked,
         None => MaintenanceStepConclusion::Idle,
     };
-    MaintenanceStepResult {
+    MaintenanceStepReport {
         conclusion,
         continuation: report.next_cursor,
         // Grep objects age against one fixed grace window rather than
@@ -265,16 +265,15 @@ fn build_conclusion(outcome: &GrepBuildOutcome) -> MaintenanceStepConclusion {
     }
 }
 
-/// What one bounded fold accomplished.
+/// Maps one bounded reorganization outcome to a scheduling result.
 ///
-/// Nothing here reports a budget it could not fit: a reorganization step
-/// merges what its policy allows and publishes that, so there is no
-/// zero-progress outcome for the runner to park as `Blocked`.
+/// Reorganization publishes whatever fits within its budget, so it has no
+/// zero-progress `Blocked` result.
 fn reorganize_conclusion(outcome: &GrepReorganizeOutcome) -> MaintenanceStepConclusion {
     match outcome {
         GrepReorganizeOutcome::NotEnabled => MaintenanceStepConclusion::NotEnabled,
         GrepReorganizeOutcome::NotNeeded { .. } => MaintenanceStepConclusion::Idle,
-        GrepReorganizeOutcome::StepPublished { .. } => MaintenanceStepConclusion::Progressed,
+        GrepReorganizeOutcome::UnitPublished { .. } => MaintenanceStepConclusion::Progressed,
         GrepReorganizeOutcome::Superseded => MaintenanceStepConclusion::Superseded,
     }
 }
@@ -345,7 +344,7 @@ mod tests {
             "a restarted backfill discarded a dead projection and published a fresh basis"
         );
         assert_eq!(
-            reorganize_conclusion(&GrepReorganizeOutcome::StepPublished {
+            reorganize_conclusion(&GrepReorganizeOutcome::UnitPublished {
                 merged_rows: 128,
                 segments_written: 1,
                 completed: false,

@@ -29,7 +29,7 @@ use super::load::{
     load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_tables,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
-use super::record::read_checkpoint_record;
+use super::record::load_checkpoint_record;
 use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
@@ -52,7 +52,7 @@ use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{
-    read_head_object, read_metadata_root_object, read_wal_floor_object,
+    load_head_object, load_metadata_root_object, load_wal_floor_object,
 };
 use crate::namespace::status::load_namespace_head_summary;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
@@ -207,7 +207,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    let head = read_head_object(store, namespace_id)
+    let head = load_head_object(store, namespace_id)
         .await
         .expect("read head")
         .state;
@@ -339,7 +339,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
             }
         }
     }
-    read_metadata_root_object(store, namespace_id)
+    load_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
@@ -380,7 +380,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<CurrentFileState> {
-    let manifest_id = read_metadata_root_object(store, namespace_id)
+    let manifest_id = load_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
@@ -495,7 +495,7 @@ async fn current_manifest_object_id<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> ManifestObjectId {
-    read_metadata_root_object(store, namespace_id)
+    load_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
@@ -523,7 +523,7 @@ async fn load_current_projection<S: ObjectStore + ?Sized>(
 ) -> Result<CurrentProjection, CoreError> {
     let (head, metadata_state) =
         load_checkpoint_projection_metadata_state(store, namespace_id).await?;
-    let root = read_metadata_root_object(store, namespace_id)
+    let root = load_metadata_root_object(store, namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))

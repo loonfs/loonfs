@@ -1,16 +1,16 @@
 //! Publish plans that move or copy visible paths.
 
-use super::planning_helpers::ReplaceDestination;
-use super::planning_helpers::{
+use super::publish_path_planning::ReplaceDestination;
+use super::publish_path_planning::{
     publish_binding_is_precondition, publish_child_name_absent_precondition,
     publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory,
-    publish_resolve_replace_destination, PlannedOperation, PublishPathPlanningView,
+    publish_resolve_replace_destination, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::commit::{
     CandidateAllocation, CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
 };
 use crate::error::{CoreError, Result};
-use crate::path::helpers::{ensure_mutation_path, final_component};
+use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{AbsolutePath, AttributeRevisionNo, DestinationBehavior, InodeKind};
 use loonfs_objectstore::ObjectStore;
 
@@ -19,7 +19,7 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     to_path: &AbsolutePath,
     behavior: DestinationBehavior,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
     publish_reject_tombstoned_path_ancestor(view, from_path).await?;
@@ -78,7 +78,7 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
         inode_id: target_parent,
     });
-    Ok(PlannedOperation::new(ops, preconditions))
+    Ok(CompiledFilesystemOperation::new(ops, preconditions))
 }
 
 pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
@@ -87,7 +87,7 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     behavior: DestinationBehavior,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
     publish_reject_tombstoned_path_ancestor(view, from_path).await?;
@@ -194,5 +194,5 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
         inode_id: target_parent,
     });
-    Ok(PlannedOperation::new(ops, preconditions))
+    Ok(CompiledFilesystemOperation::new(ops, preconditions))
 }

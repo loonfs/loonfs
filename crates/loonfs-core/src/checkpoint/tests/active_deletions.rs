@@ -10,7 +10,7 @@ use crate::metadata::{
     active_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneAction,
     SubtreeTombstoneRecord,
 };
-use crate::path::read::{load_current_metadata_view, AttributeProjection};
+use crate::path::read::{load_current_metadata_view, AttributeInclusion};
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, DeletedDirentry, TombstoneGeneration};
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 
@@ -277,7 +277,7 @@ async fn inode_id_of<S: ObjectStore + ?Sized>(
     load_current_metadata_view(store, namespace_id)
         .await
         .expect("load read view")
-        .resolve_path(absolute_path, AttributeProjection::Omit)
+        .resolve_path(absolute_path, AttributeInclusion::Omit)
         .await
         .expect("resolve path")
         .inode_id

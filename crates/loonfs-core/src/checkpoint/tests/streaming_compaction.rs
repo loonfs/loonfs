@@ -14,12 +14,12 @@ use super::super::runs::MetadataFamilyGroup;
 use super::super::scan::VerifiedMetadataTables;
 use super::super::streaming_compaction::{
     finalize_metadata_compaction, merge_group_in_step, run_metadata_compaction,
-    snapshot_segment_keys, Finalization, MetadataCompactionCancellation, MetadataCompactionOutcome,
-    MetadataCompactionSpec, MetadataMergeResult,
+    snapshot_segment_keys, Finalization, MetadataCompactionCancellation, MetadataCompactionSpec,
+    MetadataMergeOutcome, MetadataMergeResult,
 };
 use super::*;
 use crate::limits::METADATA_COMPACTION_LEASE_EXPIRY_MS;
-use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::ActiveDeletionRowAction;
 use loonfs_objectstore::keys::{metadata_compaction_lease, metadata_compaction_prefix};
 use loonfs_test_support::stores::{
@@ -641,7 +641,7 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
-) -> MetadataCompactionOutcome {
+) -> MetadataMergeOutcome {
     let tables = load_current_manifest_tables(store, namespace_id).await;
     let timer = StdMonotonicTimer::default();
     let mut lease = test_lease(store, namespace_id, spec, &timer).await;
@@ -763,7 +763,7 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
     load_manifest_materialization_for_inspection(
         store,
         namespace_id,
-        read_metadata_root_object(store, namespace_id)
+        load_metadata_root_object(store, namespace_id)
             .await
             .expect("read root")
             .state
@@ -1225,7 +1225,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
         &MetadataCompactionCancellation::default(),
     )
     .await;
-    let MetadataCompactionOutcome::Completed(result) = outcome else {
+    let MetadataMergeOutcome::Completed(result) = outcome else {
         panic!("nothing cancelled this job");
     };
     assert!(
@@ -1349,7 +1349,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
         .await
         .with_frozen_floor_seq(ChangeSeq(0));
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -1388,7 +1388,7 @@ async fn a_compaction_of_the_revisions_group_rewrites_every_row_it_reads() {
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2012,7 +2012,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
     // The background job keeps the probe, because it has no budget capping
     // what it would otherwise collect.
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let MetadataCompactionOutcome::Completed(job) = run_compaction(
+    let MetadataMergeOutcome::Completed(job) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2109,7 +2109,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     // The uninterrupted run, for the comparison.
     let spec = compaction_spec_for_group(&straight_store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&straight_store, &namespace_id, &spec).await;
-    let MetadataCompactionOutcome::Completed(straight_result) = run_compaction(
+    let MetadataMergeOutcome::Completed(straight_result) = run_compaction(
         &straight_store,
         &namespace_id,
         &spec,
@@ -2161,7 +2161,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
             &cancellation,
         )
         .await;
-        if matches!(outcome, MetadataCompactionOutcome::Cancelled) {
+        if matches!(outcome, MetadataMergeOutcome::Cancelled) {
             cancelled_attempts += 1;
         }
         assert_eq!(
@@ -2189,7 +2189,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     let store = LocalFsStore::new(interrupted_dir.path()).expect("store");
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2375,7 +2375,7 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2544,7 +2544,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::metadata_table(),
     );
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2694,7 +2694,7 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -2780,7 +2780,7 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
 
         let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
         let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-        let MetadataCompactionOutcome::Completed(result) = run_compaction(
+        let MetadataMergeOutcome::Completed(result) = run_compaction(
             &store,
             &namespace_id,
             &spec,
@@ -3278,7 +3278,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -3368,7 +3368,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
 
 /// When the namespace's root was last published.
 async fn root_updated_at_ms<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
-    read_metadata_root_object(store, namespace_id)
+    load_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
@@ -3392,7 +3392,7 @@ async fn a_rebased_publication_never_moves_the_root_timestamp_backward() {
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -3454,7 +3454,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,
@@ -3584,7 +3584,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
-    let MetadataCompactionOutcome::Completed(result) = run_compaction(
+    let MetadataMergeOutcome::Completed(result) = run_compaction(
         &store,
         &namespace_id,
         &spec,

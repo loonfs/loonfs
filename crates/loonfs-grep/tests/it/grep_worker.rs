@@ -23,7 +23,7 @@ use loonfs_grep::root::{
     GrepManifestId, GrepManifestState, GrepRootEnvelope, GrepRootPointer,
 };
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcReport, GrepGcRequest,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcOptions, GrepGcReport,
     GrepReorganizeOutcome, GrepService, GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::{
@@ -70,12 +70,12 @@ async fn drive_worker_to_current(
             .build_step(namespace_id, policy)
             .await
             .expect("worker build step");
-        let fold = worker
+        let reorganize = worker
             .reorganize_step(namespace_id, policy)
             .await
-            .expect("worker fold step");
+            .expect("worker reorganize step");
         if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
-            && matches!(fold.outcome, GrepReorganizeOutcome::NotNeeded { .. })
+            && matches!(reorganize.outcome, GrepReorganizeOutcome::NotNeeded { .. })
         {
             return;
         }
@@ -209,7 +209,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         loonfs_grep::GrepDisableOutcome::Disabled
     );
     worker
-        .garbage_collect_namespace(&namespace_id, u64::MAX, &GrepGcRequest::default())
+        .garbage_collect_namespace(&namespace_id, u64::MAX, &GrepGcOptions::default())
         .await
         .expect("collect disabled segments");
     assert!(
@@ -1425,7 +1425,7 @@ fn assert_corrupt_index_error(case: &str, result: loonfs_grep::Result<GrepRespon
 }
 
 #[tokio::test]
-async fn grep_worker_pins_fold_tail_and_pagination_results() {
+async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -1466,7 +1466,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
         worker
             .reorganize_step(&namespace_id, policy)
             .await
-            .expect("new fold");
+            .expect("new reorganization");
     }
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
@@ -1812,7 +1812,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
         blocking.wait_until_blocked().await;
         let report = worker(&store)
             .await
-            .garbage_collect_namespace(&namespace_id, published_at_ms, &GrepGcRequest::default())
+            .garbage_collect_namespace(&namespace_id, published_at_ms, &GrepGcOptions::default())
             .await;
         blocking.release();
         report
@@ -1852,7 +1852,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
         .garbage_collect_namespace(
             &namespace_id,
             published_at_ms + GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest::default(),
+            &GrepGcOptions::default(),
         )
         .await
         .expect("collection pass after the grace window");
@@ -1967,7 +1967,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .garbage_collect_namespace(
             &live_namespace,
             GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest::default(),
+            &GrepGcOptions::default(),
         )
         .await
         .expect("collect live namespace");
@@ -1975,7 +1975,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .garbage_collect_namespace(
             &deleted_namespace,
             GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest::default(),
+            &GrepGcOptions::default(),
         )
         .await
         .expect("collect deleted namespace");
@@ -1983,7 +1983,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .garbage_collect_namespace(
             &corrupt_namespace,
             GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest::default(),
+            &GrepGcOptions::default(),
         )
         .await
         .expect("collect corrupt namespace");
@@ -1991,7 +1991,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .garbage_collect_namespace(
             &absent_namespace,
             GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest::default(),
+            &GrepGcOptions::default(),
         )
         .await
         .expect("collect absent namespace");
@@ -2194,7 +2194,7 @@ async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
 
     let whole = worker(&whole_store)
         .await
-        .garbage_collect_namespace(&namespace_id, now_ms, &GrepGcRequest::default())
+        .garbage_collect_namespace(&namespace_id, now_ms, &GrepGcOptions::default())
         .await
         .expect("collect the whole prefix");
     assert_eq!(whole.next_cursor, None);
@@ -2202,7 +2202,7 @@ async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
 
     let paged_worker = worker(&paged_store).await;
     let mut paged = GrepGcReport::default();
-    let mut request = GrepGcRequest {
+    let mut request = GrepGcOptions {
         max_objects: Some(1),
         cursor: None,
     };
@@ -2301,7 +2301,7 @@ async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
         .garbage_collect_namespace(
             &namespace_id,
             GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest {
+            &GrepGcOptions {
                 // One for the pass's liveness read, then three per key.
                 max_objects: Some(7),
                 cursor: None,
@@ -2337,7 +2337,7 @@ async fn a_budget_too_small_for_one_key_still_advances_the_cursor() {
         .garbage_collect_namespace(
             &namespace_id,
             GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest {
+            &GrepGcOptions {
                 max_objects: Some(1),
                 cursor: None,
             },
@@ -2349,7 +2349,7 @@ async fn a_budget_too_small_for_one_key_still_advances_the_cursor() {
         .garbage_collect_namespace(
             &namespace_id,
             GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest {
+            &GrepGcOptions {
                 max_objects: Some(1),
                 cursor: Some(cursor.clone()),
             },
@@ -2376,7 +2376,7 @@ async fn a_collection_cursor_is_refused_outside_the_namespace_that_minted_it() {
         .garbage_collect_namespace(
             &namespace_id,
             GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcRequest {
+            &GrepGcOptions {
                 max_objects: Some(1),
                 cursor: None,
             },
@@ -2394,7 +2394,7 @@ async fn a_collection_cursor_is_refused_outside_the_namespace_that_minted_it() {
             .garbage_collect_namespace(
                 namespace,
                 GREP_GC_GRACE_WINDOW_MS + 1,
-                &GrepGcRequest {
+                &GrepGcOptions {
                     max_objects: None,
                     cursor: Some(token),
                 },

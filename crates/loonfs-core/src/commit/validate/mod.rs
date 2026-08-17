@@ -5,9 +5,11 @@
 //! the commit over the loaded metadata.
 
 mod checks;
+mod error;
 #[cfg(test)]
 mod tests;
 mod view;
 
 pub(crate) use checks::validate_ops;
+pub use error::CommitValidationError;
 pub(crate) use view::PublishValidationView;

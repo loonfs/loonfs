@@ -10,7 +10,7 @@
 use super::cache::MetadataTableCache;
 use super::error::ManifestLoadError;
 use super::load::load_verified_manifest_tables_with_cache;
-use super::record::read_checkpoint_record;
+use super::record::load_checkpoint_record;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::MetadataView;
 use loonfs_api::wire::control::{CheckpointRecordLifecycle, CheckpointRecordState};
@@ -91,7 +91,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     request: PageRequest<CheckpointFilesPageCursor>,
 ) -> Result<CheckpointFilesPage> {
-    let record = read_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
+    let record = load_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
     let tables = load_verified_manifest_tables_with_cache(
         store,
         table_cache,
@@ -197,12 +197,12 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
 /// Loads the record and refuses the one lifecycle that no longer pins its
 /// basis, so a caller never reads state garbage collection may already be
 /// reclaiming.
-async fn read_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
+async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
 ) -> Result<CheckpointRecordState> {
-    let Some(record) = read_checkpoint_record(store, namespace_id, checkpoint_id)
+    let Some(record) = load_checkpoint_record(store, namespace_id, checkpoint_id)
         .await?
         .map(|loaded| loaded.state)
     else {

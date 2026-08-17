@@ -497,7 +497,7 @@ impl<S> std::fmt::Debug for FileContentStream<S> {
     }
 }
 
-pub(crate) async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
+pub(crate) async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
@@ -780,7 +780,7 @@ async fn load_required_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        read_durable_content_bytes, store_bytes_as_content_with_store_id,
+        get_durable_content_bytes, store_bytes_as_content_with_store_id,
         validate_durable_content_reference, verify_durable_content_checksum, CoreError,
         DurableContentValidationError, FileContentStream, NonZeroU64,
     };
@@ -829,7 +829,7 @@ mod tests {
         let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
-        let bytes = read_durable_content_bytes(&store, &content_store_id, &content_ref)
+        let bytes = get_durable_content_bytes(&store, &content_store_id, &content_ref)
             .await
             .expect("read empty content ref");
         assert!(bytes.is_empty());
@@ -898,7 +898,7 @@ mod tests {
         };
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
-        let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
+        let read = get_durable_content_bytes(&store, &content_store_id, &content_ref)
             .await
             .expect("a crc32c-only reference verifies by its crc");
         assert_eq!(read, bytes);
@@ -911,7 +911,7 @@ mod tests {
         };
         put_content_object(&store, &content_store_id, &planted, bytes).await;
         assert!(matches!(
-            read_durable_content_bytes(&store, &content_store_id, &planted)
+            get_durable_content_bytes(&store, &content_store_id, &planted)
                 .await
                 .expect_err("crc mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
@@ -934,7 +934,7 @@ mod tests {
         };
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
-        let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
+        let read = get_durable_content_bytes(&store, &content_store_id, &content_ref)
             .await
             .expect("a crc-only reference verifies by its crc");
         assert_eq!(read, bytes);
@@ -947,7 +947,7 @@ mod tests {
         };
         put_content_object(&store, &content_store_id, &planted, bytes).await;
         assert!(matches!(
-            read_durable_content_bytes(&store, &content_store_id, &planted)
+            get_durable_content_bytes(&store, &content_store_id, &planted)
                 .await
                 .expect_err("crc mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }

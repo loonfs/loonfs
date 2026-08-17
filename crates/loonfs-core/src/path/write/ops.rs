@@ -6,7 +6,7 @@ use super::intent::{CommitRequest, FilesystemOperation};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use crate::path::helpers::parse_mutation_path;
+use crate::path::mutation_path::parse_mutation_path;
 use crate::storage::content_admission::PreparedContent;
 use loonfs_api::{
     CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,

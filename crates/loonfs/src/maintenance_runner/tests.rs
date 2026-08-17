@@ -49,7 +49,7 @@ impl MaintenanceClock for ManualClock {
 
 /// What one scripted step does.
 #[derive(Debug, Clone)]
-enum StepAnswer {
+enum ScriptedStep {
     Conclude(MaintenanceStepConclusion),
     /// Conclude, and tell the runner where this step stopped.
     Continue(MaintenanceStepConclusion, Option<String>),
@@ -103,9 +103,9 @@ impl Gate {
 
 /// A scripted executor that records what it was asked to do.
 struct TestJob {
-    answers: StdMutex<VecDeque<StepAnswer>>,
+    answers: StdMutex<VecDeque<ScriptedStep>>,
     /// What every step answers once the script runs out.
-    trailing_answer: StepAnswer,
+    trailing_answer: ScriptedStep,
     probe_answer: StdMutex<MaintenanceProbe>,
     steps: StdMutex<Vec<NamespaceId>>,
     /// The continuation each step was handed, in order.
@@ -115,7 +115,7 @@ struct TestJob {
 }
 
 impl TestJob {
-    fn answering(trailing_answer: StepAnswer) -> Arc<Self> {
+    fn answering(trailing_answer: ScriptedStep) -> Arc<Self> {
         Arc::new(Self {
             answers: StdMutex::new(VecDeque::new()),
             trailing_answer,
@@ -128,16 +128,19 @@ impl TestJob {
     }
 
     fn idle() -> Arc<Self> {
-        Self::answering(StepAnswer::Conclude(MaintenanceStepConclusion::Idle))
+        Self::answering(ScriptedStep::Conclude(MaintenanceStepConclusion::Idle))
     }
 
-    fn scripted(answers: impl IntoIterator<Item = StepAnswer>, trailing: StepAnswer) -> Arc<Self> {
+    fn scripted(
+        answers: impl IntoIterator<Item = ScriptedStep>,
+        trailing: ScriptedStep,
+    ) -> Arc<Self> {
         let job = Self::answering(trailing);
         *job.answers.lock().expect("answers") = answers.into_iter().collect();
         job
     }
 
-    fn gated(answers: impl IntoIterator<Item = StepAnswer>, trailing: StepAnswer) -> Arc<Self> {
+    fn gated(answers: impl IntoIterator<Item = ScriptedStep>, trailing: ScriptedStep) -> Arc<Self> {
         let mut job = Self {
             answers: StdMutex::new(answers.into_iter().collect()),
             trailing_answer: trailing,
@@ -191,7 +194,7 @@ impl MaintenanceJob for TestJob {
         &self,
         namespace_id: &NamespaceId,
         continuation: Option<&str>,
-    ) -> Result<MaintenanceStepResult> {
+    ) -> Result<MaintenanceStepReport> {
         if let Some(gate) = &self.gate {
             gate.enter().await;
         }
@@ -207,19 +210,19 @@ impl MaintenanceJob for TestJob {
             .pop_front()
             .unwrap_or_else(|| self.trailing_answer.clone());
         match answer {
-            StepAnswer::Conclude(conclusion) => Ok(MaintenanceStepResult::concluded(conclusion)),
-            StepAnswer::Continue(conclusion, continuation) => Ok(MaintenanceStepResult {
+            ScriptedStep::Conclude(conclusion) => Ok(MaintenanceStepReport::concluded(conclusion)),
+            ScriptedStep::Continue(conclusion, continuation) => Ok(MaintenanceStepReport {
                 conclusion,
                 continuation,
                 not_before_ms: None,
             }),
-            StepAnswer::Due(conclusion, not_before_ms) => Ok(MaintenanceStepResult {
+            ScriptedStep::Due(conclusion, not_before_ms) => Ok(MaintenanceStepReport {
                 conclusion,
                 continuation: None,
                 not_before_ms: Some(not_before_ms),
             }),
-            StepAnswer::Fail => Err(RuntimeError::Config("scripted step failure".to_owned())),
-            StepAnswer::Panic => panic!("injected maintenance step panic"),
+            ScriptedStep::Fail => Err(RuntimeError::Config("scripted step failure".to_owned())),
+            ScriptedStep::Panic => panic!("injected maintenance step panic"),
         }
     }
 
@@ -261,9 +264,9 @@ impl MaintenanceJob for SubscribingJob {
         &self,
         namespace_id: &NamespaceId,
         _continuation: Option<&str>,
-    ) -> Result<MaintenanceStepResult> {
+    ) -> Result<MaintenanceStepReport> {
         self.steps.lock().expect("steps").push(namespace_id.clone());
-        Ok(MaintenanceStepResult::concluded(
+        Ok(MaintenanceStepReport::concluded(
             MaintenanceStepConclusion::Idle,
         ))
     }
@@ -329,11 +332,11 @@ async fn progressed_requeues_immediately_and_stays_fair_at_the_cap() {
     // single permit, the second must not wait behind the whole backlog.
     let job = TestJob::gated(
         [
-            StepAnswer::Conclude(MaintenanceStepConclusion::Progressed),
-            StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
-            StepAnswer::Conclude(MaintenanceStepConclusion::Progressed),
+            ScriptedStep::Conclude(MaintenanceStepConclusion::Progressed),
+            ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+            ScriptedStep::Conclude(MaintenanceStepConclusion::Progressed),
         ],
-        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let (busy, peer) = (namespace_id("busy"), namespace_id("peer"));
@@ -365,16 +368,16 @@ async fn progressed_requeues_immediately_and_stays_fair_at_the_cap() {
 async fn a_progressing_job_resumes_from_where_its_last_step_stopped() {
     let job = TestJob::scripted(
         [
-            StepAnswer::Continue(
+            ScriptedStep::Continue(
                 MaintenanceStepConclusion::Progressed,
                 Some("page-1".to_owned()),
             ),
-            StepAnswer::Continue(
+            ScriptedStep::Continue(
                 MaintenanceStepConclusion::Progressed,
                 Some("page-2".to_owned()),
             ),
         ],
-        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("paged");
@@ -404,11 +407,11 @@ async fn a_progressing_job_resumes_from_where_its_last_step_stopped() {
 #[tokio::test]
 async fn a_blocked_job_resumes_from_where_it_parked() {
     let job = TestJob::scripted(
-        [StepAnswer::Continue(
+        [ScriptedStep::Continue(
             MaintenanceStepConclusion::Blocked,
             Some("page-7".to_owned()),
         )],
-        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("parked");
@@ -431,13 +434,13 @@ async fn a_blocked_job_resumes_from_where_it_parked() {
 async fn a_not_enabled_conclusion_drops_the_continuation() {
     let job = TestJob::scripted(
         [
-            StepAnswer::Continue(
+            ScriptedStep::Continue(
                 MaintenanceStepConclusion::Progressed,
                 Some("page-1".to_owned()),
             ),
-            StepAnswer::Conclude(MaintenanceStepConclusion::NotEnabled),
+            ScriptedStep::Conclude(MaintenanceStepConclusion::NotEnabled),
         ],
-        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("gone");
@@ -457,8 +460,8 @@ async fn a_not_enabled_conclusion_drops_the_continuation() {
 #[tokio::test]
 async fn blocked_parks_and_a_later_nudge_retries() {
     let job = TestJob::scripted(
-        [StepAnswer::Conclude(MaintenanceStepConclusion::Blocked)],
-        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+        [ScriptedStep::Conclude(MaintenanceStepConclusion::Blocked)],
+        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("blocked");
@@ -479,8 +482,10 @@ async fn blocked_parks_and_a_later_nudge_retries() {
 #[tokio::test]
 async fn superseded_takes_the_race_again_and_not_enabled_evicts() {
     let job = TestJob::scripted(
-        [StepAnswer::Conclude(MaintenanceStepConclusion::Superseded)],
-        StepAnswer::Conclude(MaintenanceStepConclusion::NotEnabled),
+        [ScriptedStep::Conclude(
+            MaintenanceStepConclusion::Superseded,
+        )],
+        ScriptedStep::Conclude(MaintenanceStepConclusion::NotEnabled),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("raced");
@@ -503,8 +508,8 @@ async fn superseded_takes_the_race_again_and_not_enabled_evicts() {
 #[tokio::test]
 async fn a_failed_step_backs_off_and_the_timer_retries_it() {
     let job = TestJob::scripted(
-        [StepAnswer::Fail],
-        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+        [ScriptedStep::Fail],
+        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("flaky");
@@ -552,7 +557,7 @@ async fn a_key_planted_in_the_future_does_not_fire_early() {
     );
 
     clock.advance_to(1_030_000);
-    runner.tick_now();
+    runner.dispatch_now();
     runner.drain().await.expect("the due key settles");
     assert_eq!(
         job.stepped(),
@@ -569,8 +574,11 @@ async fn a_key_planted_in_the_future_does_not_fire_early() {
 async fn a_step_that_reports_a_deadline_re_arms_its_own_key() {
     let clock = ManualClock::at(1_000_000);
     let job = TestJob::scripted(
-        [StepAnswer::Due(MaintenanceStepConclusion::Idle, 1_060_000)],
-        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+        [ScriptedStep::Due(
+            MaintenanceStepConclusion::Idle,
+            1_060_000,
+        )],
+        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
     );
     let runner = runner_with(FsBackgroundWork::Enabled, clock.clone(), job.clone());
     let namespace_id = namespace_id("retained");
@@ -585,7 +593,7 @@ async fn a_step_that_reports_a_deadline_re_arms_its_own_key() {
     );
 
     clock.advance_to(1_060_000);
-    runner.tick_now();
+    runner.dispatch_now();
     runner.drain().await.expect("the re-armed pass settles");
     assert_eq!(
         job.stepped().len(),
@@ -733,7 +741,7 @@ async fn manual_only_ignores_nudges_but_still_registers_jobs() {
 
 #[tokio::test]
 async fn shutdown_clears_pending_work_and_refuses_later_nudges() {
-    let job = TestJob::gated([], StepAnswer::Conclude(MaintenanceStepConclusion::Idle));
+    let job = TestJob::gated([], ScriptedStep::Conclude(MaintenanceStepConclusion::Idle));
     let runner = enabled_runner(job.clone());
     let (active, queued) = (namespace_id("active"), namespace_id("queued"));
 
@@ -765,8 +773,8 @@ async fn shutdown_clears_pending_work_and_refuses_later_nudges() {
 #[tokio::test]
 async fn drain_surfaces_a_panicked_step() {
     let job = TestJob::scripted(
-        [StepAnswer::Panic],
-        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+        [ScriptedStep::Panic],
+        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let panicked_namespace_id = namespace_id("panics");
@@ -910,7 +918,7 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
         "the soonest planted deadline is what the runner wakes for"
     );
     clock.advance_to(upload_session_reclaim_at_ms(1_700_000_000_000));
-    writer.bits.maintenance.tick_now();
+    writer.bits.maintenance.dispatch_now();
     assert_eq!(
         writer
             .bits
@@ -1141,7 +1149,7 @@ async fn cancellation_reaches_a_job_that_is_still_waiting_for_a_permit() {
 /// start the same long job at once.
 #[tokio::test]
 async fn a_job_that_ends_frees_its_slot_and_requeues_its_namespace() {
-    let job = TestJob::gated([], StepAnswer::Conclude(MaintenanceStepConclusion::Idle));
+    let job = TestJob::gated([], ScriptedStep::Conclude(MaintenanceStepConclusion::Idle));
     let clock = ManualClock::at(1_700_000_000_000);
     let runner = runner_with(FsBackgroundWork::Enabled, clock.clone(), job.clone());
     let compactions = runner.compactions();

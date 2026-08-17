@@ -1,5 +1,5 @@
-//! The engine's inode-level planning IR: the operations a filesystem
-//! mutation compiles into, and the race checks evaluated beside them.
+//! Inode-level operations produced by filesystem mutation planning, along
+//! with their concurrency checks.
 //!
 //! This vocabulary is internal. Callers speak
 //! [`CommitRequest`](crate::path::write::CommitRequest), whose

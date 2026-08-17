@@ -16,7 +16,7 @@ use crate::protocol::{
     PublishViewEffect,
 };
 use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
-use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
 use loonfs_api::{ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
@@ -431,7 +431,7 @@ impl NamespaceCommitEngine {
             let error = MetadataViewError::MaintenanceRequired {
                 namespace_id: self.namespace_id.clone(),
                 reason: format!(
-                    "wal tail has {wal_tail_segments} segments; publishes resume once maintenance brings it back under {reject_writes_at_segments}"
+                    "WAL tail has {wal_tail_segments} segments; publishes resume once maintenance brings it back under {reject_writes_at_segments}"
                 ),
             };
             return NamespaceCommitEnginePublishResult {
@@ -569,7 +569,7 @@ mod tests {
     use crate::error::ErrorCode;
     use crate::limits::WAL_PUBLISH_BUDGET_MS;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::control::read_head_object;
+    use crate::namespace::control::load_head_object;
     use futures::StreamExt;
     use loonfs_api::{ChangeSeq, ContentRef, ContentStoreId, WriterEpoch};
     use loonfs_objectstore::keys::wal_segment_prefix;
@@ -782,7 +782,7 @@ mod tests {
         takeover.results[0]
             .as_ref()
             .expect("writer b takeover commit");
-        let epoch_after_takeover = read_head_object(&store, &namespace_id)
+        let epoch_after_takeover = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state
@@ -803,7 +803,7 @@ mod tests {
             let error = fenced.results[0].as_ref().expect_err("fenced publish");
             assert_eq!(error.code(), ErrorCode::WriterFenced, "attempt {attempt}");
         }
-        let head = read_head_object(&store, &namespace_id)
+        let head = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -937,7 +937,7 @@ mod tests {
             .await;
         let error = fenced.results[0].as_ref().expect_err("fenced publish");
         assert_eq!(error.code(), ErrorCode::WriterFenced);
-        let epoch_after_fencing = read_head_object(&store, &namespace_id)
+        let epoch_after_fencing = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state
@@ -961,7 +961,7 @@ mod tests {
             .as_ref()
             .expect_err("rebuilt engine stays fenced");
         assert_eq!(error.code(), ErrorCode::WriterFenced);
-        let head = read_head_object(&store, &namespace_id)
+        let head = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -990,7 +990,7 @@ mod tests {
         bootstrap_namespace(&store, &namespace_id, &writer, false)
             .await
             .expect("bootstrap");
-        let head_before = read_head_object(&store, &namespace_id)
+        let head_before = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -1022,7 +1022,7 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::StaleHead);
 
         // The head did not advance; the written segment is an orphan for GC.
-        let head_after = read_head_object(&store, &namespace_id)
+        let head_after = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -1044,7 +1044,7 @@ mod tests {
         let response = retried.results[0].as_ref().expect("rebuilt publish");
         assert_eq!(response.committed_seq, ChangeSeq(1));
         assert_eq!(wal_segment_count(&store, &namespace_id).await, 2);
-        let head_final = read_head_object(&store, &namespace_id)
+        let head_final = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;

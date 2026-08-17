@@ -136,7 +136,7 @@ async fn reads_commits_and_change_feed_never_list() {
         .await
         .expect("list directory");
     let bytes = engine
-        .read_file("/docs/hello.txt", &ctx, None)
+        .get_file("/docs/hello.txt", &ctx, None)
         .await
         .expect("read");
     assert_eq!(bytes.bytes, b"hello\n");

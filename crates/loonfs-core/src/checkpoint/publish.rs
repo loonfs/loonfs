@@ -5,7 +5,7 @@ use super::error::ManifestLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
-use crate::namespace::control::{read_metadata_root_object, read_metadata_root_object_if_present};
+use crate::namespace::control::{load_metadata_root_object, load_metadata_root_object_if_present};
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, MetadataRootState};
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
@@ -125,7 +125,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     let manifest_head_seq = manifest.payload.head_seq;
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
-        let Some(loaded) = read_metadata_root_object_if_present(store, namespace_id)
+        let Some(loaded) = load_metadata_root_object_if_present(store, namespace_id)
             .await
             .map_err(CoreError::load_head)?
         else {
@@ -179,7 +179,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             Ok(_) => return Ok(ManifestPublicationOutcome::Published(next)),
             Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
             Err(error) => {
-                let recovered = read_metadata_root_object(store, namespace_id)
+                let recovered = load_metadata_root_object(store, namespace_id)
                     .await
                     .map_err(CoreError::load_head)?
                     .state;

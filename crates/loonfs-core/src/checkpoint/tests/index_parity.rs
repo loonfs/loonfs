@@ -132,7 +132,7 @@ pub(super) async fn overwrite_manifest(
     // Keep the tampered manifest consistent with the root's checksum pin, as
     // a well-formed-but-divergent publisher would: the point of these tests
     // is the deeper row-level guards, not the checksum pin.
-    let loaded_root = read_metadata_root_object(store, namespace_id)
+    let loaded_root = load_metadata_root_object(store, namespace_id)
         .await
         .expect("read root");
     if loaded_root.state.manifest_id == manifest_id {

@@ -4,7 +4,7 @@
 use crate::control_object::{
     expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
-use crate::namespace::basis::{read_head_and_metadata_basis, MetadataBasis};
+use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis};
 use loonfs_api::wire::control::{ControlObjectKind, HeadState, MetadataRootState, WalFloorState};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::{metadata_root, wal_floor, wal_head};
@@ -34,7 +34,7 @@ pub struct LoadedHeadControl {
     pub state: HeadState,
 }
 
-pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_wal_floor_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedWalFloorObject, ControlObjectLoadError> {
@@ -48,7 +48,7 @@ pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
     .await
 }
 
-pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_metadata_root_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataRootObject, ControlObjectLoadError> {
@@ -62,11 +62,11 @@ pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
     .await
 }
 
-pub(crate) async fn read_metadata_root_object_if_present<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_metadata_root_object_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<Option<LoadedMetadataRootObject>, ControlObjectLoadError> {
-    match read_metadata_root_object(store, expected_namespace_id).await {
+    match load_metadata_root_object(store, expected_namespace_id).await {
         Ok(loaded) => Ok(Some(loaded)),
         Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
         Err(error) => Err(error),
@@ -83,14 +83,14 @@ pub(crate) async fn read_metadata_root_object_if_present<S: ObjectStore + ?Sized
 /// read raced an in-flight commit CAS; a fresh head read observes at least
 /// the root's seq. Bounded reloads resolve the race without treating it as
 /// corruption (format spec, "metadata/root.json").
-pub(crate) async fn read_head_and_metadata_root_if_present<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_head_and_metadata_root_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<(LoadedHeadObject, Option<LoadedMetadataRootObject>), ControlObjectLoadError> {
     const ROOT_AHEAD_HEAD_RELOADS: usize = 3;
     let (head, root) = futures::join!(
-        read_head_object(store, expected_namespace_id),
-        read_metadata_root_object_if_present(store, expected_namespace_id)
+        load_head_object(store, expected_namespace_id),
+        load_metadata_root_object_if_present(store, expected_namespace_id)
     );
     let mut head = head?;
     let Some(root) = root? else {
@@ -100,7 +100,7 @@ pub(crate) async fn read_head_and_metadata_root_if_present<S: ObjectStore + ?Siz
         if root.state.manifest_head_seq <= head.state.seq {
             return Ok((head, Some(root)));
         }
-        head = read_head_object(store, expected_namespace_id).await?;
+        head = load_head_object(store, expected_namespace_id).await?;
     }
     Err(ControlObjectLoadError::RootAheadOfHead {
         root_manifest_head_seq: root.state.manifest_head_seq,
@@ -108,7 +108,7 @@ pub(crate) async fn read_head_and_metadata_root_if_present<S: ObjectStore + ?Siz
     })
 }
 
-pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
@@ -128,7 +128,7 @@ pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
     checkpoint_id: &loonfs_api::CheckpointId,
 ) -> Result<Option<loonfs_api::wire::control::CheckpointRecordState>, crate::error::CoreError> {
     Ok(
-        crate::checkpoint::read_checkpoint_record(store, expected_namespace_id, checkpoint_id)
+        crate::checkpoint::load_checkpoint_record(store, expected_namespace_id, checkpoint_id)
             .await?
             .map(|loaded| loaded.state),
     )
@@ -138,7 +138,7 @@ pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataRootControl, ControlObjectLoadError> {
-    let loaded = read_metadata_root_object(store, expected_namespace_id).await?;
+    let loaded = load_metadata_root_object(store, expected_namespace_id).await?;
     Ok(LoadedMetadataRootControl {
         object_key: loaded.object_key,
         identity: ControlObjectIdentity { etag: loaded.etag },
@@ -147,13 +147,13 @@ pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
 }
 
 /// Loads the head together with the metadata basis it authorizes, as one
-/// consistent read anchor (see [`read_head_and_metadata_root_if_present`]
+/// consistent read anchor (see [`load_head_and_metadata_root_if_present`]
 /// for the race rule).
 pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<(LoadedHeadControl, MetadataBasis), ControlObjectLoadError> {
-    let loaded = read_head_and_metadata_basis(store, expected_namespace_id).await?;
+    let loaded = load_head_and_metadata_basis(store, expected_namespace_id).await?;
     Ok((
         LoadedHeadControl {
             object_key: loaded.head.object_key,
@@ -170,7 +170,7 @@ pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadControl, ControlObjectLoadError> {
-    let loaded = read_head_object(store, expected_namespace_id).await?;
+    let loaded = load_head_object(store, expected_namespace_id).await?;
     Ok(LoadedHeadControl {
         object_key: loaded.object_key,
         identity: ControlObjectIdentity { etag: loaded.etag },

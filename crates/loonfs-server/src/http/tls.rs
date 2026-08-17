@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 use std::time::Duration;
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::server::TlsStream as RustlsStream;
@@ -18,7 +19,7 @@ use tokio_rustls::{Accept, TlsAcceptor};
 
 /// Why the configured TLS identity could not be used. Every variant names
 /// the file it came from; none of them carry key material.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum TlsConfigError {
     #[error("failed to read `{path}`: {source}")]
     Read {

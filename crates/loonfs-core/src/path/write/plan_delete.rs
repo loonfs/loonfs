@@ -1,11 +1,11 @@
 //! Publish plans that delete visible paths.
 
-use super::planning_helpers::{
-    publish_binding_is_precondition, PlannedOperation, PublishPathPlanningView,
+use super::publish_path_planning::{
+    publish_binding_is_precondition, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
-use crate::path::helpers::ensure_mutation_path;
+use crate::path::mutation_path::ensure_mutation_path;
 use loonfs_api::{
     AbsolutePath, DeleteDirectoryBehavior, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
 };
@@ -16,7 +16,7 @@ pub(super) async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
     behavior: DeleteDirectoryBehavior,
     expected_inode_id: Option<InodeId>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     let resolved = view
         .metadata_state
@@ -74,5 +74,5 @@ pub(super) async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
             inode_id: resolved.inode_id,
         });
     }
-    Ok(PlannedOperation::new(vec![op], preconditions))
+    Ok(CompiledFilesystemOperation::new(vec![op], preconditions))
 }

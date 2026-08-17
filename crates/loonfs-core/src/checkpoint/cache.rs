@@ -89,15 +89,15 @@ pub(super) struct MetadataTableCacheKey {
 pub(super) enum DecodedMetadataTableBlock {
     Index {
         entries: Arc<Vec<SegmentIndexEntry>>,
-        decoded_byte_len: usize,
+        decoded_bytes: usize,
     },
     Filter {
         filter: Arc<SegmentFilter>,
-        decoded_byte_len: usize,
+        decoded_bytes: usize,
     },
     Data {
         block: Arc<DecodedDataBlock>,
-        decoded_byte_len: usize,
+        decoded_bytes: usize,
     },
     Manifest {
         manifest: Arc<NamespaceManifestEnvelope>,
@@ -105,25 +105,17 @@ pub(super) enum DecodedMetadataTableBlock {
         /// derived once when the envelope is validated. Scans walk this
         /// list on every page, so it is far too hot to regroup per scan.
         scan_runs: Arc<Vec<MetadataRunManifest>>,
-        decoded_byte_len: usize,
+        decoded_bytes: usize,
     },
 }
 
 impl DecodedMetadataTableBlock {
-    pub(super) fn decoded_byte_len(&self) -> usize {
+    pub(super) fn decoded_bytes(&self) -> usize {
         match self {
-            Self::Index {
-                decoded_byte_len, ..
-            }
-            | Self::Filter {
-                decoded_byte_len, ..
-            }
-            | Self::Data {
-                decoded_byte_len, ..
-            }
-            | Self::Manifest {
-                decoded_byte_len, ..
-            } => *decoded_byte_len,
+            Self::Index { decoded_bytes, .. }
+            | Self::Filter { decoded_bytes, .. }
+            | Self::Data { decoded_bytes, .. }
+            | Self::Manifest { decoded_bytes, .. } => *decoded_bytes,
         }
     }
 }
@@ -158,7 +150,7 @@ impl std::fmt::Debug for MetadataTableCache {
 struct MetadataTableCacheInner {
     entries: HashMap<MetadataTableCacheKey, CacheSlot>,
     order: Recency<MetadataTableCacheKey>,
-    decoded_byte_len: usize,
+    decoded_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -308,7 +300,7 @@ impl MetadataTableCache {
             .inner
             .lock()
             .expect("metadata table cache lock should not be poisoned");
-        let decoded_byte_len = block.decoded_byte_len();
+        let decoded_bytes = block.decoded_bytes();
         if let Some(previous) = inner.entries.insert(
             key.clone(),
             CacheSlot {
@@ -316,11 +308,11 @@ impl MetadataTableCache {
                 last_touch: 0,
             },
         ) {
-            inner.decoded_byte_len = inner
-                .decoded_byte_len
-                .saturating_sub(previous.block.decoded_byte_len());
+            inner.decoded_bytes = inner
+                .decoded_bytes
+                .saturating_sub(previous.block.decoded_bytes());
         }
-        inner.decoded_byte_len = inner.decoded_byte_len.saturating_add(decoded_byte_len);
+        inner.decoded_bytes = inner.decoded_bytes.saturating_add(decoded_bytes);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
         if let Some(observer) = &self.observer {
@@ -329,15 +321,15 @@ impl MetadataTableCache {
         let MetadataTableCacheInner {
             entries,
             order,
-            decoded_byte_len,
+            decoded_bytes,
         } = &mut *inner;
-        while *decoded_byte_len > self.config.max_decoded_bytes {
+        while *decoded_bytes > self.config.max_decoded_bytes {
             let Some(candidate) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
             else {
                 break;
             };
             if let Some(slot) = entries.remove(&candidate) {
-                *decoded_byte_len = decoded_byte_len.saturating_sub(slot.block.decoded_byte_len());
+                *decoded_bytes = decoded_bytes.saturating_sub(slot.block.decoded_bytes());
                 self.stats.evictions.fetch_add(1, Ordering::SeqCst);
                 if let Some(observer) = &self.observer {
                     observer.evict();
@@ -672,13 +664,13 @@ mod tests {
     use loonfs_api::{ActorId, ActorRef, ChangeSeq, InodeId, InodeKind, ManifestId, NamespaceId};
     use std::sync::Arc;
 
-    fn block(decoded_byte_len: usize) -> DecodedMetadataTableBlock {
+    fn block(decoded_bytes: usize) -> DecodedMetadataTableBlock {
         DecodedMetadataTableBlock::Data {
             block: Arc::new(DecodedDataBlock {
                 row_keys: Vec::new(),
                 rows: Vec::new(),
             }),
-            decoded_byte_len,
+            decoded_bytes,
         }
     }
 

@@ -10,9 +10,9 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
-use crate::namespace::basis::{read_head_and_metadata_basis, MetadataBasis, MetadataBasisIdentity};
+use crate::namespace::basis::{load_head_and_metadata_basis, MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::load_head_object;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
@@ -139,7 +139,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
-    let loaded = read_head_and_metadata_basis(store, namespace_id)
+    let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
@@ -313,7 +313,7 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
         })
     })?;
     if current_head_etag != loaded_head_etag {
-        let moved_head = read_head_object(store, namespace_id)
+        let moved_head = load_head_object(store, namespace_id)
             .await
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))

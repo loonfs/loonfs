@@ -53,11 +53,11 @@ pub enum CoreError {
     WriterEpoch(#[from] WriterEpochAcquireError),
     #[error("commit validation failed: {0}")]
     CommitValidation(#[from] CommitValidationError),
-    #[error("wal build failed: {0}")]
+    #[error("WAL build failed: {0}")]
     WalBuild(#[from] WalBuildError),
     #[error("head publish failed: {0}")]
     HeadPublish(#[from] CommitHeadPublishError),
-    #[error("failed to write wal object `{object_key}`: {message}")]
+    #[error("failed to write WAL object `{object_key}`: {message}")]
     WalWrite {
         object_key: String,
         message: String,
@@ -269,7 +269,7 @@ pub enum MetadataProjectionLoadError {
     WalChainLoad(#[from] WalChainLoadError),
     #[error(transparent)]
     ManifestLoad(#[from] ManifestLoadError),
-    #[error("wal replay failed: {0}")]
+    #[error("WAL replay failed: {0}")]
     WalReplay(#[from] WalReplayError),
     #[error(
         "metadata projection head mismatch: expected current head `{expected:?}`, replayed `{actual:?}`"

@@ -94,7 +94,7 @@ pub(super) fn decoded_data_cache_block(
     block: DecodedDataBlock,
 ) -> DecodedMetadataTableBlock {
     DecodedMetadataTableBlock::Data {
-        decoded_byte_len: decoded_manifest_block_weight(family, &block.rows),
+        decoded_bytes: decoded_manifest_block_weight(family, &block.rows),
         block: Arc::new(block),
     }
 }
@@ -250,7 +250,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
         let cache_key =
             segment_block_cache_key(descriptor, MetadataTableBlockKind::Data, handle.offset);
         let cache_block = DecodedMetadataTableBlock::Data {
-            decoded_byte_len: decoded_manifest_block_weight(descriptor.family, &decoded.rows),
+            decoded_bytes: decoded_manifest_block_weight(descriptor.family, &decoded.rows),
             block: Arc::clone(&decoded),
         };
         memo.record(&cache_key, &cache_block);

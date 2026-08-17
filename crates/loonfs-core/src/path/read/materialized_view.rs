@@ -14,11 +14,11 @@ use crate::metadata::{
     RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 #[cfg(test)]
-use crate::namespace::basis::read_head_and_metadata_basis;
+use crate::namespace::basis::load_head_and_metadata_basis;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
-use crate::storage::content::{content_object_key_for_ref, read_durable_content_bytes};
+use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
+use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
@@ -42,12 +42,12 @@ use tracing::Instrument;
 /// A second projectable field should grow this into a projection struct
 /// rather than add a second parameter beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AttributeProjection {
+pub(crate) enum AttributeInclusion {
     Include,
     Omit,
 }
 
-impl From<bool> for AttributeProjection {
+impl From<bool> for AttributeInclusion {
     fn from(include: bool) -> Self {
         match include {
             true => Self::Include,
@@ -126,7 +126,7 @@ pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataView<'a, S>> {
-    let loaded = read_head_and_metadata_basis(store, namespace_id)
+    let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(MetadataProjectionLoadError::LoadHead)?;
     let context = ReadLoadContext::pinned_head(
@@ -306,7 +306,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) async fn resolve_path(
         &self,
         absolute_path: &str,
-        attributes: AttributeProjection,
+        attributes: AttributeInclusion,
     ) -> Result<AuthoritativePathEntry> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         // One session serves the resolution and the entry build: the walk's
@@ -325,7 +325,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) async fn stat_inode(
         &self,
         inode_id: InodeId,
-        attributes: AttributeProjection,
+        attributes: AttributeInclusion,
     ) -> Result<AuthoritativePathEntry> {
         let mut session = self.metadata_view().session();
         let mut ancestor_paths = HashMap::new();
@@ -336,7 +336,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await
     }
 
-    pub(crate) async fn read_file_bytes(
+    pub(crate) async fn get_file_bytes(
         &self,
         store: &S,
         absolute_path: &str,
@@ -344,7 +344,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<AuthoritativeFileBytes> {
         let (entry, content_ref) = self.resolve_file_content(absolute_path).await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
-        let bytes = read_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
+        let bytes = get_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
         Ok(AuthoritativeFileBytes { entry, bytes })
     }
 
@@ -357,7 +357,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
     ) -> Result<(AuthoritativePathEntry, ContentRef)> {
         let entry = self
-            .resolve_path(absolute_path, AttributeProjection::Omit)
+            .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
         let content_ref = match &entry.kind {
             AuthoritativePathEntryKind::File { content_ref, .. } => content_ref.clone(),
@@ -391,7 +391,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadTarget> {
         let entry = self
-            .resolve_path(absolute_path, AttributeProjection::Omit)
+            .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
         let current_revision = match &entry.kind {
             AuthoritativePathEntryKind::File {
@@ -445,7 +445,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let entry = self
-            .resolve_path(absolute_path, AttributeProjection::Omit)
+            .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
         if matches!(entry.kind, AuthoritativePathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
@@ -585,7 +585,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })
     }
 
-    pub(crate) async fn read_file_revision_bytes(
+    pub(crate) async fn get_file_revision_bytes(
         &self,
         store: &S,
         absolute_path: &str,
@@ -593,7 +593,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes> {
         let mut entry = self
-            .resolve_path(absolute_path, AttributeProjection::Omit)
+            .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
         if matches!(entry.kind, AuthoritativePathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
@@ -611,12 +611,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         let bytes =
-            read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
-                .await?;
+            get_durable_content_bytes(store, &self.content_store_id, &revision.content_ref).await?;
         Ok(AuthoritativeFileBytes { entry, bytes })
     }
 
-    pub(crate) async fn read_file_revision_bytes_for_inode(
+    pub(crate) async fn get_file_revision_bytes_for_inode(
         &self,
         store: &S,
         inode_id: InodeId,
@@ -625,10 +624,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<Vec<u8>> {
         let revision = self.revision_for_inode(inode_id, revision_no).await?;
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
-        Ok(
-            read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
-                .await?,
-        )
+        Ok(get_durable_content_bytes(store, &self.content_store_id, &revision.content_ref).await?)
     }
 
     #[tracing::instrument(
@@ -647,7 +643,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
-        attributes: AttributeProjection,
+        attributes: AttributeInclusion,
     ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
         validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
 
@@ -730,7 +726,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             // A projected page reads every child's attributes as one wave,
             // so the build loop below runs over cache hits instead of a
             // round trip per entry.
-            if attributes == AttributeProjection::Include {
+            if attributes == AttributeInclusion::Include {
                 let child_inode_ids: Vec<InodeId> = children
                     .iter()
                     .map(|child| child.binding.child_inode_id)
@@ -771,7 +767,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved: &ResolvedVisiblePath,
-        attributes: AttributeProjection,
+        attributes: AttributeInclusion,
     ) -> Result<AuthoritativePathEntry> {
         let kind = match resolved.inode_kind {
             InodeKind::Directory => AuthoritativePathEntryKind::Directory {},
@@ -792,7 +788,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         // Attributes belong to the inode, so a directory answers as readily
         // as a file; only the projection decides whether the read happens.
         let attributes = match attributes {
-            AttributeProjection::Include => {
+            AttributeInclusion::Include => {
                 let (revision_no, attributes, updated_by, updated_at_ms) =
                     session.attributes_of_visible(resolved.inode_id).await?;
                 Some(AttributesProjection {
@@ -802,7 +798,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     attributes,
                 })
             }
-            AttributeProjection::Omit => None,
+            AttributeInclusion::Omit => None,
         };
         let absolute_path = AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {
             CoreError::NamespaceCorrupt(format!(
@@ -840,7 +836,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved_dir: &ResolvedVisiblePath,
         child: VisibleChildEntry,
-        attributes: AttributeProjection,
+        attributes: AttributeInclusion,
     ) -> Result<AuthoritativePathEntry> {
         let child_path = AbsolutePath::parse(&resolved_dir.absolute_path)
             .map_err(map_path_error_to_core)?
@@ -1015,7 +1011,7 @@ mod tests {
             .expect("load view");
 
         let annotated = view
-            .resolve_path("/docs/annotated", AttributeProjection::Include)
+            .resolve_path("/docs/annotated", AttributeInclusion::Include)
             .await
             .expect("stat annotated");
         assert_eq!(
@@ -1035,7 +1031,7 @@ mod tests {
         );
 
         let bare = view
-            .resolve_path("/docs/bare", AttributeProjection::Include)
+            .resolve_path("/docs/bare", AttributeInclusion::Include)
             .await
             .expect("stat bare");
         assert_eq!(
@@ -1049,7 +1045,7 @@ mod tests {
         );
 
         let omitted = view
-            .resolve_path("/docs/annotated", AttributeProjection::Omit)
+            .resolve_path("/docs/annotated", AttributeInclusion::Omit)
             .await
             .expect("stat without attributes");
         assert!(omitted.attributes.is_none());
@@ -1067,8 +1063,8 @@ mod tests {
         let directory = AbsolutePath::parse("/docs").expect("path");
 
         for (projection, expected_calls, expect_projected) in [
-            (AttributeProjection::Omit, 0, false),
-            (AttributeProjection::Include, 2, true),
+            (AttributeInclusion::Omit, 0, false),
+            (AttributeInclusion::Include, 2, true),
         ] {
             let mut session = view.metadata_view().session();
             let resolved = session
@@ -1111,8 +1107,8 @@ mod tests {
             .expect("load view");
 
         for (projection, expected_preloads) in [
-            (AttributeProjection::Omit, 0),
-            (AttributeProjection::Include, 2),
+            (AttributeInclusion::Omit, 0),
+            (AttributeInclusion::Include, 2),
         ] {
             let mut session = view.metadata_view().session();
             let directory = AbsolutePath::parse("/docs").expect("path");
@@ -1128,7 +1124,7 @@ mod tests {
                 .iter()
                 .map(|child| child.binding.child_inode_id)
                 .collect();
-            if projection == AttributeProjection::Include {
+            if projection == AttributeInclusion::Include {
                 session
                     .preload_attributes(&child_inode_ids)
                     .await

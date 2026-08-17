@@ -1,8 +1,8 @@
 //! Scheduler for bounded background maintenance.
 //!
 //! A [`MaintenanceJob`] performs one bounded unit of work for one namespace.
-//! Each step reloads durable state, performs at most one update, and reports a
-//! [`MaintenanceStepResult`]. Jobs do not decide when they run.
+//! Each step reloads durable state, performs at most one update, and returns a
+//! [`MaintenanceStepReport`]. The runner decides when jobs run.
 //!
 //! [`MaintenanceRunner`] owns scheduling. It tracks pending `(job, namespace)`
 //! keys, concurrency permits, retry backoff, earliest run times, per-job
@@ -83,9 +83,8 @@ pub enum FsBackgroundWork {
 pub struct MaintenanceJobId(&'static str);
 
 impl MaintenanceJobId {
-    /// Metadata upkeep: flush the WAL tail past its threshold, then fold one
-    /// bounded reorganization unit. Registered by the runtime on every
-    /// write-capable handle.
+    /// Flushes the WAL tail after it reaches its threshold, then runs one
+    /// bounded reorganization step. Registered for every writer.
     pub const METADATA: Self = Self("metadata");
     /// Garbage collection: one bounded mark-and-sweep pass. Registered by
     /// the runtime on every write-capable handle.
@@ -151,7 +150,7 @@ impl MaintenanceStepConclusion {
 /// The runner stores the conclusion, optional continuation, and earliest next
 /// run time so jobs do not maintain separate scheduler state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaintenanceStepResult {
+pub struct MaintenanceStepReport {
     /// What the step accomplished.
     pub conclusion: MaintenanceStepConclusion,
     /// Where this step stopped, for the next one to resume from. Opaque to
@@ -171,7 +170,7 @@ pub struct MaintenanceStepResult {
     pub not_before_ms: Option<u64>,
 }
 
-impl MaintenanceStepResult {
+impl MaintenanceStepReport {
     /// A conclusion with nothing to resume from and no deadline observed —
     /// what a job whose whole position is durable returns.
     pub fn concluded(conclusion: MaintenanceStepConclusion) -> Self {
@@ -213,12 +212,12 @@ pub trait MaintenanceJob: Send + Sync + 'static {
     /// returned, or `None` for a fresh pass — after a restart, after an
     /// idle conclusion, or the first time the key is admitted. A job that
     /// has no position to carry ignores it and returns
-    /// [`MaintenanceStepResult::concluded`].
+    /// [`MaintenanceStepReport::concluded`].
     async fn step(
         &self,
         namespace_id: &NamespaceId,
         continuation: Option<&str>,
-    ) -> Result<MaintenanceStepResult>;
+    ) -> Result<MaintenanceStepReport>;
 
     /// Answers whether `namespace_id` has work waiting, as cheaply as this
     /// job can. Called only by reconciliation, never on the hot path.
@@ -645,7 +644,7 @@ impl MaintenanceRunner {
     /// Does what the timer does on a wake, without waiting for one: promote
     /// arrived obligations, then dispatch.
     #[cfg(test)]
-    pub(crate) fn tick_now(&self) {
+    pub(crate) fn dispatch_now(&self) {
         let now_ms = self.inner.clock.now_ms();
         self.inner.lock_state().admission.promote_due(now_ms);
         dispatch_ready(&self.inner);
@@ -828,7 +827,7 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
     let Some(job) = inner.job(key.job) else {
         // Nudged for a job nobody registered: there is nothing to run and
         // nothing to reconcile.
-        return StepOutcome::Concluded(MaintenanceStepResult::concluded(
+        return StepOutcome::Concluded(MaintenanceStepReport::concluded(
             MaintenanceStepConclusion::NotEnabled,
         ));
     };

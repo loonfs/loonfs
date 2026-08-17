@@ -1,13 +1,13 @@
 //! The publish plan for one attribute update.
 
-use super::planning_helpers::{
-    publish_binding_is_precondition, PlannedOperation, PublishPathPlanningView,
+use super::publish_path_planning::{
+    publish_binding_is_precondition, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::commit::{
     CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition, CommitValidationError,
 };
 use crate::error::{CoreError, Result};
-use crate::path::helpers::ensure_mutation_path;
+use crate::path::mutation_path::ensure_mutation_path;
 use loonfs_api::{
     AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, InodeId, NameKey,
     ROOT_INODE_ID,
@@ -22,7 +22,7 @@ pub(super) async fn plan_publish_update_attributes<S: ObjectStore + ?Sized>(
     expected_inode_id: Option<InodeId>,
     expected_attributes_revision_no: Option<AttributeRevisionNo>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     validate_request_shape(set, remove)?;
 
@@ -86,7 +86,7 @@ pub(super) async fn plan_publish_update_attributes<S: ObjectStore + ?Sized>(
     let attributes = Attributes::new(updated).map_err(|error| {
         CoreError::InvalidCommitRequest(format!("the resulting attribute map is invalid: {error}"))
     })?;
-    Ok(PlannedOperation::new(
+    Ok(CompiledFilesystemOperation::new(
         vec![ApiCommitOp::UpdateAttributes {
             inode_id: target.inode_id,
             base_attributes_revision_no,

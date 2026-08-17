@@ -2,7 +2,7 @@
 
 use crate::error::CoreError;
 use crate::limits::CONTENTION_RETRY_LIMIT;
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::load_head_object;
 use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -46,7 +46,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
 ) -> Result<DeleteNamespaceResponse, CoreError> {
     let mut attempted_swap = false;
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
-        let loaded = read_head_object(store, namespace_id)
+        let loaded = load_head_object(store, namespace_id)
             .await
             .map_err(|error| CoreError::MetadataProjection(error.into()))?;
         let head = loaded.state.clone();

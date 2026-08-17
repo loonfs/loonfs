@@ -128,7 +128,12 @@ impl SegmentRowIterator {
     }
 
     pub(super) fn take_head(&mut self) -> MetadataRow {
-        let row = self.blocks.front().expect("a head to take").rows[self.row].clone();
+        let row = self
+            .blocks
+            .front()
+            .expect("an iterator with a head row should have a front block")
+            .rows[self.row]
+            .clone();
         self.row += 1;
         while self
             .blocks

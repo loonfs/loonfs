@@ -6001,7 +6001,7 @@
               },
               {
                 "$ref": "#/components/schemas/MetadataMaintenanceRequest",
-                "description": "Fold the visible WAL tail into metadata tables and merge one bounded\nreorganization unit. The two travel together: folding a tail is what\ncreates the delta runs a reorganization merges."
+                "description": "Flush the visible WAL tail into metadata tables, then run one bounded\nreorganization step."
               }
             ]
           }
@@ -6096,7 +6096,7 @@
           },
           "wal_flush": {
             "$ref": "#/components/schemas/WalFlushStepOutcome",
-            "description": "What the WAL fold did."
+            "description": "What the WAL flush did."
           }
         }
       },
@@ -6801,7 +6801,7 @@
         "oneOf": [
           {
             "type": "object",
-            "description": "The tail was below the threshold, so there was nothing to fold.",
+            "description": "The tail was below the threshold, so there was nothing to flush.",
             "required": [
               "outcome"
             ],

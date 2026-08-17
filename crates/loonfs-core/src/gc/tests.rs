@@ -43,7 +43,7 @@ use crate::commit_engine::delete_namespace;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
-use crate::path::read::{load_current_metadata_view, AttributeProjection};
+use crate::path::read::{load_current_metadata_view, AttributeInclusion};
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -110,7 +110,7 @@ async fn checkpoint_lifecycle<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &loonfs_api::CheckpointId,
 ) -> CheckpointRecordLifecycle {
-    crate::checkpoint::read_checkpoint_record(store, namespace_id, checkpoint_id)
+    crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("checkpoint record exists")
@@ -145,7 +145,7 @@ async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     load_current_metadata_view(store, namespace_id)
         .await
         .expect("load latest view")
-        .resolve_path("/", AttributeProjection::Omit)
+        .resolve_path("/", AttributeInclusion::Omit)
         .await
         .expect("resolve root");
 }
@@ -436,7 +436,7 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
 
     // Simulate the crash residue: the pinned record stays active while
     // its basis manifest object vanishes.
-    let record = crate::checkpoint::record::read_checkpoint_record(
+    let record = crate::checkpoint::record::load_checkpoint_record(
         &store,
         &namespace_id,
         &pinned.checkpoint_id,
@@ -457,7 +457,7 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
         !report.degraded_retention,
         "a verifiably absent basis is not ambiguity"
     );
-    let released = crate::checkpoint::record::read_checkpoint_record(
+    let released = crate::checkpoint::record::load_checkpoint_record(
         &store,
         &namespace_id,
         &pinned.checkpoint_id,
@@ -598,7 +598,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("load clone view");
     clone_view
-        .resolve_path("/docs/shared.txt", AttributeProjection::Omit)
+        .resolve_path("/docs/shared.txt", AttributeInclusion::Omit)
         .await
         .expect("clone reads through the deleted source");
 
@@ -2057,7 +2057,7 @@ async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
     // The read is the assertion that matters: it reaches for its tables
     // after the sweep has been over them.
     pinned
-        .resolve_path("/docs/file-0.txt", AttributeProjection::Omit)
+        .resolve_path("/docs/file-0.txt", AttributeInclusion::Omit)
         .await
         .expect("the pinned anchor still resolves through its own tables");
     assert_eq!(
@@ -2929,7 +2929,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("load view");
-    view.resolve_path("/docs/two.txt", AttributeProjection::Omit)
+    view.resolve_path("/docs/two.txt", AttributeInclusion::Omit)
         .await
         .expect("tail commit stays readable");
 }
@@ -2955,7 +2955,7 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
         .await
         .expect("second checkpoint");
     let first_record =
-        crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
             .expect("read first record")
             .expect("first record exists")
@@ -2974,7 +2974,7 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     assert_eq!(first_pass.deleted_checkpoint_records, 1);
     assert!(!first_pass.degraded_retention);
     assert!(
-        crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
             .expect("read record")
             .is_none()
@@ -3151,12 +3151,9 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("load view");
     for round in 0..3 {
-        view.resolve_path(
-            &format!("/docs/file-{round}.txt"),
-            AttributeProjection::Omit,
-        )
-        .await
-        .expect("file readable after sweep");
+        view.resolve_path(&format!("/docs/file-{round}.txt"), AttributeInclusion::Omit)
+            .await
+            .expect("file readable after sweep");
     }
 }
 
@@ -3395,7 +3392,7 @@ async fn gc_deletes_a_released_record_only_after_its_release_ages() {
         report.deleted_checkpoint_records, 0,
         "an old object with a young release is retained"
     );
-    assert!(crate::checkpoint::read_checkpoint_record(
+    assert!(crate::checkpoint::load_checkpoint_record(
         &store,
         &namespace_id,
         &pinned.checkpoint_id
@@ -3409,7 +3406,7 @@ async fn gc_deletes_a_released_record_only_after_its_release_ages() {
         .await
         .expect("pass past the release grace window");
     assert_eq!(report.deleted_checkpoint_records, 1);
-    assert!(crate::checkpoint::read_checkpoint_record(
+    assert!(crate::checkpoint::load_checkpoint_record(
         &store,
         &namespace_id,
         &pinned.checkpoint_id
@@ -3486,7 +3483,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
         .await
         .expect("second post-expiry pass");
     assert_eq!(second_pass.deleted_checkpoint_records, 1);
-    assert!(crate::checkpoint::read_checkpoint_record(
+    assert!(crate::checkpoint::load_checkpoint_record(
         &store,
         &namespace_id,
         &expiring.checkpoint_id
@@ -3496,7 +3493,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     .is_none());
     // The unexpired pin — same basis, different owner — still roots it.
     let survivor =
-        crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &lasting.checkpoint_id)
+        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &lasting.checkpoint_id)
             .await
             .expect("read lasting record")
             .expect("lasting record survives")
@@ -3567,14 +3564,14 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .expect("second gc pass");
     let _ = second_pass;
     assert!(
-        crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
             .expect("read keeper record")
             .is_some(),
         "the surviving owner's record stays"
     );
     let keeper =
-        crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
             .expect("read keeper record")
             .expect("keeper record exists")
@@ -3652,7 +3649,7 @@ async fn gc_retains_active_checkpoint_bases() {
     assert!(report.deleted_manifests <= 1);
     assert_eq!(report.deleted_checkpoint_records, 0);
     let first_record =
-        crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
             .expect("read first checkpoint")
             .expect("first checkpoint exists")
@@ -3892,7 +3889,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     load_current_metadata_view(&store, &clone)
         .await
         .expect("target readable after every pass")
-        .resolve_path("/docs/one.txt", AttributeProjection::Omit)
+        .resolve_path("/docs/one.txt", AttributeInclusion::Omit)
         .await
         .expect("forked file readable");
 }
@@ -4033,7 +4030,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
     load_current_metadata_view(&store, &clone)
         .await
         .expect("target readable after retry")
-        .resolve_path("/docs/one.txt", AttributeProjection::Omit)
+        .resolve_path("/docs/one.txt", AttributeInclusion::Omit)
         .await
         .expect("forked file readable");
 }

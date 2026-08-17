@@ -1011,7 +1011,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
     );
     let bytes = harness
         .engine
-        .read_file_revision_for_inode(inode_id, RevisionNo(1), &context, None)
+        .get_file_revision_for_inode(inode_id, RevisionNo(1), &context, None)
         .await
         .expect("retained revision bytes remain readable by inode");
     assert_eq!(bytes, b"revision one");

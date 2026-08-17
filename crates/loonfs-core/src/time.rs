@@ -1,7 +1,9 @@
-//! The one wall-clock boundary durable timestamps are stamped at.
+//! Clocks used for durable timestamps and local publication time limits.
 
 use crate::error::{CoreError, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 
 /// Reads the wall clock as unix milliseconds.
 ///

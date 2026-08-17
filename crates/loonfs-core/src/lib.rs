@@ -24,14 +24,16 @@
 //! use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //!
-//! let store = LocalFsStore::new(std::env::temp_dir()).expect("store");
+//! let store = LocalFsStore::new(std::env::temp_dir())
+//!     .expect("a temporary-directory-backed store should initialize");
 //! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
 //!
 //! let engine = NamespaceEngine::writer(store, namespace.clone(), "example-writer")
-//!     .expect("engine");
+//!     .expect("a writer engine with a non-empty identity should build");
 //! let _ = engine.bootstrap_namespace(BootstrapOptions::default());
 //!
-//! let publish_store = LocalFsStore::new(std::env::temp_dir()).expect("store");
+//! let publish_store = LocalFsStore::new(std::env::temp_dir())
+//!     .expect("a temporary-directory-backed store should initialize");
 //! let context = MutationContext {
 //!     writer_id: "example-writer".to_owned(),
 //!     now_ms: 0,
@@ -41,10 +43,12 @@
 //!     &publish_store,
 //!     vec![CommitCandidate::new(CommitRequest::single(
 //!         CommitId::generate(),
-//!         ActorRef::service(ActorId::parse("example-service").expect("actor id")),
+//!         ActorRef::service(
+//!             ActorId::parse("example-service").expect("a static actor ID should parse"),
+//!         ),
 //!         None,
 //!         FilesystemOperation::CreateDirectory {
-//!             path: AbsolutePath::parse("/plans").expect("path"),
+//!             path: AbsolutePath::parse("/plans").expect("a static absolute path should parse"),
 //!             parents: false,
 //!         },
 //!     ))],
@@ -74,7 +78,6 @@ mod options;
 mod protocol;
 mod recency;
 mod storage;
-mod timing;
 mod wal;
 
 // Public modules required by `loonfs` or this crate's integration tests.
@@ -117,8 +120,8 @@ pub mod cache {
         DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
-        load_deleted_namespace_head_summary, load_namespace_fold_basis,
-        load_namespace_head_summary, NamespaceFoldBasis,
+        load_deleted_namespace_head_summary, load_namespace_flush_basis,
+        load_namespace_head_summary, NamespaceFlushBasis,
     };
 }
 

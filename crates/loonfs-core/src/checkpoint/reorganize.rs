@@ -41,8 +41,8 @@ use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
-use crate::namespace::control::{read_head_object, read_metadata_root_object_if_present};
-use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+use crate::namespace::control::{load_head_object, load_metadata_root_object_if_present};
+use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
     MetadataFileRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
@@ -152,7 +152,7 @@ pub enum MetadataReorganizeOutcome {
         /// per-group bookkeeping by. Its families are
         /// [`MetadataFamilyGroup::families`].
         group: MetadataFamilyGroup,
-        folded_l0_rows: u64,
+        merged_l0_rows: u64,
         input_runs: usize,
         decoded_input_rows: u64,
         decoded_input_bytes: u64,
@@ -236,7 +236,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let publication_started_ms = timer.monotonic_now_ms();
     // A namespace that has published no manifest of its own has no runs to
     // fold: reorganization has nothing to do until its first flush.
-    let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
+    let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
         .map(|loaded| loaded.state)
@@ -277,7 +277,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // that hands the group to a streaming compaction carries the floor that
     // job will judge every row against, and the spec it carries is immutable
     // for the job's life.
-    let head = read_head_object(store, namespace_id)
+    let head = load_head_object(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
         .state;
@@ -375,7 +375,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             namespace_id,
             MetadataReorganizeOutcome::UnitPublished {
                 group,
-                folded_l0_rows: input.folded_l0_rows,
+                merged_l0_rows: input.merged_l0_rows,
                 input_runs: input.runs.len(),
                 decoded_input_rows: input.decoded_rows,
                 decoded_input_bytes: input.decoded_bytes,
@@ -408,7 +408,7 @@ pub(super) enum ReorganizationPlan {
 pub(super) struct ReorganizationInput {
     pub(super) runs: Vec<MetadataRunManifest>,
     run_ids: BTreeSet<(ChangeSeq, u32)>,
-    folded_l0_rows: u64,
+    merged_l0_rows: u64,
     decoded_rows: u64,
     decoded_bytes: u64,
     /// Where this merge's output stands in the group, which decides both the
@@ -578,7 +578,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         let mut runs = Vec::new();
         let mut decoded_rows = 0u64;
         let mut decoded_bytes = 0u64;
-        let mut folded_l0_rows = 0u64;
+        let mut merged_l0_rows = 0u64;
         for index in window_start..candidate_count.min(window_start + max_runs) {
             let run = candidates[index];
             let run_rows = group_run_descriptors(run, group)
@@ -618,7 +618,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
                 break;
             }
             if run.level == CHECKPOINT_L0_RUN_LEVEL {
-                folded_l0_rows = folded_l0_rows.saturating_add(run_rows);
+                merged_l0_rows = merged_l0_rows.saturating_add(run_rows);
             }
             decoded_rows = decoded_rows.saturating_add(run_rows);
             decoded_bytes = decoded_bytes.saturating_add(run_bytes);
@@ -644,7 +644,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             plan: Some(ReorganizationPlan::BoundedMerge(ReorganizationInput {
                 runs,
                 run_ids,
-                folded_l0_rows,
+                merged_l0_rows,
                 decoded_rows,
                 decoded_bytes,
                 placement,

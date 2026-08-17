@@ -6,12 +6,12 @@ use crate::http::error::{status_for_core_error_code, ApiResponseError};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
-use loonfs_api::v0::{
-    GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, GrepRequest, GrepResponse,
-};
+use loonfs_api::v0::{GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
-use loonfs_api::{NamespaceId, FEATURE_ADMIN_GREP_INDEX, FEATURE_QUERY_GREP};
+use loonfs_api::{
+    GrepRequest, GrepResponse, NamespaceId, FEATURE_ADMIN_GREP_INDEX, FEATURE_QUERY_GREP,
+};
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
 
 #[cfg_attr(
@@ -272,7 +272,7 @@ pub(super) async fn gc_grep_index(
         .garbage_collect_namespace(
             &namespace_id,
             current_unix_ms()?,
-            &loonfs_grep::GrepGcRequest {
+            &loonfs_grep::GrepGcOptions {
                 max_objects: request.max_objects,
                 cursor: request.cursor,
             },

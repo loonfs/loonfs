@@ -21,7 +21,7 @@ use thiserror::Error;
 /// Implementations may version their own on-disk format. Namespace manifests
 /// are excluded because they are keyed by object path rather than content
 /// digest.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StoredMetadataBlockKey {
     pub payload_checksum: String,
     pub kind: StoredMetadataBlockKind,
@@ -29,7 +29,7 @@ pub struct StoredMetadataBlockKey {
 }
 
 /// Which stored section of a segment a key names.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StoredMetadataBlockKind {
     Data,
     Index,

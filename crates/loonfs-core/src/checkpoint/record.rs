@@ -18,7 +18,7 @@ use crate::control_object::{
 };
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::resolve_retention_floor_seq;
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::load_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
@@ -137,7 +137,7 @@ fn checkpoint_key_ids(
     Ok((namespace_id, checkpoint_id))
 }
 
-pub(crate) async fn read_checkpoint_record<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
@@ -167,7 +167,7 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     const RELEASE_CAS_ATTEMPTS: usize = 4;
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
     for _attempt in 0..RELEASE_CAS_ATTEMPTS {
-        let Some(loaded) = read_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
+        let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
             // Reaped underneath us: no active pin under this id is exactly
             // what the release asked for.
             return Ok(());
@@ -212,7 +212,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
 ) -> Result<CheckpointBasisVerification> {
-    let head = read_head_object(store, &record.namespace_id)
+    let head = load_head_object(store, &record.namespace_id)
         .await
         .map_err(CoreError::load_head)?
         .state;

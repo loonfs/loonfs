@@ -33,7 +33,7 @@ struct ManifestSwapOnCasConflictStore {
 
 impl ManifestSwapOnCasConflictStore {
     async fn install_competing_manifest_id(&self) {
-        let loaded = read_metadata_root_object(&self.inner, &self.namespace_id)
+        let loaded = load_metadata_root_object(&self.inner, &self.namespace_id)
             .await
             .expect("read root for swap");
         let mut root = loaded.state;
@@ -126,7 +126,7 @@ impl FloorRaiseOnCasConflictStore {
     async fn install_higher_floor(&self) {
         // The namespace may not have published a floor yet: create and fork
         // write none, so the competitor may be the first writer too.
-        let mut floor = match read_wal_floor_object(&self.inner, &self.namespace_id).await {
+        let mut floor = match load_wal_floor_object(&self.inner, &self.namespace_id).await {
             Ok(loaded) => loaded.state,
             Err(_) => loonfs_api::wire::control::WalFloorState {
                 namespace_id: self.namespace_id.clone(),
@@ -1166,7 +1166,7 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         other => panic!("a stale-basis candidate must be superseded, got {other:?}"),
     }
 
-    let root_after = read_metadata_root_object(&store, &namespace_id)
+    let root_after = load_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
         .state;

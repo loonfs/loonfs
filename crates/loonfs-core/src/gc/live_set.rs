@@ -10,7 +10,7 @@ use crate::context::MutationContext;
 use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::{
-    read_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
+    load_head_and_metadata_basis, resolve_retention_floor_seq, LoadedNamespaceBasis,
 };
 use crate::wal::{load_wal_chain_within, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
@@ -250,7 +250,7 @@ pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     if !budget.try_charge() {
         return Ok(LiveSetCollection::BudgetExhausted);
     }
-    let loaded = read_head_and_metadata_basis(store, namespace_id)
+    let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
     collect_live_set(

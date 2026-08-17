@@ -65,9 +65,9 @@ use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
 use super::scan::{descriptor_may_intersect_range, Readahead, VerifiedMetadataTables};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::control::read_metadata_root_object_if_present;
+use crate::namespace::control::load_metadata_root_object_if_present;
 use crate::time::current_time_ms;
-use crate::timing::StdMonotonicTimer;
+use crate::time::StdMonotonicTimer;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ChangeSeq, ManifestId, MetadataCompactionId, NamespaceId};
@@ -264,7 +264,7 @@ impl MetadataCompactionCancellation {
 
 /// How a job ended.
 #[derive(Debug)]
-pub(super) enum MetadataCompactionOutcome {
+pub(super) enum MetadataMergeOutcome {
     Completed(MetadataMergeResult),
     /// The cancellation token was set. Whatever the job had written stays
     /// staged and unreferenced.
@@ -356,7 +356,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
     lease: &mut CompactionLease<'_>,
-) -> Result<MetadataCompactionOutcome> {
+) -> Result<MetadataMergeOutcome> {
     let merge = GroupMerge::new(
         tables.store,
         namespace_id,
@@ -380,9 +380,9 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
         lease,
     };
     match merge.run(&mut control).await? {
-        Ok(result) => Ok(MetadataCompactionOutcome::Completed(result)),
-        Err(MergeStop::Cancelled) => Ok(MetadataCompactionOutcome::Cancelled),
-        Err(MergeStop::Fenced) => Ok(MetadataCompactionOutcome::Fenced),
+        Ok(result) => Ok(MetadataMergeOutcome::Completed(result)),
+        Err(MergeStop::Cancelled) => Ok(MetadataMergeOutcome::Cancelled),
+        Err(MergeStop::Fenced) => Ok(MetadataMergeOutcome::Fenced),
     }
 }
 
@@ -493,11 +493,11 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     )
     .await?
     {
-        MetadataCompactionOutcome::Completed(result) => result,
+        MetadataMergeOutcome::Completed(result) => result,
         // The prefix belongs to garbage collection now, and the segments the
         // job wrote are being reaped. Publishing descriptors naming them is
         // exactly what the fence exists to stop.
-        MetadataCompactionOutcome::Fenced => {
+        MetadataMergeOutcome::Fenced => {
             tracing::warn!(
                 namespace_id = namespace_id.as_str(),
                 job_id = spec.job_id().as_str(),
@@ -507,7 +507,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
             );
             return Ok(MetadataCompactionJobOutcome::Fenced);
         }
-        MetadataCompactionOutcome::Cancelled => {
+        MetadataMergeOutcome::Cancelled => {
             // The executor stops between block fetches, so what it wrote is
             // whatever segments had already filled. They are staged and named
             // by nothing. The lease is left where it is: it expires on its
@@ -644,7 +644,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             return Ok(Finalization::Fenced);
         }
         let publication_started_ms = timer.monotonic_now_ms();
-        let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
+        let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
             .await
             .map_err(CoreError::load_head)?
             .map(|loaded| loaded.state)
@@ -738,7 +738,7 @@ async fn load_current_manifest_tables<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<Option<VerifiedMetadataTables<'a, S>>> {
-    let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
+    let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
         .map(|loaded| loaded.state)

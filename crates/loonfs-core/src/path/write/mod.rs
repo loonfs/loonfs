@@ -16,7 +16,7 @@ mod plan_delete;
 mod plan_restore;
 mod plan_transfer;
 pub(crate) mod planner;
-mod planning_helpers;
+mod publish_path_planning;
 mod session;
 
 pub use intent::{CommitRequest, FilesystemOperation};

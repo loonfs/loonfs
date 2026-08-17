@@ -240,7 +240,7 @@ async fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .read_file_revision(absolute_path, revision_no, &context, None)
+        .get_file_revision(absolute_path, revision_no, &context, None)
         .await
 }
 
@@ -252,7 +252,7 @@ async fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<u8>, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .read_file_revision_for_inode(inode_id, revision_no, &context, None)
+        .get_file_revision_for_inode(inode_id, revision_no, &context, None)
         .await
 }
 

@@ -242,7 +242,7 @@ fn decoder_rejects_truncated_payload() {
 }
 
 #[test]
-fn constructor_rejects_fold_segment_mismatch() {
+fn constructor_rejects_reorganization_segment_mismatch() {
     let mut index = GrepIndexState::new(None, 2);
     index.reorganize = Some(GrepReorganizeState {
         snapshot_segment_ids: vec![segment_id(9)],
@@ -267,7 +267,7 @@ fn constructor_rejects_fold_segment_mismatch() {
 }
 
 fn sample_backfilling_root() -> GrepManifestState {
-    let fold = GrepReorganizeState {
+    let reorganization = GrepReorganizeState {
         snapshot_segment_ids: vec![segment_id(1), segment_id(2)],
         output_segment_ids: vec![segment_id(3)],
         row_key_cursor: "gram-6d6e6f-00000000000000000042".to_owned(),
@@ -282,7 +282,7 @@ fn sample_backfilling_root() -> GrepManifestState {
             checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
                 .expect("valid checkpoint id"),
         },
-        GrepIndexState::new(Some(fold), 4),
+        GrepIndexState::new(Some(reorganization), 4),
         vec![
             segment_ref(1, 1, 0, 0),
             segment_ref(2, 2, 0, 0),

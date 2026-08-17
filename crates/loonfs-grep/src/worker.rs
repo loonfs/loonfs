@@ -179,7 +179,7 @@ pub enum GrepReorganizeOutcome {
         l0_runs: usize,
         mid_runs: usize,
     },
-    StepPublished {
+    UnitPublished {
         merged_rows: u64,
         segments_written: u64,
         completed: bool,
@@ -189,7 +189,7 @@ pub enum GrepReorganizeOutcome {
 
 /// Budgets and resume position for one grep garbage-collection pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GrepGcRequest {
+pub struct GrepGcOptions {
     /// Reads this pass may spend before returning a resume cursor. Absent
     /// resolves to the runtime's own per-pass default, so no caller can ask
     /// for an unbounded walk by leaving the field out.
@@ -1261,7 +1261,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match self.advance_root(&current, &next).await {
             Ok(_) => Ok(reorganize_report(
                 namespace_id,
-                GrepReorganizeOutcome::StepPublished {
+                GrepReorganizeOutcome::UnitPublished {
                     merged_rows: merged.rows,
                     segments_written,
                     completed,
@@ -1294,7 +1294,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         now_ms: u64,
-        request: &GrepGcRequest,
+        request: &GrepGcOptions,
     ) -> Result<GrepGcReport> {
         let resume = match request.cursor.as_deref() {
             Some(token) => GrepGcCursor::decode(token, namespace_id)?,
