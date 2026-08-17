@@ -1,7 +1,7 @@
-//! The single op-validation loop and its operation-rule checks.
+//! Operation validation for one commit.
 //!
-//! Checks that only differ by error vocabulary take error-constructor
-//! closures so each call site keeps its exact wire-visible variant.
+//! Shared checks accept error constructors when callers require different
+//! wire-visible error variants.
 
 use super::super::{CommitOp, CommitValidationError, PlannedOp, ResolvedBinding, ValidatedOp};
 use super::preconditions::validate_explicit_preconditions;
@@ -58,10 +58,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
 
     for planned in ops {
         let op_index = numbering.reserve_op_index()?;
-        // Race checks belong to the operation that carries them and are
-        // evaluated where it runs: an operation's checks describe the state
-        // its own planning observed, which includes everything the earlier
-        // operations of the same commit did.
+        // Check preconditions immediately before the operation so they see
+        // changes made by earlier operations in the same commit.
         validate_explicit_preconditions(&planned.preconditions, metadata_state).await?;
         let validated_op = match &planned.op {
             CommitOp::CreateDirectory {

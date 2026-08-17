@@ -576,12 +576,10 @@ fn render_attribute_value(value: &AttributeValue) -> String {
 
 /// Escapes control characters and leaves every other character alone.
 ///
-/// Attribute values are free-form UTF-8 and are the first text the CLI prints
-/// that a user wrote. Printed raw, a newline in a value forges an output line
-/// and an escape sequence drives the reader's terminal. Only control
-/// characters are rewritten, so ordinary text — accents, scripts, emoji —
-/// prints as itself. JSON output needs none of this, because serde escapes
-/// what it emits.
+/// Attribute values are user-provided UTF-8. Escaping control characters
+/// prevents newlines from creating extra output rows and prevents terminal
+/// escape sequences from being interpreted. JSON output relies on serde's
+/// normal string escaping instead.
 fn escape_control_characters(value: &str) -> String {
     if !value.chars().any(char::is_control) {
         return value.to_owned();

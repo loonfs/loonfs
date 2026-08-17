@@ -27,7 +27,7 @@ use loonfs_client::{
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
 
-/// Errors used when a command requires the other profile type.
+/// Returns errors for commands that require a different profile type.
 ///
 /// Remote profiles cannot host local maintenance because the server already
 /// schedules it. Embedded profiles do not expose upload sessions because
@@ -47,7 +47,7 @@ fn maintenance_host_needs_an_embedded_profile() -> BackendError {
     )
 }
 
-/// Implements the same CLI operation set for embedded and remote targets.
+/// Implements CLI operations for embedded and remote targets.
 ///
 /// Each method exhaustively matches both variants, so adding an operation or
 /// target requires handling both transports. Both paths normalize failures to
@@ -180,9 +180,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Describes a single path entry without its attributes: the shape a
-    /// command that only needs the kind or the inode id asks for, so it pays
-    /// neither the extra lookup nor the extra bytes over the wire.
+    /// Describes a path without loading its attributes.
     pub(crate) async fn stat_path_without_attributes(
         &self,
         spec: &NamespacePath,
@@ -218,20 +216,15 @@ impl ResolvedTarget {
         }
     }
 
-    /// Opens a download of one file, in the largest pieces the transport
-    /// hands out and no larger.
+    /// Opens a file download using the selected profile's best available path.
     ///
-    /// An embedded profile reads its own store, so it streams: chunks arrive
-    /// one at a time and the file's size never becomes the command's memory.
-    /// A remote file past the deployment's proxy cap streams straight from
-    /// object storage under a download grant; a smaller proxied response
-    /// arrives whole. Every arm is verified before it reports its end.
+    /// Embedded profiles stream from their object store. Remote profiles use
+    /// direct object-store downloads above the proxy limit and buffer smaller
+    /// proxied responses. Every path verifies the complete file.
     ///
-    /// `start_offset` asks the two streaming arms to skip bytes the caller
-    /// already holds — a download picking up where an interrupted one
-    /// stopped. Only they can: a proxied read and a retained revision arrive
-    /// in one response, so they start over and say so through
-    /// [`FileDownload::resumed_from`].
+    /// `start_offset` resumes streaming downloads. Buffered responses and
+    /// retained revisions restart at zero; [`FileDownload::resumed_from`]
+    /// reports the offset actually used.
     pub(crate) async fn open_file_download(
         &self,
         spec: &NamespacePath,
@@ -330,12 +323,9 @@ impl ResolvedTarget {
     /// Waits until the grep index has built through `target_seq`, or until
     /// the budget runs out.
     ///
-    /// The two arms advance the same wait differently, and that is the whole
-    /// difference between them. An embedded profile has no maintenance host,
-    /// so it *is* the host: it runs the index job's bounded steps itself. A
-    /// remote profile's server drives its own index, so this only watches
-    /// the status endpoint. Both stop at the target they were given and
-    /// never chase a head that keeps moving.
+    /// Embedded profiles run bounded index steps locally. Remote profiles poll
+    /// the server, which runs index maintenance. Both stop at the captured
+    /// target instead of following later commits.
     pub(crate) async fn wait_for_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -443,18 +433,12 @@ impl ResolvedTarget {
         }
     }
 
-    /// Writes a file from a payload read once from its source, in bounded
-    /// memory whichever transport answers.
+    /// Writes a file from a source stream with bounded memory use.
     ///
-    /// The payload is opened per arm rather than shared: the two runtimes
-    /// spell a byte stream in their own terms, and only one arm ever runs.
-    /// `progress` counts what the payload gives up, so both arms report the
-    /// same bytes for the same file.
-    /// `journal` is where a remote profile records a direct multipart upload
-    /// so an interrupted one can pick up. Only that transport has anything
-    /// to record: an embedded profile stages through its own runtime with no
-    /// session to rejoin, and a proxied upload is one request with no parts
-    /// to have half-finished.
+    /// Each profile opens the source in the form its transport requires.
+    /// `progress` counts bytes read from the source. Remote multipart uploads
+    /// use `journal` to resume interrupted sessions; embedded and proxied
+    /// uploads do not need it.
     pub(crate) async fn put_file_stream(
         &self,
         spec: &NamespacePath,
@@ -705,13 +689,11 @@ impl ResolvedTarget {
         }
     }
 
-    /// Proves the profile's object store honours the object-store contract
-    /// LoonFS depends on, and reports what it found check by check.
+    /// Checks whether the profile's object store meets LoonFS requirements.
     ///
-    /// Store-scoped: it names no namespace. An embedded profile probes the
-    /// store it is configured with; a remote profile asks its server to
-    /// probe the store that server is configured with, which is the store
-    /// the answer is about either way.
+    /// This operation is store-scoped and does not require a namespace.
+    /// Embedded profiles probe their configured store directly. Remote
+    /// profiles ask the server to probe its configured store.
     pub(crate) async fn probe_store(&self) -> Result<StoreProbeResponse, BackendError> {
         match self {
             Self::Embedded(target) => Ok(target.backend.probe_store().await),
@@ -719,17 +701,13 @@ impl ResolvedTarget {
         }
     }
 
-    /// Hosts `jobs` for `namespaces` until `shutdown` resolves, then settles
-    /// what it admitted.
+    /// Runs `jobs` for `namespaces` until `shutdown` completes.
     ///
-    /// This is the explicit half of the coverage contract: automatic
-    /// maintenance reaches the namespaces a process touches and the ones a
-    /// host is assigned, and this is where a namespace nobody is writing to
-    /// gets assigned. Only an embedded profile can host it — a remote
-    /// profile's server is already hosting its own.
+    /// Explicit assignments cover namespaces that automatic maintenance may
+    /// not observe through normal activity. Only embedded profiles can host
+    /// maintenance because remote servers already run their own host.
     ///
-    /// `poll_interval_ms` overrides how long an assignment rests before it
-    /// is asserted again; `None` keeps the host's own cadence.
+    /// `poll_interval_ms` overrides the interval between assignment checks.
     pub(crate) async fn host_maintenance(
         &self,
         namespaces: &[NamespaceId],
@@ -748,8 +726,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Runs every `{job, namespace}` key to a settled conclusion, or until
-    /// `budget` runs out, and reports where each one got to.
+    /// Runs each job and namespace until it settles or the budget expires.
     pub(crate) async fn drain_maintenance(
         &self,
         namespaces: &[NamespaceId],

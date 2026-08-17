@@ -11,17 +11,15 @@ impl Client {
         request: &BeginUploadRequest,
     ) -> Result<BeginUploadResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/uploads", self.base_url);
-        // Beginning an upload mints a new session id, so a resend could create a second session.
+        // Do not retry automatically because each request creates a session.
         self.request_json_once::<_, BeginUploadResponse>(self.post(&url), Some(request))
             .await
     }
 
     /// Starts a direct upload of bytes the caller already has.
     ///
-    /// The claim is what the client can know about its own bytes; the
-    /// server answers with the content object it minted for them, and that
-    /// reference — not this claim — is what completion and the later commit
-    /// name.
+    /// The claim describes the caller's bytes. The returned content reference
+    /// identifies the object used by completion and the later commit.
     pub async fn begin_direct_put(
         &self,
         namespace_id: &NamespaceId,
@@ -36,12 +34,9 @@ impl Client {
 
     /// Opens a direct multipart upload session.
     ///
-    /// Nothing about the payload is declared here — not its length, not its
-    /// digest — so one pass over the bytes is enough and a stream of unknown
-    /// length can start uploading immediately. The server answers with the
-    /// part geometry to cut to and nothing else: not the bucket, not the
-    /// key, not the provider's upload id, and not the content identity,
-    /// which it names back at completion.
+    /// The request does not need a payload length or checksum. The server
+    /// returns the part size and checksum algorithm; provider details remain
+    /// private and the content reference is returned at completion.
     pub async fn begin_direct_multipart(
         &self,
         namespace_id: &NamespaceId,
@@ -56,11 +51,10 @@ impl Client {
         .await
     }
 
-    /// Asks for one wave of checksum-bound part-upload capabilities.
+    /// Requests upload authorization for a batch of parts.
     ///
-    /// Asking again for a part already uploaded is how a client retries it:
-    /// a repeated part is last-write-wins at the provider, and the object's
-    /// checksum follows the bytes that stuck.
+    /// Requesting authorization again is safe. Uploading the same part number
+    /// replaces that part at the provider.
     pub async fn sign_upload_parts(
         &self,
         namespace_id: &NamespaceId,
@@ -71,8 +65,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
             self.base_url
         );
-        // Signing writes nothing down, so asking twice costs two signatures
-        // and changes nothing.
+        // Signing does not change upload state, so this request may be retried.
         self.request_json::<_, SignUploadPartsResponse>(
             self.post(&url),
             Some(&SignUploadPartsRequest { parts }),

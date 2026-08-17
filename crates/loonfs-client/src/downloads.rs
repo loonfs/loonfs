@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// One direct download response, delivered in bounded chunks and verified
-/// against the content reference carried by its grant.
+/// A direct download returned in verified, bounded chunks.
 ///
 /// Verification completes only when [`Self::next_chunk`] returns `None`.
 /// A caller that stops earlier has received provisional bytes, just as with
@@ -12,32 +11,21 @@ pub struct DirectDownloadStream {
     body: payload::PayloadStream,
     expected: ContentRef,
     target: String,
-    /// The checksum the complete object must produce, folded so far. The
-    /// grant's reference names it, so an object nobody hashed for us — a
-    /// provider-assembled multipart, or a direct transfer described only by
-    /// the provider's own CRC — is checked on the way past rather than
-    /// taken on trust.
+    /// Running checksum for the complete object.
     digest: StreamingChecksum,
     size_bytes: u64,
-    /// Offset this stream was opened at: zero for the whole object, and the
-    /// length of what the caller already holds for a resumed download.
+    /// Requested starting offset. Zero means a complete download.
     resumed_from: u64,
-    /// How much of that head start the caller has folded in. Nothing is
-    /// read until it reaches `resumed_from`, because the verdict is over
-    /// the whole object either way.
+    /// Number of prefix bytes included in checksum verification so far.
     prefix_folded: u64,
     finished: bool,
 }
 
 impl DirectDownloadStream {
-    /// Hands the stream part of what the caller already holds, in order,
-    /// from the object's first byte.
+    /// Adds existing prefix bytes to the checksum for a resumed download.
     ///
-    /// A resumed download still checks the whole object's digest, so the
-    /// bytes it will never receive have to be folded into the same digest as
-    /// the ones it does. Feeding the wrong bytes fails the download at its
-    /// end, which is right: the grant's reference is the authority on what
-    /// the object holds, not the partial copy on the caller's disk.
+    /// The caller must provide bytes in order from the start of the object.
+    /// Incorrect prefix bytes cause final checksum verification to fail.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
         self.digest.update(bytes);
         self.prefix_folded = self.prefix_folded.saturating_add(bytes.len() as u64);
@@ -86,8 +74,8 @@ impl DirectDownloadStream {
                     )));
                 }
                 let expected = &self.expected.checksum;
-                // Closing consumes the digest; `finished` is what keeps this
-                // from running a second time over an empty one.
+                // Finalizing consumes the checksum state. `finished` prevents
+                // this branch from running again.
                 let observed = std::mem::replace(
                     &mut self.digest,
                     StreamingChecksum::for_algorithm(expected.algorithm),
@@ -110,18 +98,12 @@ impl DirectDownloadStream {
 }
 
 impl Client {
-    /// Whether this deployment would refuse to proxy a file of this size
-    /// but can authorize a direct read of it.
+    /// Returns whether this file should use a direct download.
     ///
-    /// The two halves are one question. Under the advertised proxy cap the
-    /// proxied read is the simpler path and stays the default; over it the
-    /// proxied read answers `content_too_large`, and a deployment that
-    /// advertises `core.downloads.direct_get` can hand the object back
-    /// instead — which is the whole point of the capability, because that
-    /// same deployment is one that let a client create the object directly.
+    /// Files within the proxy limit use the simpler proxied path. Larger files
+    /// use direct object-store access when the deployment advertises it.
     ///
-    /// A deployment that advertises no cap is left on the proxied path:
-    /// nothing here knows it would refuse.
+    /// If the server advertises no proxy limit, this keeps the proxied path.
     pub async fn offers_direct_download(&self, size_bytes: u64) -> Result<bool> {
         let capabilities = self.capabilities().await?;
         Ok(capabilities.supports(FEATURE_DOWNLOADS_DIRECT_GET)
@@ -131,8 +113,7 @@ impl Client {
                 .is_some_and(|proxy_cap| size_bytes > *proxy_cap))
     }
 
-    /// Asks for one short-lived capability to read a file's content object
-    /// straight from the store.
+    /// Requests short-lived direct access to a file's content object.
     pub async fn begin_download(
         &self,
         spec: &NamespacePath,
@@ -174,15 +155,12 @@ impl Client {
         .await
     }
 
-    /// Opens a download grant's body from `start_offset`, for a caller that
-    /// already holds the bytes below it.
+    /// Opens a download grant at `start_offset`.
     ///
-    /// The offset rides a `Range` header, which the presigned signature does
-    /// not cover: one grant serves the whole object or any part of it, so a
-    /// resumed download needs no different grant than a fresh one. The
-    /// stream still reports on the whole object, so a nonzero offset obliges
-    /// the caller to hand over what it holds through
-    /// [`DirectDownloadStream::fold_resumed_prefix`] before driving it.
+    /// The offset is sent in an unsigned `Range` header, so the same grant can
+    /// serve a complete or resumed download. For a nonzero offset, call
+    /// [`DirectDownloadStream::fold_resumed_prefix`] before reading so the
+    /// final checksum covers the complete object.
     pub async fn open_direct_download(
         &self,
         download: &BeginDownloadResponse,

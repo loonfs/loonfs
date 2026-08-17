@@ -109,7 +109,7 @@ impl Client {
         Ok(envelope)
     }
 
-    /// Lists one page of a directory, projecting what `options` asks for.
+    /// Lists one directory page using the requested projection.
     pub async fn list_path_entries_page(
         &self,
         spec: &NamespacePath,
@@ -134,7 +134,7 @@ impl Client {
         self.request_json::<(), _>(self.get(&url), None).await
     }
 
-    /// Stats one path, projecting what `options` asks for.
+    /// Returns path metadata using the requested projection.
     pub async fn stat_path(
         &self,
         spec: &NamespacePath,

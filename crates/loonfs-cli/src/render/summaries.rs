@@ -6,8 +6,7 @@ pub(super) fn public_inode_id(inode_id: loonfs_api::InodeId) -> String {
     loonfs_api::public_inode_id::encode(inode_id)
 }
 
-/// One line per contract check: its verdict, and what went wrong when the
-/// verdict is that something did.
+/// Formats one object-store contract check.
 pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
     match check.outcome {
         StoreProbeCheckOutcome::Passed => format!("{}: passed", check.name),
@@ -19,8 +18,7 @@ pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
     }
 }
 
-/// One phrase for what the WAL fold did, with the tail it decided against
-/// when it decided against folding.
+/// Formats the result of one WAL flush step.
 pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u64) -> String {
     match outcome {
         WalFlushStepOutcome::NotNeeded => {
@@ -43,7 +41,7 @@ pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u6
     }
 }
 
-/// One phrase for where the index is, in the terms that status actually has.
+/// Formats the current grep-index state.
 pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
     match state {
         GrepIndexLifecycle::Disabled => "disabled".to_owned(),
@@ -75,7 +73,7 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
     }
 }
 
-/// One line for where a drain left one assigned key.
+/// Formats the final state of one maintenance assignment.
 pub(super) fn maintenance_key_line(key: &MaintenanceKeyReport) -> String {
     let Some(conclusion) = &key.conclusion else {
         return format!(
@@ -117,10 +115,10 @@ pub(super) fn maintenance_assignment(namespaces: &[NamespaceId], jobs: &[String]
     )
 }
 
-/// Who a checkpoint record answers to, in one column: the label a user pin
-/// carries, or the fork target that keeps a lease standing. A fork lease is
-/// marked as such because `admin checkpoint-release` refuses it — it goes
-/// when its target namespace does.
+/// Formats a checkpoint owner for the table view.
+///
+/// User checkpoints show their label. Fork checkpoints show the target
+/// namespace because they cannot be released with `admin checkpoint-release`.
 pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     match owner {
         CheckpointOwnerSummary::User { name } => name.clone(),
@@ -140,9 +138,8 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
         report.deleted_content_objects,
         report.retained_candidates
     );
-    // One reason, not the whole table: the count says how much was kept and
-    // this says what the bulk of it was, which is the question an operator
-    // asks next. `--json` carries every reason.
+    // Keep the text summary short by showing only the most common retention
+    // reason. JSON output includes the complete breakdown.
     if let Some((reason, count)) = report.retained.top_reason() {
         summary.push_str(&format!("; mostly {reason}: {count}"));
     }
@@ -169,9 +166,9 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
     summary
 }
 
-/// Renders Unix milliseconds as `YYYY-MM-DD HH:MM:SSZ`. Hand-rolled
-/// civil-from-days arithmetic (Howard Hinnant's algorithm), matching the
-/// presign signer's approach, so the CLI takes no date dependency.
+/// Renders Unix milliseconds as `YYYY-MM-DD HH:MM:SSZ` without adding a date
+/// library dependency. The conversion uses Howard Hinnant's civil-date
+/// algorithm.
 pub(crate) fn format_utc_ms(unix_ms: u64) -> String {
     let seconds = unix_ms / 1_000;
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
@@ -194,7 +191,7 @@ pub(crate) fn format_utc_ms(unix_ms: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02}:{ss:02}Z")
 }
 
-/// Compact human descriptor for one semantic feed event.
+/// Formats one change-feed event for human-readable output.
 pub(super) fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
     use loonfs_api::v0::FilesystemChange;
     match event {

@@ -3,11 +3,7 @@
 use loonfs::{MaintenanceJobId, MaintenanceStepConclusion};
 use loonfs_api::NamespaceId;
 
-/// How long a remote wait rests between status checks.
-///
-/// A hosted server drives its own index, so this is only how often the
-/// command asks. Modest and fixed: the wait is bounded by the caller's own
-/// budgets, not by how fast it polls.
+/// Delay between remote status checks.
 const REMOTE_STATUS_POLL_INTERVAL_MS: u64 = 250;
 
 /// Optional step-count and elapsed-time limits for iterative commands.
@@ -29,25 +25,22 @@ impl StepBudget {
     }
 }
 
-/// One assigned `{job, namespace}` key, as a drain left it.
+/// Final progress for one assigned maintenance job and namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaintenanceKeyProgress {
     pub job: MaintenanceJobId,
     pub namespace_id: NamespaceId,
     /// Steps this drain ran for this key.
     pub steps: u64,
-    /// What its last step concluded, absent when the budget ran out before
-    /// the key took one.
+    /// Result of the last step, or `None` if the budget expired first.
     pub conclusion: Option<MaintenanceStepConclusion>,
 }
 
 impl MaintenanceKeyProgress {
-    /// Whether this key has nothing left for a drain to drive.
+    /// Returns whether another step would make no immediate progress.
     ///
-    /// Progress and a lost race both leave work behind, so a drain keeps
-    /// going. Everything else is where it stops — including `Blocked`, which
-    /// says there is work this step's policy cannot move: repeating it would
-    /// spin rather than finish.
+    /// `Progressed` and `Superseded` require another step. `Blocked` is
+    /// settled because repeating the same step would not change the result.
     pub(crate) fn settled(&self) -> bool {
         match self.conclusion {
             Some(
@@ -61,36 +54,32 @@ impl MaintenanceKeyProgress {
     }
 }
 
-/// Where a drain stopped and what it cost.
+/// Progress from draining a set of maintenance assignments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaintenanceDrainProgress {
-    /// Every assigned key, in the order the drain drove them.
+    /// Assignments in processing order.
     pub keys: Vec<MaintenanceKeyProgress>,
     /// Steps this drain ran across every key.
     pub steps: u64,
 }
 
 impl MaintenanceDrainProgress {
-    /// Whether the budget stopped the drain before every key settled. A key
-    /// only goes unsettled that way: the loop that drives it ends at a
-    /// settled conclusion or at a spent budget, and at nothing else.
+    /// Returns whether the budget expired before every assignment settled.
     pub(crate) fn budget_exhausted(&self) -> bool {
         !self.keys.iter().all(MaintenanceKeyProgress::settled)
     }
 }
 
-/// Where a wait stopped and what it cost.
+/// Result of waiting for a grep index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepWaitProgress {
-    /// Steps this wait spent.
+    /// Number of status checks or maintenance steps performed.
     pub steps: u64,
     /// True when the index reached the target sequence.
     pub reached: bool,
 }
 
-/// The one timer this CLI owns: how long a remote wait rests between status
-/// checks. Nothing durable depends on it — it only decides how often a
-/// command that is already waiting asks again.
+/// Waits before the next remote status check.
 #[allow(clippy::disallowed_methods)]
 pub(super) async fn rest_between_status_checks() {
     tokio::time::sleep(std::time::Duration::from_millis(

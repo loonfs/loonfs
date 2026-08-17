@@ -688,7 +688,7 @@ fn ls_limit_bounds_the_whole_listing_and_rejects_all() {
     assert_eq!(all_data["entries"].as_array().expect("json array").len(), 5);
     assert!(all_data.get("next_cursor").is_none());
 
-    // A bound stops at exactly that many entries and hands back a cursor.
+    // A bound stops at exactly that many entries and returns a cursor.
     let first = harness.run(&["--json", "ls", "--limit", "2"]);
     assert_success(&first);
     let first_data = json_data(&first);

@@ -1,11 +1,7 @@
-//! Which transport a read takes, and what the streamed one refuses to
-//! accept.
+//! Direct-download selection and verification tests.
 //!
-//! The deciding question is not how large the file is but whether this
-//! deployment would proxy it. That is the whole reason the capability
-//! exists: a deployment that let a client write an object directly must be
-//! able to hand it back, and above the proxy cap it can only do that by
-//! authorizing a read.
+//! A file uses direct object-store access only when it exceeds the server's
+//! proxy limit and the deployment advertises direct downloads.
 
 use super::*;
 use crate::transport::test_transport::{self, Outcome};
@@ -13,11 +9,9 @@ use loonfs_api::v0::ObjectTransferAccess;
 use loonfs_api::{CapabilityDocument, ContentId, ContentRef, PROFILE_CORE_V0, PROTOCOL_VERSION};
 use std::collections::BTreeMap;
 
-/// The deployment default the audit found the wall at: a proxied read
-/// buffers at most this much for one response.
+/// Default maximum size of a proxied read response.
 const DEFAULT_PROXY_CAP_BYTES: u64 = 256 * 1024 * 1024;
-/// The file in the audit's report — created through direct multipart, then
-/// refused by the proxied read that could not buffer it.
+/// Test file larger than the default proxy limit.
 const AUDIT_FILE_BYTES: u64 = 300 * 1024 * 1024;
 
 fn client() -> Client {
@@ -31,8 +25,7 @@ fn client() -> Client {
     .expect("valid client config")
 }
 
-/// A capability document as a deployment with the default read cap would
-/// answer it, offering direct reads or not.
+/// Builds a capability response for the requested direct-read support.
 fn capabilities(direct_get: bool, proxy_cap_bytes: Option<u64>) -> Outcome {
     let document = CapabilityDocument {
         protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -45,10 +38,7 @@ fn capabilities(direct_get: bool, proxy_cap_bytes: Option<u64>) -> Outcome {
     Outcome::Success(serde_json::to_vec(&document).expect("serialize capability document"))
 }
 
-/// The audit's case, at the deployment's own defaults: a 300 MiB file is
-/// past the 256 MiB a proxied read buffers, so it takes the grant. A file
-/// the deployment would happily proxy does not — the proxied read is
-/// simpler and stays the default.
+/// Files above the proxy limit use direct access; smaller files remain proxied.
 #[tokio::test]
 async fn a_file_past_the_default_proxy_cap_takes_the_grant() {
     let client = client();
@@ -69,10 +59,7 @@ async fn a_file_past_the_default_proxy_cap_takes_the_grant() {
         .expect("cached capabilities"));
 }
 
-/// A deployment that cannot presign reads proxies everything, whatever the
-/// file's size. The refusal that follows is honest and is the audit's
-/// finding; nothing here papers over it by asking for a grant that does not
-/// exist.
+/// Without direct-read support, every file remains on the proxied path.
 #[tokio::test]
 async fn a_deployment_without_the_capability_never_takes_the_grant() {
     let client = client();
@@ -84,9 +71,7 @@ async fn a_deployment_without_the_capability_never_takes_the_grant() {
         .expect("capabilities"));
 }
 
-/// A deployment that states no cap is left on the proxied path: nothing
-/// here knows it would refuse, and guessing would route reads around a
-/// server that was going to serve them.
+/// Without an advertised proxy limit, the client keeps the proxied path.
 #[tokio::test]
 async fn a_deployment_that_advertises_no_cap_stays_proxied() {
     let client = client();
@@ -269,11 +254,9 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     assert_eq!(sink, payload);
 }
 
-/// A download that stopped part way asks for the rest with a `Range`, on
-/// the grant it already has: the signature does not cover that header, so
-/// one grant serves the whole object or any part of it. The bytes already
-/// held still count toward the digest, so the verdict is over the whole
-/// file.
+/// A resumed download uses `Range` with the existing grant. The signature
+/// does not cover that header, and checksum verification includes the prefix
+/// already held by the caller.
 #[tokio::test]
 async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
     let payload = b"the first half and then the second half".to_vec();
@@ -309,8 +292,8 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
     );
 }
 
-/// A download that starts at zero asks for no range at all, and one that
-/// resumes without handing over what it holds reads nothing.
+/// Complete downloads omit `Range`. Resumed downloads require their prefix
+/// before reading new bytes.
 #[tokio::test]
 async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     let payload = b"a whole object".to_vec();

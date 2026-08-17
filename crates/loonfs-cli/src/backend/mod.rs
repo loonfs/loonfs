@@ -1,10 +1,9 @@
 //! Unified CLI operations for embedded and remote profiles.
 //!
-//! Commands call [`crate::resolve::ResolvedTarget`] without depending on the selected
-//! transport. Embedded profiles use the in-process `loonfs` runtime; remote
-//! profiles use `loonfs-client` over HTTP. This private abstraction is for
-//! CLI parity, not application extension. All methods are async and normalize
-//! transport errors as [`crate::backend_error::BackendError`].
+//! [`crate::resolve::ResolvedTarget`] gives commands the same interface for
+//! both profile types. Embedded profiles call the in-process runtime, while
+//! remote profiles use the HTTP client. Both map failures to
+//! [`crate::backend_error::BackendError`].
 
 mod dispatch;
 mod download;

@@ -1,4 +1,4 @@
-//! The common download stream shape shared by embedded and remote profiles.
+//! Download results shared by embedded and remote profiles.
 
 use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
 use bytes::Bytes;
@@ -6,15 +6,12 @@ use loonfs::{FileContentStream, RuntimeError, SharedObjectStore};
 use loonfs_api::NamespaceId;
 use loonfs_client::DirectDownloadStream;
 
-/// File content returned by either CLI transport.
+/// File content returned by either profile type.
 ///
-/// Embedded and remote profiles expose different stream types, while small
-/// reads may already be buffered. [`FileDownload::next_chunk`] gives command
-/// code one common iteration model.
+/// The result may be an embedded stream, a remote stream, or buffered bytes.
+/// [`FileDownload::next_chunk`] presents all three as a sequence of chunks.
 pub(crate) enum FileDownload {
-    /// The embedded runtime's bounded stream. Boxed because a stream carries
-    /// its object key, reference, and running digest, and the whole arm is a
-    /// pointer beside it.
+    /// A bounded stream from the embedded runtime.
     Streamed {
         namespace_id: NamespaceId,
         stream: Box<FileContentStream<SharedObjectStore>>,
@@ -26,7 +23,7 @@ pub(crate) enum FileDownload {
         stream: Box<DirectDownloadStream>,
         resumed_from: u64,
     },
-    /// Bytes the transport already holds whole.
+    /// A complete response already held in memory.
     Whole(Vec<u8>),
 }
 
@@ -51,9 +48,9 @@ impl FileDownload {
         }
     }
 
-    /// Where this download actually starts, which is not always where it was
-    /// asked to: a transport that answers whole has no partial answer to
-    /// pick up from and begins at zero however much the caller holds.
+    /// Returns the offset where this response starts.
+    ///
+    /// Buffered responses cannot resume, so they always start at zero.
     pub(crate) fn resumed_from(&self) -> u64 {
         match self {
             Self::Streamed { resumed_from, .. } | Self::Direct { resumed_from, .. } => {
@@ -63,13 +60,11 @@ impl FileDownload {
         }
     }
 
-    /// Hands a resumed download the bytes below its start, so its
-    /// verification still covers the whole file.
+    /// Adds the existing prefix to a resumed download's checksum.
     ///
-    /// Both streaming arms check a digest over the complete object, so a
-    /// download that skipped a prefix refuses to read until it has been told
-    /// what the prefix was. A held answer never resumed, so it has nothing
-    /// to be told.
+    /// Streaming downloads verify the complete object, including bytes read
+    /// by an earlier attempt. Buffered responses do not resume and ignore the
+    /// prefix.
     pub(crate) fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), BackendError> {
         match self {
             Self::Streamed {

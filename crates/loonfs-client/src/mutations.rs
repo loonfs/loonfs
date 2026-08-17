@@ -23,8 +23,7 @@ fn classify_put_retry_error(error: &ClientError) -> PutRetryErrorClassification 
 }
 
 impl Client {
-    /// Applies one commit: its operations land together, in order, under
-    /// one commit id.
+    /// Applies a commit atomically, preserving operation order.
     ///
     /// The convenience methods below are the one-element case of this call.
     /// Operations that introduce new external content carry their proofs in
@@ -43,16 +42,11 @@ impl Client {
 
     /// Uploads bytes and commits them at a path.
     ///
-    /// Re-running this with a `commit_id` that already committed is safe
-    /// when the request is the same. A commit's identity names *which*
-    /// content object it wrote, and a re-run necessarily uploads a fresh
-    /// one, so the server sees a different commit and reports
-    /// `commit_id_reuse_conflict`. This resolves that the only honest way
-    /// available: it reads back what the commit id actually committed and
-    /// compares it against the request just made. The same content under
-    /// the same message means the operation had already succeeded and the
-    /// original answer is returned; anything else — different bytes or a
-    /// different message — surfaces the conflict.
+    /// Reusing a successful `commit_id` is safe when the request is unchanged.
+    /// A retry uploads a new content object, so the server initially reports
+    /// `commit_id_reuse_conflict`. The client reads the stored receipt and
+    /// compares the content and message. Matching values return the original
+    /// result; different values preserve the conflict.
     ///
     /// The freshly uploaded duplicate object is then referenced by nothing.
     /// That is by design, not a leak: content garbage collection reclaims an
@@ -72,20 +66,11 @@ impl Client {
 
     /// Uploads a payload read once from its source and commits it at a path.
     ///
-    /// This is [`Self::put_file_bytes`] for a caller that should not hold
-    /// its payload: the source is read forward in bounded pieces, hashed as
-    /// it goes, and never assembled. What the memory costs is the transport's
-    /// window and nothing about the payload's size — so a file larger than
-    /// this process could hold, or a pipe whose length nobody knows, both
-    /// upload the same way.
+    /// The source is read once in bounded chunks and is never assembled in
+    /// memory. Memory use depends on the transport window, not payload size.
     ///
-    /// Where the deployment authorizes direct part uploads the payload goes
-    /// straight to object storage in parts, and otherwise it streams through
-    /// the server. One bound is worth knowing on the direct path: a provider
-    /// assembles at most 10,000 parts, so a session carries at most
-    /// `part_size_bytes × 10_000` and a longer payload is refused when it
-    /// asks to authorize the part past that ceiling. A caller that knows its
-    /// payload is enormous should not be taking the default geometry.
+    /// Direct multipart uploads support at most 10,000 parts. Payloads larger
+    /// than `part_size_bytes × 10_000` require a larger configured part size.
     ///
     /// Retrying with a `commit_id` that already committed is safe here in
     /// the same way it is for [`Self::put_file_bytes`], and by the same
@@ -106,19 +91,13 @@ impl Client {
     /// [`Self::put_file_stream`] for a caller that intends to survive an
     /// interruption.
     ///
-    /// `journal` is told the session's id and geometry when it opens and
-    /// told every part as it lands; `resume` hands back what an earlier run
-    /// of the same upload recorded, so this one sends only the parts still
-    /// missing. Both apply to the direct multipart transport alone: a
-    /// proxied upload is a single request with no session behind it and
-    /// nothing to resume from, and it ignores them.
+    /// `journal` records the session and each completed part. `resume`
+    /// supplies the state from an earlier attempt so only missing parts are
+    /// uploaded. Proxied uploads ignore both values.
     ///
-    /// The source is read from its first byte either way. That is not
-    /// waste — the checksum the assembly is verified against covers the
-    /// whole object, so every byte has to be folded whether or not it also
-    /// has to be sent — and it means the source has to be one that can be
-    /// opened again. A pipe cannot, which is why nothing that reads one
-    /// should be calling this.
+    /// Resuming still reads the source from the beginning because the final
+    /// checksum covers the complete object. The source must therefore be
+    /// reopenable; a pipe cannot use this method.
     pub async fn put_file_stream_resumable(
         &self,
         spec: &NamespacePath,

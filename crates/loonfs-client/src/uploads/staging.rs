@@ -2,24 +2,17 @@
 
 use super::super::*;
 
-/// Payload size from which a put stops holding its bytes whole.
+/// Minimum payload size for streaming and multipart uploads.
 ///
-/// It mirrors
-/// `loonfs_objectstore::provider_object_store::PROVIDER_MULTIPART_PART_BYTES`,
-/// and that one number answers two questions the same way: below it a direct
-/// multipart upload would be a one-part upload with extra round trips and
-/// nothing to gain, and a payload that fits in a single part is not worth
-/// streaming either. At or above it — and for any payload whose length is not
-/// known in advance — a put reads its source once, in bounded pieces.
+/// This matches the provider multipart part size. Smaller payloads would use
+/// one part and gain nothing from multipart overhead. Payloads of unknown size
+/// also use the streaming path.
 pub const STREAMING_PUT_MIN_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Parts in flight at once. Each holds its bytes, so a one-pass upload's
-/// memory is this many parts and no more.
+/// Maximum number of multipart payloads held in memory at once.
 const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
-/// Attempts one part gets before its upload gives up. A retry re-asks for
-/// the part's URL, because the first thing that goes stale about a part is
-/// its signature.
+/// Maximum attempts for one part, including refreshed authorization.
 const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
 
 /// State required to resume an interrupted direct multipart upload.
@@ -32,9 +25,8 @@ const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
 pub struct MultipartUploadResume {
     /// Upload session ID returned by the server.
     pub upload_id: UploadId,
-    /// The part size the session was opened with. A resumed upload must cut
-    /// the payload exactly as the interrupted one did, or the parts it
-    /// sends will not line up with the ones already there.
+    /// Required part size. A resumed upload must preserve the original
+    /// boundaries so new parts align with completed parts.
     pub part_size_bytes: u64,
     /// Checksum algorithm frozen into the upload session when it began.
     pub checksum_algorithm: ChecksumAlgorithm,
@@ -59,8 +51,7 @@ pub trait MultipartUploadJournal: Send + Sync {
     fn part_completed(&self, part: &CompletedUploadPart);
 }
 
-/// How one upload survives an interruption: what an earlier run got
-/// through, and where this one writes down what it gets through.
+/// Optional state for resuming and recording a multipart upload.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct UploadContinuity<'a> {
     pub(crate) resume: Option<&'a MultipartUploadResume>,
@@ -80,44 +71,32 @@ pub(crate) struct StagedContent {
 /// used when no suitable direct path is available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UploadTransport {
-    /// Parts, straight to object storage, retried one at a time.
+    /// Multipart upload directly to object storage.
     Multipart,
-    /// One whole-object request, straight to object storage, carrying the
-    /// checksum this deployment's provider will enforce on it.
+    /// One checksummed request directly to object storage.
     DirectPut(ChecksumAlgorithm),
-    /// Through the server, which writes the content object itself.
+    /// Stream through the server.
     Proxied,
 }
 
-/// A payload length this client has actually measured, as against a source's
-/// file-metadata hint.
+/// A payload length measured while reading the source.
 ///
-/// Only a measured length may end an upload. A file can change before it is
-/// read, so a refusal built on metadata would turn a stale hint into a failed
-/// upload. Threading the distinction through the type is what makes
-/// [`ClientError::UploadTooLarge`] unconstructible from a hint.
+/// File metadata is only a routing hint because the file may change before it
+/// is read. Only a measured length can produce
+/// [`ClientError::UploadTooLarge`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MeasuredBytes(u64);
 
-/// No transport this deployment offers can carry a payload of the length it
-/// was asked about.
+/// No advertised transport accepts the measured payload size.
 struct NoTransportFits {
-    /// The caps it passed, named so a caller can act on them.
+    /// Description of the relevant limits.
     reason: String,
-    /// The checksum a whole-object write would use, when one is offered at
-    /// all — even though this payload is past its ceiling. A length that was
-    /// only a hint routes through that transport anyway: its first pass
-    /// measures the payload without sending a byte, and the refusal that may
-    /// follow is built on what it found.
+    /// Checksum used by direct PUT, if supported. A size hint may still choose
+    /// this path because its first pass measures the actual payload.
     direct_put_algorithm: Option<ChecksumAlgorithm>,
 }
 
-/// What a whole-object write sends, and where it reads it from.
-///
-/// The two arms are the two ways a payload's digest can already exist when
-/// the session opens: the caller was holding the bytes, or a measuring pass
-/// left them somewhere they can be read again. Neither holds the payload on
-/// this client's account.
+/// Payload for a direct whole-object upload.
 enum DirectPutBody<'a> {
     /// Bytes the caller already holds.
     Held(&'a [u8]),
@@ -125,13 +104,12 @@ enum DirectPutBody<'a> {
     Rewound(PayloadSource),
 }
 
-/// A measuring pass wrote or found the payload, and then could not read it
-/// back — the upload cannot proceed without the bytes it just measured.
+/// Converts a failure to reopen a measured payload into a client error.
 fn read_back_failed(error: std::io::Error) -> ClientError {
     ClientError::Io(format!("could not re-read the measured payload: {error}"))
 }
 
-/// Builds the presigned whole-object write both upload forms send.
+/// Builds a presigned whole-object PUT request.
 pub(super) fn presigned_put_request(access: &ObjectTransferAccess) -> Result<WireRequest> {
     let ObjectTransferAccess::PresignedUrl {
         method,
@@ -151,21 +129,16 @@ pub(super) fn presigned_put_request(access: &ObjectTransferAccess) -> Result<Wir
     Ok(request)
 }
 
-/// What a multipart upload has to work with.
-///
-/// The two arms exist so that neither caller pays for the other's shape: a
-/// caller holding its payload should not have it copied whole to be
-/// uploaded, and a caller reading a stream cannot be asked for a length it
-/// does not have. Past this point the upload cannot tell them apart.
+/// In-memory or streaming input for a multipart upload.
 enum MultipartPayload<'a> {
     /// A payload the caller already holds.
     Held(&'a [u8]),
-    /// A payload read once, in pieces, as it is uploaded.
+    /// A payload read in chunks during upload.
     Streamed(PayloadStream),
 }
 
 impl<'a> MultipartPayload<'a> {
-    /// Binds the payload to the geometry the server chose.
+    /// Splits the payload using the server's required part size.
     fn into_parts_of(self, part_bytes: usize) -> MultipartParts<'a> {
         match self {
             Self::Held(bytes) => MultipartParts::Held {
@@ -189,8 +162,7 @@ enum MultipartParts<'a> {
 }
 
 impl MultipartParts<'_> {
-    /// The next part, or `None` once the payload is spent. Both arms hand
-    /// out one part's worth of bytes and no more.
+    /// Returns the next part, or `None` at the end of the payload.
     async fn next_part(&mut self) -> Result<Option<Bytes>> {
         match self {
             Self::Held {
@@ -221,15 +193,14 @@ struct PendingPart {
     bytes: Bytes,
 }
 
-/// What one pass over a payload produced: the assembled object's length and
-/// digest, and the parts it was written as.
+/// Result of reading and uploading a complete multipart payload.
 struct UploadedObject {
     size_bytes: u64,
     checksum: Checksum,
     parts: Vec<CompletedUploadPart>,
 }
 
-/// Picks one part's authorization out of a signing response.
+/// Returns the authorization for one part.
 fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<ObjectTransferAccess> {
     signed
         .iter()
@@ -242,11 +213,7 @@ fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<Object
         })
 }
 
-/// A begin-upload response that is not the transport the request asked for.
-///
-/// Which transport carries a payload is settled before the request goes
-/// out, from what the deployment advertises, so a different mode coming
-/// back is a broken server rather than something to fall back from.
+/// Reports a server response that disagrees with the negotiated upload mode.
 fn negotiated_a_different_upload_mode() -> ClientError {
     ClientError::Protocol(
         "the server answered with a different upload mode than negotiated".to_owned(),
@@ -254,20 +221,16 @@ fn negotiated_a_different_upload_mode() -> ClientError {
 }
 
 impl Client {
-    /// Makes bytes durable, choosing the transport the payload and the
-    /// deployment allow.
+    /// Uploads bytes using the best supported transport.
     ///
-    /// A large payload goes straight to object storage in parallel parts
-    /// where the server can authorize that; everything else goes through
-    /// the server. Either way the caller gets back one content reference
-    /// plus the receipt that admits it at commit.
+    /// Large payloads use direct multipart upload when available. The result
+    /// includes the content reference and any token required by a commit.
     pub(crate) async fn stage_bytes_as_content_ref(
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
     ) -> Result<StagedContent> {
-        // A payload already in hand has been measured by definition, so this
-        // may refuse.
+        // The exact size is known, so transport limits can reject it now.
         match self
             .transport_for_measured(MeasuredBytes(bytes.len() as u64))
             .await?
@@ -288,22 +251,17 @@ impl Client {
         }
     }
 
-    /// Makes a streamed payload durable, choosing the transport the source
-    /// and the deployment allow.
+    /// Uploads a source stream using the best supported transport.
     ///
-    /// Either way the source is read once, forward, and never held whole.
-    /// A deployment that can authorize direct part uploads gets them; one
-    /// that cannot receives the same source as a streaming request body.
+    /// The source is read forward without buffering the complete payload.
     pub(crate) async fn stage_source_as_content_ref(
         &self,
         namespace_id: &NamespaceId,
         source: PayloadSource,
         continuity: UploadContinuity<'_>,
     ) -> Result<StagedContent> {
-        // The length a source declares is a hint, so it only routes; it
-        // never refuses. Both streaming transports measure the payload as
-        // they send it, and the one that cannot — a whole-object write —
-        // measures it in the pass it has to make anyway.
+        // A declared length is only a routing hint. Rejection requires a size
+        // measured while reading the payload.
         match self.provisional_transport(source.size_bytes()).await? {
             UploadTransport::Multipart => {
                 let (stream, _) = source.into_stream();
@@ -318,22 +276,16 @@ impl Client {
                 self.stage_source_via_direct_put(namespace_id, source, algorithm, continuity)
                     .await
             }
-            // Nothing to resume off this path: a proxied upload is one
-            // request with no session behind it, so there are no parts to
-            // have landed.
+            // Proxied uploads are one request and have no resumable parts.
             UploadTransport::Proxied => self.stage_source_via_server(namespace_id, source).await,
         }
     }
 
     /// Stages a streamed payload through one presigned whole-object write.
     ///
-    /// Two passes, neither of which holds the payload. The first folds the
-    /// deployment's own checksum and counts the bytes, spooling them only if
-    /// the source cannot be read again; the second streams them into the
-    /// signed request. Between the two, what the first pass *measured*
-    /// re-decides the transport — the hint that routed here may have been
-    /// wrong in either direction, and only now is there a length worth
-    /// refusing on.
+    /// The first pass measures and checksums the source, spooling it only when
+    /// it cannot be reopened. The measured size selects the final transport.
+    /// A second pass sends the bytes if direct PUT remains eligible.
     async fn stage_source_via_direct_put(
         &self,
         namespace_id: &NamespaceId,
@@ -359,8 +311,7 @@ impl Client {
                 )
                 .await
             }
-            // Reachable only if the deployment's answer changed under us;
-            // the rewound payload serves either transport unchanged.
+            // Capabilities may change between routing and the measured check.
             UploadTransport::Multipart => {
                 let (stream, _) = measured
                     .reread()
@@ -384,14 +335,10 @@ impl Client {
         }
     }
 
-    /// Routes a payload whose length is only a hint. Never refuses.
+    /// Selects an initial transport from an optional size hint.
     ///
-    /// A hint that says nothing fits may simply be wrong, and only a
-    /// measured length may end an upload. So where a whole-object write is
-    /// on offer this takes it — that transport's first pass measures the
-    /// payload without sending a byte, and any refusal comes after. Where
-    /// one is not, the payload streams to the service, which measures it as
-    /// it receives it and answers `content_too_large` if it must.
+    /// Size hints never reject an upload. Direct PUT measures the payload
+    /// before sending it; proxied upload lets the server enforce its limit.
     async fn provisional_transport(&self, size_hint: Option<u64>) -> Result<UploadTransport> {
         let capabilities = self.capabilities().await?;
         Ok(match Self::transport_for(&capabilities, size_hint) {
@@ -402,12 +349,10 @@ impl Client {
         })
     }
 
-    /// Routes a payload whose length this client measured, refusing when no
-    /// transport can carry it.
+    /// Selects a transport for a measured payload size.
     ///
-    /// The refusal names the caps it passed. It is raised before any byte
-    /// moves rather than after the capped proxy has read and rejected the
-    /// whole payload.
+    /// Returns `UploadTooLarge` before transfer when no transport accepts the
+    /// measured size.
     async fn transport_for_measured(&self, size: MeasuredBytes) -> Result<UploadTransport> {
         let capabilities = self.capabilities().await?;
         Self::transport_for(&capabilities, Some(size.0)).map_err(|no_fit| {
@@ -418,40 +363,27 @@ impl Client {
         })
     }
 
-    /// The best transport for a payload of this length, against what the
-    /// deployment actually advertises.
+    /// Selects a transport from the deployment's advertised capabilities.
     ///
-    /// Parts win wherever they are offered and the payload is worth cutting:
-    /// a part is retried on its own, and nothing has to know the length in
-    /// advance. A whole-object write is the next rung — it exists for a
-    /// provider that can sign a write but has no multipart API to open — and
-    /// it earns its extra pass over the payload only when the payload is
-    /// large, or when the service would not take it anyway. Everything else
-    /// goes through the service.
+    /// Multipart is preferred for payloads large enough to split. Direct PUT
+    /// is next when available and within its limit. Other payloads use the
+    /// proxied server path.
     ///
-    /// Every limit here is read from the capability document. Nothing is
-    /// assumed about how the deployment is configured, which is why the
-    /// document is fetched even for a small payload: the fetch happens once
-    /// per client and is cached, so the round trip is paid at most once.
+    /// All limits come from the cached capability document.
     fn transport_for(
         capabilities: &CapabilityDocument,
         size_bytes: Option<u64>,
     ) -> std::result::Result<UploadTransport, NoTransportFits> {
-        // Below one part there is nothing to cut, and a length nobody knows
-        // cannot rule parts out.
+        // Small known payloads do not benefit from multipart. Unknown sizes
+        // remain eligible because they may exceed one part.
         let worth_cutting = size_bytes.is_none_or(|size| size >= STREAMING_PUT_MIN_BYTES);
         if worth_cutting && capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART) {
             return Ok(UploadTransport::Multipart);
         }
         let direct_put_algorithm = capabilities.direct_put_checksum_algorithm();
-        // A length nobody knows cannot be checked against a cap. Where a
-        // whole-object write is on offer that is no reason to give up on
-        // it: the transport's first pass measures the payload without
-        // sending a byte, and that measurement re-decides the transport
-        // before anything moves. Falling straight to the service here would
-        // stream an unmeasured payload at a cap it may not fit, and where the
-        // deployment signs no multipart it would be discarding the only rung
-        // that could have carried it.
+        // Unknown sizes cannot be checked against a limit. Prefer direct PUT
+        // when available because its first pass measures the payload before
+        // transfer; otherwise let the server enforce the proxied limit.
         let Some(size_bytes) = size_bytes else {
             return Ok(
                 direct_put_algorithm.map_or(UploadTransport::Proxied, UploadTransport::DirectPut)
@@ -494,13 +426,9 @@ impl Client {
         })
     }
 
-    /// Uploads one whole object the caller already holds straight to object
-    /// storage.
+    /// Uploads in-memory bytes directly to object storage.
     ///
-    /// The digest is signed into the write the provider will enforce, so it
-    /// exists before the session does. A payload already in hand needs no
-    /// second pass to produce it: it is folded here, over the bytes the
-    /// caller is holding anyway.
+    /// The provider enforces the checksum included in the signed request.
     async fn stage_via_direct_put(
         &self,
         namespace_id: &NamespaceId,
@@ -520,11 +448,8 @@ impl Client {
 
     /// Opens a `direct_put` session, writes its object, and completes it.
     ///
-    /// The claim is the measured length and the digest folded over the same
-    /// bytes; nothing here is taken from a source's declared length. A
-    /// session whose transfer fails is aborted rather than left open — it
-    /// owns an object nothing will finish writing, exactly as a multipart
-    /// session does.
+    /// The claim uses the measured size and checksum. A failed transfer aborts
+    /// the session so it does not remain open for garbage collection.
     async fn direct_put_transfer(
         &self,
         namespace_id: &NamespaceId,
@@ -567,16 +492,10 @@ impl Client {
         Self::staged_from_completion(response)
     }
 
-    /// Uploads one object straight to object storage in bounded waves of
-    /// parts.
+    /// Uploads one object directly in bounded batches of parts.
     ///
-    /// The whole-object checksum is folded part by part as the payload is
-    /// cut, so the same pass that produces what the provider enforces on
-    /// each part also produces what completion verifies the assembly
-    /// against — and because the claim is only needed at completion, that
-    /// one pass is the only pass over the bytes anyone has to make. Nothing
-    /// here needs the payload's length in advance, which is what lets a
-    /// stream with no length take this path unchanged.
+    /// One pass computes part checksums and the final object checksum while
+    /// reading the payload. The total size does not need to be known first.
     ///
     /// A session that fails partway is aborted rather than left open.
     async fn stage_via_multipart(
@@ -585,9 +504,8 @@ impl Client {
         payload: MultipartPayload<'_>,
         continuity: UploadContinuity<'_>,
     ) -> Result<StagedContent> {
-        // A resumed upload rejoins the session a previous run opened, at the
-        // part size that run was given. Asking for a new one would open a
-        // second session and orphan the parts already in object storage.
+        // Resume with the original session and part size so completed parts
+        // remain usable.
         let (upload_id, part_size_bytes, checksum_algorithm) = match continuity.resume {
             Some(resume) => (
                 resume.upload_id.clone(),
@@ -633,17 +551,14 @@ impl Client {
         let uploaded = match uploaded {
             Ok(uploaded) => uploaded,
             Err(error) => {
-                // The session owns an object this upload will never finish
-                // writing. Ending it is best-effort: the original failure is
-                // what the caller needs to see, and abandoned sessions are
-                // collected either way.
+                // Abort best-effort and preserve the original upload error.
                 let _ = self.abort_upload(namespace_id, &upload_id).await;
                 return Err(error);
             }
         };
         if uploaded.parts.is_empty() {
-            // The source was empty, and a provider has no empty assembly to
-            // make. The payload is nothing, so staging it costs nothing.
+            // Providers cannot assemble zero parts, so use the proxied empty
+            // upload path instead.
             let _ = self.abort_upload(namespace_id, &upload_id).await;
             return self.stage_bytes_via_server(namespace_id, &[]).await;
         }
@@ -667,16 +582,9 @@ impl Client {
     /// Cuts the payload into parts and uploads them, holding at most
     /// [`DIRECT_MULTIPART_PARTS_IN_FLIGHT`] of them at a time.
     ///
-    /// The window is the memory bound: each in-flight part holds its bytes,
-    /// and nothing outside the window does. One wave asks for its part URLs
-    /// in a single request, uploads them together, and only then reads the
-    /// next wave — so the payload's length never enters into how much of it
-    /// is resident.
-    /// A resumed upload still reads every byte: the whole-object checksum
-    /// completion verifies the assembly against is folded over the payload
-    /// in one forward pass, so a part already in object storage is cut,
-    /// folded, and then let go rather than sent again. What resuming saves
-    /// is the network, which is the part that was expensive.
+    /// Each in-flight part owns one buffer, which bounds memory use. A resumed
+    /// upload still reads every byte to compute the final checksum, but it
+    /// skips network transfer for completed parts.
     async fn upload_every_part(
         &self,
         namespace_id: &NamespaceId,

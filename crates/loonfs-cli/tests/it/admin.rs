@@ -308,9 +308,8 @@ fn index_enable_budgets_exit_nonzero_and_report_progress() {
     assert_success(&found);
 }
 
-/// The remote arm answers the same questions the embedded one does, and
-/// waits the same way: the server drives its own index, so the command only
-/// watches the status endpoint until the captured target is reached.
+/// Remote and embedded profiles report the same index state. Remote waiting
+/// polls status while the server runs index maintenance.
 #[test]
 fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
     let harness = Harness::new();
@@ -390,7 +389,7 @@ fn index_gc_loops_its_cursor_and_accumulates() {
     assert_eq!(data["namespace_reaped"], false);
     assert!(data.get("next_cursor").is_none(), "{data}");
 
-    // One bounded pass stops early and hands back where to resume.
+    // One bounded pass stops early and returns a resume cursor.
     let single = harness.run(&["--json", "admin", "index-gc", "--max-objects", "1"]);
     assert_success(&single);
     assert!(
@@ -545,10 +544,8 @@ fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
     }
 }
 
-/// The re-assertion cadence is the one timer a hosted run owns, so an
-/// operator may shorten it — down to a floor, below which a nudge per
-/// assigned key only spends provider requests. A drain never rests between
-/// keys, so the flag is inert there.
+/// Hosted runs accept a poll interval with a minimum value. Drains do not
+/// wait between assignments, so the setting does not affect them.
 #[test]
 fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     let harness = Harness::new();
@@ -796,8 +793,8 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .to_owned();
         assert!(checkpoint_id.starts_with("chk_"));
 
-        // A name is a label, not a key: the same one asked for twice mints a
-        // second record, and the listing is how both ids are found again.
+        // Names are labels rather than unique keys. Reusing one creates a
+        // second checkpoint with a different id.
         let second_checkpoint = harness.run(&[
             "--json",
             "admin",
@@ -1021,7 +1018,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
 
         // The budget covers marking too, so one object buys the head and
         // the root beside it and nothing else. That pass says it ran out
-        // rather than reporting a clean sweep, and hands back no position
+        // rather than reporting a clean sweep, and returns no position
         // it never reached.
         let starved_gc = harness.run(&[
             "--json",

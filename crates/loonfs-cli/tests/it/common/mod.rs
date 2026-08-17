@@ -12,16 +12,13 @@ pub(super) use std::thread;
 pub(super) use std::time::{Duration, Instant};
 pub(super) use tempfile::TempDir;
 
-/// A config file with no profiles: enough to load, for the tests that care
-/// about which file was loaded rather than what was in it.
+/// A valid config with no profiles.
 pub(super) const MINIMAL_CONFIG: &str = "config_version = 1\n";
 
-/// A file small enough that a tree holding it uploads it in one request,
-/// beside one that is not.
+/// A file small enough to upload in one request during recursive tests.
 pub(super) const SMALL_TREE_FILE: &[u8] = b"small enough to hold";
 
-/// A payload past the size at which a put stops holding its bytes whole.
-/// It is the smallest payload that exercises the streaming path at all.
+/// The smallest payload used to exercise the streaming upload path.
 pub(super) fn streaming_payload() -> Vec<u8> {
     let len = 8 * 1024 * 1024 + 1_024;
     (0..len).map(|offset| (offset % 251) as u8).collect()
@@ -47,16 +44,13 @@ pub(super) fn events_of_kind(output: &Output, kind: &str) -> Vec<Value> {
         .collect()
 }
 
-/// A payload of several download chunks, so a `get` that read the file whole
-/// and one that reads it in chunks are told apart by what comes back rather
-/// than by what a comment claims.
+/// A payload large enough to require several download chunks.
 pub(super) fn multi_chunk_payload() -> Vec<u8> {
     let len = 3 * loonfs::CONTENT_READ_CHUNK_BYTES as usize + 1_024;
     (0..len).map(|offset| (offset % 251) as u8).collect()
 }
 
-/// The bytes and the note an interrupted download leaves beside its
-/// destination, as this CLI names them.
+/// Returns the partial-data and metadata paths for an interrupted download.
 pub(super) fn partial_paths(destination: &Path) -> (PathBuf, PathBuf) {
     let name = destination
         .file_name()
@@ -70,8 +64,7 @@ pub(super) fn partial_paths(destination: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
-/// Lays down the bytes and note an interrupted download of `remote_path`
-/// would have left, having got `held` bytes in.
+/// Creates the files left by a download interrupted after `held` bytes.
 pub(super) fn leave_a_partial_download(
     harness: &Harness,
     remote_path: &str,
@@ -93,10 +86,9 @@ pub(super) fn leave_a_partial_download(
     fs::write(&meta, serde_json::to_vec(&note).expect("encode note")).expect("write note");
 }
 
-/// The one content object of a given length under a store root. Content
-/// objects live at
-/// `content-stores/<store>/objects/<first-shard>/<second-shard>/<id>`, and the
-/// tests that use this write one file whose length nothing else shares.
+/// Finds the only content object with `size_bytes` under a store root.
+///
+/// Callers use a unique size so the match identifies one fixture object.
 pub(super) fn content_object_path(store_root: &Path, size_bytes: u64) -> PathBuf {
     let objects = walkdir::WalkDir::new(store_root.join("content-stores"))
         .into_iter()
@@ -117,8 +109,7 @@ pub(super) fn content_object_path(store_root: &Path, size_bytes: u64) -> PathBuf
     objects.into_iter().next().expect("one content object")
 }
 
-/// Reads the namespace's change feed through the CLI and returns the
-/// annotations in commit order, dropping the rows that carry none.
+/// Returns change-feed messages in commit order, omitting events without one.
 pub(super) fn feed_messages(harness: &Harness) -> Vec<String> {
     let changes = harness.run(&["--json", "changes"]);
     assert_success(&changes);
@@ -157,8 +148,7 @@ impl Harness {
         self.command().args(args).output().expect("run loonfs")
     }
 
-    /// Runs the CLI with `variables` in its environment, for the config
-    /// resolution the environment takes part in.
+    /// Runs the CLI with additional environment variables.
     pub(super) fn run_with_env<V: AsRef<std::ffi::OsStr>>(
         &self,
         variables: &[(&str, V)],
@@ -171,8 +161,7 @@ impl Harness {
         command.args(args).output().expect("run loonfs")
     }
 
-    /// Every invocation starts from the temp home with CLI selection
-    /// environment cleared, so a developer's shell cannot affect a test.
+    /// Builds a command isolated from the developer's CLI configuration.
     pub(super) fn command(&self) -> Command {
         let mut command = Command::new(loon_binary_path());
         command
@@ -185,9 +174,10 @@ impl Harness {
         command
     }
 
-    /// Runs a command the CLI printed the way a user would: through a shell,
-    /// which is what makes the quoting in it load-bearing. Only the `loonfs`
-    /// the hint spells is swapped for the binary under test.
+    /// Runs a command printed by the CLI through a shell.
+    ///
+    /// This verifies that the printed quoting is valid. The helper replaces
+    /// the `loonfs` executable with the test binary.
     pub(super) fn replay_in_shell(&self, command: &str) -> Output {
         let arguments = command
             .strip_prefix("loonfs ")
@@ -207,8 +197,7 @@ impl Harness {
             .expect("replay the printed command")
     }
 
-    /// Runs the CLI with a payload on standard input, which is the one
-    /// source whose length is not knowable before it is read.
+    /// Runs the CLI with a payload on standard input.
     pub(super) fn run_with_stdin(&self, args: &[&str], stdin: &[u8]) -> Output {
         let mut child = self
             .command()
