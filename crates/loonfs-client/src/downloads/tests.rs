@@ -200,7 +200,7 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
         Outcome::Success(payload[held..].to_vec()),
     ]);
     let mut download = client
-        .open_direct_download(
+        .open_direct_download_at(
             &grant(content_ref.clone(), "http://example.invalid/object"),
             held as u64,
         )
@@ -211,7 +211,7 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
 
     // A prefix that is not the object's fails the whole download.
     let mut download = client
-        .open_direct_download(
+        .open_direct_download_at(
             &grant(content_ref, "http://example.invalid/object"),
             held as u64,
         )
@@ -266,7 +266,7 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
 
     let guard = test_transport::script([Outcome::Success(payload[held..].to_vec())]);
     let mut download = client
-        .open_direct_download(
+        .open_direct_download_at(
             &grant(content_ref, "http://example.invalid/object"),
             held as u64,
         )
@@ -302,10 +302,7 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
 
     let guard = test_transport::script([Outcome::Success(payload.clone())]);
     let mut whole = client
-        .open_direct_download(
-            &grant(content_ref.clone(), "http://example.invalid/object"),
-            0,
-        )
+        .open_direct_download(&grant(content_ref.clone(), "http://example.invalid/object"))
         .await
         .expect("grant");
     while whole.next_chunk().await.expect("chunk").is_some() {}
@@ -318,7 +315,7 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
 
     let _guard = test_transport::script([Outcome::Success(payload[4..].to_vec())]);
     let mut resumed = client
-        .open_direct_download(&grant(content_ref, "http://example.invalid/object"), 4)
+        .open_direct_download_at(&grant(content_ref, "http://example.invalid/object"), 4)
         .await
         .expect("resumed grant");
     let error = resumed

@@ -4113,7 +4113,7 @@
       },
       "CommitId": {
         "type": "string",
-        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] mints\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
+        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] returns\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
         "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
       },
