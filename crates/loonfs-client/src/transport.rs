@@ -611,6 +611,28 @@ async fn transport_retry_pause(backoff: Duration) {
     tokio::time::sleep(backoff).await;
 }
 
+pub(crate) fn append_optional_pagination_query(
+    url: &mut String,
+    has_query: &mut bool,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) {
+    if let Some(limit) = limit {
+        append_query_param(url, has_query, "limit", &limit.to_string());
+    }
+    if let Some(cursor) = cursor {
+        append_query_param(url, has_query, "cursor", cursor);
+    }
+}
+
+pub(crate) fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value: &str) {
+    url.push(if *has_query { '&' } else { '?' });
+    *has_query = true;
+    url.push_str(name);
+    url.push('=');
+    url.push_str(&urlencoding::encode(value));
+}
+
 #[cfg(test)]
 pub(crate) mod test_transport {
     use super::{FailedAttempt, WireRequest, WireResponse};

@@ -198,11 +198,11 @@ fn attribute(error: CoreError, index: usize, operation_count: usize) -> CoreErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::tests::ops::{delete_path, put_file_bytes};
     use crate::commit::{CandidateAllocation, InodeAllocator};
     use crate::context::MutationContext;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::read::load_current_metadata_view;
-    use crate::path::write::ops::{delete_path, put_file_bytes};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::{
         AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,

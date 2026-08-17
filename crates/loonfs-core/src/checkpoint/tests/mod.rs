@@ -7,13 +7,16 @@ mod active_deletions;
 mod attributes;
 mod cache;
 mod cas_recovery;
+mod content_write;
 mod index_parity;
 pub(crate) mod inspection_materialization;
 mod inventory;
 mod manifest_round_trips;
+pub(crate) mod ops;
 mod retention;
 mod streaming_compaction;
 
+use self::ops::{delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes};
 use super::build::{
     build_manifest_tables, build_manifest_tables_from_rows, MetadataTableSegmentation,
 };
@@ -57,9 +60,6 @@ use crate::namespace::control::{
 use crate::namespace::status::load_namespace_head_summary;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
-use crate::path::write::ops::{
-    delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
-};
 use crate::protocol::list_changes_after;
 use crate::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,

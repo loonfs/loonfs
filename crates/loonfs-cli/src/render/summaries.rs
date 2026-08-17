@@ -1,0 +1,251 @@
+//! Short, reusable phrases for human-readable command summaries.
+
+use super::*;
+
+pub(super) fn public_inode_id(inode_id: loonfs_api::InodeId) -> String {
+    loonfs_api::public_inode_id::encode(inode_id)
+}
+
+/// One line per contract check: its verdict, and what went wrong when the
+/// verdict is that something did.
+pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
+    match check.outcome {
+        StoreProbeCheckOutcome::Passed => format!("{}: passed", check.name),
+        StoreProbeCheckOutcome::Unsupported => format!("{}: unsupported", check.name),
+        StoreProbeCheckOutcome::Failed => match &check.message {
+            Some(message) => format!("{}: failed: {message}", check.name),
+            None => format!("{}: failed", check.name),
+        },
+    }
+}
+
+/// One phrase for what the WAL fold did, with the tail it decided against
+/// when it decided against folding.
+pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u64) -> String {
+    match outcome {
+        WalFlushStepOutcome::NotNeeded => {
+            format!("wal flush not needed (tail {tail_segments} segments)")
+        }
+        WalFlushStepOutcome::Flushed { manifest_head_seq } => {
+            format!("wal flushed @ seq {}", manifest_head_seq.0)
+        }
+        WalFlushStepOutcome::Superseded {
+            attempted_seq,
+            current_manifest_id,
+        } => format!(
+            "wal flush @ seq {} superseded (current manifest {current_manifest_id})",
+            attempted_seq.0
+        ),
+        WalFlushStepOutcome::RaceLost { observed_head_seq } => format!(
+            "wal flush race lost (head moved past seq {})",
+            observed_head_seq.0
+        ),
+    }
+}
+
+/// One phrase for where the index is, in the terms that status actually has.
+pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
+    match state {
+        GrepIndexLifecycle::Disabled => "disabled".to_owned(),
+        GrepIndexLifecycle::Backfilling {
+            target_seq,
+            cursor_inode_id,
+            ..
+        } => match cursor_inode_id {
+            Some(inode_id) => format!(
+                "backfilling toward seq {}, walked through inode {}",
+                target_seq.0,
+                public_inode_id(*inode_id)
+            ),
+            None => format!("backfilling toward seq {}, not yet started", target_seq.0),
+        },
+        GrepIndexLifecycle::Active {
+            built_through_seq,
+            next_event_index,
+        } => {
+            if *next_event_index == 0 {
+                format!("active, built through seq {}", built_through_seq.0)
+            } else {
+                format!(
+                    "active, built through seq {} up to event {}",
+                    built_through_seq.0, next_event_index
+                )
+            }
+        }
+    }
+}
+
+/// One line for where a drain left one assigned key.
+pub(super) fn maintenance_key_line(key: &MaintenanceKeyReport) -> String {
+    let Some(conclusion) = &key.conclusion else {
+        return format!(
+            "{}/{}: not started; the budget ran out first",
+            key.namespace_id, key.job
+        );
+    };
+    let spent = steps_phrase(key.steps);
+    if key.settled {
+        format!(
+            "{}/{}: {conclusion} after {spent}",
+            key.namespace_id, key.job
+        )
+    } else {
+        format!(
+            "{}/{}: {conclusion} after {spent}, still not settled",
+            key.namespace_id, key.job
+        )
+    }
+}
+
+pub(super) fn steps_phrase(steps: u64) -> String {
+    if steps == 1 {
+        "1 step".to_owned()
+    } else {
+        format!("{steps} steps")
+    }
+}
+
+pub(super) fn maintenance_assignment(namespaces: &[NamespaceId], jobs: &[String]) -> String {
+    format!(
+        "{} for {}",
+        jobs.join(", "),
+        namespaces
+            .iter()
+            .map(NamespaceId::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Who a checkpoint record answers to, in one column: the label a user pin
+/// carries, or the fork target that keeps a lease standing. A fork lease is
+/// marked as such because `admin checkpoint-release` refuses it — it goes
+/// when its target namespace does.
+pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
+    match owner {
+        CheckpointOwnerSummary::User { name } => name.clone(),
+        CheckpointOwnerSummary::Fork {
+            target_namespace_id,
+        } => format!("fork -> {target_namespace_id}"),
+    }
+}
+
+pub(super) fn gc_summary(report: &GcResponse) -> String {
+    let mut summary = format!(
+        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records, {} content objects ({} retained)",
+        report.deleted_wal_segments,
+        report.deleted_metadata_tables,
+        report.deleted_manifests,
+        report.deleted_checkpoint_records,
+        report.deleted_content_objects,
+        report.retained_candidates
+    );
+    // One reason, not the whole table: the count says how much was kept and
+    // this says what the bulk of it was, which is the question an operator
+    // asks next. `--json` carries every reason.
+    if let Some((reason, count)) = report.retained.top_reason() {
+        summary.push_str(&format!("; mostly {reason}: {count}"));
+    }
+    if report.released_fork_checkpoints > 0 {
+        summary.push_str(&format!(
+            "; released {} fork checkpoints",
+            report.released_fork_checkpoints
+        ));
+    }
+    if report.degraded_retention {
+        summary.push_str("; retention degraded: ambiguous roots suppressed deletion");
+    }
+    if report.content_reclamation_deferred {
+        summary.push_str(
+            "; content reclamation deferred: the reference scan did not fit in --max-objects",
+        );
+    }
+    if report.budget_exhausted {
+        summary.push_str("; stopped on --max-objects before the pass finished");
+    }
+    if let Some(cursor) = &report.next_cursor {
+        summary.push_str(&format!("; next_cursor: {cursor}"));
+    }
+    summary
+}
+
+/// Renders Unix milliseconds as `YYYY-MM-DD HH:MM:SSZ`. Hand-rolled
+/// civil-from-days arithmetic (Howard Hinnant's algorithm), matching the
+/// presign signer's approach, so the CLI takes no date dependency.
+pub(crate) fn format_utc_ms(unix_ms: u64) -> String {
+    let seconds = unix_ms / 1_000;
+    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
+    let second_of_day = seconds % 86_400;
+    let (hh, mm, ss) = (
+        second_of_day / 3_600,
+        (second_of_day % 3_600) / 60,
+        second_of_day % 60,
+    );
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Compact human descriptor for one semantic feed event.
+pub(super) fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
+    use loonfs_api::v0::FilesystemChange;
+    match event {
+        FilesystemChange::DirectoryCreated { display_name, .. }
+        | FilesystemChange::FileCreated { display_name, .. } => {
+            format!("create '{display_name}'")
+        }
+        FilesystemChange::ContentChanged {
+            inode_id,
+            revision_no,
+            ..
+        } => format!(
+            "write inode {} rev #{}",
+            public_inode_id(*inode_id),
+            revision_no.0
+        ),
+        FilesystemChange::Moved {
+            from_display_name,
+            to_display_name,
+            ..
+        } => format!("move '{from_display_name}' -> '{to_display_name}'"),
+        FilesystemChange::Deleted {
+            inode_id,
+            deleted_direntry,
+        } => match deleted_direntry {
+            Some(direntry) => format!("delete '{}'", direntry.display_name),
+            None => format!("delete inode {}", public_inode_id(*inode_id)),
+        },
+        FilesystemChange::Undeleted { display_name, .. } => {
+            format!("undelete '{display_name}'")
+        }
+        FilesystemChange::AttributesChanged {
+            inode_id,
+            attributes_revision_no,
+            ..
+        } => format!(
+            "attributes inode {} rev #{}",
+            public_inode_id(*inode_id),
+            attributes_revision_no.0
+        ),
+    }
+}
+
+pub(super) fn event_summary(events: &[loonfs_api::v0::FilesystemChange]) -> String {
+    const SHOWN: usize = 3;
+    if events.is_empty() {
+        return "-".to_owned();
+    }
+    let mut shown: Vec<String> = events.iter().take(SHOWN).map(event_descriptor).collect();
+    if events.len() > SHOWN {
+        shown.push(format!("+{} more", events.len() - SHOWN));
+    }
+    shown.join("; ")
+}
