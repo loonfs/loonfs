@@ -14,7 +14,9 @@ use crate::namespace::basis::{
 };
 use crate::wal::{load_wal_chain_within, WalChainLoad, WalChainLoadRequest};
 use futures::StreamExt;
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle, NamespaceState};
+use loonfs_api::wire::control::{
+    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState, HeadState, NamespaceState,
+};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
@@ -52,6 +54,20 @@ pub(super) struct LiveSet {
 }
 
 impl LiveSet {
+    fn collecting(namespace_deleted: bool) -> Self {
+        Self {
+            manifests: BTreeSet::new(),
+            tables: BTreeSet::new(),
+            wal_segments: BTreeSet::new(),
+            wal_content_ids: BTreeSet::new(),
+            checkpoint_keys: BTreeSet::new(),
+            missing_basis_records: BTreeSet::new(),
+            degraded: false,
+            namespace_deleted,
+            anchor: ReferenceAnchor::NotNeeded,
+        }
+    }
+
     /// Whether anything still protects one WAL segment key.
     ///
     /// The current chain protects what a read at this instant replays; the
@@ -154,6 +170,29 @@ impl ReferenceAnchor {
 pub(super) enum LiveSetCollection {
     Complete(LiveSet),
     BudgetExhausted,
+}
+
+/// Why a collection stopped. `?` carries both out of a family collector.
+#[derive(Debug)]
+pub(super) enum CollectStop {
+    Budget,
+    Core(CoreError),
+}
+
+impl From<CoreError> for CollectStop {
+    fn from(error: CoreError) -> Self {
+        Self::Core(error)
+    }
+}
+
+type CollectResult<T> = std::result::Result<T, CollectStop>;
+
+fn charge(budget: &mut PassBudget) -> CollectResult<()> {
+    if budget.try_charge() {
+        Ok(())
+    } else {
+        Err(CollectStop::Budget)
+    }
 }
 
 impl LiveSetCollection {
@@ -275,7 +314,6 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<LiveSetCollection> {
-    let now_ms = context.now_ms;
     let head = &loaded.head.state;
     // A namespace with no root of its own roots no manifest here: the
     // genesis basis has none, and a fork target's basis is a source-prefix
@@ -289,149 +327,168 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             .manifest_object_id
             .clone()
     });
-    // A missing floor means retain from the namespace's birth sequence
-    // (format spec, "WAL floor").
-    if !budget.try_charge() {
-        return Ok(LiveSetCollection::BudgetExhausted);
-    }
-    let floor_seq = resolve_retention_floor_seq(store, head)
-        .await
-        .map_err(CoreError::load_head)?;
-
     let namespace_deleted = head.state == NamespaceState::Deleted;
-    let mut live = LiveSet {
-        manifests: BTreeSet::new(),
-        tables: BTreeSet::new(),
-        wal_segments: BTreeSet::new(),
-        wal_content_ids: BTreeSet::new(),
-        checkpoint_keys: BTreeSet::new(),
-        missing_basis_records: BTreeSet::new(),
-        degraded: false,
-        namespace_deleted,
-        anchor: ReferenceAnchor::NotNeeded,
-    };
-    // Terminal namespaces forget (format spec, rule 4): the tombstone pair
-    // and the root/floor pointers survive as non-candidates, but nothing
-    // else is a root except fork-owned records protecting a live target —
-    // reads are impossible (`namespace_deleted` at every surface, and epoch
-    // acquire refuses the tombstone), so user pins and the final replay
-    // chain protect nothing.
-    if !namespace_deleted {
-        live.manifests.extend(root_manifest_object_id.clone());
-    }
-    let mut active_record_bases: BTreeMap<ManifestObjectId, Vec<String>> = BTreeMap::new();
-
-    // Every readable checkpoint record roots its basis, no matter its
-    // lifecycle, expiry, or owner — no exceptions. An active record roots it
-    // because it still serves reads, expiry or not: turning a passed expiry
-    // into a release is the compare-and-swap below, and until that lands the
-    // record is a pin. A released record roots it because deletion runs data
-    // first and records last, so a record still on the store never has its
-    // basis pulled out from under it inside a pass. State, expiry, and owner
-    // fate gate only whether the record itself is a candidate.
-    let checkpoints_prefix = checkpoint_prefix(namespace_id);
-    let mut checkpoint_keys = store.list_prefix_stream(&checkpoints_prefix);
-    while let Some(item) = checkpoint_keys.next().await {
-        let key = item.map_err(|error| CoreError::store(&checkpoints_prefix, &error))?;
-        if !budget.try_charge() {
-            return Ok(LiveSetCollection::BudgetExhausted);
+    let collected: CollectResult<LiveSet> = async {
+        // A missing floor means retain from the namespace's birth sequence
+        // (format spec, "WAL floor").
+        charge(budget)?;
+        let floor_seq = resolve_retention_floor_seq(store, head)
+            .await
+            .map_err(CoreError::load_head)?;
+        let mut live = LiveSet::collecting(namespace_deleted);
+        let mut manifest_ids = BTreeSet::new();
+        if !namespace_deleted {
+            manifest_ids.extend(root_manifest_object_id.clone());
         }
+        let active_record_bases = collect_checkpoint_records(
+            store,
+            namespace_id,
+            namespace_deleted,
+            &mut manifest_ids,
+            &mut live,
+            budget,
+            context,
+        )
+        .await?;
+        collect_manifest_tables(
+            store,
+            namespace_id,
+            root_manifest_object_id.as_ref(),
+            manifest_ids,
+            &active_record_bases,
+            &mut live,
+            budget,
+        )
+        .await?;
+        collect_reference_anchor(
+            store,
+            namespace_id,
+            grace_window_ms,
+            reused_anchor,
+            &mut live,
+            budget,
+            context,
+        )
+        .await?;
+        collect_retained_wal(store, namespace_id, head, floor_seq, &mut live, budget).await?;
+        Ok(live)
+    }
+    .await;
+    match collected {
+        Ok(live) => Ok(LiveSetCollection::Complete(live)),
+        Err(CollectStop::Budget) => Ok(LiveSetCollection::BudgetExhausted),
+        Err(CollectStop::Core(error)) => Err(error),
+    }
+}
+
+type ActiveRecordBases = BTreeMap<ManifestObjectId, Vec<String>>;
+
+/// Collects checkpoint roots and the protected record keys that named them.
+/// Every readable record roots its basis in a live namespace, even when the
+/// record itself is a sweep candidate.
+async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    namespace_deleted: bool,
+    manifest_ids: &mut BTreeSet<ManifestObjectId>,
+    live: &mut LiveSet,
+    budget: &mut PassBudget,
+    context: &MutationContext,
+) -> CollectResult<ActiveRecordBases> {
+    let prefix = checkpoint_prefix(namespace_id);
+    let mut keys = store.list_prefix_stream(&prefix);
+    let mut active_record_bases: ActiveRecordBases = BTreeMap::new();
+    while let Some(item) = keys.next().await {
+        let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
+        charge(budget)?;
         let loaded = load_checkpoint_record_at_key(store, &key).await;
         let record = match loaded {
             Ok(loaded) => loaded.state,
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
-            Err(error) => return Err(core_control_load_error(error)),
+            Err(error) => return Err(core_control_load_error(error).into()),
         };
-        // What makes a record a candidate depends on who owns it.
-        // A user pin answers to its own expiry. A fork pin answers
-        // to its target's fate, and only to that: the lease is one
-        // input to proving an attempt abandoned, never a reason to
-        // drop a pin whose target is alive and reading through it.
-        // Every check here is repeated at decision time; this only
-        // selects candidates.
-        let candidate = match &record.owner {
-            _ if record.state != (CheckpointRecordLifecycle::Active {}) => true,
-            CheckpointOwner::User { .. } => lease_expired(&record, now_ms),
-            CheckpointOwner::Fork {
-                target_namespace_id,
-                expires_at_ms,
-            } => {
-                if !budget.try_charge() {
-                    return Ok(LiveSetCollection::BudgetExhausted);
-                }
-                fork_target_proven_gone(store, target_namespace_id, *expires_at_ms, context).await?
-            }
-        };
-        if namespace_deleted {
-            // On a terminal namespace only a fork record with a live
-            // target roots anything; every other record is an
-            // ordinary candidate, and its basis is not rooted (no
-            // reader can reach a tombstone).
-            if candidate || matches!(record.owner, CheckpointOwner::User { .. }) {
-                continue;
-            }
-            live.manifests.insert(record.manifest_object_id.clone());
+        let candidate = checkpoint_is_candidate(store, &record, budget, context).await?;
+        // A tombstone has no readers; only a fork record whose target still
+        // lives continues to root its source basis.
+        if namespace_deleted && (candidate || matches!(record.owner, CheckpointOwner::User { .. }))
+        {
+            continue;
+        }
+        manifest_ids.insert(record.manifest_object_id.clone());
+        // A candidate still roots its basis in a live namespace; it is only
+        // kept out of the protected key set so the sweep can act on it.
+        if !candidate {
             active_record_bases
                 .entry(record.manifest_object_id)
                 .or_default()
                 .push(key.clone());
             live.checkpoint_keys.insert(key);
-            continue;
         }
-        live.manifests.insert(record.manifest_object_id.clone());
-        // A candidate still roots its basis above; it is only kept
-        // out of the protected key set so the sweep can act on it.
-        if candidate {
-            continue;
-        }
-        active_record_bases
-            .entry(record.manifest_object_id)
-            .or_default()
-            .push(key.clone());
-        live.checkpoint_keys.insert(key);
     }
+    Ok(active_record_bases)
+}
 
-    // Live manifests protect their tables (rule 6: only validated manifests
-    // are trusted to protect data — the envelope loader checks the payload
-    // checksum).
-    for manifest_object_id in live.manifests.clone() {
-        if !budget.try_charge() {
-            return Ok(LiveSetCollection::BudgetExhausted);
+async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
+    store: &S,
+    record: &CheckpointRecordState,
+    budget: &mut PassBudget,
+    context: &MutationContext,
+) -> CollectResult<bool> {
+    // User pins answer to expiry. Fork pins answer only to target fate; the
+    // lease alone never drops a pin whose target is alive.
+    match &record.owner {
+        _ if record.state != (CheckpointRecordLifecycle::Active {}) => Ok(true),
+        CheckpointOwner::User { .. } => Ok(lease_expired(record, context.now_ms)),
+        CheckpointOwner::Fork {
+            target_namespace_id,
+            expires_at_ms,
+        } => {
+            charge(budget)?;
+            Ok(
+                fork_target_proven_gone(store, target_namespace_id, *expires_at_ms, context)
+                    .await?,
+            )
         }
-        let manifest_key = metadata_manifest_object(namespace_id, &manifest_object_id);
+    }
+}
+
+async fn collect_manifest_tables<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    root_manifest_object_id: Option<&ManifestObjectId>,
+    manifest_ids: BTreeSet<ManifestObjectId>,
+    active_record_bases: &ActiveRecordBases,
+    live: &mut LiveSet,
+    budget: &mut PassBudget,
+) -> CollectResult<()> {
+    // Only validated manifest envelopes may protect their table objects.
+    for manifest_object_id in &manifest_ids {
+        charge(budget)?;
+        let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
         match load_namespace_manifest_envelope_if_present(
             store,
             namespace_id,
-            &manifest_object_id,
+            manifest_object_id,
             &manifest_key,
         )
         .await
         {
-            Ok(Some(manifest)) => {
-                for file in &manifest.payload.metadata_files {
-                    live.tables.insert(file.object_key.clone());
-                }
+            Ok(Some(manifest)) => live.tables.extend(
+                manifest
+                    .payload
+                    .metadata_files
+                    .iter()
+                    .map(|file| file.object_key.clone()),
+            ),
+            Ok(None) if Some(manifest_object_id) == root_manifest_object_id => {
+                live.degraded = true;
             }
-            // Absent is not ambiguous. The root's manifest missing is real
-            // corruption and degrades the pass; a record-rooted basis that
-            // is verifiably gone marks the still-active records above it as
-            // zombies — the crash window between record write and verify —
-            // and the pass releases them below instead of degrading forever.
             Ok(None) => {
-                if Some(&manifest_object_id) == root_manifest_object_id.as_ref() {
-                    live.degraded = true;
-                } else if let Some(record_keys) = active_record_bases.get(&manifest_object_id) {
+                if let Some(record_keys) = active_record_bases.get(manifest_object_id) {
                     live.missing_basis_records
                         .extend(record_keys.iter().cloned());
                 }
             }
-            // A manifest the store could not hand over is a transient
-            // obstacle: keep the pass conservative and let the next one try
-            // again. A manifest that was read but does not validate is
-            // corruption, and the pass reports it instead of degrading every
-            // future pass over this namespace. `failure_class` is the same
-            // split every other surface uses (`error.rs`), so this arm
-            // cannot drift from them.
             Err(error) => match error.failure_class() {
                 ManifestLoadFailureClass::Store => {
                     live.degraded = true;
@@ -445,26 +502,34 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
                 ManifestLoadFailureClass::Corrupt => {
                     return Err(CoreError::NamespaceCorrupt(format!(
                         "a manifest this namespace still references does not load: {error}"
-                    )));
+                    ))
+                    .into());
                 }
             },
         }
     }
+    live.manifests = manifest_ids;
+    Ok(())
+}
 
-    // The second anchor: what this namespace referenced a grace window ago.
-    // A terminal namespace needs none — no read can reach a tombstone, and
-    // its whole tree is meant to age out.
-    let selected = match (namespace_deleted, reused_anchor) {
-        (true, _) => Some(ReferenceAnchor::NotNeeded),
-        (false, Some(anchor)) => Some(anchor),
+async fn collect_reference_anchor<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    grace_window_ms: u64,
+    reused_anchor: Option<ReferenceAnchor>,
+    live: &mut LiveSet,
+    budget: &mut PassBudget,
+    context: &MutationContext,
+) -> CollectResult<()> {
+    // Tombstones need no historical root, and refreshes reuse the pass's
+    // original anchor because it is a fixed fact about the past.
+    live.anchor = match (live.namespace_deleted, reused_anchor) {
+        (true, _) => ReferenceAnchor::NotNeeded,
+        (false, Some(anchor)) => anchor,
         (false, None) => {
             select_reference_anchor(store, namespace_id, grace_window_ms, budget, context).await?
         }
     };
-    let Some(anchor) = selected else {
-        return Ok(LiveSetCollection::BudgetExhausted);
-    };
-    live.anchor = anchor;
     // The anchor roots what it named exactly as the current root does. Its
     // own key goes in too, so the pass cannot sweep away the evidence the
     // next pass needs.
@@ -472,73 +537,68 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         live.manifests.insert(anchor.manifest_object_id.clone());
         live.tables.extend(anchor.tables.iter().cloned());
     }
+    Ok(())
+}
 
-    // Keep every WAL segment needed to replay from the floor through the
-    // head. The floor never passes the root's basis, so this also covers
-    // root-to-head replay (rule 7). A terminal namespace has no replay
-    // future: its chain ages out.
-    if !namespace_deleted && head.seq > floor_seq {
-        // The loader keeps no budget of its own, because foreground reads
-        // and the changefeed share it. The pass caps the load at what it
-        // has left to spend instead. The loader then issues no more
-        // requests than the pass can pay for, and the charge below can
-        // never go past the bound.
-        let remaining = budget.remaining();
-        if remaining == 0 {
-            return Ok(LiveSetCollection::BudgetExhausted);
+async fn collect_retained_wal<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    floor_seq: ChangeSeq,
+    live: &mut LiveSet,
+    budget: &mut PassBudget,
+) -> CollectResult<()> {
+    // A live namespace keeps the complete replay chain from floor to head.
+    // A terminal namespace has no replay future.
+    if live.namespace_deleted || head.seq <= floor_seq {
+        return Ok(());
+    }
+    let remaining = budget.remaining();
+    if remaining == 0 {
+        return Err(CollectStop::Budget);
+    }
+    let load = load_wal_chain_within(
+        store,
+        WalChainLoadRequest {
+            namespace_id,
+            chain_base_seq: floor_seq,
+            head_seq: head.seq,
+            visible_tip: head.visible_wal_tip.clone(),
+            stop_after_seq: None,
+            recent_segments: &head.recent_segments,
+        },
+        usize::try_from(remaining).unwrap_or(usize::MAX),
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
+    })?;
+    let chain = match load {
+        WalChainLoad::Complete {
+            chain,
+            requests_issued,
+        } => {
+            budget.charge_block(u64::try_from(requests_issued).unwrap_or(u64::MAX));
+            chain
         }
-        let load = load_wal_chain_within(
-            store,
-            WalChainLoadRequest {
-                namespace_id,
-                chain_base_seq: floor_seq,
-                head_seq: head.seq,
-                visible_tip: head.visible_wal_tip.clone(),
-                stop_after_seq: None,
-                recent_segments: &head.recent_segments,
-            },
-            usize::try_from(remaining).unwrap_or(usize::MAX),
-        )
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-        })?;
-        // Either way the pass pays for the requests the loader issued, not
-        // for the segments it came back with. The two differ when a request
-        // fails or a hint names an object the chain does not use, and the
-        // store was asked either way.
-        let chain = match load {
-            WalChainLoad::Complete {
-                chain,
-                requests_issued,
-            } => {
-                budget.charge_block(u64::try_from(requests_issued).unwrap_or(u64::MAX));
-                chain
-            }
-            // The load stopped where the budget did. The pass pays for what
-            // it spent getting there and then stops, because a partial
-            // chain roots nothing.
-            WalChainLoad::LimitReached { requests_issued } => {
-                budget.charge_block(u64::try_from(requests_issued).unwrap_or(u64::MAX));
-                return Ok(LiveSetCollection::BudgetExhausted);
-            }
-        };
-        for segment in chain.segments() {
-            live.wal_segments.insert(segment.object_key().to_owned());
-            // The bodies are decoded and validated right here, so the
-            // content these commits name is read off them now rather than
-            // by a second pass over the same objects.
-            for record in segment.records() {
-                for delta in &record.deltas {
-                    if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
-                        live.wal_content_ids.insert(content_ref.content_id.clone());
-                    }
+        WalChainLoad::LimitReached { requests_issued } => {
+            budget.charge_block(u64::try_from(requests_issued).unwrap_or(u64::MAX));
+            // The incomplete chain is not inspected, so it contributes no
+            // roots before the typed budget stop discards the whole set.
+            return Err(CollectStop::Budget);
+        }
+    };
+    for segment in chain.segments() {
+        live.wal_segments.insert(segment.object_key().to_owned());
+        for record in segment.records() {
+            for delta in &record.deltas {
+                if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
+                    live.wal_content_ids.insert(content_ref.content_id.clone());
                 }
             }
         }
     }
-
-    Ok(LiveSetCollection::Complete(live))
+    Ok(())
 }
 
 /// Finds the reference manifest R and reads what it named.
@@ -555,15 +615,13 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
 /// timestamp, so a manifest with no timestamp reads as young here exactly as
 /// a candidate without one does there.
 ///
-/// `None` reports that the budget ran out. A pass that cannot pay for this
-/// has no root set at all, the same as any other partial collection.
 pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     grace_window_ms: u64,
     budget: &mut PassBudget,
     context: &MutationContext,
-) -> Result<Option<ReferenceAnchor>> {
+) -> CollectResult<ReferenceAnchor> {
     let prefix = metadata_manifest_prefix(namespace_id);
     let mut keys = store.list_prefix_stream(&prefix);
     let mut published_any = false;
@@ -576,9 +634,7 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
             continue;
         };
         published_any = true;
-        if !budget.try_charge() {
-            return Ok(None);
-        }
+        charge(budget)?;
         let Some(metadata) = store
             .head(&key)
             .await
@@ -599,14 +655,12 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
         // Nothing published, nothing unreferenced: a namespace with no
         // manifest of its own has never taken an object out of a file set,
         // and its floor cannot have advanced past its birth without a root.
-        return Ok(Some(match published_any {
+        return Ok(match published_any {
             true => ReferenceAnchor::Missing,
             false => ReferenceAnchor::NotNeeded,
-        }));
+        });
     };
-    if !budget.try_charge() {
-        return Ok(None);
-    }
+    charge(budget)?;
     let manifest = match load_namespace_manifest_envelope_if_present(
         store,
         namespace_id,
@@ -616,7 +670,7 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
     .await
     {
         Ok(Some(manifest)) => manifest,
-        Ok(None) => return Ok(Some(ReferenceAnchor::Missing)),
+        Ok(None) => return Ok(ReferenceAnchor::Missing),
         Err(error) => match error.failure_class() {
             ManifestLoadFailureClass::Store => {
                 tracing::warn!(
@@ -625,25 +679,24 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
                     error = %error,
                     "the reference manifest did not read; retaining every aged candidate"
                 );
-                return Ok(Some(ReferenceAnchor::Missing));
+                return Ok(ReferenceAnchor::Missing);
             }
             ManifestLoadFailureClass::Corrupt => {
                 return Err(CoreError::NamespaceCorrupt(format!(
                     "the reference manifest does not load: {error}"
-                )));
+                ))
+                .into());
             }
         },
     };
-    Ok(Some(ReferenceAnchor::Manifest(Box::new(
-        AnchoredManifest {
-            manifest_object_id,
-            head_seq: manifest.payload.head_seq,
-            tables: manifest
-                .payload
-                .metadata_files
-                .iter()
-                .map(|file| file.object_key.clone())
-                .collect(),
-        },
-    ))))
+    Ok(ReferenceAnchor::Manifest(Box::new(AnchoredManifest {
+        manifest_object_id,
+        head_seq: manifest.payload.head_seq,
+        tables: manifest
+            .payload
+            .metadata_files
+            .iter()
+            .map(|file| file.object_key.clone())
+            .collect(),
+    })))
 }

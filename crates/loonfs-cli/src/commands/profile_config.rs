@@ -5,6 +5,7 @@ use crate::args::{ActorKindArg, InitArgs, ProfileCreateArgs, ProfileUpdateArgs, 
 use crate::config::{non_empty_env, ProfileActorConfig, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
+use loonfs_api::env::AUTH_TOKEN_ENV;
 use loonfs_api::{ActorId, ActorKind, SecretString};
 use loonfs_objectstore::{
     ConfiguredObjectStoreKind, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV, SESSION_TOKEN_ENV,
@@ -42,11 +43,6 @@ const AWS_REGIONS: &[&str] = &[
 ];
 
 // --- ambient credentials ---
-
-/// Environment variable a remote profile's bearer token comes from. The
-/// provider credential names are the store config's own, so the CLI and the
-/// server read one set of variables.
-const AUTH_TOKEN_ENV: &str = "LOONFS_AUTH_TOKEN";
 
 /// Credentials this process's environment happens to carry.
 ///

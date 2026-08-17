@@ -93,7 +93,6 @@ utoipa = { version = "5.5", features = ["macros"] }
 urlencoding = "2"
 unicode-casefold = "0.2"
 unicode-normalization = "0.1"
-uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 zstd = "0.13"

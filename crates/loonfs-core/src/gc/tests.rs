@@ -4165,6 +4165,9 @@ async fn corrupt_reference_anchor_manifest_fails_instead_of_becoming_missing() {
     let error = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
         .await
         .expect_err("a corrupt reference anchor must surface");
+    let super::live_set::CollectStop::Core(error) = error else {
+        panic!("the unmetered anchor selection cannot exhaust its budget");
+    };
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
     assert!(error.message().contains(&manifest_key));
 }
@@ -4195,7 +4198,7 @@ async fn unreadable_reference_anchor_manifest_remains_conservative() {
     let anchor = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
         .await
         .expect("a store failure keeps a missing anchor");
-    assert!(matches!(anchor, Some(ReferenceAnchor::Missing)));
+    assert!(matches!(anchor, ReferenceAnchor::Missing));
 }
 
 /// The manifest arm of the same split: a rooted manifest that reads but

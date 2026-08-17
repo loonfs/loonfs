@@ -31,6 +31,7 @@ mod commit_identity;
 mod content;
 mod control;
 mod digest;
+pub mod env;
 mod envelope;
 mod error;
 mod hex;

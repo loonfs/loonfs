@@ -2,10 +2,10 @@
 //! `string_id!` and `numeric_id!` macros so all ids share one validated
 //! surface.
 
+use crate::hex::hex_encode_bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
-use uuid::Uuid;
 
 const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
 
@@ -304,25 +304,24 @@ pub(crate) use validation_error;
 /// Generates a project-standard opaque durable identifier.
 ///
 /// Generated server-side IDs use an underscore prefix plus a 32-character
-/// lowercase UUID-simple body, such as `cs_<32hex>` or `chk_<32hex>`.
+/// lowercase hexadecimal body, such as `cs_<32hex>` or `chk_<32hex>`.
 ///
 /// Ids in the id inventory generate through their newtype `generate()`
 /// constructors; this helper stays public for free-form generated labels
 /// (for example a server's per-request id) that have no validated id type.
 pub fn generated_id(prefix: &'static str) -> String {
-    format!("{prefix}_{}", Uuid::new_v4().simple())
+    format!("{prefix}_{}", hex_encode_bytes(&random_128()))
 }
 
 fn generated_position_suffix() -> String {
-    let suffix = Uuid::new_v4().simple().to_string();
+    let suffix = hex_encode_bytes(&random_128());
     suffix[..16].to_owned()
 }
 
 /// Draws 128 fresh random bits.
 ///
-/// [`generated_id`] spends six of its bits on UUID version and variant tags.
-/// Content ids shard on their leading characters and must be uniform there,
-/// so they draw from the system generator directly instead.
+/// The body is 128 random bits, hex-encoded. Content ids use the same system
+/// generator, so their leading shard characters remain uniform.
 fn random_128() -> [u8; 16] {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).expect("the system random generator must be available");
@@ -1090,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_runtime_ids_use_lower_hex_uuid_bodies() {
+    fn generated_runtime_ids_use_lower_hex_bodies() {
         let upload_id = UploadId::generate();
         let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
         let manifest_object_id = ManifestObjectId::generate(ManifestId(413));

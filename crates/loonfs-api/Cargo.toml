@@ -27,7 +27,6 @@ thiserror.workspace = true
 unicode-casefold.workspace = true
 unicode-normalization.workspace = true
 utoipa = { workspace = true, optional = true }
-uuid.workspace = true
 xxhash-rust.workspace = true
 zstd.workspace = true
 
