@@ -53,6 +53,7 @@ use loonfs_test_support::stores::{
     OperationClass, OperationContext, OperationKind, RecordingStore,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use tempfile::tempdir;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
@@ -156,6 +157,25 @@ struct IncompleteGcAccountingStore {
     lists: AtomicUsize,
 }
 
+#[derive(Debug)]
+struct ListingCursorStore<S> {
+    inner: S,
+    calls: Mutex<Vec<(String, Option<String>)>>,
+}
+
+impl<S> ListingCursorStore<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take_calls(&self) -> Vec<(String, Option<String>)> {
+        std::mem::take(&mut *self.calls.lock().expect("listing calls lock poisoned"))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum BlockingControlCasTarget {
     CheckpointReleased,
@@ -257,6 +277,50 @@ impl ObjectStore for IncompleteGcAccountingStore {
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         self.lists.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_prefix_from_stream(prefix, start_after)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: ObjectStore> ObjectStore for ListingCursorStore<S> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.calls
+            .lock()
+            .expect("listing calls lock poisoned")
+            .push((prefix.to_owned(), start_after.map(str::to_owned)));
         self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
@@ -4637,7 +4701,10 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     }
     let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
     let wal_prefix = wal_segment_prefix(&namespace_id);
-    let store = CountingStore::new(inner, KeyPredicate::prefix(wal_prefix));
+    let store = CountingStore::new(
+        ListingCursorStore::new(inner),
+        KeyPredicate::prefix(wal_prefix.clone()),
+    );
     let mut bounded = config();
     // Two candidates a pass, plus the roots the pass marks before it walks.
     bounded.max_objects = Some(marking_units(&store, &namespace_id, &aged).await + 2);
@@ -4659,6 +4726,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
         .expect("head next orphan")
         .is_some());
 
+    store.inner().take_calls();
     bounded.cursor = first.next_cursor;
     store.reset();
     let second = gc_namespace(&store, &namespace_id, &bounded, &aged)
@@ -4668,6 +4736,17 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     assert!(second.next_cursor.is_some());
     assert_eq!(store.snapshot().heads, 2);
     assert_eq!(store.snapshot().deletes, 2);
+    let resumed_wal_starts: Vec<Option<String>> = store
+        .inner()
+        .take_calls()
+        .into_iter()
+        .filter_map(|(prefix, start_after)| (prefix == wal_prefix).then_some(start_after))
+        .collect();
+    assert_eq!(
+        resumed_wal_starts,
+        vec![Some(orphan_keys[1].clone())],
+        "the resumed family listing starts strictly after the cursor key"
+    );
     for key in &orphan_keys[..4] {
         assert!(store.head(key).await.expect("head orphan").is_none());
     }

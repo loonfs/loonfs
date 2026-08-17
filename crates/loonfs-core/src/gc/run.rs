@@ -173,16 +173,14 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         // record whose basis was removed underneath it.
         for &family in &CandidateFamily::ALL[resume_family.index()..] {
             let prefix = family.prefix(self.namespace_id);
-            let mut stream = self.store.list_prefix_stream(&prefix);
+            let start_after = if family == resume_family {
+                resume_last_key.as_deref()
+            } else {
+                None
+            };
+            let mut stream = self.store.list_prefix_from_stream(&prefix, start_after);
             while let Some(item) = stream.next().await {
                 let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
-                if family == resume_family
-                    && resume_last_key
-                        .as_ref()
-                        .is_some_and(|last_key| key.as_str() <= last_key.as_str())
-                {
-                    continue;
-                }
                 // This one-key lookahead proves work remains. It performs no
                 // candidate reads or mutations, and the key is reconsidered
                 // from the exclusive last-examined position on resume.
