@@ -163,8 +163,8 @@ fn replay_next_inode_id_from_commit_deltas(
                 WalDelta::CreateInode { inode_id, .. } => {
                     InodeId(next_inode_id.0.max(inode_id.0.saturating_add(1)))
                 }
-                // Every other delta names an inode that already exists, so none
-                // of them moves the allocation counter.
+                // Other delta types reference existing inodes and do not
+                // allocate IDs.
                 WalDelta::BindDirentry { .. }
                 | WalDelta::UnbindDirentry { .. }
                 | WalDelta::AppendFileRevision { .. }

@@ -60,9 +60,8 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
 
     update_head(store, namespace_id, CONTENTION_RETRY_LIMIT, |loaded_head| {
         let head = &loaded_head.state;
-        // Check for deletion before incrementing the epoch. A deleted namespace
-        // never grants another writer epoch, including to the writer recorded in
-        // its tombstone.
+        // A deleted namespace cannot grant another writer epoch, even to the
+        // writer recorded in its tombstone.
         if head.state == NamespaceState::Deleted {
             return Err(WriterEpochAcquireError::NamespaceDeleted {
                 namespace_id: head.namespace_id.clone(),

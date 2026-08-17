@@ -994,7 +994,7 @@ where
     )
 }
 
-/// Builds and encodes a control-object envelope for one serializable state.
+/// Encodes state in a control-object envelope.
 pub fn encode_control_state<T: Serialize>(
     kind: ControlObjectKind,
     state: &T,

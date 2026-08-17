@@ -460,7 +460,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .map(|root| root.manifest_state().clone()))
     }
 
-    /// Projects the durable grep root into its public lifecycle summary.
+    /// Returns the public lifecycle summary for the durable grep root.
     pub async fn index_status(
         &self,
         namespace_id: &NamespaceId,
@@ -472,8 +472,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 root.index().next_run_ordinal,
                 root.index().reorganize.is_some(),
             ),
-            // No root was ever published, which is the same answer as a root
-            // that was disabled: nothing is being maintained here.
+            // A missing root means indexing has not been enabled.
             None => (GrepIndexLifecycle::Disabled, 0, false),
         };
         Ok(GrepIndexStatusResponse {

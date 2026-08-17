@@ -45,7 +45,7 @@ impl EffectiveLimit {
         self.as_usize().saturating_add(1)
     }
 
-    /// Trims one over-fetched row and derives a cursor from the last row kept.
+    /// Truncates an overfilled page and builds a cursor from its last row.
     pub fn finish_page<R, C>(self, rows: &mut Vec<R>, cursor: impl FnOnce(&R) -> C) -> Option<C> {
         if rows.len() <= self.as_usize() {
             return None;
