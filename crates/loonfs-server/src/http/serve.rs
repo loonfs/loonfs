@@ -241,7 +241,7 @@ pub async fn app(
     Ok((router, state.writer, state.local_cache))
 }
 
-#[doc(hidden)]
+/// Test-only: builds the router around an already-constructed object store.
 pub async fn app_with_store(
     config: ServerConfig,
     store: SharedObjectStore,

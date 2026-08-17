@@ -18,7 +18,7 @@ Namespaces and content stores are separate durable domains. A namespace owns fil
 | --- | --- | --- | --- |
 | **Data plane** | Stores and serves file bytes. | Whole-file content objects and download streams. | No, by itself. |
 | **Metadata plane** | Defines the filesystem's durable truth. | WAL segments, namespace head, manifests, checkpoints, inode and direntry state. | Yes. |
-| **Control plane** | Coordinates multi-request work and authorization. | Upload handles, put intents, ACLs, shares, leases. | No. |
+| **Control plane** | Coordinates multi-request work and authorization. | Upload sessions. | No. |
 
 Two rules follow from this split:
 

@@ -24,10 +24,12 @@ use loonfs_api::{
     ReorganizeStepOutcome, RetainedCandidates, RevisionNo, TrashEntry, WalFlushStepOutcome,
 };
 
+/// Builds the static OpenAPI document for the v0 HTTP API.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     <LoonfsOpenApi as utoipa::OpenApi>::openapi()
 }
 
+/// Serializes the static OpenAPI document as pretty-printed JSON.
 pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&openapi_document())
 }

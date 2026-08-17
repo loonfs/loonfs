@@ -1002,7 +1002,10 @@ impl ProgressReporter {
 }
 
 impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "construction keeps one merge's coordinated state explicit"
+    )]
     fn new(
         store: &'a S,
         namespace_id: &'a NamespaceId,

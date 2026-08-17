@@ -97,7 +97,7 @@ pub(super) struct MetadataSstRows {
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "write_manifest_tables", key_class = "manifest_table")
+    fields(phase = "write_manifest_tables", key_class = "metadata_sst")
 )]
 pub(super) async fn build_manifest_tables_from_rows<S, RowsForFamily>(
     store: &S,

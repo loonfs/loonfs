@@ -52,7 +52,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "attributes_updated_at_ms",
     "attributes_updated_by",
     "bearer_auth",
-    "begin_put",
     "budget_exhausted",
     "built_through_seq",
     "checkpoint_id",
@@ -305,13 +304,30 @@ fn error_detail_fields_match_the_api_spec_table() {
 }
 
 fn assert_api_spec_error_codes_are_registered(spec: &str) {
+    let openapi: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/openapi.json"
+    )))
+    .expect("decode docs/specs/openapi.json");
+    let operation_ids: std::collections::BTreeSet<_> = openapi["paths"]
+        .as_object()
+        .expect("OpenAPI paths object")
+        .values()
+        .flat_map(|path| {
+            path.as_object()
+                .expect("OpenAPI path item")
+                .values()
+                .filter_map(|operation| operation.get("operationId")?.as_str())
+        })
+        .collect();
+
     for token in spec
         .split('`')
         .skip(1)
         .step_by(2)
         .filter(|token| is_snake_case_token(token))
     {
-        if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token) {
+        if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token) || operation_ids.contains(token) {
             continue;
         }
         // Valid inode IDs are examples, not error codes.

@@ -803,8 +803,7 @@ impl NamespacePublisher {
                         batch_size = usize_to_u64(batch.candidates.len()),
                         queue_depth_start = usize_to_u64(queue_depth_start),
                         queue_depth_end = usize_to_u64(batch.candidates.len()),
-                        collect_ms = elapsed_ms_since(collect_started),
-                        "publisher.batch_collect"
+                        collect_ms = elapsed_ms_since(collect_started)
                     );
                     self.publish_batch(batch.candidates).await;
                 }
@@ -888,8 +887,7 @@ impl NamespacePublisher {
                 mode = self.trace_mode,
                 store_kind = self.trace_store_kind,
                 result = "ok",
-                wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at),
-                "publisher.wait_for_batch"
+                wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at)
             );
         }
 
@@ -1137,8 +1135,7 @@ impl NamespacePublisher {
                 mode = self.trace_mode,
                 store_kind = self.trace_store_kind,
                 result = result.as_str(),
-                wait_ms,
-                "publisher.wait_for_result"
+                wait_ms
             );
         }
 
@@ -1156,8 +1153,7 @@ impl NamespacePublisher {
             mode = self.trace_mode,
             store_kind = self.trace_store_kind,
             queue_depth = usize_to_u64(queue_depth),
-            reason,
-            "publisher.enqueue"
+            reason
         );
     }
 }

@@ -1735,8 +1735,8 @@ Examples include:
 - recursive reads that need a pinned snapshot; and
 - resumable uploads that need a stable destination binding.
 
-In those cases, the server may create control-plane objects such as read
-sessions, upload sessions, or put intents.
+In v0, the server creates upload sessions for resumable uploads. Read sessions
+and put intents are possible future control-plane objects, but are not in v0.
 
 A durable upload session has three states and one transition:
 
@@ -2456,7 +2456,7 @@ publishing CAS) — under these rules:
    a cursor, an output descriptor, an offset, or resumable progress. The job
    creates it `active` with create-if-absent before its first output object,
    and refreshes it by compare-and-swap on the etag it last observed, every
-   `METADATA_COMPACTION_HEARTBEAT_INTERVAL` while it runs and at the top of
+   `METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS` while it runs and at the top of
    every finalization attempt.
 
    The lease is a fence, not a timestamp. An expired lease alone proves
@@ -2485,20 +2485,21 @@ publishing CAS) — under these rules:
    A pass decides one of the prefix's objects as follows. An object the
    manifest references is live, like every other referenced object. Otherwise,
    if the owning job's lease decodes, is `active`, and its `heartbeat_at_ms`
-   is within `METADATA_COMPACTION_LEASE_EXPIRY`, the object is retained
+   is within `METADATA_COMPACTION_LEASE_EXPIRY_MS`, the object is retained
    whatever its age; so is one whose expired lease the pass tried and failed
    to claim. Otherwise the prefix is orphaned and the object ages as an
-   ordinary unreferenced orphan under `METADATA_COMPACTION_STAGING_GRACE`,
+   ordinary unreferenced orphan under `METADATA_COMPACTION_STAGING_GRACE_MS`,
    which is derived rather than tuned:
 
    ```
-   METADATA_COMPACTION_STAGING_GRACE
-       >= METADATA_COMPACTION_LEASE_EXPIRY   (a job's claim outliving its last heartbeat)
+   METADATA_COMPACTION_STAGING_GRACE_MS
+       >= METADATA_COMPACTION_LEASE_EXPIRY_MS   (a job's claim outliving its last heartbeat)
           + T                                (rule 1: the publication that may still name it)
    ```
 
-   `METADATA_COMPACTION_LEASE_EXPIRY` is a small multiple of the heartbeat
-   interval, and it must itself be at least `T`: a job's last heartbeat before
+   `METADATA_COMPACTION_LEASE_EXPIRY_MS` is
+   `METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS` times the heartbeat interval,
+   and it must itself be at least `T`: a job's last heartbeat before
    its output becomes referenced is at the top of a finalization attempt, and
    that attempt's compare-and-swap lands within one publication bound of it.
    That inequality is also what completes the fence — a job that heartbeated

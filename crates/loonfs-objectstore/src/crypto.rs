@@ -4,8 +4,7 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-/// Computes an HMAC-SHA256 authentication code.
-#[doc(hidden)]
+/// Computes the shared signing primitive that loonfs-core uses to mint content tokens.
 pub fn hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut mac =
         <Hmac<Sha256>>::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");

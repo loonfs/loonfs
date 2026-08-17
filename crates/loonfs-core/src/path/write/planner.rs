@@ -11,7 +11,7 @@ use super::plan_restore::plan_publish_restore_revision;
 use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use crate::commit::{
-    validate_ops, CandidateAllocation, CommitFingerprint, PublishValidationView,
+    validate_ops, CandidateAllocation, CommitFingerprint, CommitNumbering, PublishValidationView,
     ValidatedCommitPlan, ValidatedOp,
 };
 use crate::error::{CoreError, Result};
@@ -75,8 +75,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         })?;
 
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
-    let mut next_op_index = 0_u32;
-    let mut next_delta_index = 0_u32;
+    let mut numbering = CommitNumbering::default();
     let mut validated_ops: Vec<ValidatedOp> = Vec::new();
     let operation_count = request.operations.len();
     for (index, operation) in request.operations.iter().enumerate() {
@@ -93,8 +92,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         let validated_unit = validate_ops(
             &unit_ops,
             &mut resolved,
-            &mut next_op_index,
-            &mut next_delta_index,
+            &mut numbering,
             committed_seq,
             &request.actor,
             committed_at_ms,

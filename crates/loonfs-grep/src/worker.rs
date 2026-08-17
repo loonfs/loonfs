@@ -1363,7 +1363,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Answers whether the key was deleted. Selection may be stale — the
     /// listing is a snapshot — but every decision here re-reads what
     /// authorizes it, which is what makes resuming from a cursor safe.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one collection decision needs liveness, budget, and report state together"
+    )]
     async fn collect_one_key(
         &self,
         namespace_id: &NamespaceId,

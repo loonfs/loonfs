@@ -61,7 +61,10 @@ pub(super) enum UploadSessionSweep {
 /// session. A CAS conflict keeps the session for a later pass. Provider
 /// cleanup runs only after the durable state transition, so a crash may leave
 /// extra data to clean up but cannot delete data from an open session.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the sweep decision needs session state, policy, budget, and context together"
+)]
 pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

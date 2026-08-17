@@ -2522,12 +2522,15 @@ not require durable control-plane state. Long-running operations may span
 multiple requests, may require a stable snapshot or destination binding, and
 may need resumability across client or server restarts.
 
+In v0, upload sessions are the only registered control object in this model.
+Read sessions are forward-looking and are not in v0.
+
 ### 9.1 Definitions
 
 | Term | Meaning |
 | --- | --- |
 | **Single-request operation** | An operation that is fully described by a single request and does not require a server-side control object after the request completes. |
-| **Control object** | A server-side control-plane object used when the client continues driving an operation across multiple requests. For large or resumable `put <file>`, an implementation may use a single `UploadHandle`. |
+| **Control object** | A server-side control-plane object used when the client continues driving an operation across multiple requests. For large or resumable `put <file>`, an implementation may use a single upload session. |
 | **Implementation-specific coordinator** | A helper resource or service that correlates multiple logical commits for one higher-level workflow. Coordinators are outside the core interoperable model and do not define namespace history. |
 | **Authoritative operation state** | The state that determines the correctness, visibility, and resumability of an operation. |
 | **Transfer progress** | Non-authoritative progress information such as completed bytes, completed files, local temporary outputs, or user-interface counters. |
@@ -2552,7 +2555,7 @@ may need resumability across client or server restarts.
      safety, or promised resumability guarantees.
 
    For large or resumable `put <file>`, an implementation that uses a
-   server-side control object typically uses a single `UploadHandle`.
+   server-side control object typically uses a single upload session.
 
 3. The core specification does **NOT** require a server-side job object for
    recursive `put` or recursive `cp`. Those workflows may be realized as one
@@ -2579,7 +2582,7 @@ may need resumability across client or server restarts.
 | `get <file>` | Single-request read | none | No | path resolution, access check, selected file revision, content serving or delegated download | local download progress, temporary file, client retries |
 | `get -r <dir>` | Multi-request snapshot read | optional read session pinning a consistent snapshot | Only if a consistent snapshot is promised across requests | snapshot selection, per-request reads as for `get` | traversal progress, local outputs, client retries |
 | `put <file>` (small, one-shot convenience) | Single request | none | No | destination resolution, validation, metadata commit | request payload, client retries |
-| `put <file>` (large or resumable) | Begin, upload, commit | `UploadHandle`, if used | Only if server-side resumability or stable binding is promised | stable destination binding, expected slot or revision, upload handle validity, final publish | file reading, hashing, content upload progress, retry tokens |
+| `put <file>` (large or resumable) | Begin, upload, commit | upload session, if used | Only if server-side resumability or stable binding is promised | stable destination binding, expected slot or revision, upload session validity, final publish | file reading, hashing, content upload progress, retry tokens |
 | `put -r <dir>` | Client- or coordinator-driven uploads plus one or more logical commits | none required by the core model | No | each commit's validation and publication | orchestration across files, progress, retries |
 | `cp <file>` (same server) | Single-request server-side copy | none | No | source resolution, destination resolution, metadata publication, content reference reuse | request retry |
 | `cp -r <dir>` (same server) | Client- or coordinator-driven sequence of logical commits | none required by the core model | No | each commit's validation and publication | orchestration across entries, retries |
@@ -2595,7 +2598,7 @@ filesystem commands.
 | --- | --- | --- |
 | `get <file>` | resolve the requested path or handle; authorize the read; select the file revision to read; serve bytes or delegated download targets | receive bytes; write local output; maintain local retry and resume state |
 | `put <file>` (one-shot) | resolve the destination; validate preconditions; publish the metadata change | supply bytes or content reference; retry the request if needed |
-| `put <file>` (resumable) | if an `UploadHandle` is used, create or validate it; bind the destination; validate durable content and commit the final publish | read the local file; hash it; upload content; track upload progress; submit the final commit request |
+| `put <file>` (resumable) | if an upload session is used, create or validate it; bind the destination; validate durable content and commit the final publish | read the local file; hash it; upload content; track upload progress; submit the final commit request |
 | `cp <file>` (same server) | resolve source and destination; authorize both sides; create the copied resource; publish the metadata change | submit the request; retry if appropriate |
 
 ### 9.5 When raw paths cease to identify the operation
@@ -2607,7 +2610,7 @@ a raw path string.
 | Operation | Raw path is used for | Stable in-flight identity after start |
 | --- | --- | --- |
 | `get <file>` | the request itself | none required |
-| `put <file>` (resumable) | `begin_put` only | server-issued `UploadHandle`, if used |
+| `put <file>` (resumable) | `begin_upload` only | server-issued upload session, if used |
 
 ### 9.6 Control-plane durability guidance
 
@@ -2615,7 +2618,7 @@ a raw path string.
    would change correctness, visibility, retention safety, or promised
    resumability.
 
-2. At minimum, an `UploadHandle` is normally durable when an implementation
+2. At minimum, an upload session is normally durable when an implementation
    uses one for stable destination binding across time or restart-safe
    resumability.
 
@@ -2634,7 +2637,7 @@ stronger mode is explicitly requested:
 - `get <file>` is a single-request operation;
 - `cp <file>` on the same service is a single-request operation;
 - if large or resumable `put <file>` uses a control object, it uses a single
-  `UploadHandle`.
+  upload session.
 
 These defaults preserve a simple model for single-request commands while
 allowing multi-request correctness and resumability where they actually

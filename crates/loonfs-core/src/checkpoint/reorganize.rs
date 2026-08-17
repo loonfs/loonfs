@@ -208,7 +208,7 @@ fn report(
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "reorganize_metadata", key_class = "manifest")
+    fields(phase = "reorganize_metadata", key_class = "namespace_manifest")
 )]
 pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     store: &S,

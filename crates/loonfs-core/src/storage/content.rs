@@ -21,6 +21,7 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
+/// Witnesses that LoonFS completed the durable content write described by its reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StoredContent {
     content_store_id: ContentStoreId,
@@ -594,7 +595,7 @@ async fn validate_content_size<S: ObjectStore + ?Sized>(
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "write_content_blob", key_class = "content_blob")
+    fields(phase = "write_content_blob", key_class = "content")
 )]
 #[cfg(any(test, feature = "test-support"))]
 pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
