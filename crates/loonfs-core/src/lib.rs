@@ -108,7 +108,6 @@ pub mod time;
 pub mod cache {
     pub use crate::recency::Recency;
 
-    pub use crate::checkpoint::cache::DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES;
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
         MetadataTableCacheObserver, MetadataTableCacheStats, StoredMetadataBlockCache,

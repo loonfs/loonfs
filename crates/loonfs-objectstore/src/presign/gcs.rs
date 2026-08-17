@@ -9,6 +9,7 @@
 
 use super::{
     DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest, PresignedUrl,
+    MAX_PRESIGN_EXPIRY,
 };
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
@@ -53,9 +54,6 @@ const GCS_SIGNING_ALGORITHM: &str = "GOOG4-RSA-SHA256";
 /// location rather than requiring the bucket's region, which is what Google's
 /// own client libraries write, so a deployment never has to configure one.
 const GCS_CREDENTIAL_SCOPE_SUFFIX: &str = "auto/storage/goog4_request";
-
-/// Google's documented ceiling for a signed URL's lifetime: seven days.
-const MAX_PRESIGN_EXPIRY: u64 = 7 * 24 * 60 * 60;
 
 /// Google Cloud Storage's documented maximum for a single-request upload:
 /// 5 TiB.

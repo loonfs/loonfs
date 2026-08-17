@@ -32,6 +32,7 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
+use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
     OperationContext, OperationKind, RecordedOperation, RecordingStore,
@@ -53,10 +54,6 @@ fn request(pattern: &str) -> GrepRequest {
         allow_stale: false,
         allow_scan: false,
     }
-}
-
-fn nonzero_usize(value: usize) -> NonZeroUsize {
-    NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
 async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {

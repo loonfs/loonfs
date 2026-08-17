@@ -1,4 +1,5 @@
 //! An async gate for selected object-store operations.
+//! Tests can wait for both the blocked operation and its eventual completion.
 
 use super::{KeyPredicate, OperationClass, OperationContext, OperationKind};
 use async_trait::async_trait;

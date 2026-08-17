@@ -791,12 +791,9 @@ mod tests {
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_test_support::ids::content_ref;
     use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
     use tempfile::tempdir;
-
-    fn content_ref(bytes: &[u8]) -> ContentRef {
-        ContentRef::blob_v1(ContentId::generate(), bytes)
-    }
 
     #[tokio::test]
     async fn validate_content_ref_success() {

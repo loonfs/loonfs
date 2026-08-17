@@ -172,6 +172,20 @@ pub(super) struct AppState {
     pub(super) local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 }
 
+impl AppState {
+    pub(super) fn grep_worker(&self) -> &GrepWorker<SharedObjectStore> {
+        self.grep_worker
+            .as_ref()
+            .expect("grep routes should carry a grep worker")
+    }
+
+    pub(super) fn grep_service(&self) -> &GrepService {
+        self.grep_service
+            .as_deref()
+            .expect("grep routes should carry a grep service")
+    }
+}
+
 /// Request-side access to grep maintenance.
 ///
 /// Requests may probe whether indexing is due and submit a non-blocking nudge.

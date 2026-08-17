@@ -13,6 +13,7 @@ use futures::future::try_join_all;
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataTableId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_compaction_table, metadata_table};
 use loonfs_objectstore::ObjectStore;
@@ -225,14 +226,6 @@ pub(super) struct MetadataSstWriteRequest<'a> {
     segment_index: u32,
     rows: Vec<MetadataRow>,
 }
-
-/// Largest filter block inlined into the segment's manifest descriptor, in
-/// stored bytes (hex doubles it in the manifest JSON). Sized for delta-run
-/// segments — the small, key-range-overlapping tables a point lookup must
-/// otherwise fetch one filter block per run to rule out — while keeping big
-/// base-segment filters (which range pruning already narrows to one
-/// candidate) out of the manifest.
-pub(super) const INLINE_SEGMENT_FILTER_MAX_BYTES: u32 = 1024;
 
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,

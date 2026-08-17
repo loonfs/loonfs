@@ -161,7 +161,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     ensure_upload_namespace_available(store, namespace_id).await?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
-    let content_ref = direct_put_content_ref(content_id.clone(), &claim)?;
+    let content_ref = claimed_content_ref(content_id.clone(), &claim, None)?;
     let object_key = content_blob(&content_store_id, &content_id);
     let upload_id = create_upload_session(
         store,
@@ -317,20 +317,23 @@ fn multipart_session_upload(session: &UploadSessionState) -> Result<(&str, Check
     }
 }
 
-/// Builds the content reference for a completed multipart upload.
+/// Builds a content reference from a client's upload claim.
 ///
-/// Completion verifies the provider-reported CRC-64/NVME checksum, which the
-/// resulting content reference records as its one full-object checksum.
-fn direct_multipart_content_ref(
+/// Multipart uploads require the provider's checksum algorithm. Direct PUT
+/// uploads accept the algorithm in the claim.
+fn claimed_content_ref(
     content_id: ContentId,
     claim: &UploadContentClaim,
-    checksum_algorithm: ChecksumAlgorithm,
+    required_algorithm: Option<ChecksumAlgorithm>,
 ) -> Result<ContentRef> {
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
         content_id,
         size_bytes: claim.size_bytes,
-        checksum: validate_upload_checksum(&claim.checksum, checksum_algorithm)?.clone(),
+        checksum: match required_algorithm {
+            Some(algorithm) => validate_upload_checksum(&claim.checksum, algorithm)?.clone(),
+            None => claim.checksum.clone(),
+        },
     };
     content_ref
         .validate()
@@ -387,23 +390,6 @@ fn multipart_parts(
             })
         })
         .collect()
-}
-
-/// Builds the content reference for a direct PUT claim.
-///
-/// The provider enforces the supplied checksum, and completion verifies the
-/// stored object against it.
-fn direct_put_content_ref(content_id: ContentId, claim: &UploadContentClaim) -> Result<ContentRef> {
-    let content_ref = ContentRef {
-        kind: ContentRefKind::BlobV1,
-        content_id,
-        size_bytes: claim.size_bytes,
-        checksum: claim.checksum.clone(),
-    };
-    content_ref
-        .validate()
-        .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
-    Ok(content_ref)
 }
 
 /// What a session is opened with: everything decided before any byte moves.
@@ -1463,10 +1449,10 @@ fn completion_plan<'a>(
             },
             ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
         ) => Ok(CompletionPlan::DirectMultipart {
-            requested: direct_multipart_content_ref(
+            requested: claimed_content_ref(
                 session.content_id.clone(),
                 content,
-                *checksum_algorithm,
+                Some(*checksum_algorithm),
             )?,
             provider_upload_id,
             checksum_algorithm: *checksum_algorithm,
@@ -1688,9 +1674,12 @@ mod tests {
             size_bytes: 7,
             checksum: Checksum::crc32c(b"payload"),
         };
-        let content_ref =
-            direct_multipart_content_ref(session.content_id.clone(), &content, required_algorithm)
-                .expect("the stored algorithm accepts the content claim");
+        let content_ref = claimed_content_ref(
+            session.content_id.clone(),
+            &content,
+            Some(required_algorithm),
+        )
+        .expect("the stored algorithm accepts the content claim");
         assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Crc32c);
 
         let part = CompletedUploadPart {
@@ -1723,12 +1712,10 @@ mod tests {
             size_bytes: 7,
             checksum: Checksum::sha256(b"payload"),
         };
-        assert!(direct_multipart_content_ref(
-            session.content_id,
-            &wrong_content,
-            required_algorithm
-        )
-        .is_err());
+        assert!(
+            claimed_content_ref(session.content_id, &wrong_content, Some(required_algorithm))
+                .is_err()
+        );
     }
 
     /// An aborted session is logically absent: it will never select content,

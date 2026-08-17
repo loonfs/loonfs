@@ -2,7 +2,7 @@
 
 use super::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, PresignedGetRequest,
-    PresignedPartRequest, PresignedPutRequest, PresignedUrl,
+    PresignedPartRequest, PresignedPutRequest, PresignedUrl, MAX_PRESIGN_EXPIRY,
 };
 use crate::crypto::hmac_sha256;
 use crate::keyspace::{normalize_key_prefix, parse_endpoint_url, scope_object_key};
@@ -34,8 +34,6 @@ const S3_FULL_OBJECT_CHECKSUM_TYPE: &str = "FULL_OBJECT";
 const S3_CRC64NVME_ALGORITHM: &str = "CRC64NVME";
 /// Asks S3-family `HeadObject` to report the object's stored checksum.
 pub(crate) const S3_CHECKSUM_MODE_HEADER: &str = "x-amz-checksum-mode";
-const MAX_PRESIGN_EXPIRY: u64 = 7 * 24 * 60 * 60;
-
 /// AWS S3's documented maximum for a single `PutObject`: 5 GiB. A larger
 /// object has to be uploaded in parts.
 ///

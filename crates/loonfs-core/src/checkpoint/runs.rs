@@ -7,14 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-pub(super) const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
-/// With block-granular reads the segment is no longer the read unit, so
-/// base segments are sized large to amortize their index and filter
-/// sections across many lookups (design doc, "Sizing").
-pub(super) const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 65_536;
-pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_RUNS: usize = 8;
-pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_ROWS: usize = 131_072;
-pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_BYTES: usize = 64 * 1024 * 1024;
+pub(super) use loonfs_api::wire::sst_blocks::{
+    DEFAULT_MAX_L0_RUNS as DEFAULT_MAX_CHECKPOINT_L0_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
+    DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_REORGANIZATION_INPUT_RUNS,
+    DEFAULT_MAX_ROWS_PER_SEGMENT as DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT,
+};
 
 pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 pub(super) const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;

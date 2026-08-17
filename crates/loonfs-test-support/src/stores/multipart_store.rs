@@ -98,23 +98,6 @@ impl<S> MultipartStore<S> {
         format!("\"{}\"", Checksum::crc64nvme(bytes).value)
     }
 
-    /// The part list a well-behaved client would carry to completion.
-    pub fn completed_parts(&self, provider_upload_id: &str) -> Vec<MultipartPart> {
-        let open = self.lock();
-        let upload = open
-            .get(provider_upload_id)
-            .expect("parts listed for an open multipart upload");
-        upload
-            .parts
-            .iter()
-            .map(|(part_number, bytes)| MultipartPart {
-                part_number: *part_number,
-                etag: format!("\"{}\"", Checksum::crc64nvme(bytes).value),
-                checksum: Checksum::crc64nvme(bytes),
-            })
-            .collect()
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, OpenUpload>> {
         self.open.lock().unwrap_or_else(|err| err.into_inner())
     }

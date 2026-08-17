@@ -4,7 +4,7 @@
 //! publication itself.
 
 use futures::future::BoxFuture;
-use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     BeginUploadRequest, CommitId, CommitResponse, CreateNamespaceOptions, DestinationBehavior,
     FsWriter, NamespaceId, PutFileOptions, SharedObjectStore,
@@ -116,7 +116,10 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         );
         Box::pin(async move {
             registry
-                .submit_commit_with_prepared_content(namespace_id, request, vec![prepared])
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::prepared(request, vec![prepared]),
+                )
                 .await
         })
     };

@@ -5,7 +5,7 @@
 
 use crate::common::*;
 use bytes::Bytes;
-use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     BeginUploadRequest, ChangeSeq, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
     DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions, RuntimeCacheConfig,
@@ -574,10 +574,22 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         let publisher = fs.writer.publisher();
 
         let puts = tokio::join!(
-            publisher.submit_commit_with_prepared_content(namespace_id.clone(), put_a.0, put_a.1,),
-            publisher.submit_commit_with_prepared_content(namespace_id.clone(), put_b.0, put_b.1,),
-            publisher.submit_commit_with_prepared_content(namespace_id.clone(), put_c.0, put_c.1,),
-            publisher.submit_commit_with_prepared_content(namespace_id.clone(), put_d.0, put_d.1,),
+            publisher.submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::prepared(put_a.0, put_a.1),
+            ),
+            publisher.submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::prepared(put_b.0, put_b.1),
+            ),
+            publisher.submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::prepared(put_c.0, put_c.1),
+            ),
+            publisher.submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::prepared(put_d.0, put_d.1),
+            ),
         );
         puts.0.expect("put a");
         puts.1.expect("put b");

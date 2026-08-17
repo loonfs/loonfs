@@ -40,15 +40,11 @@ impl FsReader {
     ) -> Result<AuthoritativePathEntry> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let entry = engine
             .resolve_path(absolute_path, options, &read_context)
             .await?;
         tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_TABLES);
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(entry)
     }
 
@@ -73,13 +69,9 @@ impl FsReader {
     ) -> Result<AuthoritativePathEntry> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let entry = engine.stat_inode(inode_id, options, &read_context).await?;
         tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_TABLES);
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(entry)
     }
 
@@ -156,15 +148,11 @@ impl FsReader {
     ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
         let page = engine
             .list_path_page(listed_path.as_str(), request, options, &read_context)
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         let head_seq = page
             .items
             .first()
@@ -188,7 +176,7 @@ impl FsReader {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let read = engine
             .read_file(
                 absolute_path,
@@ -196,10 +184,6 @@ impl FsReader {
                 self.core.inner.config.max_read_content_bytes,
             )
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(read)
     }
 
@@ -229,7 +213,7 @@ impl FsReader {
         absolute_path: &str,
         options: ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let stream = engine
             .read_file_stream(
                 absolute_path,
@@ -238,10 +222,6 @@ impl FsReader {
                 options.start_offset,
             )
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(stream)
     }
 
@@ -260,14 +240,10 @@ impl FsReader {
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadTarget> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let target = engine
             .direct_download_target(absolute_path, revision_no, &read_context)
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(target)
     }
 
@@ -279,14 +255,10 @@ impl FsReader {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<DirectDownloadByInodeTarget> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let target = engine
             .direct_download_target_by_inode(inode_id, revision_no, &read_context)
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(target)
     }
 
@@ -299,10 +271,12 @@ impl FsReader {
     /// [`CheckpointFilesPage::checkpoint_seq`] is what
     /// [`Self::list_changes`] reports. Directories are not returned.
     ///
-    /// A checkpoint that was released, expired, or reaped answers
-    /// `checkpoint_unavailable`; the enumeration never silently falls back
-    /// to current state. A consumer that loses its checkpoint takes a new
-    /// one and starts over.
+    /// A released, expired, or reaped checkpoint returns
+    /// `checkpoint_unavailable`. The caller must create a new checkpoint and
+    /// restart instead of silently reading current state.
+    ///
+    /// This does not increment the latest-metadata-view metric because it
+    /// reads a checkpoint snapshot.
     pub async fn list_checkpoint_files_page(
         &self,
         namespace_id: &NamespaceId,
@@ -332,25 +306,22 @@ impl FsReader {
         namespace_id: &NamespaceId,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let states = engine
             .resolve_current_files(inode_ids, &read_context)
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(states)
     }
 
     /// Reads one immutable content object by reference.
     ///
-    /// `max_bytes` is this caller's own budget, checked against the
-    /// reference's declared size before any fetch, and deliberately
-    /// independent of the deployment's configured download limit — a
-    /// consumer that streams work through a fixed buffer says so here. The
-    /// fetched bytes are verified against the reference's size and digest,
-    /// and a mismatch fails the read.
+    /// `max_bytes` is checked against the declared size before fetching. It is
+    /// independent of the deployment's download limit so callers can apply a
+    /// smaller memory budget. The read fails if the returned size or digest
+    /// does not match the reference.
+    ///
+    /// This does not increment the latest-metadata-view metric because it
+    /// reads immutable content directly.
     pub async fn read_content_ref(
         &self,
         namespace_id: &NamespaceId,
@@ -372,12 +343,8 @@ impl FsReader {
         namespace_id: &NamespaceId,
         request: PageRequest<loonfs_api::TrashPageCursor>,
     ) -> Result<loonfs_api::ListTrashResponse> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let page = engine.list_trash_page(request, &read_context).await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
         Ok(loonfs_api::ListTrashResponse {
             namespace_id: namespace_id.clone(),
@@ -396,15 +363,11 @@ impl FsReader {
     ) -> Result<ListFileRevisionsResponse> {
         let absolute_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
         let page = engine
             .list_file_revisions_page(absolute_path.as_str(), request, &read_context)
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
             read_context.head.seq,
@@ -420,14 +383,10 @@ impl FsReader {
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let page = engine
             .list_file_revisions_for_inode_page(inode_id, request, &read_context)
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
             read_context.head.seq,
@@ -443,7 +402,7 @@ impl FsReader {
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let read = engine
             .read_file_revision(
                 absolute_path,
@@ -452,10 +411,6 @@ impl FsReader {
                 self.core.inner.config.max_read_content_bytes,
             )
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(read)
     }
 
@@ -467,7 +422,7 @@ impl FsReader {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let bytes = engine
             .read_file_revision_for_inode(
                 inode_id,
@@ -476,10 +431,6 @@ impl FsReader {
                 self.core.inner.config.max_read_content_bytes,
             )
             .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
         Ok(bytes)
     }
 

@@ -19,8 +19,8 @@ use loonfs_api::wire::control::{HeadState, WriterBlock};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
     next_public_ordinal, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
-    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
-    RevisionNo, WriterEpoch, MAX_PUBLIC_INTEGER,
+    CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
+    WriterEpoch, MAX_PUBLIC_INTEGER,
 };
 
 fn test_display_name(value: impl AsRef<str>) -> DisplayName {
@@ -28,7 +28,7 @@ fn test_display_name(value: impl AsRef<str>) -> DisplayName {
 }
 
 fn content_ref(seed: &str) -> ContentRef {
-    ContentRef::blob_v1(ContentId::generate(), seed.as_bytes())
+    loonfs_test_support::ids::content_ref(seed.as_bytes())
 }
 
 fn test_attributes(entries: &[(&str, &str)]) -> Attributes {

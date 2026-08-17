@@ -357,6 +357,19 @@ impl ReadCore {
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
+    /// Pins the latest metadata view and records the read in cache metrics.
+    pub(crate) async fn pinned_metadata_read(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<(
+        loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
+        RuntimeReadContext,
+    )> {
+        let pinned = self.pinned_read(namespace_id).await?;
+        self.inner.cache_stats.record_latest_metadata_view_read();
+        Ok(pinned)
+    }
+
     /// Returns the namespace's immutable identity, read off the cached head
     /// anchor.
     pub(crate) async fn load_namespace_catalog_cached(

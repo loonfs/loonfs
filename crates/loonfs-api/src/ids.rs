@@ -643,6 +643,12 @@ string_id! {
 }
 
 string_id! {
+    /// Identifies one stored grep manifest.
+    GrepManifestId,
+    prefix = "gmf"
+}
+
+string_id! {
     /// Durable object id for one namespace manifest candidate.
     ManifestObjectId,
     error = GeneratedIdValidationError,

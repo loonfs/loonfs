@@ -17,6 +17,7 @@ use loonfs_api::{
     direct_put_checksum_feature, CapabilityDocument, ContentId, ContentRef, ContentRefKind,
     FEATURE_UPLOADS_DIRECT_PUT, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
+use loonfs_test_support::ids::content_ref;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -261,10 +262,6 @@ fn signed_parts(first: u32, count: u32) -> Outcome {
             })
             .collect(),
     })
-}
-
-fn content_ref(bytes: &[u8]) -> ContentRef {
-    ContentRef::blob_v1(ContentId::generate(), bytes)
 }
 
 fn completed(content_ref: ContentRef) -> Outcome {

@@ -49,6 +49,18 @@ use xxhash_rust::xxh64::xxh64;
 /// still moves trivial bytes. Benchmarked over 8 KiB, which priced a full
 /// listing at one GET per tiny block.
 pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
+/// Number of level-zero runs that triggers reorganization.
+pub const DEFAULT_MAX_L0_RUNS: usize = 8;
+/// Target number of rows in one immutable segment.
+pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
+/// Maximum number of runs read by one reorganization step.
+pub const DEFAULT_MAX_REORGANIZATION_INPUT_RUNS: usize = 8;
+/// Maximum number of decoded rows read by one reorganization step.
+pub const DEFAULT_MAX_REORGANIZATION_INPUT_ROWS: usize = 131_072;
+/// Maximum decoded input size for one build or reorganization step.
+pub const DEFAULT_MAX_REORGANIZATION_INPUT_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum stored filter size embedded in a segment descriptor.
+pub const DEFAULT_INLINE_FILTER_MAX_BYTES: u32 = 1024;
 /// Entries between restart points inside a data block.
 pub const RESTART_INTERVAL: usize = 16;
 /// Bloom filter sizing: bits reserved per inserted filter key.

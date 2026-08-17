@@ -96,11 +96,6 @@ impl<S> CountingStore<S> {
         }
     }
 
-    /// Counts operations on content blobs.
-    pub fn content_blobs(inner: S) -> Self {
-        Self::new(inner, KeyPredicate::content_blob())
-    }
-
     /// Counts operations on metadata tables.
     pub fn metadata_tables(inner: S) -> Self {
         Self::new(inner, KeyPredicate::metadata_table())

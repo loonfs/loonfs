@@ -4,7 +4,7 @@
 #![allow(clippy::panic)]
 // Fixture assertions panic for precise diagnostics, as the test modules do.
 
-use loonfs::publish::CommitRequest;
+use loonfs::publish::{CommitCandidate, CommitRequest};
 use loonfs::UploadContentClaim;
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
@@ -511,9 +511,9 @@ impl RuntimeTestExt for TestRuntime {
         block_on(async move {
             // Admitted in one pass, before the publisher's worker can take
             // any of them, so the requests coalesce into one publication.
-            let submissions = requests
-                .into_iter()
-                .map(|request| publisher.submit_commit(namespace_id.clone(), request));
+            let submissions = requests.into_iter().map(|request| {
+                publisher.submit_candidate(namespace_id.clone(), CommitCandidate::new(request))
+            });
             futures::future::join_all(submissions).await
         })
     }

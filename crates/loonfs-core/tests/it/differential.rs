@@ -75,7 +75,7 @@ struct NormalizedBinding {
 }
 
 fn content_ref(seed: &str) -> ContentRef {
-    ContentRef::blob_v1(ContentId::generate(), seed.as_bytes())
+    loonfs_test_support::ids::content_ref(seed.as_bytes())
 }
 
 fn create_directory(

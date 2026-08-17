@@ -31,6 +31,8 @@ use loonfs_api::v0::{GrepIndexLifecycle, GrepIndexStatusResponse};
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
+    DEFAULT_INLINE_FILTER_MAX_BYTES, DEFAULT_MAX_L0_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_ROWS,
+    DEFAULT_MAX_REORGANIZATION_INPUT_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
     decode_namespace_cursor, encode_cursor, next_public_ordinal, sha256_digest, ChangeSeq,
@@ -69,8 +71,12 @@ const _: () = assert!(
 );
 
 const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
+/// Content bytes one backfill step ingests before it checkpoints its cursor.
+/// This budgets ingestion, not LSM merging — it happens to share a value
+/// with the metadata reorganization input limit, and must stay independent
+/// so a compaction policy change cannot silently change backfill behavior.
+const GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP: u64 = 64 * 1024 * 1024;
 const GRAM_POSTING_BATCH_TARGET: usize = 256;
-const INLINE_INDEX_FILTER_MAX_BYTES: u32 = 1024;
 const MAX_GREP_WORKER_IO: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
@@ -97,11 +103,15 @@ impl Default for GramIndexBuildPolicy {
     fn default() -> Self {
         Self {
             max_files_per_step: const { NonZeroUsize::new(256).unwrap() },
-            max_content_bytes_per_step: const { NonZeroU64::new(64 * 1024 * 1024).unwrap() },
-            max_rows_per_segment: const { NonZeroUsize::new(65_536).unwrap() },
-            max_l0_runs: const { NonZeroUsize::new(8).unwrap() },
-            max_mid_runs: const { NonZeroUsize::new(8).unwrap() },
-            max_decoded_input_rows_per_step: const { NonZeroUsize::new(131_072).unwrap() },
+            max_content_bytes_per_step: const {
+                NonZeroU64::new(GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP).unwrap()
+            },
+            max_rows_per_segment: const { NonZeroUsize::new(DEFAULT_MAX_ROWS_PER_SEGMENT).unwrap() },
+            max_l0_runs: const { NonZeroUsize::new(DEFAULT_MAX_L0_RUNS).unwrap() },
+            max_mid_runs: const { NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_RUNS).unwrap() },
+            max_decoded_input_rows_per_step: const {
+                NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_ROWS).unwrap()
+            },
         }
     }
 }
@@ -1077,7 +1087,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
         .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes.clone()))
         .await
         .map_err(grep_immutable_write_error)?;
-    let filter_inline = (built.filter.stored_len <= INLINE_INDEX_FILTER_MAX_BYTES).then(|| {
+    let filter_inline = (built.filter.stored_len <= DEFAULT_INLINE_FILTER_MAX_BYTES).then(|| {
         let start = built.filter.offset as usize;
         hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])
     });
