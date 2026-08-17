@@ -1,6 +1,4 @@
-//! Read-only namespace status: summarizes the live head, its materialized
-//! basis, WAL tail, and retention floor; exposes the smaller flush basis; and
-//! summarizes the deleted head after its materialized state is gone.
+//! Read-only status for live and deleted namespaces.
 
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
@@ -116,13 +114,10 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Answers the one question a WAL flush decides on — is there anything to
-/// flush — without sizing the tail.
+/// Returns the head sequence and whether the namespace has WAL data to flush.
 ///
-/// [`load_namespace_head_summary`] answers it too, but only alongside a
-/// segment count the head must be able to describe. A head that
-/// under-describes its own tail is exactly the state an explicit flush
-/// repairs, so the flush must not be gated on the count it cannot produce.
+/// Unlike [`load_namespace_head_summary`], this does not count WAL segments.
+/// It can therefore be used to repair a head whose segment hints are incomplete.
 pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,

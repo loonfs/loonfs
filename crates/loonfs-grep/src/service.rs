@@ -43,12 +43,9 @@ pub(crate) const GREP_LINE_CAP_BYTES: usize = 512;
 /// resume cursor, so a page's cost is bounded by its own budget rather
 /// than by how many false-positive candidates the plan admits.
 pub(crate) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
-/// Candidates one page will examine — visibility, latest revision, path
-/// derivation, scope — before returning with a resume cursor: the metadata
-/// twin of [`MAX_GREP_VERIFIED_FILES_PER_PAGE`], for pages where a scope
-/// filter rejects nearly every candidate. Rejected candidates move the
-/// cursor with them (see `fold_rejected_frontier`), so the next page
-/// continues past them instead of re-examining the same run.
+/// Maximum candidates examined while building one page. This bounds work
+/// when scope filters reject most candidates. The cursor advances past
+/// rejected candidates so the next page does not examine them again.
 pub(crate) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
 /// Maximum concurrent `(gram, segment)` posting probes.
 ///

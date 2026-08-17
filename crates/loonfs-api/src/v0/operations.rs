@@ -902,9 +902,8 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceStepRequest {
-    /// Flush the visible WAL tail into metadata tables and merge one bounded
-    /// reorganization unit. The two travel together: flushing a tail is what
-    /// creates the delta runs a reorganization merges.
+    /// Flush the visible WAL tail into metadata tables, then run one bounded
+    /// reorganization step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<MetadataMaintenanceRequest>,
     /// Advance the retention floor to the flushed manifest head. Nothing

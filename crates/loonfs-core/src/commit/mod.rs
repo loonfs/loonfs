@@ -1,11 +1,10 @@
-//! Planned commits, from planner output to durable WAL payload.
+//! Converts planned commits into durable WAL payloads.
 //!
 //! Planning validates each compiled operation as it goes, producing a
 //! validated commit plan; the plan is materialized into WAL deltas, and the
-//! result is framed for publication. Submodules follow that pipeline;
-//! `identity` names the fingerprint that makes reused commit ids safe to
-//! compare, and `ops` holds the inode-level vocabulary path operations
-//! compile into.
+//! result is framed for publication. `identity` defines the fingerprint used
+//! to compare reused commit IDs, and `ops` defines the inode-level operations
+//! produced by path planning.
 
 mod identity;
 mod inode_allocator;

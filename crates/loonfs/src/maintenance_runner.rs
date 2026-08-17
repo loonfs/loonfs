@@ -1,8 +1,8 @@
 //! Scheduler for bounded background maintenance.
 //!
 //! A [`MaintenanceJob`] performs one bounded unit of work for one namespace.
-//! Each step reloads durable state, performs at most one update, and reports a
-//! [`MaintenanceStepReport`]. Jobs do not decide when they run.
+//! Each step reloads durable state, performs at most one update, and returns a
+//! [`MaintenanceStepReport`]. The runner decides when jobs run.
 //!
 //! [`MaintenanceRunner`] owns scheduling. It tracks pending `(job, namespace)`
 //! keys, concurrency permits, retry backoff, earliest run times, per-job
@@ -83,9 +83,8 @@ pub enum FsBackgroundWork {
 pub struct MaintenanceJobId(&'static str);
 
 impl MaintenanceJobId {
-    /// Metadata upkeep: flush the WAL tail past its threshold, then merge one
-    /// bounded reorganization unit. Registered by the runtime on every
-    /// write-capable handle.
+    /// Flushes the WAL tail after it reaches its threshold, then runs one
+    /// bounded reorganization step. Registered for every writer.
     pub const METADATA: Self = Self("metadata");
     /// Garbage collection: one bounded mark-and-sweep pass. Registered by
     /// the runtime on every write-capable handle.

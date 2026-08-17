@@ -1,8 +1,7 @@
 #![allow(clippy::panic)]
 // Lifecycle assertions use panic for precise failure diagnostics.
 
-//! Host-composed grep over the runtime handles, plus direct `GrepWorker`
-//! building and reorganizing.
+//! Tests grep through runtime handles and direct `GrepWorker` operations.
 
 use crate::common::{is_content_object, GrepHost};
 use loonfs::publish::{CommitRequest, FilesystemOperation};
@@ -592,11 +591,8 @@ async fn collect_grep_paths(
     }
 }
 
-/// Ten one-file rounds cross the default delta-reorganization threshold, so the
-/// worker steps tier the index (delta segments reorganize into a mid run)
-/// while the rounds run. Grep must answer identically before, across, and
-/// after the transition — levels are reorganization bookkeeping the read path never
-/// sees.
+/// Verifies that reorganizing delta segments into a mid-level run does not
+/// change grep results.
 #[tokio::test]
 async fn grep_answers_identically_across_tiered_reorganizations() {
     let temp_dir = tempdir().expect("tempdir");
@@ -989,9 +985,8 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// A worker's partial reorganization leaves its input segments query-visible. The
-/// service composed over the same cache must hit those worker-loaded blocks
-/// instead of retaining and reading a second decoded copy.
+/// Verifies that the service reuses blocks loaded by a partial worker
+/// reorganization instead of decoding a second copy.
 #[tokio::test]
 async fn worker_and_service_share_decoded_index_blocks() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1033,8 +1028,8 @@ async fn worker_and_service_share_decoded_index_blocks() {
             .expect("build delta segment");
     }
 
-    // One decoded row cannot exhaust the reorganization, so its loaded snapshot
-    // segments remain visible to the following service read.
+    // A one-row budget leaves the reorganization incomplete, so the next
+    // service read still uses its input segments.
     let reorganize_policy = GramIndexBuildPolicy {
         max_decoded_input_rows_per_step: nonzero_usize(1),
         ..GramIndexBuildPolicy::default()
@@ -1082,16 +1077,11 @@ async fn worker_and_service_share_decoded_index_blocks() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// A cold reorganization — nothing decoded its snapshot before — must fan out its
-/// per-segment cursor opens instead of paying one round trip per
-/// segment, and the fan-out must stay within the maintenance IO cap.
+/// Verifies that a cold reorganization opens segment cursors concurrently
+/// without exceeding the maintenance I/O limit.
 ///
-/// Put-and-step rounds accumulate delta runs until the threshold reorganizes
-/// them; individual steps lag the puts and may batch two puts into one
-/// run, so the rounds run until the reorganization's reads appear rather than to a
-/// fixed count. No query ever touches the namespace and build steps only
-/// write gram segments, so the reorganization's reads are the only gram-segment
-/// GETs the probe can see: the peak measures exactly the reorganization's opens.
+/// The test adds delta runs until reorganization begins. Because it performs
+/// no queries, every observed segment read belongs to that reorganization.
 #[tokio::test]
 async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1116,10 +1106,8 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
         .expect("create namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
-    // Each round writes one file and runs one bounded build step plus
-    // one bounded reorganization step; the first gram-segment GET is, by
-    // construction, the triggered reorganization reading its snapshot of every
-    // accumulated delta run.
+    // Each round writes one file and runs one build and reorganization step.
+    // The first segment read marks the start of reorganization.
     let mut rounds = 0u32;
     while raw_store.reads().peak_in_flight == 0 {
         rounds += 1;
@@ -1149,8 +1137,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
         "the reorganization's fan-out must respect the maintenance IO cap, got {peak}"
     );
 
-    // The premise of the probe: the reads the peak observed were a real
-    // delta reorganization, which leaves a mid run behind.
+    // Confirm that the observed reads produced a mid-level run.
     let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
         .await
         .expect("load grep root")

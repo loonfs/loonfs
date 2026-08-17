@@ -192,10 +192,8 @@ impl FsAdmin {
         })
     }
 
-    /// The one metadata-upkeep implementation: flush the visible WAL tail
-    /// once it has reached the threshold, then merge one reorganization
-    /// unit. The two travel together because the flush is what creates the
-    /// delta runs the merge consumes.
+    /// Flushes the visible WAL tail after it reaches the threshold, then runs
+    /// one bounded reorganization step.
     async fn run_metadata(
         &self,
         namespace_id: &NamespaceId,
@@ -207,9 +205,9 @@ impl FsAdmin {
             .await
     }
 
-    /// Flushes the tail when asked, then merges one reorganization unit,
-    /// reporting both. `observed_head_seq` is what the caller saw before the
-    /// flush, and is only reported when another publisher wins the head race.
+    /// Optionally flushes the WAL tail, then runs one reorganization step.
+    /// `observed_head_seq` is reported only if another publisher wins the
+    /// head race.
     async fn flush_then_reorganize(
         &self,
         namespace_id: &NamespaceId,
@@ -244,11 +242,8 @@ impl FsAdmin {
         })
     }
 
-    /// One bounded reorganization unit per step: merges one family group of
-    /// L0 delta rows into the base when enough L0 runs have piled up (see
-    /// `loonfs-core`'s `reorganize_metadata`). Explicit steps stay bounded at
-    /// one unit per call; the returned outcome lets writer-scheduled
-    /// background work keep reorganizing until nothing is left.
+    /// Runs one bounded reorganization step for one metadata family.
+    /// Writer-scheduled maintenance can call this again while work remains.
     ///
     /// A family group whose oldest run no longer fits one unit is rebuilt by
     /// a streaming compaction instead, which this step starts as background
@@ -259,13 +254,9 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<ReorganizeStepOutcome> {
-        // A writer's own upkeep amortizes the rebuild across delta merges,
-        // because it is the thing that will eventually run the job and
-        // rebuilding a whole group for every eight delta runs would reread
-        // megabytes to merge in a sliver. A handle with no background work
-        // behind it has nowhere to run a job at all, so it says the namespace
-        // needs one as soon as the group's base freezes rather than
-        // publishing delta merges that never reach the rebuild.
+        // Writers with background maintenance spread a rebuild across delta
+        // merges. Manual-only handles report that compaction is required
+        // instead of starting work they cannot finish in the background.
         let frozen_base = match &self.compactions {
             Some(compactions) => compactions.amortization(namespace_id),
             None => loonfs_core::FrozenBasePolicy::CompactImmediately,
@@ -691,21 +682,14 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Flushes any visible WAL tail, then merges one reorganization unit.
+    /// Flushes any visible WAL tail, then runs one reorganization step.
     ///
-    /// The same upkeep [`Self::maintenance_step_namespace`] runs for a
-    /// metadata plan, at a threshold of one segment. The reorganization unit
-    /// rides along and is reported beside the flush — upkeep is one action,
-    /// and flushing a tail is what creates the delta runs a merge consumes. A
-    /// namespace with an empty tail has nothing to flush and reports
-    /// [`WalFlushStepOutcome::NotNeeded`]: this is the flush an operator
-    /// asks for, not a way to publish a manifest for a namespace that has
-    /// never been written to.
+    /// This is equivalent to a metadata maintenance step with a one-segment
+    /// flush threshold. It reports both the flush and reorganization outcomes.
+    /// An empty WAL tail reports [`WalFlushStepOutcome::NotNeeded`].
     ///
-    /// It asks whether there is a tail rather than how long one is, so it
-    /// does not read the namespace status. That matters for the one
-    /// namespace shape status refuses to answer for — a head that does not
-    /// describe its own WAL tail — because flushing the tail is the repair.
+    /// This checks only whether a WAL tail exists. It does not require the
+    /// head to contain enough hints to count every segment.
     pub async fn flush_wal(
         &self,
         namespace_id: &NamespaceId,
@@ -743,9 +727,7 @@ impl FsAdmin {
             .expect("a plan selecting a retention advance reports it"))
     }
 
-    /// The one implementation both the step and [`Self::flush_wal`] reach:
-    /// flush the tail, advance the root, invalidate what the flush
-    /// invalidated.
+    /// Shared implementation for metadata maintenance and [`Self::flush_wal`].
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.wal_flush",

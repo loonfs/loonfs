@@ -1,6 +1,6 @@
-//! The WAL flush: merge the visible WAL tail into metadata tables under a
-//! manifest covering the current head and advance `metadata/root.json` by
-//! compare-and-swap, creating no durable checkpoint record.
+//! Flushes the visible WAL tail into metadata tables, publishes a manifest
+//! for the current head, and advances `metadata/root.json` by compare-and-swap.
+//! This does not create a checkpoint record.
 //!
 //! This is the latest-state maintenance path: superseded manifests become
 //! garbage-collection candidates once nothing pins them. Pinning a manifest
@@ -354,10 +354,8 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     let head_seq = projection.head.seq;
     let previous_manifest = projection.manifest_tables.manifest();
 
-    // A WAL flush is manifest-only: every prior run is referenced
-    // unchanged and the WAL delta lands as one new L0 run, so the cost
-    // follows the delta, never the namespace. Merging L0 runs back into the
-    // base is reorganization's job (`reorganize.rs`), off this path.
+    // A WAL flush keeps existing runs and writes the WAL delta as one new L0
+    // run. Reorganization merges L0 runs into the base separately.
     //
     // The genesis basis is the exception: it has no run to extend and its
     // one root-inode row sits at sequence zero, which no delta run above

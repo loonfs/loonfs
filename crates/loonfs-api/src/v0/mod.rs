@@ -1,9 +1,8 @@
 //! The v0 HTTP protocol shapes.
 //!
-//! Every request/response body served by the v0 HTTP API lives under this
-//! module and is re-exported flat. The crate-root curated list is canonical
-//! for every name it contains; use `loonfs_api::v0::X` for the rest. The
-//! submodules group the surface by plane:
+//! Every v0 request and response type is available from this module. Common
+//! types are also re-exported from the crate root. The submodules group types
+//! by API area:
 //!
 //! - `operations` — namespace lifecycle, path-oriented filesystem
 //!   operations, file revisions, maintenance, and the `ApiError` body.

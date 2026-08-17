@@ -1,9 +1,7 @@
 //! Commit validation tests driving the operation validator directly over an
 //! in-memory metadata view.
 //!
-//! These exercise the planning vocabulary directly, so they live in the crate
-//! rather than in an integration test: it is internal, and callers reach it only
-//! by planning a mutation request.
+//! These tests live in the crate because the operation types are internal.
 
 #![allow(clippy::panic)]
 

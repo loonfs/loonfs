@@ -265,11 +265,10 @@ fn build_conclusion(outcome: &GrepBuildOutcome) -> MaintenanceStepConclusion {
     }
 }
 
-/// What one bounded reorganize accomplished.
+/// Maps one bounded reorganization outcome to a scheduling result.
 ///
-/// Nothing here reports a budget it could not fit: a reorganization step
-/// merges what its policy allows and publishes that, so there is no
-/// zero-progress outcome for the runner to park as `Blocked`.
+/// Reorganization publishes whatever fits within its budget, so it has no
+/// zero-progress `Blocked` result.
 fn reorganize_conclusion(outcome: &GrepReorganizeOutcome) -> MaintenanceStepConclusion {
     match outcome {
         GrepReorganizeOutcome::NotEnabled => MaintenanceStepConclusion::NotEnabled,

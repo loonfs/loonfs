@@ -6001,7 +6001,7 @@
               },
               {
                 "$ref": "#/components/schemas/MetadataMaintenanceRequest",
-                "description": "Flush the visible WAL tail into metadata tables and merge one bounded\nreorganization unit. The two travel together: flushing a tail is what\ncreates the delta runs a reorganization merges."
+                "description": "Flush the visible WAL tail into metadata tables, then run one bounded\nreorganization step."
               }
             ]
           }

@@ -1,4 +1,4 @@
-//! Clock boundaries for durable timestamps and local publication budgets.
+//! Clocks used for durable timestamps and local publication time limits.
 
 use crate::error::{CoreError, Result};
 use std::time::{SystemTime, UNIX_EPOCH};

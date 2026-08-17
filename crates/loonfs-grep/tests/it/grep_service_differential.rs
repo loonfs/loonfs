@@ -408,8 +408,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         drive_worker_step(&worker, &namespace_id, policy).await;
     }
 
-    // The ten rounds above finish a base reorganization. Two more one-file rounds
-    // reorganize into a fresh mid run, then the large batch below remains delta.
+    // Add a new mid-level run, then leave the large batch below at the delta level.
     for round in 10..12u32 {
         writer
             .put_file_bytes(
