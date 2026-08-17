@@ -10,6 +10,6 @@ mod error;
 mod tests;
 mod view;
 
-pub(crate) use checks::validate_ops;
+pub(crate) use checks::{validate_ops, CommitNumbering};
 pub use error::CommitValidationError;
 pub(crate) use view::PublishValidationView;

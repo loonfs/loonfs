@@ -3,6 +3,9 @@
 //! The crate provides seeded randomness, a virtual clock, object-store fault
 //! injection, and trace/replay support for reproducing failed simulation
 //! seeds.
+//!
+//! External simulation drivers also use this public API, so some items have
+//! no callers in this repository.
 
 pub mod clock;
 pub mod failure;

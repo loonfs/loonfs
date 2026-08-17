@@ -385,6 +385,7 @@ impl ServerConfig {
         }
     }
 
+    /// Resolves runtime cache settings by applying server overrides to the defaults.
     pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
         let mut config = RuntimeCacheConfig::default();
         if let Some(value) = self.runtime_cache.max_cached_namespaces {
@@ -405,6 +406,7 @@ impl ServerConfig {
         config
     }
 
+    /// Builds the object store selected by this server configuration.
     pub fn object_store(&self) -> Result<ConfiguredObjectStore, ServerConfigError> {
         self.store
             .configured_object_store()
@@ -570,6 +572,7 @@ impl From<StoreConfigError> for ServerConfigError {
     }
 }
 
+/// Loads, environment-fills, and validates a server configuration from TOML.
 pub fn load_server_config(path: impl AsRef<Path>) -> Result<ServerConfig, ServerConfigError> {
     let bytes = fs::read(path.as_ref()).map_err(|err| ServerConfigError::Io(err.to_string()))?;
     let source =

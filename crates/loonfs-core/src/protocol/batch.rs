@@ -94,8 +94,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     let mut dedup = BatchDedup::default();
 
     let prepare_span = tracing::debug_span!(
-        "publisher.batch_prepare",
-        phase = "batch_prepare",
+        "loonfs.phase",
+        phase = "prepare_batch",
         batch_size,
         accepted_count = tracing::field::Empty
     );
@@ -147,7 +147,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
             let plan = {
                 let _span =
-                    tracing::debug_span!("loonfs.phase", phase = "CommitPlan::finish").entered();
+                    tracing::debug_span!("loonfs.phase", phase = "finish_commit_plan").entered();
                 validated.finish(resulting_next_inode_id)
             };
             let materialized = {
@@ -156,11 +156,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 materialize_commit(plan, context.now_ms)
             };
             let preview = {
-                let _span = tracing::debug_span!(
-                    "loonfs.phase",
-                    phase = "wal_payload_from_materialized_commit"
-                )
-                .entered();
+                let _span =
+                    tracing::debug_span!("loonfs.phase", phase = "build_wal_payload").entered();
                 wal_payload_from_materialized_commit(&materialized)
             };
             {
@@ -282,7 +279,7 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
     accepted_count: u64,
 ) -> Result<PreparedWalSegment> {
     let span = tracing::debug_span!(
-        "publisher.batch_write_wal",
+        "loonfs.phase",
         phase = "batch_write_wal",
         batch_size,
         accepted_count,
@@ -346,11 +343,11 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
     accepted_count: u64,
 ) -> Result<ObjectMetadata> {
     let span = tracing::debug_span!(
-        "publisher.batch_cas_head",
+        "loonfs.phase",
         phase = "batch_cas_head",
         batch_size,
         accepted_count,
-        key_class = "wal_head",
+        key_class = "namespace_head",
         result = tracing::field::Empty
     );
     let result = publish_commit_head(store, head_etag, head_publish)

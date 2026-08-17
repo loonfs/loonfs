@@ -15,19 +15,42 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 
-/// Validates `ops` in order against `metadata_state`, folding each accepted
-/// operation into it so the next one observes what the previous would
-/// persist.
+/// Assigns operation and delta indexes across a commit.
 ///
-/// `next_op_index` and `next_delta_index` are the commit's running numbering:
-/// the planner validates one semantic operation's compiled ops at a time and
-/// carries both counters across calls, so positions number exactly as one
-/// pass over the whole list would.
+/// The planner validates each filesystem operation separately. These
+/// counters preserve continuous indexes across those validation calls.
+#[derive(Debug, Default)]
+pub(crate) struct CommitNumbering {
+    next_op_index: u32,
+    next_delta_index: u32,
+}
+
+impl CommitNumbering {
+    fn reserve_op_index(&mut self) -> Result<u32, CommitValidationError> {
+        let op_index = self.next_op_index;
+        self.next_op_index = self
+            .next_op_index
+            .checked_add(1)
+            .ok_or(CommitValidationError::OpIndexOverflow)?;
+        Ok(op_index)
+    }
+
+    fn reserve_delta_index(&mut self) -> Result<u32, CommitValidationError> {
+        let delta_index = self.next_delta_index;
+        self.next_delta_index = self
+            .next_delta_index
+            .checked_add(1)
+            .ok_or(CommitValidationError::DeltaIndexOverflow)?;
+        Ok(delta_index)
+    }
+}
+
+/// Validates operations in order and applies each accepted operation to the
+/// view used by the next one.
 pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     ops: &[PlannedOp],
     metadata_state: &mut PublishValidationView<'_, S>,
-    next_op_index: &mut u32,
-    next_delta_index: &mut u32,
+    numbering: &mut CommitNumbering,
     committed_seq: ChangeSeq,
     actor: &ActorRef,
     committed_at_ms: u64,
@@ -35,10 +58,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     let mut validated_ops = Vec::with_capacity(ops.len());
 
     for planned in ops {
-        let op_index = *next_op_index;
-        *next_op_index = op_index
-            .checked_add(1)
-            .ok_or(CommitValidationError::OpIndexOverflow)?;
+        let op_index = numbering.reserve_op_index()?;
         // Race checks belong to the operation that carries them and are
         // evaluated where it runs: an operation's checks describe the state
         // its own planning observed, which includes everything the earlier
@@ -60,8 +80,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     display_name: display_name.clone(),
                     name_key,
                     child_inode_id: *child_inode_id,
-                    create_inode_delta_index: reserve_delta_index(next_delta_index)?,
-                    bind_delta_index: reserve_delta_index(next_delta_index)?,
+                    create_inode_delta_index: numbering.reserve_delta_index()?,
+                    bind_delta_index: numbering.reserve_delta_index()?,
                 }
             }
             CommitOp::CreateFile {
@@ -81,9 +101,9 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     name_key,
                     child_inode_id: *child_inode_id,
                     content_ref: content_ref.clone(),
-                    create_inode_delta_index: reserve_delta_index(next_delta_index)?,
-                    bind_delta_index: reserve_delta_index(next_delta_index)?,
-                    revision_delta_index: reserve_delta_index(next_delta_index)?,
+                    create_inode_delta_index: numbering.reserve_delta_index()?,
+                    bind_delta_index: numbering.reserve_delta_index()?,
+                    revision_delta_index: numbering.reserve_delta_index()?,
                 }
             }
             CommitOp::ReplaceFile {
@@ -108,7 +128,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     inode_id: *inode_id,
                     revision_no,
                     content_ref: content_ref.clone(),
-                    revision_delta_index: reserve_delta_index(next_delta_index)?,
+                    revision_delta_index: numbering.reserve_delta_index()?,
                 }
             }
             CommitOp::RestoreRevision {
@@ -145,7 +165,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     source_revision_no: *source_revision_no,
                     revision_no,
                     content_ref: source_revision.content_ref,
-                    revision_delta_index: reserve_delta_index(next_delta_index)?,
+                    revision_delta_index: numbering.reserve_delta_index()?,
                 }
             }
             CommitOp::DeleteFile { inode_id } => {
@@ -176,8 +196,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     op_index,
                     inode_id: *inode_id,
                     source_binding,
-                    unbind_delta_index: reserve_delta_index(next_delta_index)?,
-                    tombstone_delta_index: reserve_delta_index(next_delta_index)?,
+                    unbind_delta_index: numbering.reserve_delta_index()?,
+                    tombstone_delta_index: numbering.reserve_delta_index()?,
                 }
             }
             CommitOp::Rename {
@@ -226,8 +246,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     new_parent_inode_id: *new_parent_inode_id,
                     new_display_name: new_display_name.clone(),
                     new_name_key,
-                    unbind_delta_index: reserve_delta_index(next_delta_index)?,
-                    bind_delta_index: reserve_delta_index(next_delta_index)?,
+                    unbind_delta_index: numbering.reserve_delta_index()?,
+                    bind_delta_index: numbering.reserve_delta_index()?,
                 }
             }
             CommitOp::DeleteSubtree { root_inode_id } => {
@@ -258,8 +278,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     op_index,
                     root_inode_id: *root_inode_id,
                     source_binding,
-                    unbind_delta_index: reserve_delta_index(next_delta_index)?,
-                    tombstone_delta_index: reserve_delta_index(next_delta_index)?,
+                    unbind_delta_index: numbering.reserve_delta_index()?,
+                    tombstone_delta_index: numbering.reserve_delta_index()?,
                 }
             }
             CommitOp::Undelete {
@@ -290,8 +310,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     display_name: display_name.clone(),
                     name_key,
                     target: active.generation,
-                    revoke_tombstone_delta_index: reserve_delta_index(next_delta_index)?,
-                    bind_delta_index: reserve_delta_index(next_delta_index)?,
+                    revoke_tombstone_delta_index: numbering.reserve_delta_index()?,
+                    bind_delta_index: numbering.reserve_delta_index()?,
                 }
             }
             CommitOp::UpdateAttributes {
@@ -323,7 +343,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     inode_id: *inode_id,
                     attributes_revision_no,
                     attributes: attributes.clone(),
-                    attributes_delta_index: reserve_delta_index(next_delta_index)?,
+                    attributes_delta_index: numbering.reserve_delta_index()?,
                 }
             }
         };
@@ -380,14 +400,6 @@ async fn validate_explicit_preconditions<S: ObjectStore + ?Sized>(
     }
 
     Ok(())
-}
-
-fn reserve_delta_index(next_delta_index: &mut u32) -> Result<u32, CommitValidationError> {
-    let delta_index = *next_delta_index;
-    *next_delta_index = next_delta_index
-        .checked_add(1)
-        .ok_or(CommitValidationError::DeltaIndexOverflow)?;
-    Ok(delta_index)
 }
 
 fn next_revision_no(
@@ -577,7 +589,10 @@ async fn validate_replace_target_not_covered<S: ObjectStore + ?Sized>(
 /// Requires `display_name` to be valid and unbound under `parent_inode_id`,
 /// which must be an existing directory; returns the derived name key. The
 /// error vocabulary (create vs rename) is supplied by the call site.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "call-site error constructors keep the validation vocabulary precise"
+)]
 async fn validate_name_absent<S: ObjectStore + ?Sized>(
     metadata_state: &PublishValidationView<'_, S>,
     parent_inode_id: InodeId,

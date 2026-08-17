@@ -6,7 +6,7 @@
 #![allow(clippy::panic)]
 
 use super::super::{CommitOp, CommitPrecondition, PlannedOp, ValidatedCommitPlan};
-use super::checks::validate_ops;
+use super::checks::{validate_ops, CommitNumbering};
 use super::view::PublishValidationView;
 use crate::commit::{
     materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator,
@@ -231,13 +231,11 @@ async fn build_commit_plan(
         &accepted_rows,
         committed_seq,
     );
-    let mut next_op_index = 0_u32;
-    let mut next_delta_index = 0_u32;
+    let mut numbering = CommitNumbering::default();
     let result = validate_ops(
         ops,
         &mut metadata_state,
-        &mut next_op_index,
-        &mut next_delta_index,
+        &mut numbering,
         committed_seq,
         &loonfs_test_support::test_actor(),
         committed_at_ms,

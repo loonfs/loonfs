@@ -29,5 +29,5 @@ pub(crate) use self::publish::{
 };
 pub use self::publish_error::CommitHeadPublishError;
 pub use self::validate::CommitValidationError;
-pub(crate) use self::validate::{validate_ops, PublishValidationView};
+pub(crate) use self::validate::{validate_ops, CommitNumbering, PublishValidationView};
 pub(crate) use self::wal_payload::wal_payload_from_materialized_commit;

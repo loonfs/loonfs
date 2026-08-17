@@ -284,7 +284,10 @@ pub struct AttributesRevisionRecord {
 }
 
 impl MetadataState {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the constructor names every durable metadata row family explicitly"
+    )]
     pub(crate) fn from_rows(
         inodes: Vec<InodeRecord>,
         direntry_binds: Vec<DirentryBindRecord>,

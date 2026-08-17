@@ -27,7 +27,7 @@ pub(super) enum ManifestPublicationOutcome {
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "write_namespace_manifest", key_class = "manifest_table")
+    fields(phase = "write_namespace_manifest", key_class = "namespace_manifest")
 )]
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
@@ -96,7 +96,7 @@ pub(super) fn manifest_write_failure(error: MetadataProjectionLoadError) -> Core
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "publish_metadata_root", key_class = "metadata_root")
+    fields(phase = "publish_metadata_root", key_class = "namespace_manifest")
 )]
 pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     store: &S,

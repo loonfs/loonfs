@@ -204,7 +204,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
             .instrument(tracing::debug_span!(
                 "loonfs.phase",
                 phase = "load_namespace_manifest",
-                key_class = "manifest_table"
+                key_class = "namespace_manifest"
             ))
             .await
             .map_err(|err| ManifestLoadError::ReadManifest {
@@ -310,7 +310,7 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
         .instrument(tracing::debug_span!(
             "loonfs.phase",
             phase = "load_namespace_manifest",
-            key_class = "manifest_table"
+            key_class = "namespace_manifest"
         ))
         .await
         .map_err(|err| ManifestLoadError::ReadManifest {
