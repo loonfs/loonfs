@@ -1,5 +1,7 @@
 //! Basic end-to-end HTTP namespace and file flows.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::{
@@ -66,7 +68,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
             assert_eq!(details.expected_head_seq, Some(ChangeSeq(0)));
             assert_eq!(details.actual_head_seq, Some(ChangeSeq(1)));
         }
-        other => unreachable!("expected stale_head, got {other:?}"),
+        other => panic!("expected stale_head, got {other:?}"),
     }
     harness
         .client
@@ -94,7 +96,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
             assert_eq!(status, 410);
             assert_eq!(code, "namespace_deleted");
         }
-        other => unreachable!("expected namespace_deleted, got {other:?}"),
+        other => panic!("expected namespace_deleted, got {other:?}"),
     }
     let read = harness
         .client
@@ -103,7 +105,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         .expect_err("reads observe the deleted namespace");
     match read {
         ClientError::Api { code, .. } => assert_eq!(code, "namespace_deleted"),
-        other => unreachable!("expected namespace_deleted, got {other:?}"),
+        other => panic!("expected namespace_deleted, got {other:?}"),
     }
     let again = harness
         .client
@@ -115,7 +117,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
             assert_eq!(status, 410);
             assert_eq!(code, "namespace_deleted");
         }
-        other => unreachable!("expected namespace_deleted, got {other:?}"),
+        other => panic!("expected namespace_deleted, got {other:?}"),
     }
     let recreate = harness
         .client
@@ -127,7 +129,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
             assert_eq!(status, 410);
             assert_eq!(code, "namespace_deleted");
         }
-        other => unreachable!("expected namespace_deleted, got {other:?}"),
+        other => panic!("expected namespace_deleted, got {other:?}"),
     }
 }
 
@@ -307,7 +309,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
             assert_eq!(status, 404);
             assert_eq!(code, "namespace_not_found");
         }
-        other => unreachable!("expected API error for missing namespace, got {other:?}"),
+        other => panic!("expected API error for missing namespace, got {other:?}"),
     }
 
     harness.server.abort();
@@ -340,8 +342,8 @@ async fn http_namespace_listing_route_is_not_exposed() {
                 "GET /v0/namespaces should be missing or method-not-allowed, got {status}"
             );
         }
-        Ok(_) => unreachable!("GET /v0/namespaces must not return a namespace list"),
-        Err(error) => unreachable!("unexpected transport error: {error}"),
+        Ok(_) => panic!("GET /v0/namespaces must not return a namespace list"),
+        Err(error) => panic!("unexpected transport error: {error}"),
     }
 
     harness.server.abort();
@@ -448,7 +450,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
-        other => unreachable!("expected rebootstrap_required, got {other:?}"),
+        other => panic!("expected rebootstrap_required, got {other:?}"),
     }
     let clone_changes = harness
         .client

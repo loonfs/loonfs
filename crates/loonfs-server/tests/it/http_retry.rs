@@ -1,5 +1,7 @@
 //! HTTP idempotency, replay, and writer fencing behavior.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::v0::{CreateCheckpointRequest, MaintenanceStepRequest};
@@ -83,7 +85,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             let request_id = request_id.expect("request id");
             assert!(request_id.starts_with("req_"), "got `{request_id}`");
         }
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     harness.server.abort();
@@ -210,7 +212,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         Err(ClientError::Api { code, .. }) => {
             assert_eq!(code, "commit_id_reuse_conflict")
         }
-        other => unreachable!("expected attributed retry conflict, got {other:?}"),
+        other => panic!("expected attributed retry conflict, got {other:?}"),
     }
 
     // Different bytes under the same commit id is a different operation,
@@ -235,7 +237,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         Err(ClientError::Api { code, .. }) => {
             assert_eq!(code, "commit_id_reuse_conflict")
         }
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     harness.server.abort();
@@ -292,7 +294,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     // Absent and empty are different messages too: the fingerprint takes
@@ -308,7 +310,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     let changes = harness
@@ -394,7 +396,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
                 .expect("the receipt's semantic identity");
             assert!(fingerprint.starts_with("v1:sha256:"), "got `{fingerprint}`");
         }
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     match harness
@@ -403,7 +405,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
-        other => unreachable!("the refused rerun wrote nothing, got {other:?}"),
+        other => panic!("the refused rerun wrote nothing, got {other:?}"),
     }
     let entry = harness
         .client
@@ -468,7 +470,7 @@ async fn http_put_conflict_stands_when_only_a_guard_changed() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     match harness
@@ -484,7 +486,7 @@ async fn http_put_conflict_stands_when_only_a_guard_changed() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     let entry = harness
@@ -567,7 +569,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     let entry = harness
@@ -636,7 +638,7 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     // And the same through the convenience call.
@@ -666,7 +668,7 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     harness.server.abort();
@@ -755,7 +757,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
             let details = details.expect("structured details");
             assert_eq!(details.committed_seq, Some(first.committed_seq));
         }
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     let bytes = harness
@@ -876,7 +878,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
     assert_eq!(move_repeated, move_first);
     match harness.client.stat_path(&copied, &Default::default()).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
-        other => unreachable!("expected path_not_found for moved-from path, got {other:?}"),
+        other => panic!("expected path_not_found for moved-from path, got {other:?}"),
     }
     let moved_entry = harness
         .client
@@ -918,7 +920,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
     assert_eq!(delete_repeated, delete_first);
     match harness.client.stat_path(&moved, &Default::default()).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
-        other => unreachable!("expected path_not_found for deleted path, got {other:?}"),
+        other => panic!("expected path_not_found for deleted path, got {other:?}"),
     }
 
     harness.server.abort();
@@ -1012,7 +1014,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
                     "the structured stamp should be the one the message renders: {message}"
                 );
             }
-            other => unreachable!("expected writer_fenced on attempt {attempt}, got {other:?}"),
+            other => panic!("expected writer_fenced on attempt {attempt}, got {other:?}"),
         }
     }
 

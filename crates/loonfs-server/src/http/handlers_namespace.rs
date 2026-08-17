@@ -290,7 +290,7 @@ pub(super) async fn delete_namespace(
         .publisher()
         .submit_delete(namespace_id.clone(), options)
         .await
-        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 

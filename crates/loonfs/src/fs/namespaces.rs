@@ -68,7 +68,6 @@ impl FsWriter {
         self.publisher
             .submit_delete(namespace_id.clone(), options)
             .await
-            .map_err(RuntimeError::Core)
     }
 }
 

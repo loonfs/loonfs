@@ -16,7 +16,7 @@ use loonfs_api::{
     MAX_PUBLIC_INTEGER,
 };
 use loonfs_grep::keyspace::{
-    manifest_key, manifests_prefix, namespace_prefix, root_key, segment_key, segments_prefix,
+    grep_prefix, manifest_key, manifests_prefix, root_key, segment_key, segments_prefix,
 };
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_root, load_grep_root, GrepIndexState, GrepLifecycle,
@@ -1951,7 +1951,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .await
         .expect("write absent namespace grep state");
     let corrupt_keys = store
-        .list_prefix(&namespace_prefix(&corrupt_namespace))
+        .list_prefix(&grep_prefix(&corrupt_namespace))
         .await
         .expect("list corrupt namespace grep state");
     store
@@ -2026,12 +2026,12 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .expect("head orphan")
         .is_none());
     assert!(store
-        .list_prefix(&namespace_prefix(&deleted_namespace))
+        .list_prefix(&grep_prefix(&deleted_namespace))
         .await
         .expect("list deleted grep prefix")
         .is_empty());
     assert!(store
-        .list_prefix(&namespace_prefix(&absent_namespace))
+        .list_prefix(&grep_prefix(&absent_namespace))
         .await
         .expect("list absent grep prefix")
         .is_empty());
@@ -2176,11 +2176,11 @@ async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
     let now_ms = GREP_GC_GRACE_WINDOW_MS + 1;
     let orphans = orphan_keys(&namespace_id);
     let whole_before = whole_store
-        .list_prefix(&namespace_prefix(&namespace_id))
+        .list_prefix(&grep_prefix(&namespace_id))
         .await
         .expect("list whole-store keys");
     let paged_before = paged_store
-        .list_prefix(&namespace_prefix(&namespace_id))
+        .list_prefix(&grep_prefix(&namespace_id))
         .await
         .expect("list paged-store keys");
     // The live segment and manifest ids are minted and differ between the
@@ -2250,11 +2250,11 @@ async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
         "resuming under a budget must decide exactly what one pass decides"
     );
     let whole_after = whole_store
-        .list_prefix(&namespace_prefix(&namespace_id))
+        .list_prefix(&grep_prefix(&namespace_id))
         .await
         .expect("list surviving whole-store keys");
     let paged_after = paged_store
-        .list_prefix(&namespace_prefix(&namespace_id))
+        .list_prefix(&grep_prefix(&namespace_id))
         .await
         .expect("list surviving paged-store keys");
     assert_eq!(
@@ -2294,7 +2294,7 @@ async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
         .expect("delete namespace");
     writer.shutdown().await.expect("shutdown");
     let keys_before = store
-        .list_prefix(&namespace_prefix(&namespace_id))
+        .list_prefix(&grep_prefix(&namespace_id))
         .await
         .expect("list keys");
     assert!(keys_before.len() > 2, "{keys_before:?}");
@@ -2320,7 +2320,7 @@ async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
     assert!(pass.next_cursor.is_some(), "{pass:?}");
     assert_eq!(
         store
-            .list_prefix(&namespace_prefix(&namespace_id))
+            .list_prefix(&grep_prefix(&namespace_id))
             .await
             .expect("list keys after the bounded pass")
             .len(),

@@ -996,7 +996,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     assert_eq!(described_tail.len(), boundary);
     for pair in described_tail.windows(2) {
         let [newer, older] = pair else {
-            unreachable!("windows(2) yields pairs")
+            panic!("windows(2) yields pairs")
         };
         assert_eq!(
             older.end_seq.0 + 1,

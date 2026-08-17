@@ -1107,7 +1107,7 @@ impl ReleasePinAfterHeadStore {
                 }
                 ForkPinAfterHead::LeaseAtTheGuardMargin { now_ms } => {
                     let CheckpointOwner::Fork { expires_at_ms, .. } = &mut record.owner else {
-                        unreachable!("the record was checked as fork-owned")
+                        panic!("the record was checked as fork-owned")
                     };
                     *expires_at_ms = now_ms + loonfs_core::limits::FORK_GUARD_MARGIN_MS;
                 }

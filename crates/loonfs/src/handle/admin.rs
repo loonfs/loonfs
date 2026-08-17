@@ -108,6 +108,7 @@ impl FsAdmin {
 }
 
 /// Builder for [`FsAdmin`].
+#[must_use]
 pub struct FsAdminBuilder {
     core: HandleBuilderCore,
     actor_id: Option<String>,

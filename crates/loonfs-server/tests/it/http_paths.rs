@@ -1,5 +1,7 @@
 //! HTTP path mutation semantics and readable conflicts.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{DeleteDirectoryBehavior, DestinationBehavior};
@@ -88,7 +90,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
-        other => unreachable!("expected path_conflict, got {other:?}"),
+        other => panic!("expected path_conflict, got {other:?}"),
     }
 
     harness
@@ -194,7 +196,7 @@ async fn http_name_collision_reports_readable_error_message() {
                 "expected no Debug formatting in message, got {message:?}"
             );
         }
-        other => unreachable!("expected path_conflict, got {other:?}"),
+        other => panic!("expected path_conflict, got {other:?}"),
     }
 
     harness.server.abort();
@@ -233,7 +235,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
             assert_eq!(status, 409);
             assert_eq!(code, "directory_not_empty");
         }
-        other => unreachable!("expected directory_not_empty, got {other:?}"),
+        other => panic!("expected directory_not_empty, got {other:?}"),
     }
 
     harness
@@ -249,7 +251,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
         .expect("recursive delete succeeds");
     match harness.client.stat_path(&child, &Default::default()).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
-        other => unreachable!("expected path_not_found after recursive delete, got {other:?}"),
+        other => panic!("expected path_not_found after recursive delete, got {other:?}"),
     }
 
     harness.server.abort();

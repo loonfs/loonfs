@@ -1,3 +1,6 @@
+#![allow(clippy::panic)]
+
+use loonfs_test_support::http::raw_agent;
 use serde_json::Value;
 use std::env;
 use std::fs;
@@ -6021,7 +6024,7 @@ key_prefix = "{key_prefix}"
             rewrite_server_bind(&server_config_path, available_port());
         }
 
-        unreachable!(
+        panic!(
             "timed out waiting for external server from {}",
             server_config_path.display()
         );
@@ -6131,7 +6134,11 @@ fn server_url_from_config(path: &Path) -> String {
 fn wait_for_readiness(server_url: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if ureq::get(&format!("{server_url}/health")).call().is_ok() {
+        if raw_agent()
+            .get(&format!("{server_url}/health"))
+            .call()
+            .is_ok()
+        {
             return true;
         }
         thread::sleep(Duration::from_millis(100));

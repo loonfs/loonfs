@@ -22,18 +22,18 @@ pub struct ParsedGrepKey {
 }
 
 /// Prefix containing every grep object for one namespace.
-pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
+pub fn grep_prefix(namespace_id: &NamespaceId) -> String {
     format!("{NAMESPACE_KEYSPACE_PREFIX}{namespace_id}{GREP_EXTENSION_SUFFIX}")
 }
 
 /// Key of one namespace's atomic grep root pointer.
 pub fn root_key(namespace_id: &NamespaceId) -> String {
-    format!("{}root.json", namespace_prefix(namespace_id))
+    format!("{}root.json", grep_prefix(namespace_id))
 }
 
 /// Prefix containing one namespace's immutable grep manifests.
 pub fn manifests_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}manifests/", namespace_prefix(namespace_id))
+    format!("{}manifests/", grep_prefix(namespace_id))
 }
 
 /// Key of one immutable grep manifest, under the id its publisher minted.
@@ -46,7 +46,7 @@ pub fn manifest_key(namespace_id: &NamespaceId, manifest_id: &GrepManifestId) ->
 
 /// Prefix containing one namespace's immutable grep segments.
 pub fn segments_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}segments/", namespace_prefix(namespace_id))
+    format!("{}segments/", grep_prefix(namespace_id))
 }
 
 /// Key of one immutable grep segment.
@@ -106,7 +106,7 @@ mod tests {
             .expect("valid manifest id");
 
         assert_eq!(
-            namespace_prefix(&namespace_id),
+            grep_prefix(&namespace_id),
             "namespaces/docs/extensions/grep/"
         );
         assert_eq!(

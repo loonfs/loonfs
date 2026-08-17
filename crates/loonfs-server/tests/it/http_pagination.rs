@@ -1,5 +1,7 @@
 //! HTTP directory and revision pagination behavior.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{
@@ -35,7 +37,7 @@ fn assert_invalid_request<T: std::fmt::Debug>(result: Result<T, ClientError>) {
             assert_eq!(status, 400);
             assert_eq!(code, "invalid_request");
         }
-        other => unreachable!("expected invalid_request API error, got {other:?}"),
+        other => panic!("expected invalid_request API error, got {other:?}"),
     }
 }
 
@@ -265,7 +267,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
             assert_eq!(status, 400);
             assert_eq!(code, "invalid_request");
         }
-        other => unreachable!("expected cursor rejection, got {other:?}"),
+        other => panic!("expected cursor rejection, got {other:?}"),
     }
 
     let raw_first_page: ListPathEntriesResponse = get_json(
@@ -649,7 +651,7 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
             assert_eq!(status, 404);
             assert_eq!(code, "revision_not_found");
         }
-        other => unreachable!("expected revision_not_found, got {other:?}"),
+        other => panic!("expected revision_not_found, got {other:?}"),
     }
 
     harness.server.abort();

@@ -1,5 +1,7 @@
 //! HTTP request validation and configured limit enforcement.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{ApiError, CommitResponse};
@@ -18,7 +20,7 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
             assert_eq!(error.code, "invalid_request");
             assert!(error.message.contains("invalid namespace_id"));
         }
-        other => unreachable!("expected invalid_namespace_id response, got {other:?}"),
+        other => panic!("expected invalid_namespace_id response, got {other:?}"),
     }
 }
 
@@ -103,7 +105,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, "invalid_request");
         }
-        other => unreachable!("expected rejected move behavior, got {other:?}"),
+        other => panic!("expected rejected move behavior, got {other:?}"),
     }
 
     let accepted = raw_agent()
@@ -133,7 +135,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, "invalid_request");
         }
-        other => unreachable!("expected rejected upload body, got {other:?}"),
+        other => panic!("expected rejected upload body, got {other:?}"),
     }
 
     harness.server.abort();

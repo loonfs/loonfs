@@ -354,12 +354,12 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             CheckpointOwner::User { .. } => lease_expired(&record, now_ms),
             CheckpointOwner::Fork {
                 target_namespace_id,
-                ..
+                expires_at_ms,
             } => {
                 if !budget.try_charge() {
                     return Ok(LiveSetCollection::BudgetExhausted);
                 }
-                fork_target_proven_gone(store, target_namespace_id, &record, context).await?
+                fork_target_proven_gone(store, target_namespace_id, *expires_at_ms, context).await?
             }
         };
         if namespace_deleted {

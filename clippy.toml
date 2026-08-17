@@ -3,5 +3,7 @@ disallowed-methods = [
   { path = "std::time::Instant::now", reason = "use an explicit timing boundary so protocol code does not grow ambient time dependencies" },
   { path = "std::thread::sleep", reason = "use deterministic coordination in tests and async timers in async code" },
   { path = "tokio::time::sleep", reason = "use deterministic coordination where possible and isolate coalescing timers" },
+  { path = "tokio::time::Instant::now", reason = "use an explicit timing boundary so async protocol code does not grow ambient time dependencies" },
+  { path = "tokio::time::sleep_until", reason = "use deterministic coordination where possible and isolate deadline timers" },
   { path = "rand::random", reason = "use explicit seeded randomness or generated IDs with named entropy boundaries" },
 ]

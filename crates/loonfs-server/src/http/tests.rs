@@ -2653,6 +2653,8 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::disallowed_methods)]
+// Monotonic time is used only to bound this shutdown check.
 async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

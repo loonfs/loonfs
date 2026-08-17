@@ -61,6 +61,7 @@ impl FsReader {
 }
 
 /// Builder for [`FsReader`].
+#[must_use]
 pub struct FsReaderBuilder {
     core: HandleBuilderCore,
 }

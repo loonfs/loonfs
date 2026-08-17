@@ -725,7 +725,6 @@ impl FsWriter {
         self.publisher
             .submit_candidate(namespace_id.clone(), candidate)
             .await
-            .map_err(RuntimeError::Core)
     }
 }
 
