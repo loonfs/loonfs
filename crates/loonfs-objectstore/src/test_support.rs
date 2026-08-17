@@ -54,8 +54,9 @@ pub(crate) fn gcs_fixture_service_account_key_file(
     let dir = tempfile::Builder::new()
         .prefix(&format!("loonfs-objectstore-{label}-"))
         .tempdir()
-        .expect("create temp dir");
+        .expect("a temporary fixture directory should be creatable");
     let path = dir.path().join("service-account.json");
-    std::fs::write(&path, GCS_FIXTURE_SERVICE_ACCOUNT_KEY).expect("write fixture service account");
+    std::fs::write(&path, GCS_FIXTURE_SERVICE_ACCOUNT_KEY)
+        .expect("the fixture service account should be writable");
     (dir, path)
 }

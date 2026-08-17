@@ -13,7 +13,7 @@
 use super::record::load_checkpoint_record_at_key;
 use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::load_head_object;
 use futures::StreamExt;
 use loonfs_api::wire::control::CheckpointRecordLifecycle;
 use loonfs_api::{Checkpoint, NamespaceCursor, NamespaceId, Page, PageCursor, PageRequest};
@@ -80,7 +80,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request: PageRequest<CheckpointPageCursor>,
 ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
-    read_head_object(store, namespace_id)
+    load_head_object(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
 

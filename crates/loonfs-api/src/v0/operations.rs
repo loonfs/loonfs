@@ -902,8 +902,8 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceStepRequest {
-    /// Fold the visible WAL tail into metadata tables and merge one bounded
-    /// reorganization unit. The two travel together: folding a tail is what
+    /// Flush the visible WAL tail into metadata tables and merge one bounded
+    /// reorganization unit. The two travel together: flushing a tail is what
     /// creates the delta runs a reorganization merges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<MetadataMaintenanceRequest>,
@@ -934,7 +934,7 @@ pub struct MetadataMaintenanceRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum WalFlushStepOutcome {
-    /// The tail was below the threshold, so there was nothing to fold.
+    /// The tail was below the threshold, so there was nothing to flush.
     NotNeeded,
     /// The step flushed the WAL tail and advanced the metadata root.
     Flushed {
@@ -1015,7 +1015,7 @@ pub struct MaintenanceStepResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataMaintenanceResponse {
-    /// What the WAL fold did.
+    /// What the WAL flush did.
     pub wal_flush: WalFlushStepOutcome,
     /// What the reorganization unit did.
     pub reorganize: ReorganizeStepOutcome,

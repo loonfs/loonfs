@@ -11,5 +11,5 @@ pub(crate) use materialized_view::{
     ensure_within_read_limit, load_metadata_view, LoadedMetadataView, ReadLoadContext,
 };
 #[cfg(test)]
-pub(crate) use materialized_view::{load_current_metadata_view, AttributeProjection};
+pub(crate) use materialized_view::{load_current_metadata_view, AttributeInclusion};
 pub use materialized_view::{DirectDownloadByInodeTarget, DirectDownloadTarget};

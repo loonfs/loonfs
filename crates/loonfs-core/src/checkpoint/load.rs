@@ -237,7 +237,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
             scan_runs,
             // The entry retains the envelope plus its regrouped descriptor
             // list, which clones every metadata file ref once.
-            decoded_byte_len: manifest_bytes.len().saturating_mul(2),
+            decoded_bytes: manifest_bytes.len().saturating_mul(2),
         })
     };
     let decoded = match table_cache {

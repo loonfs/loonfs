@@ -16,7 +16,7 @@ use crate::{
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
-use loonfs_core::cache::{load_namespace_fold_basis, load_namespace_head_summary};
+use loonfs_core::cache::{load_namespace_flush_basis, load_namespace_head_summary};
 use loonfs_core::CheckpointPageCursor;
 use tokio::time::Instant;
 
@@ -192,9 +192,9 @@ impl FsAdmin {
         })
     }
 
-    /// The one metadata-upkeep implementation: fold the visible WAL tail
+    /// The one metadata-upkeep implementation: flush the visible WAL tail
     /// once it has reached the threshold, then merge one reorganization
-    /// unit. The two travel together because the fold is what creates the
+    /// unit. The two travel together because the flush is what creates the
     /// delta runs the merge consumes.
     async fn run_metadata(
         &self,
@@ -202,21 +202,21 @@ impl FsAdmin {
         options: MetadataMaintenanceOptions,
         status_before: &NamespaceStatusResponse,
     ) -> Result<MetadataMaintenanceResponse> {
-        let fold = status_before.wal_tail_segments >= options.max_wal_tail_segments.get();
-        self.fold_then_reorganize(namespace_id, fold, status_before.head_seq)
+        let flush = status_before.wal_tail_segments >= options.max_wal_tail_segments.get();
+        self.flush_then_reorganize(namespace_id, flush, status_before.head_seq)
             .await
     }
 
-    /// Folds the tail when asked, then merges one reorganization unit,
+    /// Flushes the tail when asked, then merges one reorganization unit,
     /// reporting both. `observed_head_seq` is what the caller saw before the
-    /// fold, and is only reported when another publisher wins the head race.
-    async fn fold_then_reorganize(
+    /// flush, and is only reported when another publisher wins the head race.
+    async fn flush_then_reorganize(
         &self,
         namespace_id: &NamespaceId,
-        fold: bool,
+        flush: bool,
         observed_head_seq: ChangeSeq,
     ) -> Result<MetadataMaintenanceResponse> {
-        let wal_flush = if fold {
+        let wal_flush = if flush {
             match self.run_wal_flush(namespace_id).await {
                 Ok(flush) => match flush.outcome {
                     FlushWalOutcome::Published => WalFlushStepOutcome::Flushed {
@@ -244,16 +244,16 @@ impl FsAdmin {
         })
     }
 
-    /// One bounded reorganization unit per step: folds one family group of
+    /// One bounded reorganization unit per step: merges one family group of
     /// L0 delta rows into the base when enough L0 runs have piled up (see
     /// `loonfs-core`'s `reorganize_metadata`). Explicit steps stay bounded at
     /// one unit per call; the returned outcome lets writer-scheduled
-    /// background work keep folding until nothing is left.
+    /// background work keep reorganizing until nothing is left.
     ///
     /// A family group whose oldest run no longer fits one unit is rebuilt by
     /// a streaming compaction instead, which this step starts as background
     /// work and does not wait for. While that job runs its group is left
-    /// alone and the step folds the other groups; the plan it carries is what
+    /// alone and the step reorganizes the other groups; the plan it carries is what
     /// tells the planner which group that is.
     async fn run_reorganization(
         &self,
@@ -262,7 +262,7 @@ impl FsAdmin {
         // A writer's own upkeep amortizes the rebuild across delta merges,
         // because it is the thing that will eventually run the job and
         // rebuilding a whole group for every eight delta runs would reread
-        // megabytes to fold in a sliver. A handle with no background work
+        // megabytes to merge in a sliver. A handle with no background work
         // behind it has nowhere to run a job at all, so it says the namespace
         // needs one as soon as the group's base freezes rather than
         // publishing delta merges that never reach the rebuild.
@@ -319,7 +319,7 @@ impl FsAdmin {
             }
             loonfs_core::MetadataReorganizeOutcome::UnitPublished {
                 group,
-                folded_l0_rows,
+                merged_l0_rows,
                 input_runs,
                 decoded_input_rows,
                 decoded_input_bytes,
@@ -337,7 +337,7 @@ impl FsAdmin {
                 }
                 tracing::info!(
                     families = ?group.families(),
-                    folded_l0_rows,
+                    merged_l0_rows,
                     input_runs,
                     decoded_input_rows,
                     decoded_input_bytes,
@@ -691,13 +691,13 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Folds any visible WAL tail, then merges one reorganization unit.
+    /// Flushes any visible WAL tail, then merges one reorganization unit.
     ///
     /// The same upkeep [`Self::maintenance_step_namespace`] runs for a
     /// metadata plan, at a threshold of one segment. The reorganization unit
-    /// rides along and is reported beside the fold — upkeep is one action,
-    /// and folding a tail is what creates the delta runs a merge consumes. A
-    /// namespace with an empty tail has nothing to fold and reports
+    /// rides along and is reported beside the flush — upkeep is one action,
+    /// and flushing a tail is what creates the delta runs a merge consumes. A
+    /// namespace with an empty tail has nothing to flush and reports
     /// [`WalFlushStepOutcome::NotNeeded`]: this is the flush an operator
     /// asks for, not a way to publish a manifest for a namespace that has
     /// never been written to.
@@ -705,13 +705,13 @@ impl FsAdmin {
     /// It asks whether there is a tail rather than how long one is, so it
     /// does not read the namespace status. That matters for the one
     /// namespace shape status refuses to answer for — a head that does not
-    /// describe its own WAL tail — because folding the tail is the repair.
+    /// describe its own WAL tail — because flushing the tail is the repair.
     pub async fn flush_wal(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<MetadataMaintenanceResponse> {
-        let basis = load_namespace_fold_basis(self.core.store(), namespace_id).await?;
-        self.fold_then_reorganize(namespace_id, basis.has_unflushed_wal_tail, basis.head_seq)
+        let basis = load_namespace_flush_basis(self.core.store(), namespace_id).await?;
+        self.flush_then_reorganize(namespace_id, basis.has_unflushed_wal_tail, basis.head_seq)
             .await
     }
 
@@ -744,7 +744,7 @@ impl FsAdmin {
     }
 
     /// The one implementation both the step and [`Self::flush_wal`] reach:
-    /// fold the tail, advance the root, invalidate what the fold
+    /// flush the tail, advance the root, invalidate what the flush
     /// invalidated.
     #[tracing::instrument(
         level = "debug",

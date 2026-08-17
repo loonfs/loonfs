@@ -144,7 +144,7 @@ async fn drive_worker_step(
     worker
         .reorganize_step(namespace_id, policy)
         .await
-        .expect("grep fold step");
+        .expect("grep reorganize step");
 }
 
 async fn drive_worker_to_current(
@@ -157,12 +157,12 @@ async fn drive_worker_to_current(
             .build_step(namespace_id, policy)
             .await
             .expect("grep build step");
-        let fold = worker
+        let reorganize = worker
             .reorganize_step(namespace_id, policy)
             .await
-            .expect("grep fold step");
+            .expect("grep reorganize step");
         if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
-            && matches!(fold.outcome, GrepReorganizeOutcome::NotNeeded { .. })
+            && matches!(reorganize.outcome, GrepReorganizeOutcome::NotNeeded { .. })
         {
             return;
         }
@@ -383,7 +383,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     worker.enable(&namespace_id).await.expect("enable grep");
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
-    let folded_corpus: [(&str, &[u8]); 10] = [
+    let reorganized_corpus: [(&str, &[u8]); 10] = [
         ("/docs/indexed.txt", b"indexed-needle\n"),
         ("/docs/deleted.txt", b"visibility-token deleted\n"),
         ("/docs/moved-source.txt", b"visibility-token moved\n"),
@@ -392,10 +392,10 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         ("/docs/short.txt", b"ab short token\n"),
         ("/docs/empty.txt", b""),
         ("/docs/pages.txt", b"page-token one\npage-token two\n"),
-        ("/fold/filler-08.txt", b"fold filler eight\n"),
-        ("/fold/filler-09.txt", b"fold filler nine\n"),
+        ("/reorganize/filler-08.txt", b"reorganize filler eight\n"),
+        ("/reorganize/filler-09.txt", b"reorganize filler nine\n"),
     ];
-    for (path, content) in folded_corpus {
+    for (path, content) in reorganized_corpus {
         writer
             .put_file_bytes(
                 &namespace_id,
@@ -404,18 +404,18 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
                 PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
-            .expect("write folded corpus file");
+            .expect("write reorganized corpus file");
         drive_worker_step(&worker, &namespace_id, policy).await;
     }
 
-    // The ten rounds above finish a base fold. Two more one-file rounds
-    // fold into a fresh mid run, then the large batch below remains delta.
+    // The ten rounds above finish a base reorganization. Two more one-file rounds
+    // reorganize into a fresh mid run, then the large batch below remains delta.
     for round in 10..12u32 {
         writer
             .put_file_bytes(
                 &namespace_id,
-                &format!("/fold/filler-{round:02}.txt"),
-                format!("fold filler {round}\n").as_bytes(),
+                &format!("/reorganize/filler-{round:02}.txt"),
+                format!("reorganize filler {round}\n").as_bytes(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await

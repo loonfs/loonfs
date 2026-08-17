@@ -28,7 +28,7 @@ pub struct MetadataState {
     #[serde(default)]
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
-    pub attribute_revisions: Vec<AttributeRevisionRecord>,
+    pub attribute_revisions: Vec<ModelAttributeRevision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ pub struct SubtreeTombstoneRecord {
 /// Complete attribute map for one inode revision, represented with this
 /// model's independent key, value, and field types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttributeRevisionRecord {
+pub struct ModelAttributeRevision {
     pub inode_id: InodeId,
     pub revision: u64,
     pub committed_seq: ChangeSeq,
@@ -268,7 +268,7 @@ impl MetadataState {
                 } => {
                     metadata_state
                         .attribute_revisions
-                        .push(AttributeRevisionRecord {
+                        .push(ModelAttributeRevision {
                             inode_id: *inode_id,
                             revision: attributes_revision_no.0,
                             committed_seq,

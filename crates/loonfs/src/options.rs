@@ -12,7 +12,7 @@
 //! already return `CommitResponse` and `FlushWalResponse`.
 
 use crate::{EffectiveLimit, GcConfig, Result, RuntimeError};
-use loonfs_api::v0::{
+use loonfs_api::{
     CreateCheckpointRequest, GcRequest, MaintenanceStepRequest, MetadataMaintenanceRequest,
 };
 use loonfs_core::publish::WalTailPolicy;

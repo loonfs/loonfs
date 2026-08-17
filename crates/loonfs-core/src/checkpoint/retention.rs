@@ -8,7 +8,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{
-    read_head_object, read_metadata_root_object_if_present, read_wal_floor_object,
+    load_head_object, load_metadata_root_object_if_present, load_wal_floor_object,
 };
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, WalFloorState};
@@ -33,13 +33,13 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     // pin (format spec, "Garbage collection"). Corruption that slips past it
     // is caught by read-path checksums, which an existence probe here could
     // not have caught anyway.
-    let head = read_head_object(store, namespace_id)
+    let head = load_head_object(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
         .state;
     // A namespace that has published no manifest has nothing to derive a
     // target floor from: its history is retained from birth either way.
-    let Some(loaded_root) = read_metadata_root_object_if_present(store, namespace_id)
+    let Some(loaded_root) = load_metadata_root_object_if_present(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
     else {
@@ -73,7 +73,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     // Monotonic floor publication: never decrease. The first advance
     // creates the object, because create and fork write no floor.
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
-        let loaded = match read_wal_floor_object(store, namespace_id).await {
+        let loaded = match load_wal_floor_object(store, namespace_id).await {
             Ok(loaded) => Some(loaded),
             Err(ControlObjectLoadError::MissingObject { .. }) => None,
             Err(error) => return Err(CoreError::load_head(error)),

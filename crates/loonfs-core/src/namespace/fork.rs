@@ -3,7 +3,7 @@
 //! source's metadata until the target flushes its own.
 
 use crate::checkpoint::{
-    create_checkpoint, load_namespace_manifest_envelope, read_checkpoint_record,
+    create_checkpoint, load_checkpoint_record, load_namespace_manifest_envelope,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
@@ -11,7 +11,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::{FORK_CHECKPOINT_LEASE_MS, FORK_GUARD_MARGIN_MS};
 use crate::namespace::bootstrap::{install_namespace_head, NamespaceHeadInstall};
 use crate::options::DeleteNamespaceOptions;
-use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordLifecycle, ForkBasis, HeadState, NamespaceState, WriterBlock,
 };
@@ -46,7 +46,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         context,
     )
     .await?;
-    let source_record = read_checkpoint_record(
+    let source_record = load_checkpoint_record(
         store,
         source_namespace_id,
         &checkpoint.checkpoint.checkpoint_id,
@@ -66,7 +66,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
-    let source_head = crate::namespace::control::read_head_object(store, source_namespace_id)
+    let source_head = crate::namespace::control::load_head_object(store, source_namespace_id)
         .await
         .map_err(CoreError::load_head)?
         .state;
@@ -180,7 +180,7 @@ async fn ensure_fork_checkpoint_lease_holds<S: ObjectStore + ?Sized>(
              checkpoint `{checkpoint_id}`: {reason}"
         )))
     };
-    let Some(record) = read_checkpoint_record(store, source_namespace_id, checkpoint_id)
+    let Some(record) = load_checkpoint_record(store, source_namespace_id, checkpoint_id)
         .await?
         .map(|loaded| loaded.state)
     else {

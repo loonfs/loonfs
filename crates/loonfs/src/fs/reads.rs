@@ -178,7 +178,7 @@ impl FsReader {
     ) -> Result<AuthoritativeFileBytes> {
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let read = engine
-            .read_file(
+            .get_file(
                 absolute_path,
                 &read_context,
                 self.core.inner.config.max_read_content_bytes,
@@ -404,7 +404,7 @@ impl FsReader {
     ) -> Result<AuthoritativeFileBytes> {
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let read = engine
-            .read_file_revision(
+            .get_file_revision(
                 absolute_path,
                 revision_no,
                 &read_context,
@@ -424,7 +424,7 @@ impl FsReader {
     ) -> Result<Vec<u8>> {
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let bytes = engine
-            .read_file_revision_for_inode(
+            .get_file_revision_for_inode(
                 inode_id,
                 revision_no,
                 &read_context,

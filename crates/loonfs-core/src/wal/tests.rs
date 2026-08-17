@@ -347,7 +347,7 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
     assert_eq!(
         error.to_string(),
         format!(
-            "wal replay validation failed: WAL segment `{}` is missing its previous visible segment link before seq `0`",
+            "WAL replay validation failed: WAL segment `{}` is missing its previous visible segment link before seq `0`",
             prepared_segment_key(&segment)
         )
     );

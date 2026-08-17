@@ -6,7 +6,7 @@ use crate::control_object::{
     ControlObjectLoadError, LoadedControl,
 };
 use crate::error::{CoreError, StoreFailureClass};
-use crate::namespace::control::{read_head_object, LoadedHeadObject};
+use crate::namespace::control::{load_head_object, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, HeadState, UploadSessionState,
@@ -72,7 +72,7 @@ where
     F: FnMut(&LoadedHeadObject) -> Result<HeadReplacement<T>, E>,
 {
     for _attempt in 0..max_attempts {
-        let loaded = read_head_object(store, namespace_id)
+        let loaded = load_head_object(store, namespace_id)
             .await
             .map_err(|error| E::from(ControlUpdateError::LoadHead(error)))?;
         let HeadReplacement { next, outcome } = update(&loaded)?;
@@ -139,7 +139,7 @@ where
     F: FnOnce(UploadSessionState) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
-    let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
+    let loaded = load_upload_session_object(store, namespace_id, upload_id).await?;
     match update(loaded.state).await? {
         UploadSessionUpdate::Noop(outcome) => Ok(UploadSessionCas::Applied(outcome)),
         UploadSessionUpdate::Replace { next, outcome } => {
@@ -171,19 +171,19 @@ fn encode_head(next: HeadState, object_key: &str) -> Result<Vec<u8>, ControlUpda
 
 /// Reads an upload session without retaining its ETag. Use this for status
 /// checks and other operations that do not need to update the session.
-pub(crate) async fn read_upload_session_state<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_upload_session_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
 ) -> crate::error::Result<UploadSessionState> {
-    Ok(read_upload_session_object(store, namespace_id, upload_id)
+    Ok(load_upload_session_object(store, namespace_id, upload_id)
         .await?
         .state)
 }
 
 type LoadedUploadSessionObject = LoadedControl<UploadSessionState>;
 
-async fn read_upload_session_object<S: ObjectStore + ?Sized>(
+async fn load_upload_session_object<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,

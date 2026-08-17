@@ -238,7 +238,7 @@ impl GcsV4Presigner {
         let mut canonical_headers = String::new();
         for (name, value) in &headers_to_sign {
             writeln!(&mut canonical_headers, "{name}:{value}")
-                .expect("writing to String cannot fail");
+                .expect("writing to a String should not fail");
         }
 
         let query = BTreeMap::from([

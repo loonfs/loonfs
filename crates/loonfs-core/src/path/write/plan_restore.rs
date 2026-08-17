@@ -1,12 +1,12 @@
 //! Publish plans that restore an earlier file revision.
 
-use super::planning_helpers::{
-    publish_binding_is_precondition, publish_reject_tombstoned_path_ancestor, PlannedOperation,
-    PublishPathPlanningView,
+use super::publish_path_planning::{
+    publish_binding_is_precondition, publish_reject_tombstoned_path_ancestor,
+    CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
-use crate::path::helpers::ensure_mutation_path;
+use crate::path::mutation_path::ensure_mutation_path;
 use loonfs_api::{AbsolutePath, InodeKind, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
@@ -14,7 +14,7 @@ pub(super) async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     source_revision_no: RevisionNo,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
@@ -33,7 +33,7 @@ pub(super) async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
 
-    Ok(PlannedOperation::new(
+    Ok(CompiledFilesystemOperation::new(
         vec![ApiCommitOp::RestoreRevision {
             inode_id: target.inode_id,
             source_revision_no,

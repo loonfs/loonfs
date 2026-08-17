@@ -1,20 +1,20 @@
-//! Read-only namespace status: summarizes the head, its materialized
-//! basis, the WAL tail, and the retention floor.
+//! Read-only namespace status: summarizes the live head, its materialized
+//! basis, WAL tail, and retention floor; exposes the smaller flush basis; and
+//! summarizes the deleted head after its materialized state is gone.
 
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::basis::{read_head_and_metadata_basis, resolve_retention_floor_seq};
+use crate::namespace::basis::{load_head_and_metadata_basis, resolve_retention_floor_seq};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
-use loonfs_api::v0::NamespaceStatusResponse;
 use loonfs_api::wire::control::{HeadState, NamespaceState};
-use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestId, NamespaceId, NamespaceStatusResponse};
 use loonfs_objectstore::ObjectStore;
 
 /// Whether a namespace carries visible commits its basis manifest does not
 /// cover, and the head sequence they run to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NamespaceFoldBasis {
+pub struct NamespaceFlushBasis {
     pub head_seq: ChangeSeq,
     pub has_unflushed_wal_tail: bool,
 }
@@ -33,7 +33,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadBasis> {
-    let loaded = read_head_and_metadata_basis(store, expected_namespace_id)
+    let loaded = load_head_and_metadata_basis(store, expected_namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
@@ -116,19 +116,19 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Answers the one question a WAL fold decides on — is there anything to
-/// fold — without sizing the tail.
+/// Answers the one question a WAL flush decides on — is there anything to
+/// flush — without sizing the tail.
 ///
 /// [`load_namespace_head_summary`] answers it too, but only alongside a
 /// segment count the head must be able to describe. A head that
-/// under-describes its own tail is exactly the state an explicit fold
-/// repairs, so the fold must not be gated on the count it cannot produce.
-pub async fn load_namespace_fold_basis<S: ObjectStore + ?Sized>(
+/// under-describes its own tail is exactly the state an explicit flush
+/// repairs, so the flush must not be gated on the count it cannot produce.
+pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceFoldBasis> {
+) -> Result<NamespaceFlushBasis> {
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
-    Ok(NamespaceFoldBasis {
+    Ok(NamespaceFlushBasis {
         head_seq: loaded.head.seq,
         has_unflushed_wal_tail: loaded.basis_head_seq < loaded.head.seq,
     })
@@ -145,7 +145,7 @@ pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceStatusResponse> {
-    let head = crate::namespace::control::read_head_object(store, expected_namespace_id)
+    let head = crate::namespace::control::load_head_object(store, expected_namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))

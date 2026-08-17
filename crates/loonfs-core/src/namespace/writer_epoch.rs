@@ -146,7 +146,7 @@ mod tests {
     use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
     use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::control::read_head_object;
+    use crate::namespace::control::load_head_object;
     use crate::options::DeleteNamespaceOptions;
 
     async fn submit_commit<S: loonfs_objectstore::ObjectStore + ?Sized>(
@@ -269,7 +269,7 @@ mod tests {
 
         assert_eq!(first.writer_epoch, WriterEpoch(8));
         assert_eq!(second.writer_epoch, WriterEpoch(9));
-        let head = read_head_object(&store, &namespace_id)
+        let head = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -341,7 +341,7 @@ mod tests {
         // The tombstone is byte-identical after every attempt: no epoch
         // inflation, no new writer block, no churn on a terminal object.
         assert_eq!(head_etag(&store, &namespace_id).await, etag_before);
-        let head = read_head_object(&store, &namespace_id)
+        let head = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -398,7 +398,7 @@ mod tests {
 
         assert_eq!(acquired.writer_epoch, WriterEpoch(8));
         assert_eq!(acquired.writer_id, "writer-b");
-        let head = read_head_object(&store, &namespace_id)
+        let head = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -466,7 +466,7 @@ mod tests {
         .await
         .expect("writer a reacquires on its next one-shot commit");
 
-        let head = read_head_object(&store, &namespace_id)
+        let head = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -515,7 +515,7 @@ mod tests {
         .expect_err("stale-epoch delete must be fenced");
         assert_eq!(error.code(), ErrorCode::WriterFenced);
 
-        let head = read_head_object(&store.inner, &namespace_id)
+        let head = load_head_object(&store.inner, &namespace_id)
             .await
             .expect("read head")
             .state;
@@ -631,7 +631,7 @@ mod tests {
         // writer-b installed epoch 8 during the conflict; writer-c retried
         // and took 9.
         assert_eq!(acquired.writer_epoch, WriterEpoch(9));
-        let head = read_head_object(&store.inner, &namespace_id)
+        let head = load_head_object(&store.inner, &namespace_id)
             .await
             .expect("read head")
             .state;

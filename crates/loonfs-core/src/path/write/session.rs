@@ -200,7 +200,7 @@ mod tests {
         crate::path::read::load_current_metadata_view(store, namespace_id)
             .await
             .expect("load view")
-            .resolve_path(absolute_path, crate::path::read::AttributeProjection::Omit)
+            .resolve_path(absolute_path, crate::path::read::AttributeInclusion::Omit)
             .await
             .expect("visible path")
             .inode_id
@@ -483,7 +483,7 @@ mod tests {
             .expect("load view")
             .resolve_path(
                 "/docs/doomed.txt",
-                crate::path::read::AttributeProjection::Omit,
+                crate::path::read::AttributeInclusion::Omit,
             )
             .await
             .expect_err("deleted file is no longer visible");

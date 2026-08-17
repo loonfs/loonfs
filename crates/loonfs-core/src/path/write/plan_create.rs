@@ -1,17 +1,17 @@
 //! Publish plans that create, recover, or replace path content.
 
-use super::planning_helpers::{
+use super::publish_path_planning::{
     is_missing_visible_path, publish_binding_is_precondition,
     publish_child_name_absent_precondition, publish_ensure_parent_directories,
-    publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory, PlannedOperation,
-    PublishPathPlanningView,
+    publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory,
+    CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::commit::{
     CandidateAllocation, CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
     CommitValidationError,
 };
 use crate::error::{CoreError, Result};
-use crate::path::helpers::{ensure_mutation_path, final_component};
+use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
     AbsolutePath, ChangeSeq, ContentRef, DestinationBehavior, InodeId, InodeKind, RevisionNo,
 };
@@ -22,7 +22,7 @@ pub(super) async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
     parents: bool,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     match view
@@ -71,7 +71,7 @@ pub(super) async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
             inode_id: parent_inode_id,
         });
     }
-    Ok(PlannedOperation::new(ops, preconditions))
+    Ok(CompiledFilesystemOperation::new(ops, preconditions))
 }
 
 pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
@@ -79,7 +79,7 @@ pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
     deletion_seq: ChangeSeq,
     absolute_path: Option<&AbsolutePath>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     let (parent_inode_id, display_name) = match absolute_path {
         Some(absolute_path) => {
             ensure_mutation_path(absolute_path)?;
@@ -133,7 +133,7 @@ pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
             }
         }
     };
-    Ok(PlannedOperation::new(
+    Ok(CompiledFilesystemOperation::new(
         vec![ApiCommitOp::Undelete {
             inode_id,
             deletion_seq,
@@ -156,7 +156,7 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     expected_revision_no: Option<RevisionNo>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     if expected_revision_no.is_some() && behavior == DestinationBehavior::NoReplace {
         return Err(CoreError::InvalidCommitRequest(
@@ -246,5 +246,5 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
         Err(other) => return Err(other),
     }
 
-    Ok(PlannedOperation::new(ops, preconditions))
+    Ok(CompiledFilesystemOperation::new(ops, preconditions))
 }

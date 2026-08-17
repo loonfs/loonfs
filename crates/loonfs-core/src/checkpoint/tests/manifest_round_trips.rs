@@ -132,7 +132,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .await
         .expect("materialization");
     assert_eq!(materialization.root.manifest_id, ManifestId(1));
-    let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
+    let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
@@ -298,7 +298,7 @@ async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
         .await
         .expect("advance retention");
 
-    let head_after = read_head_object(&store, &namespace_id)
+    let head_after = load_head_object(&store, &namespace_id)
         .await
         .expect("read head")
         .state;
@@ -351,7 +351,7 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
     assert_eq!(repeated.manifest_id, first.manifest_id);
     assert_eq!(repeated.checkpoint_seq, first.checkpoint_seq);
 
-    let record = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+    let record = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
@@ -379,7 +379,7 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
         .expect("second checkpoint");
     assert_ne!(second.checkpoint_id, first.checkpoint_id);
     assert!(
-        read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
             .expect("read first record")
             .is_some()
@@ -513,7 +513,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
         .iter()
         .all(|run| run.level == CHECKPOINT_L0_RUN_LEVEL));
     for response in [&first, &second] {
-        let record = read_checkpoint_record(&store, &namespace_id, &response.checkpoint_id)
+        let record = load_checkpoint_record(&store, &namespace_id, &response.checkpoint_id)
             .await
             .expect("read checkpoint record")
             .expect("record exists")
@@ -994,7 +994,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     // writes a checkpoint file against it instead of building a new
     // manifest.
     assert_eq!(checkpoint.manifest_id, ManifestId(1));
-    let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
+    let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")

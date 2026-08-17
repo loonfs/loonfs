@@ -250,7 +250,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                     .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
             );
             let block = DecodedMetadataTableBlock::Index {
-                decoded_byte_len: index_handle.decoded_len as usize,
+                decoded_bytes: index_handle.decoded_len as usize,
                 entries: Arc::clone(&entries),
             };
             publish_segment_block(
@@ -279,7 +279,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             let filter = decode_filter_block(stored, &filter_handle)
                 .map_err(|err| segment_codec_error(&descriptor.object_key, err))?;
             let block = DecodedMetadataTableBlock::Filter {
-                decoded_byte_len: filter_handle.decoded_len as usize,
+                decoded_bytes: filter_handle.decoded_len as usize,
                 filter: Arc::new(filter),
             };
             publish_segment_block(
@@ -402,7 +402,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
         .await
         {
             return Ok(DecodedMetadataTableBlock::Index {
-                decoded_byte_len: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_len as usize,
                 entries: Arc::new(entries),
             });
         }
@@ -426,7 +426,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
             let entries = decode_index_block(&stored, &handle)
                 .map_err(|err| segment_codec_error(&descriptor.object_key, err))?;
             Ok(DecodedMetadataTableBlock::Index {
-                decoded_byte_len: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_len as usize,
                 entries: Arc::new(entries),
             })
         }
@@ -477,7 +477,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
                 .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
         );
         let block = DecodedMetadataTableBlock::Filter {
-            decoded_byte_len: handle.decoded_len as usize,
+            decoded_bytes: handle.decoded_len as usize,
             filter: Arc::clone(&filter),
         };
         publish_segment_block(table_cache, memo, cache_key, &block);
@@ -496,7 +496,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         .await
         {
             return Ok(DecodedMetadataTableBlock::Filter {
-                decoded_byte_len: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_len as usize,
                 filter: Arc::new(filter),
             });
         }

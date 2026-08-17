@@ -6,7 +6,7 @@ use crate::checkpoint::record::{
 use crate::context::MutationContext;
 use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::load_head_object;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle, NamespaceState};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -131,7 +131,7 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     lease_expires_at_ms: u64,
     context: &MutationContext,
 ) -> Result<bool> {
-    match read_head_object(store, target_namespace_id).await {
+    match load_head_object(store, target_namespace_id).await {
         Ok(loaded) => Ok(loaded.state.state == NamespaceState::Deleted),
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             Ok(lease_expires_at_ms <= context.now_ms)

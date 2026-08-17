@@ -1,8 +1,9 @@
 //! The v0 HTTP protocol shapes.
 //!
 //! Every request/response body served by the v0 HTTP API lives under this
-//! module, re-exported flat so `loonfs_api::v0::X` is the canonical path for
-//! any v0 shape. The submodules group the surface by plane:
+//! module and is re-exported flat. The crate-root curated list is canonical
+//! for every name it contains; use `loonfs_api::v0::X` for the rest. The
+//! submodules group the surface by plane:
 //!
 //! - `operations` — namespace lifecycle, path-oriented filesystem
 //!   operations, file revisions, maintenance, and the `ApiError` body.
@@ -12,9 +13,6 @@
 //! - `uploads` — upload sessions and direct-put access.
 //! - `downloads` — direct-get download grants.
 //!
-//! The crate root re-exports the common surface for convenience; see the
-//! crate docs for the rule.
-
 mod commits;
 mod downloads;
 mod operations;

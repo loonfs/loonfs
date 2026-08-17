@@ -14,7 +14,7 @@ use super::live_set::LiveSet;
 use crate::checkpoint::{load_verified_manifest_tables, ManifestLoadFailureClass};
 use crate::context::MutationContext;
 use crate::control_update::{
-    read_upload_session_state, try_update_upload_session, UploadSessionCas, UploadSessionUpdate,
+    load_upload_session_state, try_update_upload_session, UploadSessionCas, UploadSessionUpdate,
 };
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
@@ -74,7 +74,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
 ) -> Result<UploadSessionSweep> {
     // This read selects the lifecycle branch only. Any state change is applied
     // through a later CAS using a fresh ETag.
-    let state = match read_upload_session_state(store, namespace_id, upload_id).await {
+    let state = match load_upload_session_state(store, namespace_id, upload_id).await {
         Ok(state) => state,
         Err(CoreError::UploadNotFound { .. }) => return Ok(retain_undated()),
         Err(error) => return Err(error),

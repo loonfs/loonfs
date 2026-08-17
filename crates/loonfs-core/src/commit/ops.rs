@@ -1,4 +1,4 @@
-//! The engine's inode-level planning IR: the operations a filesystem
+//! The engine's inode-level planning vocabulary: the operations a filesystem
 //! mutation compiles into, and the race checks evaluated beside them.
 //!
 //! This vocabulary is internal. Callers speak

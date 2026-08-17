@@ -105,7 +105,7 @@ async fn current_manifest_id<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> ManifestId {
-    read_metadata_root_object(store, namespace_id)
+    load_metadata_root_object(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
@@ -282,7 +282,7 @@ impl SteppingTimer {
     }
 }
 
-impl crate::timing::MonotonicTimer for SteppingTimer {
+impl crate::time::MonotonicTimer for SteppingTimer {
     fn monotonic_now_ms(&self) -> u64 {
         self.now_ms
             .fetch_add(self.step_ms, std::sync::atomic::Ordering::SeqCst)
@@ -462,7 +462,7 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
         "a new pin never lands on a released record's key"
     );
 
-    let released = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+    let released = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
@@ -495,7 +495,7 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
     .expect("repeat release");
     assert_eq!(again.checkpoint_id, first.checkpoint_id);
     assert_eq!(
-        read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
             .expect("read checkpoint record")
             .expect("record exists")
@@ -555,7 +555,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             "each pin gets an id of its own"
         );
         assert_eq!(next.expires_at_ms, expiry);
-        let record = read_checkpoint_record(&store, &namespace_id, &next.checkpoint_id)
+        let record = load_checkpoint_record(&store, &namespace_id, &next.checkpoint_id)
             .await
             .expect("read checkpoint record")
             .expect("record exists")
@@ -570,7 +570,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 
     // The very first record is untouched by any of it: a pin taken without
     // an expiry, or with one, is held until something releases it.
-    let original = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+    let original = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
@@ -619,7 +619,7 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
     .expect("create checkpoint whose expiry has already passed")
     .checkpoint;
     assert_eq!(
-        read_checkpoint_record(&store, &namespace_id, &already_expired.checkpoint_id)
+        load_checkpoint_record(&store, &namespace_id, &already_expired.checkpoint_id)
             .await
             .expect("read checkpoint record")
             .expect("record exists")
@@ -687,7 +687,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_released() {
         .await
         .expect("gc pass");
     }
-    let record = read_checkpoint_record(&store, &namespace_id, &pin.checkpoint_id)
+    let record = load_checkpoint_record(&store, &namespace_id, &pin.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("an unexpiring pin survives every pass")
@@ -828,7 +828,7 @@ async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_recor
         .and_then(|name| name.strip_suffix(".json"))
         .and_then(|id| CheckpointId::parse(id).ok())
         .expect("checkpoint record key");
-    let record = read_checkpoint_record(store.inner(), &namespace_id, &checkpoint_id)
+    let record = load_checkpoint_record(store.inner(), &namespace_id, &checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record remains for cleanup inspection")
@@ -903,7 +903,7 @@ async fn checkpoint_checksum_disagreement_is_terminal_corruption_and_releases_re
         .and_then(|name| name.strip_suffix(".json"))
         .and_then(|id| CheckpointId::parse(id).ok())
         .expect("checkpoint record key");
-    let record = read_checkpoint_record(store.inner(), &namespace_id, &checkpoint_id)
+    let record = load_checkpoint_record(store.inner(), &namespace_id, &checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record remains for cleanup inspection")
@@ -983,7 +983,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
 
     // The whole legal tail is named by the tip plus its predecessor hints,
     // so no reader has to discover a key by walking an unhinted link.
-    let head = read_head_object(&store, &namespace_id)
+    let head = load_head_object(&store, &namespace_id)
         .await
         .expect("read head")
         .state;
@@ -1650,7 +1650,7 @@ async fn a_missing_floor_reads_as_retain_everything() {
         "creation writes no floor object"
     );
 
-    let head = crate::namespace::control::read_head_object(&store, &namespace_id)
+    let head = crate::namespace::control::load_head_object(&store, &namespace_id)
         .await
         .expect("head")
         .state;
@@ -1686,7 +1686,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     )
     .await
     .expect("seed file");
-    let root_before = read_metadata_root_object(&store, &namespace_id)
+    let root_before = load_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
         .state;
@@ -1702,7 +1702,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         "expected budget error, got {error:?}"
     );
 
-    let root_after = read_metadata_root_object(&store, &namespace_id)
+    let root_after = load_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
         .state;
@@ -1747,7 +1747,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     super::flush::flush_wal(&store, &namespace_id, &context)
         .await
         .expect("publish an L0 run to fold");
-    let root_before = read_metadata_root_object(&store, &namespace_id)
+    let root_before = load_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
         .state;
@@ -1772,7 +1772,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         "expected budget error, got {error:?}"
     );
 
-    let root_after = read_metadata_root_object(&store, &namespace_id)
+    let root_after = load_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
         .state;

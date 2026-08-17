@@ -85,6 +85,6 @@ pub use reads::NamespaceReads;
 pub use service::{GrepService, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES};
 pub use worker::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepBuildReport, GrepDisableOutcome, GrepEnableOutcome,
-    GrepGcReport, GrepGcRequest, GrepReorganizeOutcome, GrepReorganizeReport, GrepWorker,
+    GrepGcOptions, GrepGcReport, GrepReorganizeOutcome, GrepReorganizeReport, GrepWorker,
     GREP_BACKFILL_CHECKPOINT_TTL_MS, GREP_GC_GRACE_WINDOW_MS,
 };

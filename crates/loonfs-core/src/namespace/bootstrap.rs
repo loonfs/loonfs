@@ -9,7 +9,7 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, StoreFailureClass};
 use crate::metadata::{InodeRecord, MetadataState};
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::load_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, HeadState, NamespaceState, WriterBlock,
@@ -165,7 +165,7 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
         Ok(_) => Ok(NamespaceHeadInstall::Landed),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            let existing = match read_head_object(store, namespace_id).await {
+            let existing = match load_head_object(store, namespace_id).await {
                 Ok(loaded) => loaded.state,
                 // An unreadable head still occupies the id: report the
                 // corruption rather than a lifecycle answer this attempt

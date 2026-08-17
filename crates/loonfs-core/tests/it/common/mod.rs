@@ -316,7 +316,7 @@ pub(crate) mod commit_split_support {
     ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
-            .read_file(absolute_path, &context, None)
+            .get_file(absolute_path, &context, None)
             .await
     }
 

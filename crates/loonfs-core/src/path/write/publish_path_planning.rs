@@ -18,12 +18,12 @@ pub(super) fn is_missing_visible_path(error: &CoreError) -> bool {
 
 /// One filesystem operation compiled into the commit operations it needs,
 /// plus the race checks that must hold before the first of them runs.
-pub(super) struct PlannedOperation {
+pub(super) struct CompiledFilesystemOperation {
     pub(super) ops: Vec<ApiCommitOp>,
     pub(super) preconditions: Vec<ApiCommitPrecondition>,
 }
 
-impl PlannedOperation {
+impl CompiledFilesystemOperation {
     pub(super) fn new(ops: Vec<ApiCommitOp>, preconditions: Vec<ApiCommitPrecondition>) -> Self {
         Self { ops, preconditions }
     }
@@ -43,8 +43,8 @@ impl PlannedOperation {
     }
 }
 
-pub(super) struct PublishPathPlanningView<'a, 'b, 'store, S: ObjectStore + ?Sized> {
-    pub(super) metadata_state: &'a MetadataView<'b, 'store, S>,
+pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?Sized> {
+    pub(super) metadata_state: &'a MetadataView<'view, 'store, S>,
 }
 
 pub(super) async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(

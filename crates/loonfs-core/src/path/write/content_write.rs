@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::namespace::catalog::load_namespace_catalog_entry;
-use crate::path::helpers::parse_mutation_path;
+use crate::path::mutation_path::parse_mutation_path;
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content_with_store_id};
 use crate::storage::content_admission::PreparedContent;
 use loonfs_api::NamespaceId;

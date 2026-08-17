@@ -13,7 +13,7 @@ use axum::body::Bytes;
 use futures::stream::{BoxStream, StreamExt};
 use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, MaintenanceJob,
-    MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepResult,
+    MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepReport,
     PutFileOptions, StoredMetadataBlockCache, TraceMode, TraceStoreKind,
 };
 use loonfs_api::ErrorCode;
@@ -875,11 +875,11 @@ impl MaintenanceJob for StepCountingJob {
         &self,
         _namespace_id: &NamespaceId,
         _continuation: Option<&str>,
-    ) -> loonfs::Result<MaintenanceStepResult> {
+    ) -> loonfs::Result<MaintenanceStepReport> {
         self.steps.fetch_add(1, Ordering::SeqCst);
         // Idle rather than progressed: a requeueing step would never let
         // the control settle below.
-        Ok(MaintenanceStepResult::concluded(
+        Ok(MaintenanceStepReport::concluded(
             MaintenanceStepConclusion::Idle,
         ))
     }

@@ -7,7 +7,7 @@
 
 use super::{
     BackgroundCompactions, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
-    MaintenanceStepConclusion, MaintenanceStepResult,
+    MaintenanceStepConclusion, MaintenanceStepReport,
 };
 use crate::fs::{ReadCore, WriterBits};
 use crate::publisher::PublisherRegistry;
@@ -106,9 +106,9 @@ impl MaintenanceJob for MetadataJob {
         &self,
         namespace_id: &NamespaceId,
         _continuation: Option<&str>,
-    ) -> Result<MaintenanceStepResult> {
+    ) -> Result<MaintenanceStepReport> {
         let Some((_writer, admin)) = self.context.admin() else {
-            return Ok(MaintenanceStepResult::concluded(
+            return Ok(MaintenanceStepReport::concluded(
                 MaintenanceStepConclusion::NotEnabled,
             ));
         };
@@ -135,10 +135,10 @@ impl MaintenanceJob for MetadataJob {
                     conclusion = conclusion.as_str(),
                     "metadata maintenance step concluded"
                 );
-                Ok(MaintenanceStepResult::concluded(conclusion))
+                Ok(MaintenanceStepReport::concluded(conclusion))
             }
             Err(error) if metadata_has_nothing_to_maintain(&error) => Ok(
-                MaintenanceStepResult::concluded(MaintenanceStepConclusion::NotEnabled),
+                MaintenanceStepReport::concluded(MaintenanceStepConclusion::NotEnabled),
             ),
             Err(error) => Err(error),
         }
@@ -186,9 +186,9 @@ impl MaintenanceJob for GcJob {
         &self,
         namespace_id: &NamespaceId,
         continuation: Option<&str>,
-    ) -> Result<MaintenanceStepResult> {
+    ) -> Result<MaintenanceStepReport> {
         let Some((_writer, admin)) = self.context.admin() else {
-            return Ok(MaintenanceStepResult::concluded(
+            return Ok(MaintenanceStepReport::concluded(
                 MaintenanceStepConclusion::NotEnabled,
             ));
         };
@@ -206,7 +206,7 @@ impl MaintenanceJob for GcJob {
             Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
                 // A deleted namespace still owns reclaimable state, so only
                 // one that was never created is nothing to collect.
-                return Ok(MaintenanceStepResult::concluded(
+                return Ok(MaintenanceStepReport::concluded(
                     MaintenanceStepConclusion::NotEnabled,
                 ));
             }
@@ -219,7 +219,7 @@ impl MaintenanceJob for GcJob {
                     error = %error,
                     "collection rejected its resume position; restarting the pass"
                 );
-                return Ok(MaintenanceStepResult::concluded(
+                return Ok(MaintenanceStepReport::concluded(
                     MaintenanceStepConclusion::Superseded,
                 ));
             }
@@ -312,8 +312,8 @@ fn conclusion_precedence(conclusion: MaintenanceStepConclusion) -> u8 {
 /// that walked keyspace is told apart from one that decided nothing, and
 /// handing the second one back is what lets a retry resume rather than
 /// restart.
-fn gc_step_result(gc: GcResponse, submitted_cursor: Option<&str>) -> MaintenanceStepResult {
-    MaintenanceStepResult {
+fn gc_step_result(gc: GcResponse, submitted_cursor: Option<&str>) -> MaintenanceStepReport {
+    MaintenanceStepReport {
         conclusion: gc_conclusion(&gc, submitted_cursor),
         continuation: gc.next_cursor,
         // The pass reports the earliest future reclamation time it observed.

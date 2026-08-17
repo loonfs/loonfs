@@ -14,7 +14,7 @@ pub enum CommitHeadPublishError {
         head: NamespaceId,
         plan: NamespaceId,
     },
-    #[error("WAL segment namespace mismatch: head `{head}`, wal `{wal}`")]
+    #[error("WAL segment namespace mismatch: head `{head}`, WAL `{wal}`")]
     WalSegmentNamespaceMismatch { head: NamespaceId, wal: NamespaceId },
     #[error("WAL segment writer epoch mismatch: expected `{expected}`, actual `{actual}`")]
     WalSegmentWriterEpochMismatch {
@@ -51,7 +51,7 @@ pub enum CommitHeadPublishError {
     /// segment PUT and reaching the head CAS. The segment is abandoned as an
     /// orphan for GC and the commit must be rebuilt as a fresh segment, so
     /// callers retry exactly as they do for `StaleHead`.
-    #[error("publish budget exceeded: elapsed `{elapsed_ms}` ms over budget `{budget_ms}` ms")]
+    #[error("publish budget exceeded: elapsed {elapsed_ms}ms over budget {budget_ms}ms")]
     PublishBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     /// The head compare-and-swap was sent but its outcome was never
     /// observed (for example, a transport failure waiting for the

@@ -100,10 +100,7 @@ impl SessionBlockMemo {
         block: &DecodedMetadataTableBlock,
     ) {
         let cache_key = Arc::new(cache_key.clone());
-        let DecodedMetadataTableBlock::Data {
-            decoded_byte_len, ..
-        } = block
-        else {
+        let DecodedMetadataTableBlock::Data { decoded_bytes, .. } = block else {
             self.inner
                 .lock()
                 .expect("session block memo lock should not be poisoned")
@@ -119,11 +116,11 @@ impl SessionBlockMemo {
         if let Some(previous) = previous {
             inner.data_decoded_bytes = inner
                 .data_decoded_bytes
-                .saturating_sub(previous.decoded_byte_len());
+                .saturating_sub(previous.decoded_bytes());
         } else {
             inner.data_insertion_order.push_back(cache_key);
         }
-        inner.data_decoded_bytes = inner.data_decoded_bytes.saturating_add(*decoded_byte_len);
+        inner.data_decoded_bytes = inner.data_decoded_bytes.saturating_add(*decoded_bytes);
         while inner.data_decoded_bytes > SESSION_BLOCK_MEMO_DATA_DECODED_BYTES {
             let oldest = inner
                 .data_insertion_order
@@ -135,7 +132,7 @@ impl SessionBlockMemo {
                 .expect("session block memo queue and map should stay one-to-one");
             inner.data_decoded_bytes = inner
                 .data_decoded_bytes
-                .saturating_sub(evicted.decoded_byte_len());
+                .saturating_sub(evicted.decoded_bytes());
         }
     }
 }
@@ -210,13 +207,13 @@ mod tests {
         }
     }
 
-    fn data_block(decoded_byte_len: usize) -> DecodedMetadataTableBlock {
+    fn data_block(decoded_bytes: usize) -> DecodedMetadataTableBlock {
         DecodedMetadataTableBlock::Data {
             block: Arc::new(DecodedDataBlock {
                 row_keys: Vec::new(),
                 rows: Vec::new(),
             }),
-            decoded_byte_len,
+            decoded_bytes,
         }
     }
 
@@ -232,7 +229,7 @@ mod tests {
             .expect("filter fixture should decode");
         DecodedMetadataTableBlock::Filter {
             filter: Arc::new(filter),
-            decoded_byte_len: 1,
+            decoded_bytes: 1,
         }
     }
 
@@ -241,7 +238,7 @@ mod tests {
         DecodedMetadataTableBlock::Manifest {
             manifest: Arc::new(genesis_basis_manifest(&namespace_id)),
             scan_runs: Arc::new(Vec::new()),
-            decoded_byte_len: 1,
+            decoded_bytes: 1,
         }
     }
 
@@ -255,7 +252,7 @@ mod tests {
             &index_key,
             &DecodedMetadataTableBlock::Index {
                 entries: Arc::new(Vec::new()),
-                decoded_byte_len: 1,
+                decoded_bytes: 1,
             },
         );
         memo.record(&filter_key, &filter_block());

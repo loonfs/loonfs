@@ -11,7 +11,7 @@
 
 use crate::context::MutationContext;
 use crate::control_update::{
-    read_upload_session_state, update_upload_session, UploadSessionUpdate,
+    load_upload_session_state, update_upload_session, UploadSessionUpdate,
 };
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
@@ -270,7 +270,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
         )));
     }
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    let session = read_upload_session_state(store, namespace_id, upload_id).await?;
+    let session = load_upload_session_state(store, namespace_id, upload_id).await?;
     if let Some(error) = terminal_session_error(&session.state, upload_id.clone()) {
         return Err(error);
     }
@@ -636,7 +636,7 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
 ) -> Result<(ContentStoreId, UploadSessionState)> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    let session = read_upload_session_state(store, namespace_id, upload_id).await?;
+    let session = load_upload_session_state(store, namespace_id, upload_id).await?;
     if let Some(error) = terminal_session_error(&session.state, upload_id.clone()) {
         return Err(error);
     }
@@ -871,7 +871,7 @@ where
     F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
 {
     let now_ms = context.now_ms;
-    let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
+    let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     // An aborted session answers the same absence its physical deletion
     // will, before anything about the request's shape is examined.
     if matches!(loaded.state, UploadSessionLifecycle::Aborted { .. }) {
@@ -1225,7 +1225,7 @@ pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     now_ms: u64,
 ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
-    let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
+    let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     let mode = upload_mode(&loaded.transport);
     let (status, receipt) = match loaded.state {
         UploadSessionLifecycle::Open { expires_at_ms, .. } => {
@@ -1752,7 +1752,7 @@ mod tests {
         .expect_err("an aborted session cannot complete");
         assert!(matches!(error, CoreError::UploadNotFound { .. }));
 
-        let state = read_upload_session_state(&store, &namespace_id, &upload_id)
+        let state = load_upload_session_state(&store, &namespace_id, &upload_id)
             .await
             .expect("session still readable");
         assert!(matches!(
@@ -1807,7 +1807,7 @@ mod tests {
         .await
         .expect_err("mismatched bytes cannot complete");
         assert!(matches!(error, CoreError::InvalidUploadContent(_)));
-        let state = read_upload_session_state(&store, &namespace_id, &begin.upload_id)
+        let state = load_upload_session_state(&store, &namespace_id, &begin.upload_id)
             .await
             .expect("session remains readable");
         assert!(matches!(

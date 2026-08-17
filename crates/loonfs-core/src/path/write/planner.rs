@@ -9,7 +9,7 @@ use super::plan_create::{
 use super::plan_delete::plan_publish_delete_path;
 use super::plan_restore::plan_publish_restore_revision;
 use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
-use super::planning_helpers::{PlannedOperation, PublishPathPlanningView};
+use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use crate::commit::{
     validate_ops, CandidateAllocation, CommitFingerprint, PublishValidationView,
     ValidatedCommitPlan, ValidatedOp,
@@ -121,7 +121,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
     operation: &FilesystemOperation,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
-) -> Result<PlannedOperation> {
+) -> Result<CompiledFilesystemOperation> {
     match operation {
         FilesystemOperation::CreateDirectory { path, parents } => {
             plan_publish_create_directory(path, *parents, view, allocation).await

@@ -181,7 +181,7 @@ pub enum WalChainLoadError {
         described_segments: u64,
         described_from_seq: ChangeSeq,
     },
-    #[error("wal replay validation failed: {0}")]
+    #[error("WAL replay validation failed: {0}")]
     Replay(#[from] WalReplayError),
 }
 

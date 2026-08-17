@@ -2,7 +2,7 @@
 //! store and name policy — read from the head that carries them.
 
 use crate::control_object::ControlObjectLoadError;
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::load_head_object;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -55,7 +55,7 @@ pub async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<VerifiedNamespaceCatalogEntry, NamespaceCatalogLoadError> {
-    let head = read_head_object(store, expected_namespace_id).await?;
+    let head = load_head_object(store, expected_namespace_id).await?;
     Ok(VerifiedNamespaceCatalogEntry::from_head(&head.state))
 }
 

@@ -1,4 +1,4 @@
-//! The WAL flush: fold the visible WAL tail into metadata tables under a
+//! The WAL flush: merge the visible WAL tail into metadata tables under a
 //! manifest covering the current head and advance `metadata/root.json` by
 //! compare-and-swap, creating no durable checkpoint record.
 //!
@@ -23,10 +23,10 @@ use crate::error::Result;
 use crate::limits::{CONTENTION_RETRY_LIMIT, METADATA_PUBLICATION_BUDGET_MS};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{
-    advanced_floor_without_root, namespace_birth_seq, read_head_and_metadata_basis,
+    advanced_floor_without_root, load_head_and_metadata_basis, namespace_birth_seq,
     resolve_retention_floor_seq, MetadataBasis,
 };
-use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
@@ -228,7 +228,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<RootProjection<'a, S>> {
-    let loaded = read_head_and_metadata_basis(store, namespace_id)
+    let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
     let head = loaded.head.state;
@@ -356,7 +356,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
 
     // A WAL flush is manifest-only: every prior run is referenced
     // unchanged and the WAL delta lands as one new L0 run, so the cost
-    // follows the delta, never the namespace. Folding L0 runs back into the
+    // follows the delta, never the namespace. Merging L0 runs back into the
     // base is reorganization's job (`reorganize.rs`), off this path.
     //
     // The genesis basis is the exception: it has no run to extend and its

@@ -2,7 +2,7 @@
 // Lifecycle assertions use panic for precise failure diagnostics.
 
 //! Host-composed grep over the runtime handles, plus direct `GrepWorker`
-//! building and folding.
+//! building and reorganizing.
 
 use crate::common::{is_content_object, GrepHost};
 use loonfs::publish::{CommitRequest, FilesystemOperation};
@@ -64,7 +64,7 @@ async fn drive_worker_step(
     worker
         .reorganize_step(namespace_id, policy)
         .await
-        .expect("grep fold step");
+        .expect("grep reorganization step");
 }
 
 /// The watermark from the namespace's verified grep root.
@@ -592,13 +592,13 @@ async fn collect_grep_paths(
     }
 }
 
-/// Ten one-file rounds cross the default delta-fold threshold, so the
-/// worker steps tier the index (delta segments fold into a mid run)
+/// Ten one-file rounds cross the default delta-reorganization threshold, so the
+/// worker steps tier the index (delta segments reorganize into a mid run)
 /// while the rounds run. Grep must answer identically before, across, and
-/// after the transition — levels are fold bookkeeping the read path never
+/// after the transition — levels are reorganization bookkeeping the read path never
 /// sees.
 #[tokio::test]
-async fn grep_answers_identically_across_tiered_folds() {
+async fn grep_answers_identically_across_tiered_reorganizations() {
     let temp_dir = tempdir().expect("tempdir");
     let store: loonfs::SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -662,7 +662,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         .collect();
     assert!(
         grams_levels.contains(&1),
-        "ten one-delta rounds must fold at least once into a mid run, got levels {grams_levels:?}"
+        "ten one-delta rounds must reorganize at least once into a mid run, got levels {grams_levels:?}"
     );
 
     writer.shutdown().await.expect("writer shutdown");
@@ -989,7 +989,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// A worker's partial fold leaves its input segments query-visible. The
+/// A worker's partial reorganization leaves its input segments query-visible. The
 /// service composed over the same cache must hit those worker-loaded blocks
 /// instead of retaining and reading a second decoded copy.
 #[tokio::test]
@@ -1033,33 +1033,33 @@ async fn worker_and_service_share_decoded_index_blocks() {
             .expect("build delta segment");
     }
 
-    // One decoded row cannot exhaust the fold, so its loaded snapshot
+    // One decoded row cannot exhaust the reorganization, so its loaded snapshot
     // segments remain visible to the following service read.
-    let fold_policy = GramIndexBuildPolicy {
+    let reorganize_policy = GramIndexBuildPolicy {
         max_decoded_input_rows_per_step: nonzero_usize(1),
         ..GramIndexBuildPolicy::default()
     };
-    let gets_before_fold = raw_store.count(OperationClass::Read);
-    let stats_before_fold = host.block_cache.stats();
-    let fold = host
+    let gets_before_reorganization = raw_store.count(OperationClass::Read);
+    let stats_before_reorganization = host.block_cache.stats();
+    let reorganization = host
         .worker
-        .reorganize_step(&namespace_id, fold_policy)
+        .reorganize_step(&namespace_id, reorganize_policy)
         .await
-        .expect("partial fold");
+        .expect("partial reorganization");
     assert!(matches!(
-        fold.outcome,
-        GrepReorganizeOutcome::StepPublished {
+        reorganization.outcome,
+        GrepReorganizeOutcome::UnitPublished {
             completed: false,
             ..
         }
     ));
     assert!(
-        raw_store.count(OperationClass::Read) > gets_before_fold,
+        raw_store.count(OperationClass::Read) > gets_before_reorganization,
         "the worker must load its snapshot's segment blocks"
     );
-    let stats_after_fold = host.block_cache.stats();
+    let stats_after_reorganization = host.block_cache.stats();
     assert!(
-        stats_after_fold.inserts > stats_before_fold.inserts,
+        stats_after_reorganization.inserts > stats_before_reorganization.inserts,
         "the worker must publish decoded blocks to the shared cache"
     );
 
@@ -1075,32 +1075,32 @@ async fn worker_and_service_share_decoded_index_blocks() {
         "the service must not refetch index-segment sections the worker warmed"
     );
     assert!(
-        host.block_cache.stats().hits > stats_after_fold.hits,
+        host.block_cache.stats().hits > stats_after_reorganization.hits,
         "the service must hit blocks inserted by the worker"
     );
 
     writer.shutdown().await.expect("writer shutdown");
 }
 
-/// A cold fold — nothing decoded its snapshot before — must fan out its
+/// A cold reorganization — nothing decoded its snapshot before — must fan out its
 /// per-segment cursor opens instead of paying one round trip per
 /// segment, and the fan-out must stay within the maintenance IO cap.
 ///
-/// Put-and-step rounds accumulate delta runs until the threshold folds
-/// them; single-step steps lag the puts and may batch two puts into one
-/// run, so the rounds run until the fold's reads appear rather than to a
+/// Put-and-step rounds accumulate delta runs until the threshold reorganizes
+/// them; individual steps lag the puts and may batch two puts into one
+/// run, so the rounds run until the reorganization's reads appear rather than to a
 /// fixed count. No query ever touches the namespace and build steps only
-/// write gram segments, so the fold's reads are the only gram-segment
-/// GETs the probe can see: the peak measures exactly the fold's opens.
+/// write gram segments, so the reorganization's reads are the only gram-segment
+/// GETs the probe can see: the peak measures exactly the reorganization's opens.
 #[tokio::test]
-async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
+async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(ConcurrencyWatchStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         index_segment_keys(),
     ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
-    let namespace_id = NamespaceId::parse("grams-fold-fan-out").expect("namespace id");
+    let namespace_id = NamespaceId::parse("grams-reorganization-fan-out").expect("namespace id");
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fan-out-writer")
@@ -1117,15 +1117,15 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     // Each round writes one file and runs one bounded build step plus
-    // one bounded fold step; the first gram-segment GET is, by
-    // construction, the triggered fold reading its snapshot of every
+    // one bounded reorganization step; the first gram-segment GET is, by
+    // construction, the triggered reorganization reading its snapshot of every
     // accumulated delta run.
     let mut rounds = 0u32;
     while raw_store.reads().peak_in_flight == 0 {
         rounds += 1;
         assert!(
             rounds <= 24,
-            "the delta threshold must fold within a bounded number of rounds"
+            "the delta threshold must trigger reorganization within a bounded number of rounds"
         );
         writer
             .put_file_bytes(
@@ -1142,15 +1142,15 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
     let peak = raw_store.reads().peak_in_flight;
     assert!(
         peak > 1,
-        "a cold fold's segment opens must overlap, got a serial peak of {peak}"
+        "a cold reorganization's segment opens must overlap, got a serial peak of {peak}"
     );
     assert!(
         peak <= 8,
-        "the fold's fan-out must respect the maintenance IO cap, got {peak}"
+        "the reorganization's fan-out must respect the maintenance IO cap, got {peak}"
     );
 
     // The premise of the probe: the reads the peak observed were a real
-    // delta fold, which leaves a mid run behind.
+    // delta reorganization, which leaves a mid run behind.
     let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
         .await
         .expect("load grep root")
@@ -1163,7 +1163,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
         .collect();
     assert!(
         grams.contains(&1),
-        "the observed fold must have left a mid run behind, got {grams:?}"
+        "the observed reorganization must have left a mid run behind, got {grams:?}"
     );
 
     writer.shutdown().await.expect("writer shutdown");

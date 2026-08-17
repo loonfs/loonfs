@@ -17,10 +17,9 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
-use crate::namespace::basis::read_head_and_metadata_basis;
+use crate::namespace::basis::load_head_and_metadata_basis;
 use futures::StreamExt;
-use loonfs_api::v0::GcResponse;
-use loonfs_api::{ContentStoreId, NamespaceId, RetainedReason, UploadId};
+use loonfs_api::{ContentStoreId, GcResponse, NamespaceId, RetainedReason, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -69,7 +68,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // the content store a session's object lives in. The metadata root is
     // read alongside it and charged with it as one unit.
     budget.charge();
-    let loaded = match read_head_and_metadata_basis(store, namespace_id).await {
+    let loaded = match load_head_and_metadata_basis(store, namespace_id).await {
         Ok(loaded) => loaded,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
         Err(error) => return Err(CoreError::load_head(error)),
