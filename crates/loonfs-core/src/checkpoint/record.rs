@@ -21,8 +21,7 @@ use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, CheckpointRecordEnvelope, CheckpointRecordLifecycle,
-    CheckpointRecordState, ControlObjectKind,
+    encode_control_state, CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
 };
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
@@ -32,19 +31,12 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 pub(crate) fn encode_checkpoint_record(
     record: &CheckpointRecordState,
 ) -> crate::error::Result<Bytes> {
-    let envelope =
-        CheckpointRecordEnvelope::from_state(ControlObjectKind::CheckpointRecord, record.clone())
-            .map_err(|error| {
-            CoreError::Internal(format!(
-                "failed to build checkpoint record envelope: {error}"
-            ))
-        })?;
-    encode_control_object(&envelope)
+    let object_key = checkpoint_record(&record.namespace_id, &record.checkpoint_id);
+    encode_control_state(ControlObjectKind::CheckpointRecord, record)
         .map(Bytes::from)
-        .map_err(|error| {
-            CoreError::Internal(format!(
-                "failed to encode checkpoint record object: {error}"
-            ))
+        .map_err(|error| CoreError::Codec {
+            object_key,
+            message: error.to_string(),
         })
 }
 

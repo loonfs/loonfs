@@ -182,16 +182,11 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
         }
     }
 
-    let has_more = files.len() > request.limit.as_usize();
-    if has_more {
-        files.truncate(request.limit.as_usize());
-    }
-    let next_cursor = has_more.then(|| CheckpointFilesPageCursor {
-        after_inode_id: files
-            .last()
-            .expect("a non-zero page limit with more files must return a file")
-            .inode_id,
-    });
+    let next_cursor = request
+        .limit
+        .finish_page(&mut files, |last| CheckpointFilesPageCursor {
+            after_inode_id: last.inode_id,
+        });
     Ok(CheckpointFilesPage {
         checkpoint_seq,
         files,

@@ -52,8 +52,9 @@ pub struct MetadataMaintenanceOptions {
 impl Default for MetadataMaintenanceOptions {
     fn default() -> Self {
         Self {
-            max_wal_tail_segments: NonZeroU64::new(WalTailPolicy::DEFAULT.checkpoint_at_segments)
-                .expect("the default flush threshold is non-zero"),
+            max_wal_tail_segments: const {
+                NonZeroU64::new(WalTailPolicy::DEFAULT.checkpoint_at_segments).unwrap()
+            },
         }
     }
 }
@@ -199,8 +200,7 @@ pub struct ReadFileStreamOptions {
 impl Default for ReadFileStreamOptions {
     fn default() -> Self {
         Self {
-            chunk_bytes: NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES)
-                .expect("the default read chunk size is non-zero"),
+            chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
             start_offset: 0,
         }
     }

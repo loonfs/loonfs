@@ -43,8 +43,8 @@ use crate::limits::{
 use crate::timing::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, MetadataCompactionLeaseEnvelope,
-    MetadataCompactionLeaseState, MetadataCompactionLeaseStatus,
+    encode_control_state, ControlObjectKind, MetadataCompactionLeaseState,
+    MetadataCompactionLeaseStatus,
 };
 use loonfs_api::{MetadataCompactionId, NamespaceId};
 use loonfs_objectstore::keys::metadata_compaction_lease;
@@ -345,14 +345,11 @@ impl<'a> CompactionLease<'a> {
 }
 
 fn encode_lease(state: &MetadataCompactionLeaseState) -> Result<Bytes> {
-    let envelope = MetadataCompactionLeaseEnvelope::from_state(
-        ControlObjectKind::CompactionLease,
-        state.clone(),
-    )
-    .map_err(|error| CoreError::Internal(format!("failed to build a compaction lease: {error}")))?;
-    encode_control_object(&envelope)
+    let object_key = metadata_compaction_lease(&state.namespace_id, &state.job_id);
+    encode_control_state(ControlObjectKind::CompactionLease, state)
         .map(Bytes::from)
-        .map_err(|error| {
-            CoreError::Internal(format!("failed to encode a compaction lease: {error}"))
+        .map_err(|error| CoreError::Codec {
+            object_key,
+            message: error.to_string(),
         })
 }

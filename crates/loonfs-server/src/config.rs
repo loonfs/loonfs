@@ -546,7 +546,7 @@ impl ServerConfig {
             });
         }
         require_non_empty("content_token_secret", self.content_token_secret.expose())?;
-        self.store.validate().map_err(ServerConfigError::from)?;
+        self.store.validate()?;
 
         Ok(())
     }

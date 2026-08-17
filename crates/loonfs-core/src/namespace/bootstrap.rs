@@ -12,8 +12,7 @@ use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceState,
-    WriterBlock,
+    encode_control_state, ControlObjectKind, HeadState, NamespaceState, WriterBlock,
 };
 use loonfs_api::{
     ChangeSeq, ContentStoreId, ErrorCode, InodeKind, NamespaceId, NamespaceStatusResponse,
@@ -156,10 +155,12 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
     head: &HeadState,
 ) -> Result<NamespaceHeadInstall, CoreError> {
     let object_key = wal_head(namespace_id);
-    let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head.clone())
-        .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
-    let bytes = encode_control_object(&envelope)
-        .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
+    let bytes = encode_control_state(ControlObjectKind::WalHead, head).map_err(|error| {
+        CoreError::Codec {
+            object_key: object_key.clone(),
+            message: error.to_string(),
+        }
+    })?;
     // The namespace head is mutable control state, so installation must be a conditional create.
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
         Ok(_) => Ok(NamespaceHeadInstall::Landed),

@@ -945,7 +945,7 @@ fn tail_count_from_contiguous_hints_covers_the_longest_legal_tail() {
     let chain = prepared_unstored_chain(&namespace_id, boundary);
     let hints = newest_first_pointers(&chain);
 
-    let count = count_visible_wal_tail_segments(tail_count_request(
+    let count = count_visible_wal_tail_segments(&tail_count_request(
         &namespace_id,
         ChangeSeq(0),
         ChangeSeq(boundary),
@@ -956,7 +956,7 @@ fn tail_count_from_contiguous_hints_covers_the_longest_legal_tail() {
 
     // A manifest boundary inside the hinted window is honored: only the
     // segments above it are tail.
-    let count = count_visible_wal_tail_segments(tail_count_request(
+    let count = count_visible_wal_tail_segments(&tail_count_request(
         &namespace_id,
         ChangeSeq(boundary - 1),
         ChangeSeq(boundary),
@@ -966,7 +966,7 @@ fn tail_count_from_contiguous_hints_covers_the_longest_legal_tail() {
     assert_eq!(count, 1);
 
     // An empty tail costs nothing and consults nothing.
-    let count = count_visible_wal_tail_segments(tail_count_request(
+    let count = count_visible_wal_tail_segments(&tail_count_request(
         &namespace_id,
         ChangeSeq(boundary),
         ChangeSeq(boundary),
@@ -987,7 +987,7 @@ fn wal_tail_segment_count_is_identical_across_head_hint_reshape() {
     let former_public_count =
         u64::try_from(former_tip_inclusive_hints.len()).expect("test tail count");
 
-    let reshaped_count = count_visible_wal_tail_segments(tail_count_request(
+    let reshaped_count = count_visible_wal_tail_segments(&tail_count_request(
         &namespace_id,
         ChangeSeq(0),
         ChangeSeq(4),
@@ -1001,7 +1001,7 @@ fn wal_tail_segment_count_is_identical_across_head_hint_reshape() {
 #[test]
 fn tail_count_at_genesis_is_zero_without_tip_or_hints() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let count = count_visible_wal_tail_segments(WalChainLoadRequest {
+    let count = count_visible_wal_tail_segments(&WalChainLoadRequest {
         namespace_id: &namespace_id,
         chain_base_seq: ChangeSeq(0),
         head_seq: ChangeSeq(0),
@@ -1025,7 +1025,7 @@ fn tail_count_rejects_a_head_that_does_not_describe_its_tail() {
     let head_seq = ChangeSeq(4);
 
     // A run that stops short of the basis boundary.
-    let error = count_visible_wal_tail_segments(tail_count_request(
+    let error = count_visible_wal_tail_segments(&tail_count_request(
         &namespace_id,
         ChangeSeq(0),
         head_seq,
@@ -1047,7 +1047,7 @@ fn tail_count_rejects_a_head_that_does_not_describe_its_tail() {
         pointers[2].clone(),
         pointers[3].clone(),
     ];
-    let error = count_visible_wal_tail_segments(tail_count_request(
+    let error = count_visible_wal_tail_segments(&tail_count_request(
         &namespace_id,
         ChangeSeq(0),
         head_seq,
@@ -1075,7 +1075,7 @@ async fn tail_count_and_chain_load_agree_where_the_head_describes_the_tail() {
     let pointers = newest_first_pointers(&chain);
 
     let request = tail_count_request(&namespace_id, ChangeSeq(0), ChangeSeq(3), &pointers);
-    let count = count_visible_wal_tail_segments(request.clone()).expect("count tail");
+    let count = count_visible_wal_tail_segments(&request).expect("count tail");
     let loaded = load_validated_wal_chain(&store, request)
         .await
         .expect("load chain");
@@ -1086,7 +1086,7 @@ async fn tail_count_and_chain_load_agree_where_the_head_describes_the_tail() {
         recent_segments: &[],
         ..tail_count_request(&namespace_id, ChangeSeq(0), ChangeSeq(3), &pointers)
     };
-    count_visible_wal_tail_segments(unhinted.clone())
+    count_visible_wal_tail_segments(&unhinted)
         .expect_err("an unhinted head describes no tail to count");
     let loaded = load_validated_wal_chain(&store, unhinted)
         .await

@@ -14,9 +14,9 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, EffectiveLimit, FileRevision, FileRevisionsPageCursor, Page,
-    PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    PageCursor, PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
     PROTOCOL_VERSION,
@@ -303,6 +303,15 @@ pub(super) fn default_page_limit() -> EffectiveLimit {
         .expect("default pagination policy must resolve its default limit")
 }
 
+pub(super) fn encode_next_cursor<C: PageCursor>(
+    cursor: Option<&C>,
+) -> std::result::Result<Option<String>, CoreError> {
+    cursor
+        .map(encode_cursor)
+        .transpose()
+        .map_err(|error| CoreError::InvalidCursor(error.to_string()))
+}
+
 pub(super) fn file_revisions_page_response(
     namespace_id: NamespaceId,
     head_seq: ChangeSeq,
@@ -318,12 +327,7 @@ pub(super) fn file_revisions_page_response(
         .ok_or_else(|| {
             CoreError::InvalidCursor("empty revision page lacks inode identity".into())
         })?;
-    let next_cursor = page
-        .next_cursor
-        .as_ref()
-        .map(encode_cursor)
-        .transpose()
-        .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+    let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
     Ok(ListFileRevisionsResponse {
         namespace_id,
         inode_id,

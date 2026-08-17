@@ -9,14 +9,13 @@ use crate::maintenance_runner::CompactionStart;
 use crate::FsAdmin;
 use crate::NamespaceStatusResponse;
 use crate::{
-    AdvanceRetentionResponse, CheckpointId, CoreError, CreateCheckpointOptions,
-    CreateCheckpointResponse, ErrorCode, FlushWalOutcome, FlushWalResponse,
-    ListCheckpointsResponse, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceOptions,
-    MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
-    SharedObjectStore, WalFlushStepOutcome,
+    AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
+    ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenancePlan,
+    MaintenanceStepResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
-use loonfs_api::{encode_cursor, PageRequest};
+use loonfs_api::PageRequest;
 use loonfs_core::cache::{load_namespace_fold_basis, load_namespace_head_summary};
 use loonfs_core::CheckpointPageCursor;
 use tokio::time::Instant;
@@ -653,11 +652,7 @@ impl FsAdmin {
         let (mut response, next_cursor) = self
             .list_checkpoints_page_typed(namespace_id, request)
             .await?;
-        response.next_cursor = next_cursor
-            .as_ref()
-            .map(encode_cursor)
-            .transpose()
-            .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+        response.next_cursor = super::core::encode_next_cursor(next_cursor.as_ref())?;
         Ok(response)
     }
 

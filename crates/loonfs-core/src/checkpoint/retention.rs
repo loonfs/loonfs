@@ -11,9 +11,7 @@ use crate::namespace::control::{
     read_head_object, read_metadata_root_object_if_present, read_wal_floor_object,
 };
 use bytes::Bytes;
-use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, WalFloorEnvelope, WalFloorState,
-};
+use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, WalFloorState};
 use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -92,14 +90,14 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             verified_at_ms: context.now_ms,
             updated_at_ms: context.now_ms,
         };
-        let envelope =
-            WalFloorEnvelope::from_state(ControlObjectKind::WalFloor, next).map_err(|err| {
-                CoreError::Internal(format!("failed to build wal floor envelope: {err}"))
-            })?;
-        let encoded = encode_control_object(&envelope).map_err(|err| {
-            CoreError::Internal(format!("failed to encode wal floor object: {err}"))
-        })?;
         let object_key = loonfs_objectstore::keys::wal_floor(namespace_id);
+        let encoded =
+            encode_control_state(ControlObjectKind::WalFloor, &next).map_err(|error| {
+                CoreError::Codec {
+                    object_key: object_key.clone(),
+                    message: error.to_string(),
+                }
+            })?;
         let published = match &loaded {
             Some(loaded) => {
                 store

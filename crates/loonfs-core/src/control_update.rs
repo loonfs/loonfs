@@ -9,8 +9,7 @@ use crate::error::{CoreError, StoreFailureClass};
 use crate::namespace::control::{read_head_object, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, UploadSessionEnvelope,
-    UploadSessionState,
+    encode_control_state, ControlObjectKind, HeadState, UploadSessionState,
 };
 use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::upload_session;
@@ -144,16 +143,11 @@ where
     match update(loaded.state).await? {
         UploadSessionUpdate::Noop(outcome) => Ok(UploadSessionCas::Applied(outcome)),
         UploadSessionUpdate::Replace { next, outcome } => {
-            let envelope =
-                UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, *next)
-                    .map_err(|err| {
-                        CoreError::Internal(format!(
-                            "failed to build upload session envelope: {err}"
-                        ))
-                    })?;
-            let encoded = encode_control_object(&envelope).map_err(|err| {
-                CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
-            })?;
+            let encoded = encode_control_state(ControlObjectKind::UploadSession, next.as_ref())
+                .map_err(|error| CoreError::Codec {
+                    object_key: loaded.object_key.clone(),
+                    message: error.to_string(),
+                })?;
             match store
                 .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
                 .await
@@ -167,16 +161,11 @@ where
 }
 
 fn encode_head(next: HeadState, object_key: &str) -> Result<Vec<u8>, ControlUpdateError> {
-    let envelope =
-        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, next).map_err(|err| {
-            ControlUpdateError::Codec {
-                object_key: object_key.to_owned(),
-                message: err.to_string(),
-            }
-        })?;
-    encode_control_object(&envelope).map_err(|err| ControlUpdateError::Codec {
-        object_key: object_key.to_owned(),
-        message: err.to_string(),
+    encode_control_state(ControlObjectKind::WalHead, &next).map_err(|err| {
+        ControlUpdateError::Codec {
+            object_key: object_key.to_owned(),
+            message: err.to_string(),
+        }
     })
 }
 
@@ -222,7 +211,7 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::{ControlObjectKind, HeadStateEnvelope};
+    use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
     use loonfs_api::NamespaceId;
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;

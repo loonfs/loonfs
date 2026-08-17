@@ -21,7 +21,7 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
 };
-use loonfs_api::{Checkpoint, CheckpointId, CreateCheckpointResponse, NamespaceId};
+use loonfs_api::{CheckpointId, CreateCheckpointResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 #[cfg(test)]
@@ -105,17 +105,9 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
             <= CHECKPOINT_VERIFY_BUDGET_MS;
         if verification == CheckpointBasisVerification::Verified && within_budget {
-            let expires_at_ms = record.owner.expires_at_ms();
             return Ok(CreateCheckpointResponse {
                 namespace_id: namespace_id.clone(),
-                checkpoint: Checkpoint {
-                    checkpoint_id: record.checkpoint_id,
-                    owner: super::checkpoint_owner_summary(record.owner),
-                    created_at_ms: record.created_at_ms,
-                    expires_at_ms,
-                    checkpoint_seq: record.manifest_head_seq,
-                    manifest_id: record.manifest_id,
-                },
+                checkpoint: super::checkpoint_summary(record),
             });
         }
 

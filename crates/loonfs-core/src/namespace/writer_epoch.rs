@@ -5,13 +5,12 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
 use crate::error::StoreFailureClass;
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState, WriterBlock};
 use loonfs_api::{next_public_ordinal, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-const MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WriterEpochAcquireError {
@@ -59,31 +58,26 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         return Err(WriterEpochAcquireError::EmptyWriterId);
     }
 
-    update_head(
-        store,
-        namespace_id,
-        MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
-        |loaded_head| {
-            let head = &loaded_head.state;
-            // Check for deletion before incrementing the epoch. A deleted namespace
-            // never grants another writer epoch, including to the writer recorded in
-            // its tombstone.
-            if head.state == NamespaceState::Deleted {
-                return Err(WriterEpochAcquireError::NamespaceDeleted {
-                    namespace_id: head.namespace_id.clone(),
-                });
-            }
+    update_head(store, namespace_id, CONTENTION_RETRY_LIMIT, |loaded_head| {
+        let head = &loaded_head.state;
+        // Check for deletion before incrementing the epoch. A deleted namespace
+        // never grants another writer epoch, including to the writer recorded in
+        // its tombstone.
+        if head.state == NamespaceState::Deleted {
+            return Err(WriterEpochAcquireError::NamespaceDeleted {
+                namespace_id: head.namespace_id.clone(),
+            });
+        }
 
-            let next_epoch = next_writer_epoch(head.writer_epoch)?;
-            Ok(HeadReplacement {
-                next: Box::new(head_with_writer(head, next_epoch, context)),
-                outcome: AcquiredWriter {
-                    writer_id: context.writer_id.clone(),
-                    writer_epoch: next_epoch,
-                },
-            })
-        },
-    )
+        let next_epoch = next_writer_epoch(head.writer_epoch)?;
+        Ok(HeadReplacement {
+            next: Box::new(head_with_writer(head, next_epoch, context)),
+            outcome: AcquiredWriter {
+                writer_id: context.writer_id.clone(),
+                writer_epoch: next_epoch,
+            },
+        })
+    })
     .await
 }
 

@@ -1,17 +1,15 @@
 //! Namespace deletion: a fenced, terminal head-state transition.
 
 use crate::error::CoreError;
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::control::read_head_object;
 use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, AcquiredWriter, ControlObjectKind, HeadState, HeadStateEnvelope,
-    NamespaceState,
+    encode_control_state, AcquiredWriter, ControlObjectKind, HeadState, NamespaceState,
 };
 use loonfs_api::{DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
-
-const MAX_DELETE_CAS_ATTEMPTS: usize = 8;
 
 /// Deletes a namespace by compare-and-swapping its head into the terminal
 /// `deleted` state (format spec, "Tombstones and deletion").
@@ -47,7 +45,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
 ) -> Result<DeleteNamespaceResponse, CoreError> {
     let mut attempted_swap = false;
-    for _attempt in 0..MAX_DELETE_CAS_ATTEMPTS {
+    for _attempt in 0..CONTENTION_RETRY_LIMIT {
         let loaded = read_head_object(store, namespace_id)
             .await
             .map_err(|error| CoreError::MetadataProjection(error.into()))?;
@@ -96,10 +94,13 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             state: NamespaceState::Deleted,
             ..head.clone()
         };
-        let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, deleted_head)
-            .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
-        let encoded = encode_control_object(&envelope)
-            .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
+        let encoded =
+            encode_control_state(ControlObjectKind::WalHead, &deleted_head).map_err(|error| {
+                CoreError::Codec {
+                    object_key: loaded.object_key.clone(),
+                    message: error.to_string(),
+                }
+            })?;
 
         let swap = store
             .put(

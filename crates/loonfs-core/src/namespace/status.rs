@@ -96,7 +96,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceStatusResponse> {
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
-    let wal_tail_segments = count_visible_wal_tail_segments(WalChainLoadRequest {
+    let wal_tail_segments = count_visible_wal_tail_segments(&WalChainLoadRequest {
         namespace_id: expected_namespace_id,
         chain_base_seq: loaded.basis_head_seq,
         head_seq: loaded.head.seq,

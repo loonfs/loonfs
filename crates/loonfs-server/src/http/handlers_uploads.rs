@@ -479,6 +479,17 @@ fn content_token_error(error: ContentTokenError) -> ApiResponseError {
     )
 }
 
+fn with_content_token(
+    mut response: UploadSessionResponse,
+    verifier: ContentTokenVerifier<'_>,
+    receipt: Option<&CompletedUploadReceipt>,
+) -> Result<UploadSessionResponse, ApiResponseError> {
+    if let UploadSessionStatus::Completed { content_token, .. } = &mut response.status {
+        *content_token = verifier.mint_receipt(receipt)?;
+    }
+    Ok(response)
+}
+
 #[allow(clippy::disallowed_methods)]
 pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
     // Request timestamps enter wall time at this HTTP API boundary so core
@@ -606,12 +617,11 @@ pub(super) async fn complete_upload(
         })
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    let mut response = completed.response;
-    if let UploadSessionStatus::Completed { content_token, .. } = &mut response.status {
-        *content_token = ContentTokenVerifier::new(state.config.content_token_secret())
-            .mint_receipt(completed.receipt.as_ref())?;
-    }
-    Ok(Json(response))
+    Ok(Json(with_content_token(
+        completed.response,
+        ContentTokenVerifier::new(state.config.content_token_secret()),
+        completed.receipt.as_ref(),
+    )?))
 }
 
 fn decode_completion_body(
@@ -799,16 +809,16 @@ pub(super) async fn read_upload_status(
     let namespace_id = namespace_id_path.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
-    let (mut response, receipt) = state
+    let (response, receipt) = state
         .writer
         .read_upload_status(&namespace_id, &upload_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    if let UploadSessionStatus::Completed { content_token, .. } = &mut response.status {
-        *content_token = ContentTokenVerifier::new(state.config.content_token_secret())
-            .mint_receipt(receipt.as_ref())?;
-    }
-    Ok(Json(response))
+    Ok(Json(with_content_token(
+        response,
+        ContentTokenVerifier::new(state.config.content_token_secret()),
+        receipt.as_ref(),
+    )?))
 }
 
 #[cfg_attr(

@@ -6,7 +6,7 @@ use crate::limits::RECENT_SEGMENTS_LIMIT;
 use crate::wal::PreparedWalSegment;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, WalSegmentPointer,
+    encode_control_state, ControlObjectKind, HeadState, WalSegmentPointer,
 };
 use loonfs_api::{next_public_ordinal, ChangeSeq};
 use loonfs_objectstore::keys::wal_head;
@@ -97,17 +97,12 @@ pub(crate) fn prepare_commit_head_publish(
     current_head
         .ensure_successor_identity(&resulting_head)
         .map_err(CommitHeadPublishError::HeadIdentityDrift)?;
-    let envelope =
-        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, resulting_head.clone()).map_err(
-            |err| CommitHeadPublishError::Codec {
+    let encoded_bytes =
+        encode_control_state(ControlObjectKind::WalHead, &resulting_head).map_err(|err| {
+            CommitHeadPublishError::Codec {
                 object_key: object_key.clone(),
                 message: err.to_string(),
-            },
-        )?;
-    let encoded_bytes =
-        encode_control_object(&envelope).map_err(|err| CommitHeadPublishError::Codec {
-            object_key: object_key.clone(),
-            message: err.to_string(),
+            }
         })?;
 
     Ok(PreparedCommitHeadPublish {
@@ -167,6 +162,7 @@ fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHead
 mod tests {
     use super::*;
     use crate::commit::CommitFingerprint;
+    use loonfs_api::wire::control::{encode_control_object, HeadStateEnvelope};
 
     #[test]
     fn head_cas_transport_failure_maps_to_unknown_outcome_not_failure() {

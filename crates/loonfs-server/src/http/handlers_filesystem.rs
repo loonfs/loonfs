@@ -26,9 +26,9 @@ use loonfs_api::ApiError;
 use loonfs_api::{
     decode_cursor,
     v0::{ChangesResponse, CommitResponse as ApiCommitResponse},
-    CommitRequest as ApiCommitRequest, DirectoryPageCursor, FileRevisionsPageCursor,
-    FilesystemOperation, LimitError, ListFileRevisionsResponse, ListTrashResponse, PageCursorError,
-    PageRequest, PaginationPolicy, PublicOrdinalRangeError, RevisionNo,
+    CommitRequest as ApiCommitRequest, FilesystemOperation, LimitError, ListFileRevisionsResponse,
+    ListTrashResponse, PageCursorError, PageRequest, PaginationPolicy, PublicOrdinalRangeError,
+    RevisionNo,
 };
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -213,7 +213,7 @@ pub(super) async fn list_path_entries(
             &path,
             PageRequest {
                 limit: resolve_page_limit(query.limit)?,
-                cursor: decode_directory_page_cursor(query.cursor)?,
+                cursor: decode_optional_cursor(query.cursor)?,
             },
             options,
         )
@@ -415,7 +415,7 @@ pub(super) async fn list_file_revisions(
             &path,
             PageRequest {
                 limit: resolve_page_limit(query.limit)?,
-                cursor: decode_file_revisions_page_cursor(query.cursor)?,
+                cursor: decode_optional_cursor(query.cursor)?,
             },
         )
         .await
@@ -648,29 +648,9 @@ fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
     })
 }
 
-fn decode_directory_page_cursor(
-    cursor: Option<String>,
-) -> Result<Option<DirectoryPageCursor>, ApiResponseError> {
-    cursor
-        .as_deref()
-        .map(decode_cursor)
-        .transpose()
-        .map_err(page_cursor_response_error)
-}
-
-fn decode_optional_cursor<C: loonfs_api::PageCursor>(
+pub(super) fn decode_optional_cursor<C: loonfs_api::PageCursor>(
     cursor: Option<String>,
 ) -> Result<Option<C>, ApiResponseError> {
-    cursor
-        .as_deref()
-        .map(decode_cursor)
-        .transpose()
-        .map_err(page_cursor_response_error)
-}
-
-pub(super) fn decode_file_revisions_page_cursor(
-    cursor: Option<String>,
-) -> Result<Option<FileRevisionsPageCursor>, ApiResponseError> {
     cursor
         .as_deref()
         .map(decode_cursor)

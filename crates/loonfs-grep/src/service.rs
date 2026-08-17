@@ -97,8 +97,7 @@ impl GrepService {
         namespace_id: &NamespaceId,
     ) -> Result<MaterializedGrepIndexSnapshot> {
         let pointer = load_grep_root_pointer(store, namespace_id)
-            .await
-            .map_err(GrepError::from)?
+            .await?
             .ok_or(GrepError::NotEnabled)?;
         let manifest_id = pointer.pointer().manifest_id();
         let cache_key = GrepBlockCacheKey {
@@ -110,8 +109,7 @@ impl GrepService {
             .block_cache
             .get_or_load(&cache_key, || async {
                 let manifest = load_grep_manifest(store, namespace_id, pointer.pointer())
-                    .await
-                    .map_err(GrepError::from)?
+                    .await?
                     .ok_or_else(|| GrepError::CorruptIndex {
                         message: format!(
                             "grep root `{}` names missing manifest `{}`",

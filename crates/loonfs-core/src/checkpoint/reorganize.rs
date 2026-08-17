@@ -47,6 +47,7 @@ use loonfs_api::wire::manifest::{
     MetadataFileRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -834,10 +835,12 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
     // hex characters, so the key is this unit's alone and a conflict under it
     // is corruption rather than contention.
     let manifest_id = next_manifest_id_after(previous.payload.manifest_id)?;
+    let manifest_object_id = ManifestObjectId::generate(manifest_id);
+    let object_key = metadata_manifest_object(namespace_id, &manifest_object_id);
     let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_id,
-        manifest_object_id: ManifestObjectId::generate(manifest_id),
+        manifest_object_id,
         head_seq: previous.payload.head_seq,
         head_commit_id: previous.payload.head_commit_id.clone(),
         base_seq,
@@ -846,7 +849,10 @@ pub(super) async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
         retention_floor_seq,
         metadata_files,
     })
-    .map_err(|err| CoreError::Internal(format!("failed to build reorganized manifest: {err}")))?;
+    .map_err(|error| CoreError::Codec {
+        object_key,
+        message: error.to_string(),
+    })?;
     write_namespace_manifest(store, &manifest)
         .await
         .map_err(manifest_write_failure)?;
