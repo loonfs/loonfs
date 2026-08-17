@@ -514,11 +514,7 @@ impl RuntimeTestExt for TestRuntime {
             let submissions = requests
                 .into_iter()
                 .map(|request| publisher.submit_commit(namespace_id.clone(), request));
-            futures::future::join_all(submissions)
-                .await
-                .into_iter()
-                .map(|result| result.map_err(RuntimeError::Core))
-                .collect()
+            futures::future::join_all(submissions).await
         })
     }
 

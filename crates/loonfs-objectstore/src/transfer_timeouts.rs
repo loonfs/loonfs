@@ -137,6 +137,9 @@ impl Body for IdleDeadlineBody {
     type Data = Bytes;
     type Error = HttpError;
 
+    #[allow(clippy::disallowed_methods)]
+    // The response-body idle deadline is a transport boundary, so its
+    // monotonic timestamp reaches neither durable bytes nor protocol replay.
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -206,7 +209,7 @@ mod tests {
             let frames = self
                 .frames
                 .lock()
-                .expect("frames")
+                .expect("scripted response frames lock should not be poisoned")
                 .take()
                 .expect("one response per scripted service");
             let body = DelayedFrames {
@@ -240,7 +243,7 @@ mod tests {
                 let sleep = Box::pin(tokio::time::sleep(delay));
                 this.armed = Some((sleep, bytes));
             }
-            let (sleep, _) = this.armed.as_mut().expect("armed frame");
+            let (sleep, _) = this.armed.as_mut().expect("pending frame should be armed");
             match sleep.as_mut().poll(cx) {
                 Poll::Ready(()) => {
                     let (_, bytes) = this.armed.take().expect("armed frame");

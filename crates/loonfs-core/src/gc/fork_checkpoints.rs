@@ -1,6 +1,5 @@
 //! Release rules for fork-owned and missing-basis checkpoint records.
 
-use super::reap::lease_expired;
 use crate::checkpoint::record::{
     encode_checkpoint_record, load_checkpoint_record_at_key, release_checkpoint_record,
 };
@@ -8,9 +7,7 @@ use crate::context::MutationContext;
 use crate::control_object::{core_control_load_error, ControlObjectLoadError};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::read_head_object;
-use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState, NamespaceState,
-};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle, NamespaceState};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
@@ -89,12 +86,12 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     }
     let CheckpointOwner::Fork {
         target_namespace_id,
-        ..
+        expires_at_ms,
     } = &record.owner
     else {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     };
-    if !fork_target_proven_gone(store, target_namespace_id, &record, context).await? {
+    if !fork_target_proven_gone(store, target_namespace_id, *expires_at_ms, context).await? {
         return Ok(ForkCheckpointSweep::Retained);
     }
     let mut released = record;
@@ -131,13 +128,13 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
 pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     store: &S,
     target_namespace_id: &NamespaceId,
-    record: &CheckpointRecordState,
+    lease_expires_at_ms: u64,
     context: &MutationContext,
 ) -> Result<bool> {
     match read_head_object(store, target_namespace_id).await {
         Ok(loaded) => Ok(loaded.state.state == NamespaceState::Deleted),
         Err(ControlObjectLoadError::MissingObject { .. }) => {
-            Ok(lease_expired(record, context.now_ms))
+            Ok(lease_expires_at_ms <= context.now_ms)
         }
         Err(error) => match &error {
             // An unreadable target head is not verifiably deleted; retain.

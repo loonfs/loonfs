@@ -78,19 +78,15 @@ async fn prefetch_recent_segments<S: ObjectStore + ?Sized>(
 }
 
 /// One walk down the chain links, from the visible tip towards the base.
-enum WalkedChain {
-    /// The segments the walk found, oldest first.
-    Reached {
-        segments: Vec<ValidatedWalSegment>,
-        /// How many `get` requests the load issued, prefetch included. A
-        /// request that failed or missed counts, because the round trip
-        /// happened; a segment the prefetch delivered is not counted a second
-        /// time when the walk consumes it.
-        fetches: usize,
-    },
-    /// The walk spent its fetch limit before reaching the base. Its partial
-    /// chain is dropped because nothing may replay from it.
-    LimitReached { fetches: usize },
+struct WalkedChain {
+    /// The complete segments the walk found, oldest first. Empty when a
+    /// limited walk stopped early because nothing may replay a partial chain.
+    segments: Vec<ValidatedWalSegment>,
+    /// How many `get` requests the load issued, prefetch included. A request
+    /// that failed or missed counts, because the round trip happened; a
+    /// segment the prefetch delivered is not counted again when consumed.
+    fetches: usize,
+    limit_reached: bool,
 }
 
 /// Result of loading a WAL chain with a fetch limit.
@@ -127,14 +123,16 @@ pub(crate) async fn load_wal_chain_within<S: ObjectStore + ?Sized>(
     request: WalChainLoadRequest<'_>,
     max_segment_fetches: usize,
 ) -> Result<WalChainLoad, WalChainLoadError> {
-    match walk_chain(store, &request, max_segment_fetches).await? {
-        WalkedChain::Reached { segments, fetches } => Ok(WalChainLoad::Complete {
-            chain: finish_chain(&request, segments)?,
-            requests_issued: fetches,
-        }),
-        WalkedChain::LimitReached { fetches } => Ok(WalChainLoad::LimitReached {
-            requests_issued: fetches,
-        }),
+    let walked = walk_chain(store, &request, Some(max_segment_fetches)).await?;
+    if walked.limit_reached {
+        Ok(WalChainLoad::LimitReached {
+            requests_issued: walked.fetches,
+        })
+    } else {
+        Ok(WalChainLoad::Complete {
+            chain: finish_chain(&request, walked.segments)?,
+            requests_issued: walked.fetches,
+        })
     }
 }
 
@@ -149,19 +147,16 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: WalChainLoadRequest<'_>,
 ) -> Result<ValidatedWalChain, WalChainLoadError> {
-    let WalkedChain::Reached { segments, .. } = walk_chain(store, &request, usize::MAX).await?
-    else {
-        unreachable!("a namespace cannot hold `usize::MAX` WAL segments")
-    };
-    finish_chain(&request, segments)
+    let walked = walk_chain(store, &request, None).await?;
+    finish_chain(&request, walked.segments)
 }
 
-/// Walks the chain links from the visible tip down to the base, issuing at
-/// most `max_segment_fetches` requests for segment bodies.
+/// Walks the chain links from the visible tip down to the base, optionally
+/// limiting requests for segment bodies.
 async fn walk_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: &WalChainLoadRequest<'_>,
-    max_segment_fetches: usize,
+    max_segment_fetches: Option<usize>,
 ) -> Result<WalkedChain, WalChainLoadError> {
     if request.chain_base_seq > request.head_seq {
         return Err(WalChainLoadError::InvalidSeqRange {
@@ -170,9 +165,10 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
         });
     }
     if request.chain_base_seq == request.head_seq {
-        return Ok(WalkedChain::Reached {
+        return Ok(WalkedChain {
             segments: Vec::new(),
             fetches: 0,
+            limit_reached: false,
         });
     }
 
@@ -202,7 +198,8 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
     // never exceeds `max_segment_fetches`. Prefetch consumes its share first;
     // the chain walk uses the remaining budget. Because hints are ordered from
     // newest to oldest, a limited prefetch covers the segments nearest the tip.
-    let prefetched_hints = in_gap.len().min(max_segment_fetches);
+    let prefetched_hints =
+        max_segment_fetches.map_or(in_gap.len(), |limit| in_gap.len().min(limit));
     let mut fetches = prefetched_hints;
     let mut prefetched = if prefetched_hints == 0 {
         HashMap::new()
@@ -221,8 +218,12 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
             // costs nothing further.
             Some(bytes) => bytes,
             None => {
-                if fetches >= max_segment_fetches {
-                    return Ok(WalkedChain::LimitReached { fetches });
+                if max_segment_fetches.is_some_and(|limit| fetches >= limit) {
+                    return Ok(WalkedChain {
+                        segments: Vec::new(),
+                        fetches,
+                        limit_reached: true,
+                    });
                 }
                 fetches += 1;
                 store
@@ -256,9 +257,10 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
     }
 
     reversed.reverse();
-    Ok(WalkedChain::Reached {
+    Ok(WalkedChain {
         segments: reversed,
         fetches,
+        limit_reached: false,
     })
 }
 

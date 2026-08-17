@@ -4,7 +4,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs::{CoreError, RuntimeError};
+use loonfs::RuntimeError;
 use loonfs_api::{
     ApiError, CommitId, ErrorCode, ErrorDetails, ErrorKind, NamespaceId, NamespaceIdValidationError,
 };
@@ -81,35 +81,15 @@ impl ApiResponseError {
 
     pub(super) fn runtime(error: RuntimeError) -> Self {
         let code = error.code();
+        let details = error.details();
         let rendered = error.to_string();
         let message = match &error {
             RuntimeError::Config(message) => message.as_str(),
             _ => rendered.as_str(),
         };
         let mut response = Self::new(status_for_core_error_code(code), code, message);
-        if let RuntimeError::Core(error) = error {
-            response.body.details = error.details().map(Box::new);
-        }
+        response.body.details = details.map(Box::new);
         response
-    }
-
-    fn core(error: CoreError) -> Self {
-        let status = status_for_core_error_code(error.code());
-        let mut response = Self::new(status, error.code(), &error.to_string());
-        response.body.details = error.details().map(Box::new);
-        response
-    }
-
-    pub(super) fn core_for_namespace(namespace_id: &NamespaceId, error: CoreError) -> Self {
-        if matches!(error.code(), ErrorCode::NamespaceNotFound) {
-            return Self::new(
-                StatusCode::NOT_FOUND,
-                ErrorCode::NamespaceNotFound,
-                &format!("namespace `{}` does not exist", namespace_id.as_str()),
-            );
-        }
-
-        Self::core(error)
     }
 
     pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: RuntimeError) -> Self {

@@ -31,6 +31,7 @@ pub use loonfs_api::options::{
 /// surrenders replay history or sweeps objects without being named here,
 /// and a plan that names nothing is not a step.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use]
 pub struct MaintenancePlan {
     /// Fold the visible WAL tail and merge one bounded reorganization unit.
     pub metadata: Option<MetadataMaintenanceOptions>,

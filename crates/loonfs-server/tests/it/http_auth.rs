@@ -1,5 +1,7 @@
 //! HTTP content-token admission and replay behavior.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::ContentId;
@@ -32,7 +34,7 @@ fn assert_content_not_prepared_response(
     match result {
         Err(error) if matches!(error.as_ref(), ureq::Error::Status(_, _)) => {
             let ureq::Error::Status(status, response) = *error else {
-                unreachable!("guard requires an HTTP status error");
+                panic!("guard requires an HTTP status error");
             };
             assert_eq!(status, 409);
             let error: ApiError =
@@ -44,13 +46,13 @@ fn assert_content_not_prepared_response(
                 Some(request.commit_id.clone())
             );
         }
-        other => unreachable!("expected content_not_prepared response, got {other:?}"),
+        other => panic!("expected content_not_prepared response, got {other:?}"),
     }
 }
 
 fn missing_content_proof_message(request: &CommitRequest) -> String {
     let [FilesystemOperation::PutFile { content_ref, .. }] = &request.operations[..] else {
-        unreachable!("content preparation assertion requires a one-put request");
+        panic!("content preparation assertion requires a one-put request");
     };
     format!(
         "content object `{}` is not prepared for publication",
@@ -62,7 +64,7 @@ fn missing_content_proof_message(request: &CommitRequest) -> String {
 /// entry per content ref, naming the ref and why its token was refused.
 fn rejected_content_token_message(request: &CommitRequest, reason: &str) -> String {
     let [FilesystemOperation::PutFile { content_ref, .. }] = &request.operations[..] else {
-        unreachable!("content preparation assertion requires a one-put request");
+        panic!("content preparation assertion requires a one-put request");
     };
     format!(
         "content tokens were rejected: `{}`: {reason}",
@@ -465,7 +467,7 @@ async fn every_upload_session_route_requires_the_bearer_token() {
                     serde_json::from_reader(response.into_reader()).expect("decode api error");
                 assert_eq!(error.code, ErrorCode::Unauthorized.as_str());
             }
-            other => unreachable!("expected 401 for `{method} {url}`, got {other:?}"),
+            other => panic!("expected 401 for `{method} {url}`, got {other:?}"),
         }
     }
 

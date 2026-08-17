@@ -2,6 +2,8 @@
 //! instead of dropping them, and no cache lifecycle event — invalidation,
 //! LRU eviction, or running with caches disabled — erases writer fencing.
 
+#![allow(clippy::panic)]
+
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, FsWriter, NamespaceId, PutFileOptions,
@@ -57,7 +59,7 @@ fn retained_projections(recorder: &DefaultMetricsRecorder) -> i64 {
         .expect("the publisher registers its retention gauges");
     match entry.value {
         MetricValue::Gauge(value) => value,
-        ref other => unreachable!("retention is reported as a gauge, found {other:?}"),
+        ref other => panic!("retention is reported as a gauge, found {other:?}"),
     }
 }
 
@@ -73,7 +75,7 @@ fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &st
     );
     match error {
         RuntimeError::Core(loonfs::CoreError::WriterFenced(fence)) => fence,
-        other => unreachable!("{when}: {other:?}"),
+        other => panic!("{when}: {other:?}"),
     }
 }
 

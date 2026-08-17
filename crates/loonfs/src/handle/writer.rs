@@ -206,6 +206,7 @@ impl FsWriter {
 }
 
 /// Builder for [`FsWriter`].
+#[must_use]
 pub struct FsWriterBuilder {
     core: HandleBuilderCore,
     writer_id: Option<String>,

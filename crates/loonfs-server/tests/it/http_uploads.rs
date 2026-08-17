@@ -1,5 +1,7 @@
 //! HTTP upload session and upload-backed commit flows.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{
@@ -43,7 +45,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
         .send_bytes(b"hello");
     let ureq::Error::Status(status, response) = result.expect_err("invalid upload id should fail")
     else {
-        unreachable!("invalid upload id should return an HTTP status");
+        panic!("invalid upload id should return an HTTP status");
     };
     assert_eq!(status, 400);
     let error: ApiError =
@@ -94,7 +96,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
         let ureq::Error::Status(status, response) =
             result.expect_err("a mixed begin body should fail")
         else {
-            unreachable!("a rejected begin body returns an HTTP status");
+            panic!("a rejected begin body returns an HTTP status");
         };
         assert_eq!(status, 400, "body: {body}");
         let error: ApiError =
@@ -150,7 +152,7 @@ async fn stored_proxied_mode_rejects_multipart_and_retired_completion_fields_pre
         let ureq::Error::Status(status, response) =
             result.expect_err("wrong completion shape should fail")
         else {
-            unreachable!("a rejected completion body returns an HTTP status");
+            panic!("a rejected completion body returns an HTTP status");
         };
         assert_eq!(status, 400);
         let error: ApiError =
@@ -223,7 +225,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
     let ureq::Error::Status(status, response) =
         result.expect_err("unstaged content should fail session validation")
     else {
-        unreachable!("an unstaged completion returns an HTTP status");
+        panic!("an unstaged completion returns an HTTP status");
     };
     assert_eq!(status, 400);
     let error: ApiError =
@@ -245,7 +247,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
     let ureq::Error::Status(status, response) =
         result.expect_err("body above the completion cap should fail")
     else {
-        unreachable!("an oversized completion returns an HTTP status");
+        panic!("an oversized completion returns an HTTP status");
     };
     assert_eq!(status, 413);
     let error: ApiError =
@@ -301,7 +303,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
-        other => unreachable!("expected upload_content_conflict, got {other:?}"),
+        other => panic!("expected upload_content_conflict, got {other:?}"),
     }
 
     let completed = stage_uploaded_content(&harness.client, &namespace, file_bytes).await;
@@ -430,12 +432,12 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         aborted_at_ms: response_aborted_at_ms,
     } = aborted.status
     else {
-        unreachable!("abort reports an aborted session")
+        panic!("abort reports an aborted session")
     };
     let status = read_upload_status(&harness.server_url, open.upload_id());
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Aborted { aborted_at_ms } = status.status else {
-        unreachable!("an aborted session reports itself aborted");
+        panic!("an aborted session reports itself aborted");
     };
     assert_eq!(aborted_at_ms, response_aborted_at_ms);
 
@@ -462,7 +464,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         content_token,
     } = status.status
     else {
-        unreachable!("a completed session reports itself completed");
+        panic!("a completed session reports itself completed");
     };
     assert_eq!(reported_completed_at_ms, completed_at_ms);
     assert_eq!(reported_ref, content_ref);
@@ -491,7 +493,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     let ureq::Error::Status(status_code, response) =
         *abort_upload(&harness.server_url, &upload_id).expect_err("a completed session is final")
     else {
-        unreachable!("aborting a completed session should return an HTTP status");
+        panic!("aborting a completed session should return an HTTP status");
     };
     assert_eq!(status_code, 409);
     let error: ApiError =
@@ -539,7 +541,7 @@ async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
         content_token,
     } = status.status
     else {
-        unreachable!("a completed session reports itself completed");
+        panic!("a completed session reports itself completed");
     };
     assert_eq!(reported_completed_at_ms, completed_at_ms);
     assert_eq!(reported_ref, content_ref);
@@ -604,7 +606,7 @@ async fn complete_upload_session(
         ..
     } = completed.status
     else {
-        unreachable!("completion reports a completed session")
+        panic!("completion reports a completed session")
     };
     (begin.upload_id().clone(), content_ref, completed_at_ms)
 }

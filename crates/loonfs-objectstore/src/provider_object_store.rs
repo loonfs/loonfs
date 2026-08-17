@@ -1179,6 +1179,7 @@ fn mask_xml_element_text(message: &str, element: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::metrics::{
@@ -1552,7 +1553,7 @@ mod tests {
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(location)),
                 Some(WriteScript::VanishThenFail) => {
-                    unreachable!("VanishThenFail is a completion script")
+                    panic!("VanishThenFail is a completion script")
                 }
                 None => self.inner.put_opts(location, payload, opts).await,
             }
@@ -1594,7 +1595,7 @@ mod tests {
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(location)),
                 Some(WriteScript::VanishThenFail) => {
-                    unreachable!("VanishThenFail is a completion script")
+                    panic!("VanishThenFail is a completion script")
                 }
                 None => self.inner.delete(location).await,
             }
@@ -1725,7 +1726,7 @@ mod tests {
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(path)),
                 Some(WriteScript::VanishThenFail) => {
-                    unreachable!("VanishThenFail is a completion script")
+                    panic!("VanishThenFail is a completion script")
                 }
                 None => {
                     self.store_part(id, part_idx, data)?;

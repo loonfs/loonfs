@@ -11,9 +11,7 @@ use crate::codec::{
     extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
 };
 use crate::index_read::{load_data_block, load_index_block};
-use crate::keyspace::{
-    manifest_key, namespace_prefix, parse_key, root_key, segment_key, GrepKeyKind,
-};
+use crate::keyspace::{grep_prefix, manifest_key, parse_key, root_key, segment_key, GrepKeyKind};
 use crate::reads::{published_revision, NamespaceReads};
 use crate::root::{
     advance_grep_root, load_grep_root, seed_grep_root, ChangeFeedResume, GrepIndexState,
@@ -394,12 +392,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         else {
             return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
         };
-        if matches!(
-            current.manifest_state().lifecycle(),
-            GrepLifecycle::Disabled
-        ) {
-            return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
-        }
         let reads = self.reads(namespace_id);
 
         let collected = match current.manifest_state().lifecycle() {
@@ -415,7 +407,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 collect_incremental_unit(&reads, *built_through_seq, *next_event_index, policy)
                     .await
             }
-            GrepLifecycle::Disabled => unreachable!("disabled returned above"),
+            GrepLifecycle::Disabled => {
+                return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled))
+            }
         };
 
         let unit = match collected {
@@ -1307,7 +1301,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             report.namespace_degraded = true;
         }
 
-        let prefix = namespace_prefix(namespace_id);
+        let prefix = grep_prefix(namespace_id);
         let mut keys = self.store.list_prefix_stream(&prefix);
         let mut position = resume.clone();
         let mut deleted_any = false;
@@ -1459,7 +1453,7 @@ impl NamespaceCursor for GrepGcCursor {
     }
 
     fn key_prefix(&self) -> String {
-        namespace_prefix(&self.namespace_id)
+        grep_prefix(&self.namespace_id)
     }
 }
 

@@ -1,5 +1,7 @@
 //! HTTP stat, revision history, and content reads by inode ID.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
 use loonfs_api::{ApiError, ErrorCode, InodeId, RevisionNo};
@@ -26,7 +28,7 @@ fn assert_api_code<T: std::fmt::Debug>(
             assert_eq!(actual, code.as_str());
             assert_ne!(actual, ErrorCode::PathNotFound.as_str());
         }
-        other => unreachable!("expected API error, got {other:?}"),
+        other => panic!("expected API error, got {other:?}"),
     }
 }
 
@@ -272,7 +274,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .send_json(serde_json::json!({ "path": "/file.txt" }))
         .expect_err("inode download body rejects fields");
     let ureq::Error::Status(status, response) = strict_body else {
-        unreachable!("expected status response")
+        panic!("expected status response")
     };
     assert_eq!(status, 400);
     let error: ApiError =
@@ -362,7 +364,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
             let ureq::Error::Status(status, response) =
                 result.expect_err("malformed inode route should fail")
             else {
-                unreachable!("expected status response")
+                panic!("expected status response")
             };
             assert_eq!(status, 400, "{method} {url}");
             let error: ApiError = serde_json::from_reader(response.into_reader())
@@ -390,7 +392,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
             let ureq::Error::Status(status, response) =
                 result.expect_err("unauthorized malformed inode route should fail")
             else {
-                unreachable!("expected status response")
+                panic!("expected status response")
             };
             assert_eq!(status, 401, "{method} {url}");
             let error: ApiError =

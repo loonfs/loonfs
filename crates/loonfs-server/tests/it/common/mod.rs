@@ -1,6 +1,7 @@
 //! Shared fixtures for the crate's integration tests.
 
 #![allow(dead_code)]
+#![allow(clippy::panic)]
 
 use loonfs_client::{Client, ClientConfig};
 use loonfs_server::{
@@ -26,7 +27,7 @@ pub(crate) fn scrape(server_url: &str, token: Option<&str>) -> Result<BTreeMap<S
     let response = match request.call() {
         Ok(response) => response,
         Err(ureq::Error::Status(status, _)) => return Err(status),
-        Err(error) => unreachable!("metrics scrape failed: {error}"),
+        Err(error) => panic!("metrics scrape failed: {error}"),
     };
     assert_eq!(
         response.header("content-type"),
@@ -43,10 +44,10 @@ pub(crate) fn scrape(server_url: &str, token: Option<&str>) -> Result<BTreeMap<S
         .map(|line| {
             let (series, value) = line
                 .rsplit_once(' ')
-                .unwrap_or_else(|| unreachable!("exposition line without a value: {line}"));
+                .unwrap_or_else(|| panic!("exposition line without a value: {line}"));
             let value: f64 = value
                 .parse()
-                .unwrap_or_else(|_| unreachable!("unparsable value in `{line}`"));
+                .unwrap_or_else(|_| panic!("unparsable value in `{line}`"));
             (series.to_owned(), value)
         })
         .collect())
@@ -55,7 +56,7 @@ pub(crate) fn scrape(server_url: &str, token: Option<&str>) -> Result<BTreeMap<S
 pub(crate) fn series(scrape: &BTreeMap<String, f64>, name: &str) -> f64 {
     *scrape
         .get(name)
-        .unwrap_or_else(|| unreachable!("no series `{name}` in the scrape"))
+        .unwrap_or_else(|| panic!("no series `{name}` in the scrape"))
 }
 
 pub(crate) struct TestServer {
@@ -384,7 +385,7 @@ pub(crate) mod http_split_support {
             content_token,
         } = complete.status
         else {
-            unreachable!("completion reports a completed session")
+            panic!("completion reports a completed session")
         };
         let UploadSessionStatus::Completed {
             completed_at_ms: repeated_at_ms,
@@ -392,7 +393,7 @@ pub(crate) mod http_split_support {
             content_token: repeated_token,
         } = repeated.status
         else {
-            unreachable!("completion replay reports a completed session")
+            panic!("completion replay reports a completed session")
         };
         assert_eq!(repeated_at_ms, completed_at_ms);
         assert_eq!(repeated_ref, content_ref);

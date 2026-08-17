@@ -488,6 +488,9 @@ impl FsAdmin {
     /// and the segments the job wrote unreferenced, so there is nothing to
     /// undo here — the caller gives its claim back and a later step plans the
     /// group again.
+    #[allow(clippy::disallowed_methods)]
+    // Compaction duration enters monotonic time at this metrics boundary, so
+    // its value cannot affect the manifest the deterministic job publishes.
     pub(crate) async fn run_streaming_compaction(
         &self,
         namespace_id: &NamespaceId,

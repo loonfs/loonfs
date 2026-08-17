@@ -379,24 +379,34 @@ pub(super) fn build_profile_from_create_spec(
     ambient: &AmbientCredentials,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
+    enum ProfileMode {
+        Embedded,
+        Remote,
+    }
+
     let mode = match spec.mode.as_deref() {
-        Some("embedded") => "embedded".to_owned(),
-        Some("remote") => "remote".to_owned(),
+        Some("embedded") => ProfileMode::Embedded,
+        Some("remote") => ProfileMode::Remote,
         Some(other) => {
             return Err(CliError::invalid_input(format!(
                 "unknown mode: `{other}` (expected embedded or remote)"
             )))
         }
-        None if runtime.interactive => prompt::prompt_choice("mode", &["embedded", "remote"])?,
+        None if runtime.interactive => {
+            match prompt::prompt_choice("mode", &["embedded", "remote"])?.as_str() {
+                "embedded" => ProfileMode::Embedded,
+                // `prompt_choice` returns one of the two supplied values.
+                _ => ProfileMode::Remote,
+            }
+        }
         None => {
             return Err(CliError::non_interactive_field_required("mode"));
         }
     };
 
-    match mode.as_str() {
-        "embedded" => build_embedded_profile(spec, ambient, runtime),
-        "remote" => build_remote_profile(spec, ambient, runtime),
-        _ => unreachable!("mode is validated to `embedded` or `remote` above"),
+    match mode {
+        ProfileMode::Embedded => build_embedded_profile(spec, ambient, runtime),
+        ProfileMode::Remote => build_remote_profile(spec, ambient, runtime),
     }
 }
 

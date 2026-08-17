@@ -670,20 +670,21 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         )));
     }
 
-    let content_ref = ContentRef::blob_v1(loaded.content_id.clone(), bytes);
-    let response = UploadContentResponse {
-        namespace_id: namespace_id.clone(),
-        upload_id: upload_id.clone(),
-        content_ref: content_ref.clone(),
-    };
     // The claim is what makes the write exclusive, so it is taken before any
     // byte is written and released by the same swap that records the result.
     match claim_staging_slot(store, namespace_id, upload_id).await? {
-        StagingSlot::AlreadyStaged(staged) if staged == content_ref => return Ok(response),
-        StagingSlot::AlreadyStaged(_) => {
-            return Err(CoreError::UploadContentConflict {
+        StagingSlot::AlreadyStaged(staged) => {
+            let content_ref = ContentRef::blob_v1(loaded.content_id.clone(), bytes);
+            if staged != content_ref {
+                return Err(CoreError::UploadContentConflict {
+                    upload_id: upload_id.clone(),
+                });
+            }
+            return Ok(UploadContentResponse {
+                namespace_id: namespace_id.clone(),
                 upload_id: upload_id.clone(),
-            })
+                content_ref,
+            });
         }
         StagingSlot::Claimed => {}
     }

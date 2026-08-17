@@ -324,7 +324,7 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
             let deleted_direntry = match active.action {
                 SubtreeTombstoneAction::Set { deleted_direntry } => deleted_direntry,
                 SubtreeTombstoneAction::Revoke { .. } => {
-                    unreachable!("the active tombstone is a set by construction")
+                    panic!("the active tombstone is a set by construction")
                 }
             };
             Some(TrashEntry {

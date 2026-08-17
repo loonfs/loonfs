@@ -2681,6 +2681,7 @@ mod download_tests;
 mod streaming_tests;
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::transport::{retryable_transport_failure, TransportRetryPolicy};
@@ -2773,7 +2774,7 @@ mod tests {
                     reason.contains(&display),
                     "the reason must name the path, got: {reason}"
                 ),
-                other => unreachable!("unexpected error: {other:?}"),
+                other => panic!("unexpected error: {other:?}"),
             }
         }
     }
@@ -3129,7 +3130,7 @@ mod tests {
         let error = crate::transport::map_status_error(502, b"<html>upstream error</html>");
 
         let ClientError::Http(message) = error else {
-            unreachable!("expected Http error, got {error:?}");
+            panic!("expected Http error, got {error:?}");
         };
         assert!(message.contains("502"), "{message}");
         assert!(message.contains("non-envelope body"), "{message}");

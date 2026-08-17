@@ -534,7 +534,7 @@ pub(super) async fn apply_commit(
             .await
     };
     let response = response_result.map_err(|error| {
-        ApiResponseError::core_for_namespace(&namespace_id, error)
+        ApiResponseError::runtime_for_namespace(&namespace_id, error)
             .with_commit_id(&commit_id_for_errors)
     })?;
     Ok(Json(response))

@@ -1,5 +1,7 @@
 //! HTTP checkpoint, retention, garbage collection, and maintenance operations.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use bytes::Bytes;
@@ -279,7 +281,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 
     match client.list_changes(&namespace, ChangeSeq(0), None).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
-        other => unreachable!("expected rebootstrap_required, got {other:?}"),
+        other => panic!("expected rebootstrap_required, got {other:?}"),
     }
 
     let empty = client
@@ -513,7 +515,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
 
     match cold_client.stat_path(&target, &Default::default()).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
-        other => unreachable!("expected namespace_corrupt, got {other:?}"),
+        other => panic!("expected namespace_corrupt, got {other:?}"),
     }
     // The warm server keeps serving its pinned pair; the corruption is
     // surfaced by whoever actually consumes the manifest.

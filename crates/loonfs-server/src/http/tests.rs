@@ -2653,6 +2653,9 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::disallowed_methods)]
+// Monotonic time bounds this shutdown observation, so the test measures a
+// process deadline without deriving any protocol state from the clock.
 async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

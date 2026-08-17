@@ -669,6 +669,7 @@ fn wal_tail_projection_slot_is_live(
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::{
         DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache,
@@ -806,7 +807,7 @@ mod tests {
             DecodedMetadataTableBlock::Index { .. }
             | DecodedMetadataTableBlock::Filter { .. }
             | DecodedMetadataTableBlock::Manifest { .. } => {
-                unreachable!("fixture builds a data block")
+                panic!("fixture builds a data block")
             }
         };
         cache.insert(key("a"), inserted);

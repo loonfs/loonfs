@@ -270,12 +270,13 @@ fn single_folded_byte(class: &Class) -> Option<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 
     fn grams(plan: &GramPlanOutcome) -> Vec<Vec<String>> {
         let GramPlanOutcome::Indexable(plan) = plan else {
-            unreachable!("expected an indexable plan");
+            panic!("expected an indexable plan");
         };
         plan.required
             .iter()

@@ -1,5 +1,7 @@
 // Ignored real-provider tests exercise the full server/client/direct-object-store path.
 
+#![allow(clippy::panic)]
+
 use crate::common::{start_server, test_config};
 use base64::Engine as _;
 use bytes::Bytes;
@@ -16,6 +18,7 @@ use loonfs_api::{
 use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
 use loonfs_objectstore::ObjectStore;
 use loonfs_server::{ServerConfig, StoreConfig};
+use loonfs_test_support::http::raw_agent;
 use std::fmt;
 use std::io::Read as _;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -77,7 +80,7 @@ fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> UploadContent
 fn direct_put_of(begin: &BeginUploadResponse) -> &DirectPutUpload {
     match begin {
         BeginUploadResponse::DirectPut { direct_put, .. } => direct_put,
-        other => unreachable!("a direct_put begin answered as {:?}", other.mode()),
+        other => panic!("a direct_put begin answered as {:?}", other.mode()),
     }
 }
 
@@ -87,7 +90,7 @@ fn direct_multipart_of(begin: &BeginUploadResponse) -> DirectMultipartUpload {
         BeginUploadResponse::DirectMultipart {
             direct_multipart, ..
         } => *direct_multipart,
-        other => unreachable!("a direct_multipart begin answered as {:?}", other.mode()),
+        other => panic!("a direct_multipart begin answered as {:?}", other.mode()),
     }
 }
 
@@ -305,7 +308,8 @@ async fn assert_direct_get_capability_serves_ranges(
 /// Reads one inclusive byte range from a presigned URL with a `Range`
 /// header the signature never covered.
 fn fetch_range(url: &str, first: usize, last: usize) -> Vec<u8> {
-    let response = ureq::get(url)
+    let response = raw_agent()
+        .get(url)
         .set("range", &format!("bytes={first}-{last}"))
         .call()
         .expect("ranged read of a presigned capability");
@@ -526,16 +530,17 @@ impl Meddle {
 
 fn expect_client_rejection<T>(result: Result<T, ClientError>, context: &str) {
     match result {
-        Ok(_) => unreachable!("{context} unexpectedly succeeded"),
+        Ok(_) => panic!("{context} unexpectedly succeeded"),
         Err(ClientError::Api { .. } | ClientError::Http(_)) => {}
         Err(error) => {
-            unreachable!("{context} failed with unexpected client-side error: {error}")
+            panic!("{context} failed with unexpected client-side error: {error}")
         }
     }
 }
 
 fn post_commit(server_url: &str, namespace: &str, request: &CommitRequest) -> CommitResponse {
-    let response = ureq::post(&format!("{server_url}/v0/namespaces/{namespace}/commits"))
+    let response = raw_agent()
+        .post(&format!("{server_url}/v0/namespaces/{namespace}/commits"))
         .set("authorization", &format!("Bearer {AUTH_TOKEN}"))
         .send_json(request)
         .expect("post mutation");
@@ -809,7 +814,7 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
         bucket, key_prefix, ..
     } = store_config
     else {
-        unreachable!("this proof runs on GCS")
+        panic!("this proof runs on GCS")
     };
     let prefix = key_prefix.as_deref().expect("this run configures a prefix");
     assert!(
@@ -916,7 +921,7 @@ async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id:
     // flight.
     let expired = url.replace("X-Goog-Expires=900", "X-Goog-Expires=1");
     assert_ne!(&expired, url, "the capability did not carry an expiry");
-    let response = ureq::put(&expired).send_bytes(bytes);
+    let response = raw_agent().put(&expired).send_bytes(bytes);
     assert!(
         response.is_err(),
         "a capability with an edited lifetime was accepted"
@@ -1137,7 +1142,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         completed_at_ms, ..
     } = complete.status
     else {
-        unreachable!("completion reports a completed session")
+        panic!("completion reports a completed session")
     };
     assert_eq!(content_ref.size_bytes, payload.len() as u64);
     assert_eq!(content_ref.checksum, whole_object);
@@ -1158,7 +1163,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         ..
     } = &replayed.status
     else {
-        unreachable!("completion replay reports a completed session")
+        panic!("completion replay reports a completed session")
     };
     assert_eq!(*replayed_at_ms, completed_at_ms);
 

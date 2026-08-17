@@ -667,6 +667,7 @@ async fn walk_remote_tree(
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::args::RuntimeBehavior;
@@ -755,13 +756,13 @@ mod tests {
         .await
         {
             Ok(output) => output,
-            Err(failure) => unreachable!("recursive put failed: {:?}", failure.error),
+            Err(failure) => panic!("recursive put failed: {:?}", failure.error),
         };
         let CommandData::TreeTransfer {
             files, failures, ..
         } = output.data
         else {
-            unreachable!("a recursive put reports a tree transfer");
+            panic!("a recursive put reports a tree transfer");
         };
         assert_eq!(files, 2);
         assert!(failures.is_empty(), "{failures:?}");

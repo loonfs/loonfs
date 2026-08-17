@@ -1,5 +1,7 @@
 //! Behavior tests for namespace GC.
 
+#![allow(clippy::panic)]
+
 use super::budget::PassBudget;
 use super::config::GcConfig;
 use super::cursor::{CandidateFamily, GcCursor};
@@ -3686,7 +3688,7 @@ async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> Checkpo
             return record;
         }
     }
-    unreachable!("fork leaves one fork-owned record");
+    panic!("fork leaves one fork-owned record");
 }
 
 /// The fork-record cascade: a live target keeps the record a root; a

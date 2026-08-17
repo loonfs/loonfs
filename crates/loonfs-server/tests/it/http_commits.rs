@@ -2,6 +2,8 @@
 //! operation names its position, and replay shares one fingerprint domain
 //! with the embedded runtime.
 
+#![allow(clippy::panic)]
+
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitRequest as CoreCommitRequest;
@@ -279,7 +281,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
                 Some("batch-stops-at-two")
             );
         }
-        other => unreachable!("expected path_not_found with a position, got {other:?}"),
+        other => panic!("expected path_not_found with a position, got {other:?}"),
     }
 
     // Nothing the batch would have written became visible, and the head
@@ -293,7 +295,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
             .expect_err("the aborted batch wrote nothing");
         match missing {
             ClientError::Api { code, .. } => assert_eq!(code, ErrorCode::PathNotFound.as_str()),
-            other => unreachable!("expected path_not_found, got {other:?}"),
+            other => panic!("expected path_not_found, got {other:?}"),
         }
     }
     assert_eq!(
@@ -347,7 +349,7 @@ async fn an_empty_operation_list_is_rejected() {
             assert_eq!(status, 400);
             assert_eq!(code, ErrorCode::InvalidRequest.as_str());
         }
-        other => unreachable!("expected invalid_request, got {other:?}"),
+        other => panic!("expected invalid_request, got {other:?}"),
     }
     assert_eq!(
         harness
@@ -422,7 +424,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
                 Some("root-alone")
             );
         }
-        other => unreachable!("expected invalid_request, got {other:?}"),
+        other => panic!("expected invalid_request, got {other:?}"),
     }
 
     let in_batch = harness
@@ -471,7 +473,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
                 Some("root-in-batch")
             );
         }
-        other => unreachable!("expected invalid_request, got {other:?}"),
+        other => panic!("expected invalid_request, got {other:?}"),
     }
 
     // The valid first operation of the rejected batch did not land either.
@@ -510,7 +512,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             assert_eq!(status, 404);
             assert_eq!(code, ErrorCode::NamespaceNotFound.as_str());
         }
-        other => unreachable!("expected namespace_not_found, got {other:?}"),
+        other => panic!("expected namespace_not_found, got {other:?}"),
     }
 
     harness.server.abort();
@@ -586,7 +588,7 @@ async fn a_batch_replays_under_its_commit_id() {
         ClientError::Api { code, .. } => {
             assert_eq!(code, ErrorCode::CommitIdReuseConflict.as_str());
         }
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     harness.server.abort();
@@ -722,7 +724,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         ClientError::Api { code, .. } => {
             assert_eq!(code, ErrorCode::CommitIdReuseConflict.as_str());
         }
-        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
     harness.server.abort();
@@ -797,7 +799,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
         &replace("misspelled-guard", "expected_revsion_no"),
     )
     .expect_err("a misspelled guard is not a commit this API accepts") else {
-        unreachable!("a rejected commit body returns an HTTP status");
+        panic!("a rejected commit body returns an HTTP status");
     };
     assert_eq!(status, 400);
     let error: ApiError =

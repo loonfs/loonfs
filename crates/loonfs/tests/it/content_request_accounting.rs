@@ -229,14 +229,15 @@ fn assert_content_counts(
     assert_eq!(counts.content_get_bytes, bytes_read);
 }
 
-fn assert_content_not_prepared(error: CoreError, content_ref: &loonfs::ContentRef) {
+fn assert_content_not_prepared(error: impl Into<RuntimeError>, content_ref: &loonfs::ContentRef) {
+    let error = error.into();
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert!(
         matches!(
             error,
-            CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
-                ref content_id
-            }) if content_id == &content_ref.content_id
+            RuntimeError::Core(CoreError::ContentPreparation(
+                ContentPreparationError::ContentNotPrepared { ref content_id }
+            )) if content_id == &content_ref.content_id
         ),
         "content-not-prepared error should carry the rejected digest"
     );
@@ -934,7 +935,9 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert!(matches!(
         error,
-        CoreError::ContentPreparation(ContentPreparationError::ContentToken(ref rejections))
+        RuntimeError::Core(CoreError::ContentPreparation(
+            ContentPreparationError::ContentToken(ref rejections)
+        ))
             if matches!(rejections[..], [(_, ContentTokenError::Expired)])
     ));
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);

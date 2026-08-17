@@ -174,6 +174,7 @@ pub enum SstBlockCodecError {
 
 /// Builds one segment's blocks from rows fed in ascending row-key order.
 #[derive(Debug)]
+#[must_use]
 pub struct SegmentBlocksBuilder {
     target_block_bytes: usize,
     entries: Vec<u8>,
@@ -322,14 +323,19 @@ pub fn decode_index_block(
     let payload = decode_section(stored, handle, true)?;
     let entries: Vec<SegmentIndexEntry> = ciborium::de::from_reader(payload.as_slice())
         .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
-    // Ascending block order is a format requirement; key-range narrowing
-    // binary-searches the last keys, so an out-of-order index is malformed.
-    if let Some(pair) = entries
-        .windows(2)
-        .find(|pair| pair[0].last_key > pair[1].last_key)
-    {
+    // Ascending, non-overlapping block order is a format requirement:
+    // key-range narrowing binary-searches the last keys, and span loading
+    // subtracts adjacent offsets before slicing the fetched bytes.
+    if let Some(pair) = entries.windows(2).find(|pair| {
+        pair[0].last_key > pair[1].last_key
+            || pair[0]
+                .block
+                .offset
+                .saturating_add(u64::from(pair[0].block.stored_len))
+                > pair[1].block.offset
+    }) {
         return Err(SstBlockCodecError::Malformed(format!(
-            "index blocks out of key order: `{}` follows `{}`",
+            "index blocks out of key order or offset order: `{}` follows `{}`",
             pair[1].last_key, pair[0].last_key
         )));
     }
@@ -670,6 +676,26 @@ mod tests {
         &bytes[handle.offset as usize..handle.offset as usize + handle.stored_len as usize]
     }
 
+    fn encode_index(entries: &[SegmentIndexEntry]) -> (Vec<u8>, BlockHandle) {
+        let mut payload = Vec::new();
+        ciborium::ser::into_writer(entries, &mut payload).expect("encode index");
+        let mut bytes = Vec::new();
+        let handle = append_section(&mut bytes, &payload, true).expect("append section");
+        (bytes, handle)
+    }
+
+    fn index_entry(last_key: &str, offset: u64, stored_len: u32) -> SegmentIndexEntry {
+        SegmentIndexEntry {
+            last_key: last_key.to_owned(),
+            block: BlockHandle {
+                offset,
+                stored_len,
+                decoded_len: stored_len,
+                crc32c: 0,
+            },
+        }
+    }
+
     #[test]
     fn segment_round_trips_every_row_through_index_and_blocks() {
         let rows = 5_000;
@@ -997,31 +1023,42 @@ mod tests {
 
     #[test]
     fn decoding_rejects_out_of_order_index_entries() {
-        let block = BlockHandle {
-            offset: 0,
-            stored_len: 1,
-            decoded_len: 1,
-            crc32c: 0,
-        };
         let entries = vec![
-            SegmentIndexEntry {
-                last_key: "inode-00000000000000000009".to_owned(),
-                block,
-            },
-            SegmentIndexEntry {
-                last_key: "inode-00000000000000000003".to_owned(),
-                block,
-            },
+            index_entry("inode-00000000000000000009", 0, 1),
+            index_entry("inode-00000000000000000003", 0, 1),
         ];
-        let mut payload = Vec::new();
-        ciborium::ser::into_writer(&entries, &mut payload).expect("encode index");
-        let mut bytes = Vec::new();
-        let handle = append_section(&mut bytes, &payload, true).expect("append section");
+        let (bytes, handle) = encode_index(&entries);
 
         let error =
             decode_index_block(&bytes, &handle).expect_err("descending index should be rejected");
         assert!(
             matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("key order")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decoding_rejects_out_of_order_index_offsets() {
+        let entries = [index_entry("a", 10, 1), index_entry("b", 5, 1)];
+        let (bytes, handle) = encode_index(&entries);
+
+        let error = decode_index_block(&bytes, &handle)
+            .expect_err("descending block offsets should be rejected");
+        assert!(
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("offset order")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decoding_rejects_overlapping_index_ranges() {
+        let entries = [index_entry("a", 10, 5), index_entry("b", 14, 1)];
+        let (bytes, handle) = encode_index(&entries);
+
+        let error = decode_index_block(&bytes, &handle)
+            .expect_err("overlapping block ranges should be rejected");
+        assert!(
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("offset order")),
             "unexpected error: {error}"
         );
     }

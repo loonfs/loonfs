@@ -44,8 +44,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use tracing::Instrument;
 
-type CommitResult = Result<ApiCommitResponse, CoreError>;
-type DeleteResult = Result<DeleteNamespaceResponse, CoreError>;
+type CommitResult = Result<ApiCommitResponse, RuntimeError>;
+type DeleteResult = Result<DeleteNamespaceResponse, RuntimeError>;
 
 /// A synchronous notification after one mutation batch durably advances a
 /// namespace.
@@ -666,6 +666,9 @@ impl NamespacePublisher {
     /// The first poll either admits the candidate or returns an error. After
     /// admission, cancelling the caller only drops result delivery; the worker
     /// still owns and publishes the request.
+    #[allow(clippy::disallowed_methods)]
+    // Queue latency enters monotonic time at this metrics boundary, so no
+    // timestamp reaches durable protocol state.
     async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
         let enqueued_at = Instant::now();
@@ -673,11 +676,12 @@ impl NamespacePublisher {
         let (sender, receiver) = oneshot::channel();
         self.admit(commit_id, candidate, semantic_identity, sender, enqueued_at)?;
         receiver.await.unwrap_or_else(|_| {
-            Err(CoreError::HeadPublish(
-                CommitHeadPublishError::OutcomeUnknown(
+            Err(
+                CoreError::HeadPublish(CommitHeadPublishError::OutcomeUnknown(
                     "publisher task stopped before reporting an outcome".to_owned(),
-                ),
-            ))
+                ))
+                .into(),
+            )
         })
     }
 
@@ -762,11 +766,12 @@ impl NamespacePublisher {
             self.ensure_worker(&mut state);
         }
         receiver.await.unwrap_or_else(|_| {
-            Err(CoreError::HeadPublish(
-                CommitHeadPublishError::OutcomeUnknown(
+            Err(
+                CoreError::HeadPublish(CommitHeadPublishError::OutcomeUnknown(
                     "publisher task stopped mid-delete".to_owned(),
-                ),
-            ))
+                ))
+                .into(),
+            )
         })
     }
 
@@ -795,6 +800,9 @@ impl NamespacePublisher {
     }
 
     /// Drains the queue in admission order, then exits.
+    #[allow(clippy::disallowed_methods)]
+    // Batch collection latency enters monotonic time at this metrics
+    // boundary, so replay and durable ordering do not depend on it.
     async fn run_worker(self) {
         loop {
             let collect_started = Instant::now();
@@ -838,6 +846,9 @@ impl NamespacePublisher {
     /// Ownership is released under the same lock that finds the queue empty,
     /// so a racing admission either queued before this check and is taken
     /// here, or finds no worker and spawns one.
+    #[allow(clippy::disallowed_methods)]
+    // CAS pacing enters monotonic time at this publisher boundary, so it can
+    // delay an attempt without changing the durable operation it performs.
     fn take_next_item(&self) -> Option<WorkItem> {
         let mut state = self.lock_state();
         // Terminal: a successful delete emptied the queue and set this
@@ -887,10 +898,14 @@ impl NamespacePublisher {
         for waiter in orphaned_waiters {
             let _ = waiter.send(Err(CoreError::HeadPublish(
                 CommitHeadPublishError::OutcomeUnknown("publish task aborted mid-batch".to_owned()),
-            )));
+            )
+            .into()));
         }
     }
 
+    #[allow(clippy::disallowed_methods)]
+    // Publication latency enters monotonic time at this metrics boundary, so
+    // no timestamp participates in commit validity or replay.
     async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) {
         let selected_at = Instant::now();
         for candidate in &candidates {
@@ -924,7 +939,7 @@ impl NamespacePublisher {
                 let Some(writer) = self.writer.upgrade() else {
                     results = candidates
                         .iter()
-                        .map(|_| Err(CoreError::ShuttingDown))
+                        .map(|_| Err(CoreError::ShuttingDown.into()))
                         .collect();
                     break;
                 };
@@ -968,9 +983,6 @@ impl NamespacePublisher {
         .await;
         self.settle_retained_projection(engine.retained_tail_weight());
         results
-            .into_iter()
-            .map(|result| result.map_err(runtime_error_to_core))
-            .collect()
     }
 
     /// Returns the publisher's lazily created commit engine.
@@ -998,9 +1010,7 @@ impl NamespacePublisher {
                 // Contain deletion panics so the worker can continue. Deletion has no commit
                 // receipt for reconciliation, so report an internal error to its callers.
                 self.record_panic();
-                Err(CoreError::Internal(
-                    "delete task aborted mid-delete".to_owned(),
-                ))
+                Err(CoreError::Internal("delete task aborted mid-delete".to_owned()).into())
             }
         };
         match outcome {
@@ -1024,10 +1034,10 @@ impl NamespacePublisher {
                     let _ = waiter.send(Ok(response.clone()));
                 }
                 for waiter in queued.commits {
-                    let _ = waiter.send(Err(self.namespace_deleted()));
+                    let _ = waiter.send(Err(self.namespace_deleted().into()));
                 }
                 for waiter in queued.deletes {
-                    let _ = waiter.send(Err(self.namespace_deleted()));
+                    let _ = waiter.send(Err(self.namespace_deleted().into()));
                 }
                 true
             }
@@ -1044,7 +1054,7 @@ impl NamespacePublisher {
 
     async fn delete_through_engine(&self, options: DeleteNamespaceOptions) -> DeleteResult {
         let Some(writer) = self.writer.upgrade() else {
-            return Err(CoreError::ShuttingDown);
+            return Err(CoreError::ShuttingDown.into());
         };
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
@@ -1056,7 +1066,6 @@ impl NamespacePublisher {
             options,
         )
         .await
-        .map_err(runtime_error_to_core)
     }
 
     fn namespace_deleted(&self) -> CoreError {
@@ -1092,6 +1101,9 @@ impl NamespacePublisher {
     /// When `claim` is true, this method also reserves the next slot by advancing
     /// the deadline one pacing interval. When false, it only waits; the caller
     /// reserves the slot when it removes work from the queue.
+    #[allow(clippy::disallowed_methods)]
+    // CAS pacing waits at this publisher boundary, so ambient time affects
+    // only attempt scheduling and never the committed operation's meaning.
     async fn await_cas_slot(&self, claim: bool) {
         loop {
             let sleep_until = self.lock_state().next_allowed_cas_at;
@@ -1123,11 +1135,11 @@ impl NamespacePublisher {
             // count mismatch fails every candidate instead of delivering
             // misaligned results to the earlier ones.
             let count_mismatch = (results.len() != candidates.len()).then(|| {
-                CoreError::Internal(format!(
+                RuntimeError::Core(CoreError::Internal(format!(
                     "publisher batch returned {got} results for {want} candidates",
                     got = results.len(),
                     want = candidates.len(),
-                ))
+                )))
             });
             let mut results = results.into_iter();
             for candidate in candidates {
@@ -1213,19 +1225,10 @@ fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
 fn is_retryable_head_publish(result: &CommitResult) -> bool {
     matches!(
         result,
-        Err(CoreError::HeadPublish(
+        Err(RuntimeError::Core(CoreError::HeadPublish(
             CommitHeadPublishError::StaleHead | CommitHeadPublishError::OutcomeUnknown(_)
-        ))
+        )))
     )
-}
-
-fn runtime_error_to_core(error: RuntimeError) -> CoreError {
-    match error {
-        RuntimeError::Core(error) => error,
-        RuntimeError::Bootstrap(error) => CoreError::Internal(error.to_string()),
-        RuntimeError::Config(message) => CoreError::Internal(message),
-        RuntimeError::RuntimeTask(message) => CoreError::Internal(message),
-    }
 }
 
 /// Candidates queued but not yet taken by the worker: the depth admission

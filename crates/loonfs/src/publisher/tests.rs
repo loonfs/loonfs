@@ -346,7 +346,7 @@ fn publisher_state(
     publisher
         .state
         .lock()
-        .expect("namespace publisher mutex poisoned")
+        .expect("namespace publisher mutex should not be poisoned")
 }
 
 /// True while exactly one worker owns the publisher's queue.
@@ -473,6 +473,9 @@ fn try_admit_commit(
     try_admit_candidate(publisher, namespace_id, candidate)
 }
 
+#[allow(clippy::disallowed_methods)]
+// This synthetic admission timestamp feeds only publisher wait metrics, so
+// the test's durable operation remains independent of ambient time.
 fn try_admit_candidate(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
@@ -512,6 +515,52 @@ fn publisher_trace_labels_are_low_cardinality() {
         "error"
     );
     assert_eq!(usize_to_u64(7), 7);
+}
+
+#[tokio::test]
+#[allow(clippy::disallowed_methods)]
+// Monotonic time only seeds synthetic publisher wait metrics here, so the
+// asserted wire-code path remains independent of the clock.
+async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let runtime = test_runtime(store);
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+    let candidate = CommitCandidate::new(create_directory_request("bootstrap-error", "docs"));
+    let commit_id = candidate.commit_id().clone();
+    let semantic_identity = candidate
+        .semantic_identity(&namespace_id)
+        .expect("candidate identity");
+    let (sender, receiver) = oneshot::channel();
+    publisher_state(&publisher).in_flight.insert(
+        commit_id.clone(),
+        InFlightRequest {
+            semantic_identity,
+            waiters: vec![sender],
+        },
+    );
+    let selected_at = Instant::now();
+    publisher.deliver_batch_results(
+        vec![BatchCandidate {
+            commit_id,
+            candidate,
+            enqueued_at: selected_at,
+        }],
+        vec![Err(RuntimeError::Bootstrap(
+            crate::BootstrapNamespaceError::NamespaceAlreadyExists {
+                namespace_id: namespace_id.clone(),
+            },
+        ))],
+        selected_at,
+    );
+
+    let error = receiver
+        .await
+        .expect("publisher should deliver the result")
+        .expect_err("bootstrap failure should remain an error");
+    assert!(matches!(error, RuntimeError::Bootstrap(_)));
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
 }
 
 #[tokio::test]
