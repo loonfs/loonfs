@@ -323,21 +323,38 @@ pub fn decode_index_block(
     let payload = decode_section(stored, handle, true)?;
     let entries: Vec<SegmentIndexEntry> = ciborium::de::from_reader(payload.as_slice())
         .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
-    // Index keys must be sorted, and each block must end before the next
-    // block starts. Range lookup relies on key order, and span loading
-    // relies on non-overlapping offsets.
-    if let Some(pair) = entries.windows(2).find(|pair| {
-        pair[0].last_key > pair[1].last_key
-            || pair[0]
-                .block
-                .offset
-                .saturating_add(u64::from(pair[0].block.stored_len))
-                > pair[1].block.offset
-    }) {
-        return Err(SstBlockCodecError::Malformed(format!(
-            "index blocks out of key order or offset order: `{}` follows `{}`",
-            pair[1].last_key, pair[0].last_key
-        )));
+    // Index keys must be sorted, and block ranges must tile their region:
+    // every range fits in `u64`, and each block starts exactly where its
+    // predecessor ends — the builder writes blocks back to back. Range
+    // lookup relies on key order; span loading and its bulk-read budget
+    // rely on contiguous, overflow-free ranges.
+    let mut previous: Option<(&String, u64)> = None;
+    for entry in &entries {
+        let end = entry
+            .block
+            .offset
+            .checked_add(u64::from(entry.block.stored_len))
+            .ok_or_else(|| {
+                SstBlockCodecError::Malformed(format!(
+                    "index block `{}` byte range overflows",
+                    entry.last_key
+                ))
+            })?;
+        if let Some((previous_key, previous_end)) = previous {
+            if previous_key > &entry.last_key {
+                return Err(SstBlockCodecError::Malformed(format!(
+                    "index blocks out of key order: `{}` follows `{previous_key}`",
+                    entry.last_key
+                )));
+            }
+            if entry.block.offset != previous_end {
+                return Err(SstBlockCodecError::Malformed(format!(
+                    "index block `{}` does not start where `{previous_key}` ends",
+                    entry.last_key
+                )));
+            }
+        }
+        previous = Some((&entry.last_key, end));
     }
     Ok(entries)
 }
@@ -1045,7 +1062,7 @@ mod tests {
         let error = decode_index_block(&bytes, &handle)
             .expect_err("descending block offsets should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("offset order")),
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("does not start where")),
             "unexpected error: {error}"
         );
     }
@@ -1058,7 +1075,49 @@ mod tests {
         let error = decode_index_block(&bytes, &handle)
             .expect_err("overlapping block ranges should be rejected");
         assert!(
-            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("offset order")),
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("does not start where")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decoding_rejects_a_gap_between_index_blocks() {
+        let entries = [index_entry("a", 0, 10), index_entry("b", 20, 1)];
+        let (bytes, handle) = encode_index(&entries);
+
+        let error = decode_index_block(&bytes, &handle)
+            .expect_err("a gap between block ranges should be rejected");
+        assert!(
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("does not start where")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decoding_rejects_a_single_block_range_past_the_integer_edge() {
+        let entries = [index_entry("a", u64::MAX - 10, 100)];
+        let (bytes, handle) = encode_index(&entries);
+
+        let error = decode_index_block(&bytes, &handle)
+            .expect_err("an overflowing single range should be rejected");
+        assert!(
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decoding_rejects_a_final_block_range_past_the_integer_edge() {
+        let entries = [
+            index_entry("a", u64::MAX - 110, 100),
+            index_entry("b", u64::MAX - 10, 100),
+        ];
+        let (bytes, handle) = encode_index(&entries);
+
+        let error = decode_index_block(&bytes, &handle)
+            .expect_err("a trailing overflowing range should be rejected");
+        assert!(
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
             "unexpected error: {error}"
         );
     }
