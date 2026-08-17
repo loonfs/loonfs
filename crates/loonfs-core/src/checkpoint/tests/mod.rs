@@ -7,16 +7,13 @@ mod active_deletions;
 mod attributes;
 mod cache;
 mod cas_recovery;
-mod content_write;
 mod index_parity;
 pub(crate) mod inspection_materialization;
 mod inventory;
 mod manifest_round_trips;
-pub(crate) mod ops;
 mod retention;
 mod streaming_compaction;
 
-use self::ops::{delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes};
 use super::build::{
     build_manifest_tables, build_manifest_tables_from_rows, MetadataTableSegmentation,
 };
@@ -65,6 +62,9 @@ use crate::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
+use crate::test_support::ops::{
+    delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
+};
 use crate::test_support::{RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache};
 use crate::MutationContext;
 use async_trait::async_trait;

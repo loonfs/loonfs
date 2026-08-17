@@ -1,5 +1,14 @@
 //! Test doubles for this crate's public seams.
 
+// Path-mutation wrappers that drive the production commit pipeline one
+// operation at a time. They are `#[cfg(test)]`-only rather than part of the
+// `test-support` feature surface: they lean on this crate's dev-dependencies,
+// and their consumers (checkpoint and planner tests) are in-crate.
+#[cfg(test)]
+mod content_write;
+#[cfg(test)]
+pub(crate) mod ops;
+
 use crate::cache::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
 };
