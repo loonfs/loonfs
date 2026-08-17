@@ -477,8 +477,7 @@ fn build_embedded_profile(
             bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
             account_id: require_or_prompt(spec.account_id.as_ref(), "account-id", runtime)?,
             endpoint_url: require_or_prompt(spec.endpoint_url.as_ref(), "endpoint-url", runtime)?,
-            // R2 speaks the S3 API, so its credentials arrive under the same
-            // environment names.
+            // R2 uses the S3 API and the same credential environment variables.
             access_key_id: require_or_prompt_secret(
                 spec.access_key_id.as_ref(),
                 ambient.access_key_id.as_ref(),

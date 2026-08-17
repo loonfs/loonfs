@@ -79,9 +79,8 @@ async fn live_set<S: ObjectStore + ?Sized>(
     marked(store, namespace_id, context).await.0
 }
 
-/// What marking this namespace costs, in budget units. Marking is inside
-/// `max_objects`, so a bounded test asks for the roots plus the candidates
-/// it means to buy rather than for a number kept true by hand.
+/// Returns the budget units required to mark this namespace. Bounded tests
+/// add candidate work to this measured value instead of hard-coding it.
 async fn marking_units<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -486,10 +485,8 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
 
 #[tokio::test]
 async fn deleted_namespace_reclaims_down_to_its_tombstone() {
-    // A terminal namespace forgets: user pins, the final replay chain,
-    // manifests, and tables all age out; only the id-retiring tombstone
-    // objects survive. The user checkpoint here would have made the
-    // tree immortal under the live rules.
+    // After deletion, user checkpoints, WAL, manifests, and tables can age
+    // out. Only tombstone objects remain to prevent id reuse.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -929,8 +926,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     );
 }
 
-/// Runs one upload through to its durable completed state and hands back
-/// everything the content half of the sweep reasons about.
+/// Completes an upload and returns the state needed by content GC tests.
 async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1303,13 +1299,9 @@ async fn content_reference_scan_retains_content_when_metadata_rows_do_not_read()
         .is_some());
 }
 
-/// A budget with room for the roots and one candidate a pass has nothing
-/// left for the reference scan, and the honest response to that is to
-/// reclaim nothing and say so: the session and its content stay exactly
-/// where they were, `content_reclamation_deferred` reports the skip, and
-/// the walk keeps moving past the session rather than pinning itself to it.
-/// A later pass with room for the scan reaches the verdict an unbounded
-/// pass would have reached.
+/// If the reference scan exceeds the remaining budget, the pass retains the
+/// session and content, sets `content_reclamation_deferred`, and advances its
+/// cursor. A later pass with enough budget completes the decision.
 #[tokio::test]
 async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1352,9 +1344,8 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
         let Some(next) = pass.next_cursor else {
             break;
         };
-        // The whole point of deferring rather than parking: a pass either
-        // finishes or hands back a cursor strictly past the one it came in
-        // with. It never asks to be run again from where it started.
+        // A deferred pass must finish or return a cursor after its input
+        // cursor so repeated passes continue making progress.
         assert_ne!(
             Some(next.as_str()),
             cursor.as_deref(),
@@ -1634,8 +1625,7 @@ async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
         "this pass did finish marking, so it has a root set and a reference set"
     );
 
-    // One more unit, and the pass walks: it decides a candidate and hands
-    // back a position instead of the cursor it came in with.
+    // One additional unit lets the pass decide a candidate and advance.
     let mut one_more = config();
     one_more.max_objects = Some(marking + 1);
     let walked = gc_namespace(&store, &namespace_id, &one_more, &aged)
@@ -2834,8 +2824,8 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
     let (live, marking) = marked(&inner, &namespace_id, &aged).await;
     let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
-    // One unit short of reading the reference manifest, which is the last
-    // thing marking pays for before the chain.
+    // Leave the pass one unit short of reading the reference manifest, the
+    // final marking cost before loading the WAL chain.
     let mut starved = config();
     starved.max_objects = Some(marking - chain_units - 1);
     let report = gc_namespace(&inner, &namespace_id, &starved, &aged)
@@ -3588,8 +3578,8 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     );
 }
 
-/// Fork-owned records refuse the user release operation: their release
-/// is decided by garbage collection from the fork target's fate.
+/// Fork checkpoints cannot be released through the user operation. Garbage
+/// collection releases them after their target namespace is gone.
 #[tokio::test]
 async fn fork_owned_checkpoints_reject_user_release() {
     let temp_dir = tempdir().expect("tempdir");
@@ -4083,11 +4073,8 @@ async fn gc_fails_the_pass_on_a_corrupt_checkpoint_record() {
     );
 }
 
-/// A record the store will not hand over is a different failure from a
-/// record whose bytes do not decode. The read is not part of the split,
-/// because it already failed the pass before this change. This test holds
-/// that behavior in place: the message names the key, and the code tells
-/// the caller to try again.
+/// A store read failure is retryable and differs from an invalid record. The
+/// error includes the object key and a retryable error code.
 #[tokio::test]
 async fn gc_fails_the_pass_when_a_checkpoint_record_does_not_read() {
     let temp_dir = tempdir().expect("tempdir");

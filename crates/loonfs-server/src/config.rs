@@ -182,9 +182,10 @@ fn default_max_concurrent_maintenance() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
 }
 
-/// What a config with no `[grep]` table asks for: nothing composed, no
-/// query plane advertised, no index job registered. Saying `[grep]` at all
-/// is what opts a deployment in.
+/// Default used when no `[grep]` table is present.
+///
+/// This disables grep routes and maintenance until the deployment explicitly
+/// configures grep.
 fn grep_absent() -> GrepConfig {
     GrepConfig {
         mode: GrepMode::Disabled,

@@ -1,5 +1,6 @@
-//! Collects the live set: every object the current namespace state
-//! can still reach, re-verified in chunks as the sweep advances.
+//! Collects objects that remain reachable from a namespace.
+//!
+//! Garbage collection refreshes this set in bounded chunks while sweeping.
 
 use super::budget::PassBudget;
 use super::fork_checkpoints::fork_target_proven_gone;
@@ -26,30 +27,26 @@ use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// Everything reachable from the fresh root set (rule 4).
+/// Objects reachable from the most recently collected roots.
 pub(super) struct LiveSet {
     pub(super) manifests: BTreeSet<ManifestObjectId>,
     pub(super) tables: BTreeSet<String>,
     pub(super) wal_segments: BTreeSet<String>,
-    /// Content the retained chain's commits append, harvested from the same
-    /// decoded bodies the chain walk validated. These are the references
-    /// that protect bytes a durable commit named but no manifest has
-    /// materialized yet, and reading them here is why no later scan fetches
-    /// a segment a second time.
+    /// Content referenced by retained WAL commits but not yet materialized in
+    /// a manifest. These references are collected while validating the WAL
+    /// chain, avoiding a second read of each segment.
     pub(super) wal_content_ids: BTreeSet<ContentId>,
     pub(super) checkpoint_keys: BTreeSet<String>,
-    /// Still-active records whose basis manifest is verifiably absent —
-    /// the crash window between record write and verification. The pass
-    /// releases them; they never degrade sweeping.
+    /// Active checkpoint records whose basis manifest is missing. These can
+    /// result from a crash between writing and verifying the record.
     pub(super) missing_basis_records: BTreeSet<String>,
-    /// A root manifest did not resolve: it read as absent, or the read
-    /// failed. Manifest and table deletion must not proceed on this pass.
-    /// A corrupt root never lands here, because it fails the pass instead.
+    /// Whether a root manifest was missing or could not be read. The pass must
+    /// not delete manifests or tables when this is true. Corruption fails the
+    /// pass instead.
     pub(super) degraded: bool,
-    /// The inspected namespace head is the terminal, absorbing tombstone.
+    /// Whether the namespace has been deleted.
     pub(super) namespace_deleted: bool,
-    /// What this pass knows about the references this namespace held when
-    /// the grace window opened.
+    /// References held when the grace window began.
     pub(super) anchor: ReferenceAnchor,
 }
 
@@ -68,80 +65,44 @@ impl LiveSet {
         }
     }
 
-    /// Whether anything still protects one WAL segment key.
-    ///
-    /// The current chain protects what a read at this instant replays; the
-    /// reference anchor protects what a read pinned earlier in the grace
-    /// window replays, which is every segment above the anchor's own head.
+    /// Returns whether the current state or grace-window anchor needs a WAL
+    /// segment.
     pub(super) fn protects_wal_segment(&self, key: &str) -> bool {
         self.wal_segments.contains(key) || self.anchor.replays_wal_segment(key)
     }
 }
 
-/// The reference manifest and what it named — the pass's evidence about
-/// which objects this namespace referenced a grace window ago.
+/// References recorded at the start of the grace window.
 ///
-/// The grace window exists to protect a reader that pinned an anchor (a head
-/// and the basis manifest under it) and is still reading through it. Aging an
-/// unreferenced object by its own write time protects the wrong thing: a
-/// table written yesterday and superseded by a fold one second ago has
-/// already outlived any window, so it is reaped while the reader that pinned
-/// the anchor just before the fold is still reading it. The window has to run
-/// from the moment an object stopped being referenced, and nothing durable
-/// records that moment.
+/// Object age alone is not enough to protect active readers. An old table may
+/// have stopped being referenced only moments ago. The collector therefore
+/// uses the newest manifest that is at least one grace window old as an
+/// anchor. An object can be deleted only when it is absent from the current
+/// roots and the anchor, and its own write time is also old enough.
 ///
-/// Manifests record it collectively. Each one is a timestamped snapshot of
-/// what the namespace referenced when it was published, so the newest
-/// manifest published at least a grace window ago says what was referenced
-/// when the window opened. Call it R. An object is reaped only when the
-/// current live set, R, and the object's own write time all agree it is
-/// unreferenced:
-///
-/// 1. it is not reachable now,
-/// 2. R did not name it,
-/// 3. its provider write time is a grace window old.
-///
-/// **The theorem.** Take a reader that pinned a head at any instant T inside
-/// the last grace window. It can only reference what the namespace
-/// referenced at T. If the object was written after the window opened, arm 3
-/// keeps it. Otherwise it was written before, so the publication that first
-/// referenced it had already landed by T — publications self-enforce a
-/// budget below the grace floor (`limits::GC_MIN_GRACE_WINDOW_MS`) — and
-/// references only start at a publication. Its reference span is one
-/// interval: manifests are built on their immediate predecessor
-/// (`checkpoint/publish.rs`) and every id is freshly generated, so an object
-/// that leaves a file set never re-enters one. R's publication falls inside
-/// that span, because it is at or before the window's opening and the object
-/// was still referenced at T. So R named it, and arm 2 keeps it. Either way
-/// the reader's object survives the pass.
-///
-/// R protects itself, so the anchor cannot be swept out from under the
-/// namespace: it is in its own reference set, and it stops being the anchor
-/// only once a newer manifest has aged past the window in its place.
+/// This protects readers pinned during the grace window. Newer objects are
+/// protected by their write time. Older objects still needed during the
+/// window appear in the anchor because manifest references form one
+/// continuous interval: manifests build on their predecessor and object ids
+/// are never reused. The anchor also protects its own manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ReferenceAnchor {
-    /// R, with everything it named.
+    /// The selected manifest and its referenced objects.
     Manifest(Box<AnchoredManifest>),
-    /// This namespace has never published a manifest, so no publication has
-    /// ever stopped referencing anything: everything a reader could hold is
-    /// the WAL chain from the namespace's birth, which the floor cannot have
-    /// advanced past without a root. Or the namespace is the terminal
-    /// tombstone, which no read can reach at all. Aged candidates are debris
-    /// either way, and the pass reaps them.
+    /// No historical manifest is required. This applies to namespaces that
+    /// never published a manifest and to deleted namespaces with no readers.
     NotNeeded,
-    /// Manifests exist but none has aged past the window, so nothing proves
-    /// an unreferenced object was already unreferenced when the window
-    /// opened. The pass keeps every aged candidate instead of guessing.
+    /// No manifest is old enough to prove when references ended. The pass
+    /// keeps aged candidates until an anchor becomes available.
     Missing,
 }
 
-/// One reference manifest, reduced to what a sweep decision asks of it.
+/// Information from one manifest needed during sweeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AnchoredManifest {
     manifest_object_id: ManifestObjectId,
-    /// Greatest sequence the anchor materialized. A read pinned on it
-    /// replays every segment above this, and a manifest always materializes
-    /// through the end of a committed segment, so nothing above it is reaped.
+    /// Highest sequence materialized by the anchor. Readers pinned to it may
+    /// still replay later WAL segments.
     head_seq: ChangeSeq,
     /// Object keys of the metadata tables the anchor named.
     tables: BTreeSet<String>,
@@ -164,15 +125,15 @@ impl ReferenceAnchor {
     }
 }
 
-/// What one collection produced. Marking is all or nothing: a partial root
-/// set is not a smaller answer, it is no answer, and deciding a deletion
-/// against one would delete something live.
+/// Result of collecting a complete live set within the pass budget.
+///
+/// A partial set is discarded because it cannot safely authorize deletion.
 pub(super) enum LiveSetCollection {
     Complete(LiveSet),
     BudgetExhausted,
 }
 
-/// Why a collection stopped. `?` carries both out of a family collector.
+/// Reason a live-set collector stopped.
 #[derive(Debug)]
 pub(super) enum CollectStop {
     Budget,
@@ -196,7 +157,7 @@ fn charge(budget: &mut PassBudget) -> CollectResult<()> {
 }
 
 impl LiveSetCollection {
-    /// The roots, when the collection got all of them.
+    /// Returns the roots only when collection completed.
     #[cfg(test)]
     pub(super) fn complete(self) -> Option<LiveSet> {
         match self {
@@ -206,16 +167,16 @@ impl LiveSetCollection {
     }
 }
 
-/// Whether the pass may go on from here, or stopped because its budget did.
+/// Whether sweeping can continue within the current budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SweepStep {
     Continue,
     BudgetExhausted,
 }
 
-/// Delete-time re-verification state (rule 3): deletion decisions consult a
-/// live set no staler than `reverify_chunk` candidates. Rule 5 degradation
-/// is sticky for the pass once any collection observes it.
+/// Refreshes the live set after each `reverify_chunk` deletion decisions.
+/// Once a refresh reports degraded retention, the flag remains set for the
+/// rest of the pass.
 pub(super) struct SweepVerifier {
     pub(super) live: Arc<LiveSet>,
     pub(super) degraded: bool,
@@ -242,11 +203,8 @@ impl SweepVerifier {
         context: &MutationContext,
     ) -> Result<SweepStep> {
         if self.decided_since_collect >= self.reverify_chunk {
-            // The anchor is a fact about the past, so a re-collection reuses
-            // the one the pass opened with rather than paying for it again.
-            // Nothing inside a pass can change it: the pass's clock is
-            // fixed, a manifest published while it runs is young, and the
-            // anchor is protected from the pass's own sweep.
+            // Reuse the original anchor. The pass uses a fixed clock, and any
+            // manifest published during the pass is too new to replace it.
             let anchor = self.live.anchor.clone();
             match recollect_live_set(
                 store,
@@ -263,10 +221,8 @@ impl SweepVerifier {
                     self.degraded |= self.live.degraded;
                     self.decided_since_collect = 0;
                 }
-                // Rule 3 does not bend for a budget: a decision needs a
-                // live set no staler than the chunk, so a pass that cannot
-                // pay for a fresh one stops sweeping rather than deciding
-                // against the stale one.
+                // Stop if the pass cannot afford the required refresh. A stale
+                // live set cannot safely authorize more deletions.
                 LiveSetCollection::BudgetExhausted => return Ok(SweepStep::BudgetExhausted),
             }
         }
@@ -275,9 +231,7 @@ impl SweepVerifier {
     }
 }
 
-/// Collects against a freshly read head and basis. Re-collecting is what a
-/// mid-sweep refresh is for, so it pays for the pair like the pass's own
-/// first read did.
+/// Reloads the namespace head and basis before collecting a new live set.
 pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -329,8 +283,8 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     });
     let namespace_deleted = head.state == NamespaceState::Deleted;
     let collected: CollectResult<LiveSet> = async {
-        // A missing floor means retain from the namespace's birth sequence
-        // (format spec, "WAL floor").
+        // Without a stored floor, retain WAL from the namespace's first
+        // sequence.
         charge(budget)?;
         let floor_seq = resolve_retention_floor_seq(store, head)
             .await
@@ -383,9 +337,10 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
 
 type ActiveRecordBases = BTreeMap<ManifestObjectId, Vec<String>>;
 
-/// Collects checkpoint roots and the protected record keys that named them.
-/// Every readable record roots its basis in a live namespace, even when the
-/// record itself is a sweep candidate.
+/// Collects checkpoint roots and record keys that must be retained.
+///
+/// In a live namespace, every readable record protects its basis even if the
+/// record itself is eligible for deletion.
 async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -408,15 +363,15 @@ async fn collect_checkpoint_records<S: ObjectStore + ?Sized>(
             Err(error) => return Err(core_control_load_error(error).into()),
         };
         let candidate = checkpoint_is_candidate(store, &record, budget, context).await?;
-        // A tombstone has no readers; only a fork record whose target still
-        // lives continues to root its source basis.
+        // A deleted namespace has no readers. Only an active fork checkpoint
+        // for an existing target still protects the source basis.
         if namespace_deleted && (candidate || matches!(record.owner, CheckpointOwner::User { .. }))
         {
             continue;
         }
         manifest_ids.insert(record.manifest_object_id.clone());
-        // A candidate still roots its basis in a live namespace; it is only
-        // kept out of the protected key set so the sweep can act on it.
+        // In a live namespace, a candidate still protects its basis but does
+        // not protect its own record key.
         if !candidate {
             active_record_bases
                 .entry(record.manifest_object_id)
@@ -434,8 +389,8 @@ async fn checkpoint_is_candidate<S: ObjectStore + ?Sized>(
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> CollectResult<bool> {
-    // User pins answer to expiry. Fork pins answer only to target fate; the
-    // lease alone never drops a pin whose target is alive.
+    // User checkpoints expire by time. Fork checkpoints remain active while
+    // their target namespace exists.
     match &record.owner {
         _ if record.state != (CheckpointRecordLifecycle::Active {}) => Ok(true),
         CheckpointOwner::User { .. } => Ok(lease_expired(record, context.now_ms)),
@@ -461,7 +416,7 @@ async fn collect_manifest_tables<S: ObjectStore + ?Sized>(
     live: &mut LiveSet,
     budget: &mut PassBudget,
 ) -> CollectResult<()> {
-    // Only validated manifest envelopes may protect their table objects.
+    // Only a validated manifest can protect its table objects.
     for manifest_object_id in &manifest_ids {
         charge(budget)?;
         let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
@@ -521,8 +476,8 @@ async fn collect_reference_anchor<S: ObjectStore + ?Sized>(
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> CollectResult<()> {
-    // Tombstones need no historical root, and refreshes reuse the pass's
-    // original anchor because it is a fixed fact about the past.
+    // Deleted namespaces need no historical root. Refreshes reuse the anchor
+    // selected at the start of the pass.
     live.anchor = match (live.namespace_deleted, reused_anchor) {
         (true, _) => ReferenceAnchor::NotNeeded,
         (false, Some(anchor)) => anchor,
@@ -530,9 +485,8 @@ async fn collect_reference_anchor<S: ObjectStore + ?Sized>(
             select_reference_anchor(store, namespace_id, grace_window_ms, budget, context).await?
         }
     };
-    // The anchor roots what it named exactly as the current root does. Its
-    // own key goes in too, so the pass cannot sweep away the evidence the
-    // next pass needs.
+    // Protect the anchor's tables and manifest so later passes can use the
+    // same evidence.
     if let ReferenceAnchor::Manifest(anchor) = &live.anchor {
         live.manifests.insert(anchor.manifest_object_id.clone());
         live.tables.extend(anchor.tables.iter().cloned());
@@ -548,8 +502,8 @@ async fn collect_retained_wal<S: ObjectStore + ?Sized>(
     live: &mut LiveSet,
     budget: &mut PassBudget,
 ) -> CollectResult<()> {
-    // A live namespace keeps the complete replay chain from floor to head.
-    // A terminal namespace has no replay future.
+    // Live namespaces retain the complete WAL chain from floor to head.
+    // Deleted namespaces do not need a replay chain.
     if live.namespace_deleted || head.seq <= floor_seq {
         return Ok(());
     }
@@ -583,8 +537,7 @@ async fn collect_retained_wal<S: ObjectStore + ?Sized>(
         }
         WalChainLoad::LimitReached { requests_issued } => {
             budget.charge_block(u64::try_from(requests_issued).unwrap_or(u64::MAX));
-            // The incomplete chain is not inspected, so it contributes no
-            // roots before the typed budget stop discards the whole set.
+            // Discard the partial chain and the incomplete live set.
             return Err(CollectStop::Budget);
         }
     };

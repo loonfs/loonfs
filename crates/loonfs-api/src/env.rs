@@ -1,6 +1,6 @@
-//! Environment-variable names shared across LoonFS process surfaces.
+//! Environment variables used by more than one LoonFS process.
 
-/// Supplies the bearer token used to authenticate remote API requests.
+/// Bearer token for remote API requests.
 pub const AUTH_TOKEN_ENV: &str = "LOONFS_AUTH_TOKEN";
-/// Supplies the secret used to sign content-transfer tokens.
+/// Secret used to sign content-transfer tokens.
 pub const CONTENT_TOKEN_SECRET_ENV: &str = "LOONFS_CONTENT_TOKEN_SECRET";

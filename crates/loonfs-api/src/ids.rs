@@ -320,8 +320,8 @@ fn generated_position_suffix() -> String {
 
 /// Draws 128 fresh random bits.
 ///
-/// The body is 128 random bits, hex-encoded. Content ids use the same system
-/// generator, so their leading shard characters remain uniform.
+/// Generated ids hex-encode these bytes. Content ids use the same generator,
+/// which keeps their shard prefixes uniformly distributed.
 fn random_128() -> [u8; 16] {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).expect("the system random generator must be available");
@@ -532,7 +532,7 @@ string_id! {
     ///
     /// Reuse the same `CommitId` when retrying the same request. The accepted
     /// grammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,
-    /// or hyphens, starting with a letter or digit. [`CommitId::generate`] mints
+    /// or hyphens, starting with a letter or digit. [`CommitId::generate`] returns
     /// `c_<32 lowercase hex>`, but callers may supply any value in that grammar.
     CommitId,
     error = CommitIdValidationError,
