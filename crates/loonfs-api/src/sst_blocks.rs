@@ -323,9 +323,9 @@ pub fn decode_index_block(
     let payload = decode_section(stored, handle, true)?;
     let entries: Vec<SegmentIndexEntry> = ciborium::de::from_reader(payload.as_slice())
         .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
-    // Ascending, non-overlapping block order is a format requirement:
-    // key-range narrowing binary-searches the last keys, and span loading
-    // subtracts adjacent offsets before slicing the fetched bytes.
+    // Index keys must be sorted, and each block must end before the next
+    // block starts. Range lookup relies on key order, and span loading
+    // relies on non-overlapping offsets.
     if let Some(pair) = entries.windows(2).find(|pair| {
         pair[0].last_key > pair[1].last_key
             || pair[0]

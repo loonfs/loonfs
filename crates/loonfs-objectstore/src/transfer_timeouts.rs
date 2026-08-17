@@ -138,8 +138,7 @@ impl Body for IdleDeadlineBody {
     type Error = HttpError;
 
     #[allow(clippy::disallowed_methods)]
-    // The response-body idle deadline is a transport boundary, so its
-    // monotonic timestamp reaches neither durable bytes nor protocol replay.
+    // Monotonic time is used only to enforce the response-body idle timeout.
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

@@ -619,8 +619,7 @@ where
 /// Kept apart from [`serve_on`] so the settling order is a thing a test can
 /// drive with handles it holds.
 #[allow(clippy::disallowed_methods)]
-// The graceful-drain deadline is a process-lifecycle boundary, so ambient
-// monotonic time limits waiting without entering durable protocol state.
+// Monotonic time is used only to limit graceful shutdown.
 pub(super) async fn serve_and_settle<L>(
     listener: L,
     router: Router,

@@ -474,8 +474,7 @@ fn try_admit_commit(
 }
 
 #[allow(clippy::disallowed_methods)]
-// This synthetic admission timestamp feeds only publisher wait metrics, so
-// the test's durable operation remains independent of ambient time.
+// This timestamp is used only by publisher wait metrics.
 fn try_admit_candidate(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
@@ -519,8 +518,7 @@ fn publisher_trace_labels_are_low_cardinality() {
 
 #[tokio::test]
 #[allow(clippy::disallowed_methods)]
-// Monotonic time only seeds synthetic publisher wait metrics here, so the
-// asserted wire-code path remains independent of the clock.
+// Monotonic time is used only by publisher wait metrics in this test.
 async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

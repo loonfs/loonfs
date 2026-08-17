@@ -489,8 +489,7 @@ impl FsAdmin {
     /// undo here — the caller gives its claim back and a later step plans the
     /// group again.
     #[allow(clippy::disallowed_methods)]
-    // Compaction duration enters monotonic time at this metrics boundary, so
-    // its value cannot affect the manifest the deterministic job publishes.
+    // Monotonic time is used only to record compaction duration.
     pub(crate) async fn run_streaming_compaction(
         &self,
         namespace_id: &NamespaceId,

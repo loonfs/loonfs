@@ -667,8 +667,7 @@ impl NamespacePublisher {
     /// admission, cancelling the caller only drops result delivery; the worker
     /// still owns and publishes the request.
     #[allow(clippy::disallowed_methods)]
-    // Queue latency enters monotonic time at this metrics boundary, so no
-    // timestamp reaches durable protocol state.
+    // Monotonic time is used only to record queue latency.
     async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
         let enqueued_at = Instant::now();
@@ -801,8 +800,7 @@ impl NamespacePublisher {
 
     /// Drains the queue in admission order, then exits.
     #[allow(clippy::disallowed_methods)]
-    // Batch collection latency enters monotonic time at this metrics
-    // boundary, so replay and durable ordering do not depend on it.
+    // Monotonic time is used only to record batch collection latency.
     async fn run_worker(self) {
         loop {
             let collect_started = Instant::now();
@@ -847,8 +845,7 @@ impl NamespacePublisher {
     /// so a racing admission either queued before this check and is taken
     /// here, or finds no worker and spawns one.
     #[allow(clippy::disallowed_methods)]
-    // CAS pacing enters monotonic time at this publisher boundary, so it can
-    // delay an attempt without changing the durable operation it performs.
+    // Monotonic time is used only to pace CAS attempts.
     fn take_next_item(&self) -> Option<WorkItem> {
         let mut state = self.lock_state();
         // Terminal: a successful delete emptied the queue and set this
@@ -904,8 +901,7 @@ impl NamespacePublisher {
     }
 
     #[allow(clippy::disallowed_methods)]
-    // Publication latency enters monotonic time at this metrics boundary, so
-    // no timestamp participates in commit validity or replay.
+    // Monotonic time is used only to record publication latency.
     async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) {
         let selected_at = Instant::now();
         for candidate in &candidates {
@@ -1102,8 +1098,7 @@ impl NamespacePublisher {
     /// the deadline one pacing interval. When false, it only waits; the caller
     /// reserves the slot when it removes work from the queue.
     #[allow(clippy::disallowed_methods)]
-    // CAS pacing waits at this publisher boundary, so ambient time affects
-    // only attempt scheduling and never the committed operation's meaning.
+    // Monotonic time is used only to wait between CAS attempts.
     async fn await_cas_slot(&self, claim: bool) {
         loop {
             let sleep_until = self.lock_state().next_allowed_cas_at;

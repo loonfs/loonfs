@@ -822,8 +822,7 @@ impl Drop for PermitChain {
 /// Runs one claimed step. Everything it needs about the key came with the
 /// claim, so nothing here reads scheduling state back out of the book.
 #[allow(clippy::disallowed_methods)]
-// Step duration enters monotonic time at this metrics boundary, so job
-// selection and durable outcomes remain independent of it.
+// Monotonic time is used only to record step duration.
 async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> StepOutcome {
     let key = &dispatch.key;
     let Some(job) = inner.job(key.job) else {

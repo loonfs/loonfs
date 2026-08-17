@@ -79,8 +79,8 @@ async fn prefetch_recent_segments<S: ObjectStore + ?Sized>(
 
 /// One walk down the chain links, from the visible tip towards the base.
 struct WalkedChain {
-    /// The complete segments the walk found, oldest first. Empty when a
-    /// limited walk stopped early because nothing may replay a partial chain.
+    /// Complete segments in oldest-first order. Empty when a limited walk
+    /// stops before reaching the base.
     segments: Vec<ValidatedWalSegment>,
     /// How many `get` requests the load issued, prefetch included. A request
     /// that failed or missed counts, because the round trip happened; a
