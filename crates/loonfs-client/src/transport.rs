@@ -524,11 +524,9 @@ pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
     }
 }
 
-/// Renders a request-send failure with its root cause visible. Reqwest's
-/// own `Display` stops at "error sending request", hiding the
-/// connection-refused or DNS cause underneath — the one line that tells an
-/// operator whether the server is down or `server_url` points at the wrong
-/// place.
+/// Formats a request failure with its underlying connection or DNS error.
+/// Reqwest's default message omits this detail, which operators need to
+/// distinguish an unavailable server from an incorrect `server_url`.
 fn describe_send_error(url: &str, error: &reqwest::Error) -> String {
     render_send_error(url, error, error.is_connect(), error.is_timeout())
 }
@@ -609,6 +607,28 @@ fn next_transport_retry_backoff(
 // through the protocol.
 async fn transport_retry_pause(backoff: Duration) {
     tokio::time::sleep(backoff).await;
+}
+
+pub(crate) fn append_optional_pagination_query(
+    url: &mut String,
+    has_query: &mut bool,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) {
+    if let Some(limit) = limit {
+        append_query_param(url, has_query, "limit", &limit.to_string());
+    }
+    if let Some(cursor) = cursor {
+        append_query_param(url, has_query, "cursor", cursor);
+    }
+}
+
+pub(crate) fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value: &str) {
+    url.push(if *has_query { '&' } else { '?' });
+    *has_query = true;
+    url.push_str(name);
+    url.push('=');
+    url.push_str(&urlencoding::encode(value));
 }
 
 #[cfg(test)]

@@ -1,10 +1,8 @@
-//! What a one-pass put costs in memory, and that it still reconciles a
-//! retried commit id.
+//! Upload memory bounds, transport selection, and retry behavior.
 //!
-//! The measurement here is retention, not resident size: the source hands
-//! out chunks whose owners report when they are released, so the peak is
-//! how much of the payload the uploader was holding at once — a number that
-//! is exact, deterministic, and says nothing about the allocator.
+//! Test chunks record when they are created and dropped. This measures the
+//! payload bytes retained by the uploader without depending on allocator
+//! behavior.
 #![allow(clippy::panic)]
 // Transport-choice tests panic in unexpected match arms for precise
 // diagnostics.
@@ -21,19 +19,15 @@ use loonfs_test_support::ids::content_ref;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Part geometry the scripted server hands back. Smaller than the default
-/// so the test's payload stays cheap, and a server is free to choose it.
+/// Small part size used to keep multipart tests inexpensive.
 const TEST_PART_BYTES: u64 = 1024 * 1024;
-/// A payload just past the size at which a put stops holding its bytes
-/// whole — which is what puts it on the streaming path at all — cut into
-/// eight full parts and a short ninth, so the source's end is discovered
-/// rather than computed.
+/// Payload just above the streaming threshold, split into eight full parts
+/// and one partial part.
 const TEST_PAYLOAD_BYTES: usize = STREAMING_PUT_MIN_BYTES as usize + 1_000;
 /// Parts [`TEST_PAYLOAD_BYTES`] is cut into at [`TEST_PART_BYTES`].
 const TEST_PAYLOAD_PARTS: u32 = 9;
 
-/// How much of a payload its consumer is holding, tracked by the payload
-/// itself.
+/// Tracks payload chunks retained by the uploader.
 #[derive(Debug, Default)]
 struct Retention {
     live_bytes: AtomicU64,
@@ -70,9 +64,7 @@ impl Retention {
     }
 }
 
-/// One chunk of a watched payload. Its `Drop` is what marks the bytes
-/// released, so the live count falls exactly when the consumer lets go —
-/// including when a part is a view of this chunk rather than a copy of it.
+/// A chunk that updates retention counters when dropped.
 struct WatchedChunk {
     bytes: Vec<u8>,
     retention: Arc<Retention>,
@@ -90,13 +82,10 @@ impl Drop for WatchedChunk {
     }
 }
 
-/// A payload that reports how much of itself is being held.
+/// Builds a source that records retained payload bytes.
 ///
-/// Chunks are cut at the part size on purpose: the part reader hands a
-/// part-filling chunk straight through instead of copying it, so a part
-/// keeps its chunk alive for exactly as long as the uploader keeps the
-/// part. A source chunked more finely would be copied into part buffers and
-/// released early, which would measure the source rather than the uploader.
+/// Source chunks match the part size so the uploader can reuse each buffer.
+/// This keeps the counters aligned with buffers retained by in-flight parts.
 fn watched_source(payload: &[u8], chunk_bytes: usize) -> (PayloadSource, Arc<Retention>) {
     let retention = Arc::new(Retention::default());
     let chunks: Vec<Vec<u8>> = payload
@@ -852,9 +841,8 @@ async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy(
     assert_eq!(transport.attempts(), 1);
 }
 
-/// A file-backed source is the dominant case, and it pays nothing extra:
-/// the second pass re-opens the file the caller named, so the payload is
-/// never copied anywhere — not into memory and not into a spool.
+/// A file-backed direct PUT reopens the source for its second pass instead of
+/// copying it to memory or a spool file.
 #[tokio::test]
 async fn a_file_backed_direct_put_re_reads_the_file_rather_than_spooling_it() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -960,9 +948,8 @@ async fn a_sized_source_frames_its_body_with_a_content_length() {
     );
 }
 
-/// A source that cannot know its length is framed chunked, which is the
-/// only honest framing for it — and the case the server's incremental cap
-/// exists to bound.
+/// A source with unknown length uses chunked transfer encoding so the server
+/// can enforce its incremental size limit.
 #[tokio::test]
 async fn an_unsized_source_frames_its_body_chunked() {
     let stream = futures::stream::iter(vec![Ok(Bytes::from_static(b"0123456789"))]).boxed();

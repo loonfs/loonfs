@@ -23,7 +23,7 @@ tracing.workspace = true
 # `loonfs-core`'s `test-support` feature; test targets are the only builds
 # that turn it on.
 loonfs-core = { workspace = true, features = ["test-support"] }
-loonfs-test-support = { path = "../loonfs-test-support" }
+loonfs-test-support.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

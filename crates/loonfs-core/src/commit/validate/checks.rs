@@ -1,14 +1,13 @@
-//! The single op-validation loop and its precondition checks.
+//! Operation validation for one commit.
 //!
-//! Checks that only differ by error vocabulary take error-constructor
-//! closures so each call site keeps its exact wire-visible variant.
+//! Shared checks accept error constructors when callers require different
+//! wire-visible error variants.
 
-use super::super::{
-    CommitOp, CommitPrecondition, CommitValidationError, PlannedOp, ResolvedBinding, ValidatedOp,
-};
+use super::super::{CommitOp, CommitValidationError, PlannedOp, ResolvedBinding, ValidatedOp};
+use super::preconditions::validate_explicit_preconditions;
 use super::view::PublishValidationView;
 use crate::error::CoreError;
-use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::{
     next_public_ordinal, ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, DisplayName,
     InodeId, InodeKind, NameKey, RevisionNo,
@@ -59,10 +58,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
 
     for planned in ops {
         let op_index = numbering.reserve_op_index()?;
-        // Race checks belong to the operation that carries them and are
-        // evaluated where it runs: an operation's checks describe the state
-        // its own planning observed, which includes everything the earlier
-        // operations of the same commit did.
+        // Check preconditions immediately before the operation so they see
+        // changes made by earlier operations in the same commit.
         validate_explicit_preconditions(&planned.preconditions, metadata_state).await?;
         let validated_op = match &planned.op {
             CommitOp::CreateDirectory {
@@ -354,54 +351,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     Ok(validated_ops)
 }
 
-async fn validate_explicit_preconditions<S: ObjectStore + ?Sized>(
-    preconditions: &[CommitPrecondition],
-    metadata_state: &PublishValidationView<'_, S>,
-) -> Result<(), CoreError> {
-    for precondition in preconditions {
-        match precondition {
-            CommitPrecondition::InodeRevisionIs {
-                inode_id,
-                revision_no,
-            } => {
-                validate_inode_revision_is(metadata_state, *inode_id, *revision_no).await?;
-            }
-            CommitPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
-                validate_replace_target_not_covered(metadata_state, *inode_id).await?;
-            }
-            CommitPrecondition::ChildNameAbsent {
-                parent_inode_id,
-                name_key,
-            } => {
-                validate_child_name_absent_precondition(metadata_state, *parent_inode_id, name_key)
-                    .await?;
-            }
-            CommitPrecondition::BindingIs {
-                parent_inode_id,
-                name_key,
-                child_inode_id,
-                bind_seq,
-                bind_delta_index,
-            } => {
-                validate_binding_is_precondition(
-                    metadata_state,
-                    *parent_inode_id,
-                    name_key,
-                    *child_inode_id,
-                    *bind_seq,
-                    *bind_delta_index,
-                )
-                .await?;
-            }
-            CommitPrecondition::DirectoryEmpty { inode_id } => {
-                validate_directory_empty_precondition(metadata_state, *inode_id).await?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn next_revision_no(
     inode_id: InodeId,
     base_revision_no: RevisionNo,
@@ -519,7 +468,7 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
 
 /// Requires the inode to exist and to have `expected_kind`, with the error
 /// vocabulary supplied by the call site.
-async fn validate_inode_kind<S: ObjectStore + ?Sized>(
+pub(super) async fn validate_inode_kind<S: ObjectStore + ?Sized>(
     metadata_state: &PublishValidationView<'_, S>,
     inode_id: InodeId,
     expected_kind: InodeKind,
@@ -572,7 +521,7 @@ async fn validate_create_parent_not_covered<S: ObjectStore + ?Sized>(
 
 /// Shared by the `ReplaceFile` op and the `AncestorsNotSubtreeDeleted`
 /// explicit precondition, both of which report the replace-flavored error.
-async fn validate_replace_target_not_covered<S: ObjectStore + ?Sized>(
+pub(super) async fn validate_replace_target_not_covered<S: ObjectStore + ?Sized>(
     metadata_state: &PublishValidationView<'_, S>,
     inode_id: InodeId,
 ) -> Result<(), CoreError> {
@@ -676,117 +625,6 @@ async fn validate_rename_target_name_absent<S: ObjectStore + ?Sized>(
     .await
 }
 
-async fn validate_child_name_absent_precondition<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishValidationView<'_, S>,
-    parent_inode_id: InodeId,
-    name_key: &NameKey,
-) -> Result<(), CoreError> {
-    validate_name_precondition_parent(metadata_state, parent_inode_id).await?;
-
-    if let Some(existing) = metadata_state
-        .view()
-        .visible_child(parent_inode_id, name_key)
-        .await?
-    {
-        return Err(CommitValidationError::CreateChildNameCollision {
-            parent_inode_id,
-            name_key: name_key.clone(),
-            child_inode_id: existing.child_inode_id,
-        }
-        .into());
-    }
-
-    Ok(())
-}
-
-async fn validate_binding_is_precondition<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishValidationView<'_, S>,
-    parent_inode_id: InodeId,
-    name_key: &NameKey,
-    child_inode_id: InodeId,
-    bind_seq: ChangeSeq,
-    bind_delta_index: u32,
-) -> Result<(), CoreError> {
-    validate_name_precondition_parent(metadata_state, parent_inode_id).await?;
-
-    let Some(existing) = metadata_state
-        .view()
-        .visible_child(parent_inode_id, name_key)
-        .await?
-    else {
-        return Err(CommitValidationError::BindingPreconditionMissing {
-            parent_inode_id,
-            name_key: name_key.clone(),
-        }
-        .into());
-    };
-    // Same parent and name by construction: `existing` was looked up under
-    // `(parent_inode_id, name_key)`, so identity equality reduces to the
-    // remaining binding-identity fields.
-    let expected = BindingIdentity {
-        parent_inode_id,
-        name_key,
-        child_inode_id,
-        bind_seq,
-        bind_delta_index,
-    };
-    if BindingIdentity::from(&existing) != expected {
-        return Err(CommitValidationError::BindingPreconditionMismatch {
-            parent_inode_id,
-            name_key: name_key.clone(),
-            expected_child_inode_id: child_inode_id,
-            actual_child_inode_id: existing.child_inode_id,
-        }
-        .into());
-    }
-
-    Ok(())
-}
-
-async fn validate_name_precondition_parent<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishValidationView<'_, S>,
-    parent_inode_id: InodeId,
-) -> Result<(), CoreError> {
-    validate_inode_kind(
-        metadata_state,
-        parent_inode_id,
-        InodeKind::Directory,
-        || CommitValidationError::NamePreconditionParentMissing { parent_inode_id },
-        |actual_kind| CommitValidationError::NamePreconditionParentNotDirectory {
-            parent_inode_id,
-            actual_kind,
-        },
-    )
-    .await
-    .map(|_| ())
-}
-
-async fn validate_directory_empty_precondition<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishValidationView<'_, S>,
-    inode_id: InodeId,
-) -> Result<(), CoreError> {
-    let inode = metadata_state
-        .view()
-        .visible_inode(inode_id)
-        .await?
-        .ok_or(CommitValidationError::DirectoryEmptyPreconditionInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::Directory {
-        return Err(
-            CommitValidationError::DirectoryEmptyPreconditionInodeNotDirectory {
-                inode_id,
-                actual_kind: inode.inode_kind,
-            }
-            .into(),
-        );
-    }
-
-    if metadata_state.view().has_visible_children(inode_id).await? {
-        return Err(CommitValidationError::DirectoryEmptyPreconditionNotEmpty { inode_id }.into());
-    }
-
-    Ok(())
-}
-
 async fn resolve_current_binding_for_mutation<S: ObjectStore + ?Sized>(
     metadata_state: &PublishValidationView<'_, S>,
     inode_id: InodeId,
@@ -832,7 +670,7 @@ async fn validate_file_base_revision_is<S: ObjectStore + ?Sized>(
 
 /// Shared by the `ReplaceFile` op and the `InodeRevisionIs` explicit
 /// precondition, both of which report the replace-flavored error.
-async fn validate_inode_revision_is<S: ObjectStore + ?Sized>(
+pub(super) async fn validate_inode_revision_is<S: ObjectStore + ?Sized>(
     metadata_state: &PublishValidationView<'_, S>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,

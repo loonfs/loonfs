@@ -65,6 +65,8 @@ serde_bytes = "0.11"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 hmac = "0.12"
+loonfs-model = { path = "crates/loonfs-model" }
+loonfs-test-support = { path = "crates/loonfs-test-support" }
 # Cargo requires published dependencies to include a registry version even
 # when they also have a local path. These versions must match
 # `workspace.package.version`.

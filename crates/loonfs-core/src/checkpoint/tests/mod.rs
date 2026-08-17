@@ -57,14 +57,14 @@ use crate::namespace::control::{
 use crate::namespace::status::load_namespace_head_summary;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
-use crate::path::write::ops::{
-    delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
-};
 use crate::protocol::list_changes_after;
 use crate::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
+use crate::test_support::ops::{
+    delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
+};
 use crate::test_support::{RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache};
 use crate::MutationContext;
 use async_trait::async_trait;

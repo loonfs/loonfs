@@ -48,7 +48,7 @@ utoipa = { workspace = true, optional = true }
 [dev-dependencies]
 base64.workspace = true
 loonfs-client.workspace = true
-loonfs-test-support = { path = "../loonfs-test-support" }
+loonfs-test-support.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
