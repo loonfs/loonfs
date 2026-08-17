@@ -6,13 +6,6 @@ use loonfs_api::{IndexSegmentId, NamespaceId};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid grep manifest id {value:?}: {reason}")]
-pub struct GrepManifestIdError {
-    pub(crate) value: String,
-    pub(crate) reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum GrepManifestStateError {
     #[error("unsupported grep index format version `{found}`: this build supports `{supported}`")]

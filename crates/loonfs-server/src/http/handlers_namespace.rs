@@ -287,8 +287,7 @@ pub(super) async fn delete_namespace(
     };
     let response = state
         .writer
-        .publisher()
-        .submit_delete(namespace_id.clone(), options)
+        .delete_namespace(&namespace_id, options)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))

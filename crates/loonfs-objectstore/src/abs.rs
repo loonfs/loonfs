@@ -151,11 +151,9 @@ impl ObjectStore for AzureAbsStore {
 #[cfg(test)]
 mod tests {
     use super::{AzureAbsStore, AzureAbsStoreConfig};
+    use crate::test_support::AZURITE_ACCOUNT_KEY;
     use crate::ObjectStore;
     use crate::ObjectStoreError;
-
-    const AZURITE_ACCOUNT_KEY: &str =
-        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 
     #[test]
     fn access_key_is_required() {

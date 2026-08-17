@@ -1,16 +1,11 @@
 //! Constructor-validated grep manifest payload and its root pointer.
 
-use super::error::{GrepManifestIdError, GrepManifestStateError};
-use loonfs_api::generated_id;
+use super::error::GrepManifestStateError;
 use loonfs_api::wire::sst_blocks::BlockHandle;
+pub use loonfs_api::GrepManifestId;
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, NamespaceId};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::str::FromStr;
-
-const GREP_MANIFEST_ID_PREFIX: &str = "gmf";
-const GREP_MANIFEST_ID_BODY_LEN: usize = 32;
 
 /// Version of the grep index state nested inside a v1 manifest.
 ///
@@ -18,119 +13,6 @@ const GREP_MANIFEST_ID_BODY_LEN: usize = 32;
 /// compatibility starts with the released format, not intermediate
 /// pre-release encodings.
 pub const GREP_INDEX_FORMAT_VERSION: u32 = 1;
-
-/// Durable object id for one immutable grep manifest candidate.
-///
-/// The id is drawn fresh for every candidate and names *which object*, never
-/// what it contains. A content-derived id would make an identical rebuild
-/// reuse the object an earlier publication left behind, and that reuse is
-/// what lets collection race a publication for a manifest the winner is
-/// about to point at. Integrity evidence rides
-/// [`GrepRootPointer::manifest_payload_checksum`] beside the id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GrepManifestId(String);
-
-impl GrepManifestId {
-    /// Generates an id no earlier candidate can carry.
-    pub fn generate() -> Self {
-        Self(generated_id(GREP_MANIFEST_ID_PREFIX))
-    }
-
-    /// Parses the `gmf_` marker plus a 32-character lowercase hex body.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, GrepManifestIdError> {
-        let value = value.as_ref();
-        let expected_prefix = format!("{GREP_MANIFEST_ID_PREFIX}_");
-        let Some(body) = value.strip_prefix(&expected_prefix) else {
-            return Err(GrepManifestIdError {
-                value: value.to_owned(),
-                reason: format!("must start with `{expected_prefix}`"),
-            });
-        };
-        if body.len() != GREP_MANIFEST_ID_BODY_LEN {
-            return Err(GrepManifestIdError {
-                value: value.to_owned(),
-                reason: format!(
-                    "body must be {GREP_MANIFEST_ID_BODY_LEN} lowercase hex characters"
-                ),
-            });
-        }
-        if !body
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(GrepManifestIdError {
-                value: value.to_owned(),
-                reason: "body must contain only lowercase hex characters".to_owned(),
-            });
-        }
-        Ok(Self(value.to_owned()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for GrepManifestId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::borrow::Borrow<str> for GrepManifestId {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for GrepManifestId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl FromStr for GrepManifestId {
-    type Err = GrepManifestIdError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::parse(value)
-    }
-}
-
-impl TryFrom<&str> for GrepManifestId {
-    type Error = GrepManifestIdError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
-}
-
-impl TryFrom<String> for GrepManifestId {
-    type Error = GrepManifestIdError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
-}
-
-impl Serialize for GrepManifestId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for GrepManifestId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::parse(value).map_err(serde::de::Error::custom)
-    }
-}
 
 /// Small mutable control payload installed at `extensions/grep/root.json`.
 ///

@@ -826,15 +826,6 @@ impl Client {
         .await
     }
 
-    /// Opens the response body authorized by a download grant as a bounded,
-    /// verified stream.
-    pub async fn open_direct_download(
-        &self,
-        download: &BeginDownloadResponse,
-    ) -> Result<DirectDownloadStream> {
-        self.open_direct_download_at(download, 0).await
-    }
-
     /// Opens a download grant's body from `start_offset`, for a caller that
     /// already holds the bytes below it.
     ///
@@ -844,7 +835,7 @@ impl Client {
     /// stream still reports on the whole object, so a nonzero offset obliges
     /// the caller to hand over what it holds through
     /// [`DirectDownloadStream::fold_resumed_prefix`] before driving it.
-    pub async fn open_direct_download_at(
+    pub async fn open_direct_download(
         &self,
         download: &BeginDownloadResponse,
         start_offset: u64,
@@ -858,16 +849,8 @@ impl Client {
         .await
     }
 
-    /// Opens an inode download as a bounded, verified stream.
-    pub async fn open_direct_download_by_inode(
-        &self,
-        download: &BeginDownloadByInodeResponse,
-    ) -> Result<DirectDownloadStream> {
-        self.open_direct_download_by_inode_at(download, 0).await
-    }
-
     /// Opens an inode download from `start_offset`.
-    pub async fn open_direct_download_by_inode_at(
+    pub async fn open_direct_download_by_inode(
         &self,
         download: &BeginDownloadByInodeResponse,
         start_offset: u64,
@@ -957,7 +940,7 @@ impl Client {
     {
         use tokio::io::AsyncWriteExt as _;
         let path = &download.path;
-        let mut download = self.open_direct_download(download).await?;
+        let mut download = self.open_direct_download(download, 0).await?;
         let mut size_bytes = 0u64;
         while let Some(chunk) = download.next_chunk().await? {
             size_bytes += chunk.len() as u64;

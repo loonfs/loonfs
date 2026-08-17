@@ -23,7 +23,7 @@
 
 use crate::fs::{ReadCore, WriterBits};
 use crate::metrics::PublishOutcome;
-use crate::publish::{CommitCandidate, CommitRequest, PreparedContent};
+use crate::publish::CommitCandidate;
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeCacheConfig, RuntimeError,
 };
@@ -318,28 +318,6 @@ impl PublisherRegistry {
             trace_mode,
             trace_store_kind,
         }
-    }
-
-    /// Submits one mutation request through the namespace's publisher.
-    pub async fn submit_commit(
-        &self,
-        namespace_id: NamespaceId,
-        request: CommitRequest,
-    ) -> CommitResult {
-        self.submit_candidate(namespace_id, CommitCandidate::new(request))
-            .await
-    }
-
-    /// Submits one mutation request together with opaque proofs for its
-    /// already-prepared content.
-    pub async fn submit_commit_with_prepared_content(
-        &self,
-        namespace_id: NamespaceId,
-        request: CommitRequest,
-        content: Vec<PreparedContent>,
-    ) -> CommitResult {
-        self.submit_candidate(namespace_id, CommitCandidate::prepared(request, content))
-            .await
     }
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations

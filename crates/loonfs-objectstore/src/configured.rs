@@ -264,7 +264,7 @@ mod tests {
         GCP_GCS_MAX_DIRECT_PUT_BYTES,
     };
     use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
-    use crate::test_support::gcs_fixture_service_account_key_file;
+    use crate::test_support::{gcs_fixture_service_account_key_file, AZURITE_ACCOUNT_KEY};
     use crate::ObjectStore;
     use crate::ObjectStoreError;
     use bytes::Bytes;
@@ -274,9 +274,6 @@ mod tests {
     use loonfs_api::ContentRef;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
-
-    const AZURITE_ACCOUNT_KEY: &str =
-        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 
     #[tokio::test]
     async fn configured_local_fs_scopes_optional_key_prefix() {

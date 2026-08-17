@@ -923,8 +923,9 @@ mod tests {
     use crate::context::MutationContext;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::{CommitRequest, FilesystemOperation};
-    use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, CommitId};
+    use loonfs_api::{AttributeRevisionNo, AttributeValue, CommitId};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_test_support::ids::attribute_key;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
@@ -933,10 +934,6 @@ mod tests {
             writer_id: "reader-tests".to_owned(),
             now_ms: 1,
         }
-    }
-
-    fn attribute_key(key: &str) -> AttributeKey {
-        AttributeKey::parse(key).expect("attribute key")
     }
 
     /// Bootstraps a namespace holding `/docs` with one annotated child

@@ -8,7 +8,7 @@ use crate::keyspace::parse_endpoint_url;
 use crate::object_store::Result;
 use crate::presign::PresignedUrl;
 use crate::presign::{
-    S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
+    S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES, CHECKSUM_HEAD_TTL,
     CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
 };
 use crate::store_io_runtime::StoreIoRuntime;
@@ -28,11 +28,6 @@ use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-
-/// Lifetime of the internally signed `HeadObject` used for checksum
-/// readback. The request is issued immediately and never handed out, so it
-/// only needs to outlive one round trip and its clock skew.
-const CHECKSUM_HEAD_TTL: Duration = Duration::from_secs(60);
 
 /// Lifetime of the internally signed multipart control requests. Like the
 /// checksum head, each is issued immediately and never handed out.

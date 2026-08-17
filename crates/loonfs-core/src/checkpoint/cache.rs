@@ -22,7 +22,7 @@ use tokio::sync::OnceCell;
 /// budget is the only limit — one wide directory's segment working set must
 /// fit, or warm listings re-fetch segments superlinearly — and zero
 /// disables the cache.
-pub const DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataTableCacheConfig {
@@ -181,16 +181,7 @@ struct MetadataTableCacheStatsInner {
 
 impl MetadataTableCache {
     pub fn new(config: MetadataTableCacheConfig) -> Self {
-        Self::with_stored_block_cache(config, None)
-    }
-
-    /// Creates a decoded-block cache with an optional encoded-block cache.
-    /// Passing `None` is equivalent to [`Self::new`].
-    pub fn with_stored_block_cache(
-        config: MetadataTableCacheConfig,
-        stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
-    ) -> Self {
-        Self::with_stored_block_cache_and_observer(config, stored_block_cache, None)
+        Self::with_stored_block_cache_and_observer(config, None, None)
     }
 
     /// Creates a cache that reports activity to the optional `observer`.

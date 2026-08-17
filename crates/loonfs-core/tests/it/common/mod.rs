@@ -56,7 +56,6 @@ pub(crate) mod commit_split_support {
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::BoxStream;
-    use loonfs_api::ContentId;
     use loonfs_api::{
         AbsolutePath, ChangeSeq, CommitId, ContentRef, DestinationBehavior, NamespaceId,
     };
@@ -479,7 +478,7 @@ pub(crate) mod commit_split_support {
     }
 
     pub(crate) fn content_ref(seed: &str) -> ContentRef {
-        ContentRef::blob_v1(ContentId::generate(), seed.as_bytes())
+        loonfs_test_support::ids::content_ref(seed.as_bytes())
     }
 
     pub(crate) fn content_blob_counting_store(

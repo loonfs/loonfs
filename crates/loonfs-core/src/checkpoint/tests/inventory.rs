@@ -9,15 +9,9 @@ use super::*;
 use crate::checkpoint::list::list_checkpoints_page;
 use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::{
-    CheckpointOwnerSummary, EffectiveLimit, ErrorCode, ListCheckpointsResponse, NamespaceCursor,
-    PageRequest, PaginationPolicy,
+    CheckpointOwnerSummary, ErrorCode, ListCheckpointsResponse, NamespaceCursor, PageRequest,
 };
-
-fn page_limit(limit: u32) -> EffectiveLimit {
-    PaginationPolicy::default()
-        .resolve_limit(Some(limit))
-        .expect("test page limit")
-}
+use loonfs_test_support::ids::page_limit;
 
 async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
     store: &S,

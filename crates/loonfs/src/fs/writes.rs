@@ -691,7 +691,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        self.publish_candidate(namespace_id, CommitCandidate::new(request))
+        self.commit_candidate(namespace_id, CommitCandidate::new(request))
             .await
     }
 
@@ -705,7 +705,7 @@ impl FsWriter {
         request: CommitRequest,
         prepared_content: Vec<PreparedContent>,
     ) -> Result<CommitResponse> {
-        self.publish_candidate(
+        self.commit_candidate(
             namespace_id,
             CommitCandidate::prepared(request, prepared_content),
         )
@@ -717,7 +717,7 @@ impl FsWriter {
     /// its own durable result, and admitted work is owned by the service's
     /// worker — a cancelled caller abandons only its result delivery, never
     /// the publication.
-    async fn publish_candidate(
+    pub async fn commit_candidate(
         &self,
         namespace_id: &NamespaceId,
         candidate: CommitCandidate,

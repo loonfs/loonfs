@@ -2,7 +2,9 @@
 
 use super::{ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::object_store::Result;
-use crate::presign::{stored_crc32c, GcsPresignerConfig, GcsV4Presigner, PresignedUrl};
+use crate::presign::{
+    stored_crc32c, GcsPresignerConfig, GcsV4Presigner, PresignedUrl, CHECKSUM_HEAD_TTL,
+};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig, StoredObjectChecksum,
@@ -14,12 +16,7 @@ use loonfs_api::Checksum;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::GoogleCloudStorageBuilder;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
-
-/// Lifetime of the internally signed request used for checksum readback. It
-/// is issued immediately and never handed out, so it only needs to outlive
-/// one round trip and its clock skew.
-const CHECKSUM_HEAD_TTL: Duration = Duration::from_secs(60);
+use std::time::SystemTime;
 
 /// Supplies explicit credentials and key scoping for the native Google Cloud Storage adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]

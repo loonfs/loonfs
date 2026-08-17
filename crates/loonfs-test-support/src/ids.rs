@@ -4,7 +4,7 @@ use loonfs_api::{
     ActorId, ActorRef, AttributeKey, AttributeValue, ContentId, ContentRef, EffectiveLimit,
     NamespaceId,
 };
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroUsize};
 
 /// Parses a namespace id that is expected to be valid test data.
 pub fn namespace_id(value: &str) -> NamespaceId {
@@ -46,13 +46,8 @@ pub fn nonzero_usize(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
-/// Constructs a nonzero `u64` that is expected to be valid test data.
-pub fn nonzero_u64(value: u64) -> NonZeroU64 {
-    NonZeroU64::new(value).expect("test value should be nonzero")
-}
-
 /// Constructs a nonzero `u32` that is expected to be valid test data.
-pub fn nonzero_u32(value: u32) -> NonZeroU32 {
+fn nonzero_u32(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("test value should be nonzero")
 }
 

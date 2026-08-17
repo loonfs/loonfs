@@ -520,18 +520,13 @@ pub(super) async fn apply_commit(
             };
             state
                 .writer
-                .publisher()
-                .submit_candidate(namespace_id.clone(), candidate)
+                .commit_candidate(&namespace_id, candidate)
                 .await
         }
         .instrument(span)
         .await
     } else {
-        state
-            .writer
-            .publisher()
-            .submit_commit(namespace_id.clone(), request)
-            .await
+        state.writer.commit(&namespace_id, request).await
     };
     let response = response_result.map_err(|error| {
         ApiResponseError::runtime_for_namespace(&namespace_id, error)

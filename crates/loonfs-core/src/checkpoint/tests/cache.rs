@@ -829,9 +829,10 @@ async fn checkpointed_direntry_segment() -> (
 /// built with a local cache hands the read paths. A fresh one stands for a
 /// fresh process: only the local tier carries anything over.
 fn table_cache_over(blocks: &Arc<RecordingStoredMetadataBlockCache>) -> MetadataTableCache {
-    MetadataTableCache::with_stored_block_cache(
+    MetadataTableCache::with_stored_block_cache_and_observer(
         MetadataTableCacheConfig::default(),
         Some(Arc::clone(blocks) as Arc<dyn StoredMetadataBlockCache>),
+        None,
     )
 }
 

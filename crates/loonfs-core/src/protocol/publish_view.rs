@@ -337,10 +337,7 @@ mod tests {
     use crate::namespace::basis::BasisManifest;
     use crate::namespace::bootstrap::bootstrap_metadata_state;
     use loonfs_api::ManifestObjectId;
-
-    fn namespace_id(value: &str) -> NamespaceId {
-        NamespaceId::parse(value).expect("valid namespace id")
-    }
+    use loonfs_test_support::ids::namespace_id;
 
     fn manifest_basis(
         owner: &str,

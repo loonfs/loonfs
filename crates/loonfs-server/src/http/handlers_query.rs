@@ -50,10 +50,7 @@ pub(super) async fn grep(
     if let Some(maintenance) = &state.grep_maintenance {
         maintenance.nudge_if_behind(&namespace_id).await;
     }
-    let service = state
-        .grep_service
-        .as_ref()
-        .expect("grep routes should carry a grep service");
+    let service = state.grep_service();
     // Grep's own segments come off the instrumented store every LoonFS
     // request in this process is measured on; its filesystem reads go
     // through the same reader handle the core planes serve from.
@@ -122,9 +119,7 @@ pub(super) async fn enable_grep_index(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let outcome = state
-        .grep_worker
-        .as_ref()
-        .expect("grep routes should carry a grep worker")
+        .grep_worker()
         .enable(&namespace_id)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
@@ -183,9 +178,7 @@ async fn read_grep_index_status(
     namespace_id: &NamespaceId,
 ) -> Result<GrepIndexStatusResponse, ApiResponseError> {
     state
-        .grep_worker
-        .as_ref()
-        .expect("grep routes should carry a grep worker")
+        .grep_worker()
         .index_status(namespace_id)
         .await
         .map_err(|error| map_grep_error(namespace_id, error))
@@ -225,9 +218,7 @@ pub(super) async fn disable_grep_index(
     // to maintain, and the runner forgets the namespace. Nothing here waits
     // on a background task to notice.
     let outcome = state
-        .grep_worker
-        .as_ref()
-        .expect("grep routes should carry a grep worker")
+        .grep_worker()
         .disable(&namespace_id)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
@@ -277,9 +268,7 @@ pub(super) async fn gc_grep_index(
     let namespace_id = namespace_id_path.into_id()?;
     let request = request.unwrap_or_default();
     let report = state
-        .grep_worker
-        .as_ref()
-        .expect("grep routes should carry a grep worker")
+        .grep_worker()
         .garbage_collect_namespace(
             &namespace_id,
             current_unix_ms()?,

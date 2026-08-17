@@ -22,9 +22,7 @@ pub use codec::{
     GrepManifestEnvelope, GrepRootEnvelope, GREP_MANIFEST_FORMAT_VERSION, GREP_MANIFEST_KIND,
     GREP_ROOT_FORMAT_VERSION, GREP_ROOT_KIND,
 };
-pub use error::{
-    GrepEnvelopeCodecError, GrepManifestIdError, GrepManifestStateError, GrepRootError,
-};
+pub use error::{GrepEnvelopeCodecError, GrepManifestStateError, GrepRootError};
 pub(crate) use state::ChangeFeedResume;
 pub use state::{
     GrepIndexState, GrepLifecycle, GrepManifestId, GrepManifestState, GrepReorganizeState,

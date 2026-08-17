@@ -9,7 +9,7 @@ use crate::content_tokens::ContentTokenError;
 use crate::fs::WriterIdentity;
 use crate::maintenance_runner::MaintenanceRunner;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
-use crate::publish::{ContentPreparationError, FilesystemOperation};
+use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
     BeginUploadRequest, CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig,
     SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
@@ -307,9 +307,9 @@ async fn publish_once_into_each(writer: &crate::FsWriter, namespaces: &[Namespac
             .await
             .expect("bootstrap");
         registry
-            .submit_commit(
+            .submit_candidate(
                 namespace_id.clone(),
-                create_directory_request("seed", "docs"),
+                CommitCandidate::new(create_directory_request("seed", "docs")),
             )
             .await
             .expect("commit");
@@ -883,9 +883,9 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
     let registry = writer.publisher();
 
     registry
-        .submit_commit(
+        .submit_candidate(
             namespace_id.clone(),
-            create_directory_request("warmup", "warmup"),
+            CommitCandidate::new(create_directory_request("warmup", "warmup")),
         )
         .await
         .expect("warmup commit");
@@ -895,7 +895,10 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
         let namespace_id = namespace_id.clone();
         async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("hot", "hot"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("hot", "hot")),
+                )
                 .await
         }
     });
@@ -1402,7 +1405,10 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("warmup", "warmup"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("warmup", "warmup")),
+                )
                 .await
         })
     };
@@ -1417,12 +1423,20 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let response_a = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();
-        tokio::spawn(async move { registry.submit_commit(namespace_id, request_a).await })
+        tokio::spawn(async move {
+            registry
+                .submit_candidate(namespace_id, CommitCandidate::new(request_a))
+                .await
+        })
     };
     let response_b = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();
-        tokio::spawn(async move { registry.submit_commit(namespace_id, request_b).await })
+        tokio::spawn(async move {
+            registry
+                .submit_candidate(namespace_id, CommitCandidate::new(request_b))
+                .await
+        })
     };
     let publisher = registry.publisher_for(&namespace_id).expect("publisher");
     wait_for_queued_candidates(&publisher, 2).await;
@@ -1531,7 +1545,10 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("warmup", "warmup"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("warmup", "warmup")),
+                )
                 .await
         })
     };
@@ -1552,14 +1569,21 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     let plain_response = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();
-        tokio::spawn(async move { registry.submit_commit(namespace_id, plain).await })
+        tokio::spawn(async move {
+            registry
+                .submit_candidate(namespace_id, CommitCandidate::new(plain))
+                .await
+        })
     };
     let prepared_response = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit_with_prepared_content(namespace_id, prepared, vec![prepared_content])
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::prepared(prepared, vec![prepared_content]),
+                )
                 .await
         })
     };
@@ -1632,7 +1656,10 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("active", "active"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("active", "active")),
+                )
                 .await
         })
     };
@@ -1641,9 +1668,9 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     // Admission then closes, and new work is refused.
     registry.close_admission();
     let refused = registry
-        .submit_commit(
+        .submit_candidate(
             namespace_id.clone(),
-            create_directory_request("refused", "refused"),
+            CommitCandidate::new(create_directory_request("refused", "refused")),
         )
         .await
         .expect_err("submission after close_admission");
@@ -1700,7 +1727,10 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("doomed", "doomed"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("doomed", "doomed")),
+                )
                 .await
         })
     };
@@ -1713,7 +1743,10 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("queued", "queued"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("queued", "queued")),
+                )
                 .await
         })
     };
@@ -1764,9 +1797,9 @@ async fn successful_delete_evicts_the_namespace_publisher() {
     let registry = writer.publisher();
 
     registry
-        .submit_commit(
+        .submit_candidate(
             namespace_id.clone(),
-            create_directory_request("before", "before"),
+            CommitCandidate::new(create_directory_request("before", "before")),
         )
         .await
         .expect("commit before delete");
@@ -1784,9 +1817,9 @@ async fn successful_delete_evicts_the_namespace_publisher() {
     // A later submission builds a fresh publisher and still fails, now
     // on the durable tombstone instead of the fast in-memory flag.
     let late = registry
-        .submit_commit(
+        .submit_candidate(
             namespace_id.clone(),
-            create_directory_request("late", "late"),
+            CommitCandidate::new(create_directory_request("late", "late")),
         )
         .await
         .expect_err("submission after delete");
@@ -1805,9 +1838,9 @@ async fn close_admission_refuses_without_creating_publishers() {
 
     registry.close_admission();
     let refused = registry
-        .submit_commit(
+        .submit_candidate(
             namespace_id.clone(),
-            create_directory_request("nope", "nope"),
+            CommitCandidate::new(create_directory_request("nope", "nope")),
         )
         .await
         .expect_err("closed registry refuses commits");
@@ -1846,7 +1879,10 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("active", "active"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("active", "active")),
+                )
                 .await
         })
     };
@@ -1914,7 +1950,10 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("before", "before"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("before", "before")),
+                )
                 .await
         })
     };
@@ -1934,7 +1973,10 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_commit(namespace_id, create_directory_request("second", "second"))
+                .submit_candidate(
+                    namespace_id,
+                    CommitCandidate::new(create_directory_request("second", "second")),
+                )
                 .await
         })
     };
@@ -2235,7 +2277,10 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
         .await
         .expect("bootstrap");
     registry
-        .submit_commit(other.clone(), create_directory_request("seed", "docs"))
+        .submit_candidate(
+            other.clone(),
+            CommitCandidate::new(create_directory_request("seed", "docs")),
+        )
         .await
         .expect("commit while the other engine is held");
 
@@ -2253,7 +2298,10 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
 
     drop(held_engine);
     registry
-        .submit_commit(other.clone(), create_directory_request("second", "more"))
+        .submit_candidate(
+            other.clone(),
+            CommitCandidate::new(create_directory_request("second", "more")),
+        )
         .await
         .expect("commit once the engine is free");
 

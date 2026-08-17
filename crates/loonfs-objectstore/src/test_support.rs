@@ -3,6 +3,10 @@
 use crate::timing::MonotonicTimer;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Azurite's published development-account key.
+pub(crate) const AZURITE_ACCOUNT_KEY: &str =
+    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+
 /// Deterministic timer that advances a fixed step per reading.
 #[derive(Debug)]
 pub(crate) struct SteppingTimer {
