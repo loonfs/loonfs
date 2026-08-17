@@ -48,15 +48,11 @@ use payload::PartReader;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-/// Payload size from which a put stops holding its bytes whole.
+/// Minimum payload size for streaming uploads.
 ///
-/// It mirrors
-/// `loonfs_objectstore::provider_object_store::PROVIDER_MULTIPART_PART_BYTES`,
-/// and that one number answers two questions the same way: below it a direct
-/// multipart upload would be a one-part upload with extra round trips and
-/// nothing to gain, and a payload that fits in a single part is not worth
-/// streaming either. At or above it — and for any payload whose length is not
-/// known in advance — a put reads its source once, in bounded pieces.
+/// This matches the server's multipart part size. Smaller known-length
+/// payloads are buffered because streaming would add overhead without
+/// reducing peak memory below one part.
 pub const STREAMING_PUT_MIN_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Parts in flight at once. Each holds its bytes, so a one-pass upload's

@@ -2522,15 +2522,15 @@ not require durable control-plane state. Long-running operations may span
 multiple requests, may require a stable snapshot or destination binding, and
 may need resumability across client or server restarts.
 
-In v0, upload sessions are the only registered control object in this model.
-Read sessions are forward-looking and are not in v0.
+For the operations in this section, v0 defines upload sessions but not read
+sessions.
 
 ### 9.1 Definitions
 
 | Term | Meaning |
 | --- | --- |
 | **Single-request operation** | An operation that is fully described by a single request and does not require a server-side control object after the request completes. |
-| **Control object** | A server-side control-plane object used when the client continues driving an operation across multiple requests. For large or resumable `put <file>`, an implementation may use a single upload session. |
+| **Control object** | Server-side state for an operation that spans multiple requests. A large or resumable `put <file>` may use one upload session. |
 | **Implementation-specific coordinator** | A helper resource or service that correlates multiple logical commits for one higher-level workflow. Coordinators are outside the core interoperable model and do not define namespace history. |
 | **Authoritative operation state** | The state that determines the correctness, visibility, and resumability of an operation. |
 | **Transfer progress** | Non-authoritative progress information such as completed bytes, completed files, local temporary outputs, or user-interface counters. |
@@ -2554,8 +2554,8 @@ Read sessions are forward-looking and are not in v0.
    - loss of server restart state would change correctness, retention
      safety, or promised resumability guarantees.
 
-   For large or resumable `put <file>`, an implementation that uses a
-   server-side control object typically uses a single upload session.
+   A large or resumable `put <file>` that needs server-side state typically
+   uses one upload session.
 
 3. The core specification does **NOT** require a server-side job object for
    recursive `put` or recursive `cp`. Those workflows may be realized as one
@@ -2580,7 +2580,7 @@ Read sessions are forward-looking and are not in v0.
 | Operation | Typical execution shape | Typical server-side control-plane object | Long-lived server state required? | Server is authoritative for | Client is authoritative for |
 | --- | --- | --- | --- | --- | --- |
 | `get <file>` | Single-request read | none | No | path resolution, access check, selected file revision, content serving or delegated download | local download progress, temporary file, client retries |
-| `get -r <dir>` | Multi-request snapshot read | optional read session pinning a consistent snapshot | Only if a consistent snapshot is promised across requests | snapshot selection, per-request reads as for `get` | traversal progress, local outputs, client retries |
+| `get -r <dir>` | Client-driven multi-request read | none in v0 | No | each request's path resolution, access check, and selected file revision | traversal progress, local outputs, client retries |
 | `put <file>` (small, one-shot convenience) | Single request | none | No | destination resolution, validation, metadata commit | request payload, client retries |
 | `put <file>` (large or resumable) | Begin, upload, commit | upload session, if used | Only if server-side resumability or stable binding is promised | stable destination binding, expected slot or revision, upload session validity, final publish | file reading, hashing, content upload progress, retry tokens |
 | `put -r <dir>` | Client- or coordinator-driven uploads plus one or more logical commits | none required by the core model | No | each commit's validation and publication | orchestration across files, progress, retries |
@@ -2618,9 +2618,8 @@ a raw path string.
    would change correctness, visibility, retention safety, or promised
    resumability.
 
-2. At minimum, an upload session is normally durable when an implementation
-   uses one for stable destination binding across time or restart-safe
-   resumability.
+2. An upload session must be durable when it provides a stable destination
+   across requests or must survive a server restart.
 
 3. Implementation-specific coordinators **MAY** also be stored durably, but
    they are not required by this specification.

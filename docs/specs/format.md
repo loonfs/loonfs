@@ -1735,8 +1735,8 @@ Examples include:
 - recursive reads that need a pinned snapshot; and
 - resumable uploads that need a stable destination binding.
 
-In v0, the server creates upload sessions for resumable uploads. Read sessions
-and put intents are possible future control-plane objects, but are not in v0.
+v0 uses upload sessions for resumable uploads. It does not define read
+sessions or put intents.
 
 A durable upload session has three states and one transition:
 

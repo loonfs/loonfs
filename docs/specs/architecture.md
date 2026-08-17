@@ -46,7 +46,7 @@ Most core operations fall into one of two classes.
 | Class | Typical examples | Server-side state |
 | --- | --- | --- |
 | **One-shot** | `ls`, `stat`, `get <file>`, `put <small file>`, `cp <file>` on one service | Usually none after the request completes. |
-| **Client-driven long-running** | recursive `get`, resumable `put`, recursive `put`, recursive `cp` realized as several commits | A handle or intent may be used to pin a snapshot or destination across multiple requests. Other orchestration may remain client-side. |
+| **Client-driven long-running** | recursive `get`, resumable `put`, recursive `put`, recursive `cp` realized as several commits | Resumable puts may use an upload session. Other orchestration remains client-side. |
 
 Implementations may additionally expose coordinator-specific helpers for recursive workflows or admin work, but those helpers are outside the interoperable core model.
 

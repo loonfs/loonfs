@@ -15,11 +15,10 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 
-/// The commit's running numbering.
+/// Assigns operation and delta indexes across a commit.
 ///
-/// The planner validates one semantic operation's compiled ops at a time and
-/// carries both counters across calls, so positions number exactly as one
-/// pass over the whole list would.
+/// The planner validates each filesystem operation separately. These
+/// counters preserve continuous indexes across those validation calls.
 #[derive(Debug, Default)]
 pub(crate) struct CommitNumbering {
     next_op_index: u32,
@@ -46,9 +45,8 @@ impl CommitNumbering {
     }
 }
 
-/// Validates `ops` in order against `metadata_state`, folding each accepted
-/// operation into it so the next one observes what the previous would
-/// persist.
+/// Validates operations in order and applies each accepted operation to the
+/// view used by the next one.
 pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     ops: &[PlannedOp],
     metadata_state: &mut PublishValidationView<'_, S>,

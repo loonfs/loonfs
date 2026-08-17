@@ -4,9 +4,8 @@
 //! injection, and trace/replay support for reproducing failed simulation
 //! seeds.
 //!
-//! Its public surface is also the hook contract for out-of-repository
-//! simulation drivers, so some public items intentionally have no in-repo
-//! callers.
+//! External simulation drivers also use this public API, so some items have
+//! no callers in this repository.
 
 pub mod clock;
 pub mod failure;

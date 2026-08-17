@@ -21,7 +21,7 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
-/// Witnesses that LoonFS completed the durable content write described by its reference.
+/// Confirms that LoonFS durably stored the content described by this reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StoredContent {
     content_store_id: ContentStoreId,
