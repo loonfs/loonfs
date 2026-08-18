@@ -490,6 +490,7 @@ Responses expose attribution through these fields:
 | --- | --- |
 | `created_by`, `created_at_ms` | Commit attribution for inode creation. |
 | `revision_committed_by`, `revision_committed_at_ms` | Commit attribution for the current file revision on stat and list entries; absent on directories. |
+| `commit_id` | Owning commit identity on revision-history items and committed changes. |
 | `committed_by`, `committed_at_ms` | Commit attribution on revision-history items and committed changes. |
 | `attributes_updated_by`, `attributes_updated_at_ms` | Commit attribution for the latest stored attribute update; absent for the initial empty attributes at revision 0. |
 | `deleted_by`, `deleted_at_ms` | Commit attribution for an active trash entry. |

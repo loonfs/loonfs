@@ -4,7 +4,7 @@ use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
     ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
-    ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, SubtreeTombstoneAction as CoreTombstoneAction,
@@ -13,9 +13,9 @@ use loonfs_model::metadata::{
     MetadataState as ModelMetadataState, SubtreeTombstoneAction as ModelTombstoneAction,
 };
 
-type NormalizedInodes = Vec<(u64, &'static str, u64, ActorRef, u64)>;
+type NormalizedInodes = Vec<(u64, &'static str, u64, CommitId, ActorRef, u64)>;
 type NormalizedDirentryBinds = Vec<(u64, String, u64, u64, u32)>;
-type NormalizedRevisions = Vec<(u64, u64, u64, u64, ActorRef, u32, ContentId)>;
+type NormalizedRevisions = Vec<(u64, u64, u64, CommitId, u64, ActorRef, u32, ContentId)>;
 type NormalizedTombstones = Vec<NormalizedTombstone>;
 type NormalizedAttributes = Vec<NormalizedAttributeRevision>;
 type NormalizedMetadata = (
@@ -35,6 +35,7 @@ struct NormalizedAttributeRevision {
     inode_id: u64,
     revision: u64,
     committed_seq: u64,
+    commit_id: CommitId,
     delta_index: u32,
     actor: ActorRef,
     updated_at_ms: u64,
@@ -51,6 +52,7 @@ struct NormalizedTombstone {
     root_inode_id: u64,
     tombstone_seq: u64,
     tombstone_delta_index: u32,
+    commit_id: CommitId,
     deleted_at_ms: u64,
     actor: ActorRef,
     action: NormalizedTombstoneAction,
@@ -485,6 +487,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
 fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(0),
+        &loonfs_api::wire::control::genesis_commit_id(),
         &ActorRef::loonfs_system(),
         4_000,
         &[WalDelta::CreateInode {
@@ -509,8 +512,17 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
             ActorId::parse(format!("scenario-actor-{index}")).expect("valid actor id"),
         );
         let committed_at_ms = 4_200 + u64::try_from(index).expect("timestamp offset");
-        core_state = core_state.apply_committed_wal_deltas(seq, &actor, committed_at_ms, deltas);
-        model_state = model_state.apply_committed_wal_deltas(seq, &actor, committed_at_ms, deltas);
+        let commit_id =
+            CommitId::parse(format!("c_differential_{index}")).expect("valid commit id");
+        core_state =
+            core_state.apply_committed_wal_deltas(seq, &commit_id, &actor, committed_at_ms, deltas);
+        model_state = model_state.apply_committed_wal_deltas(
+            seq,
+            &commit_id,
+            &actor,
+            committed_at_ms,
+            deltas,
+        );
     }
 
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
@@ -526,6 +538,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     inode.inode_id.0,
                     inode.inode_kind,
                     inode.created_seq.0,
+                    inode.commit_id.clone(),
                     inode.created_by.clone(),
                     inode.created_at_ms,
                 )
@@ -552,6 +565,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     revision.inode_id.0,
                     revision.revision_no.0,
                     revision.committed_seq.0,
+                    revision.commit_id.clone(),
                     revision.committed_at_ms,
                     revision.actor.clone(),
                     revision.revision_delta_index,
@@ -566,6 +580,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 root_inode_id: tombstone.root_inode_id.0,
                 tombstone_seq: tombstone.generation.seq.0,
                 tombstone_delta_index: tombstone.generation.delta_index,
+                commit_id: tombstone.commit_id.clone(),
                 deleted_at_ms: tombstone.deleted_at_ms,
                 actor: tombstone.actor.clone(),
                 action: match &tombstone.action {
@@ -594,6 +609,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 inode_id: record.inode_id.0,
                 revision: record.attributes_revision_no.0,
                 committed_seq: record.committed_seq.0,
+                commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
                 actor: record.actor.clone(),
                 updated_at_ms: record.updated_at_ms,
@@ -624,6 +640,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     inode.inode_id.0,
                     inode.inode_kind,
                     inode.created_seq.0,
+                    inode.commit_id.clone(),
                     inode.created_by.clone(),
                     inode.created_at_ms,
                 )
@@ -648,6 +665,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     revision.inode_id.0,
                     revision.revision_no.0,
                     revision.committed_seq.0,
+                    revision.commit_id.clone(),
                     revision.committed_at_ms,
                     revision.actor.clone(),
                     revision.revision_delta_index,
@@ -661,6 +679,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 root_inode_id: tombstone.root_inode_id.0,
                 tombstone_seq: tombstone.tombstone_seq.0,
                 tombstone_delta_index: tombstone.tombstone_delta_index,
+                commit_id: tombstone.commit_id.clone(),
                 deleted_at_ms: tombstone.deleted_at_ms,
                 actor: tombstone.actor.clone(),
                 action: match &tombstone.action {
@@ -688,6 +707,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 inode_id: record.inode_id.0,
                 revision: record.revision,
                 committed_seq: record.committed_seq.0,
+                commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
                 actor: record.actor.clone(),
                 updated_at_ms: record.updated_at_ms,
@@ -705,9 +725,10 @@ fn normalize_inode(
     inode_id: u64,
     inode_kind: InodeKind,
     created_seq: u64,
+    commit_id: CommitId,
     created_by: ActorRef,
     created_at_ms: u64,
-) -> (u64, &'static str, u64, ActorRef, u64) {
+) -> (u64, &'static str, u64, CommitId, ActorRef, u64) {
     (
         inode_id,
         match inode_kind {
@@ -715,6 +736,7 @@ fn normalize_inode(
             InodeKind::File => "file",
         },
         created_seq,
+        commit_id,
         created_by,
         created_at_ms,
     )

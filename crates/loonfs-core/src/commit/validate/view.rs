@@ -3,7 +3,7 @@
 use super::super::metadata_overlay::CommitOverlayRows;
 use super::super::ValidatedOp;
 use crate::metadata::{MetadataState, MetadataView};
-use loonfs_api::{ActorRef, ChangeSeq};
+use loonfs_api::{ActorRef, ChangeSeq, CommitId};
 use loonfs_objectstore::ObjectStore;
 
 /// The publish view: it holds the loaded [`MetadataView`] plus the
@@ -43,11 +43,12 @@ impl<S: ObjectStore + ?Sized> PublishValidationView<'_, S> {
     pub(crate) fn apply_validated_op_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        commit_id: &CommitId,
         actor: &ActorRef,
         committed_at_ms: u64,
         op: &ValidatedOp,
     ) {
         self.overlay
-            .apply_validated_op_mut(committed_seq, actor, committed_at_ms, op);
+            .apply_validated_op_mut(committed_seq, commit_id, actor, committed_at_ms, op);
     }
 }

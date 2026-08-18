@@ -708,6 +708,7 @@ mod tests {
                     inode_id: InodeId(42),
                     inode_kind: InodeKind::File,
                     created_seq: ChangeSeq(3),
+                    commit_id: loonfs_api::CommitId::parse("c_cache_row").expect("commit id"),
                     created_by: actor.clone(),
                     created_at_ms: 3_000 + offset as u64,
                 }],

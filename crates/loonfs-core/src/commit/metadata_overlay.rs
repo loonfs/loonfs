@@ -4,7 +4,7 @@
 use super::materialize::materialize_validated_op;
 use super::ValidatedOp;
 use crate::metadata::MetadataState;
-use loonfs_api::{ActorRef, ChangeSeq};
+use loonfs_api::{ActorRef, ChangeSeq, CommitId};
 
 pub(super) struct CommitOverlayRows {
     rows: MetadataState,
@@ -41,6 +41,7 @@ impl CommitOverlayRows {
     pub(super) fn apply_validated_op_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        commit_id: &CommitId,
         actor: &ActorRef,
         committed_at_ms: u64,
         op: &ValidatedOp,
@@ -48,6 +49,7 @@ impl CommitOverlayRows {
         for delta in &materialize_validated_op(op) {
             self.rows.apply_committed_wal_delta_mut(
                 committed_seq,
+                commit_id,
                 actor,
                 committed_at_ms,
                 &delta.wal_delta,
@@ -66,6 +68,10 @@ mod tests {
         AttributeKey, AttributeValue, Attributes, ContentRef, InodeId, NameKey, RevisionNo,
     };
 
+    fn commit_id(committed_seq: ChangeSeq) -> CommitId {
+        CommitId::parse(format!("c_overlay_{}", committed_seq.0)).expect("commit id")
+    }
+
     /// The commit overlay derives its rows from the WAL encoding
     /// (`materialize_validated_op` + `apply_committed_wal_delta_mut`), the
     /// same pair durable replay is built on. These tests pin the boundary
@@ -78,6 +84,7 @@ mod tests {
         let mut replayed = MetadataState::default();
         replayed.apply_committed_wal_deltas_mut(
             committed_seq,
+            &commit_id(committed_seq),
             &loonfs_api::ActorRef::loonfs_system(),
             4_200,
             &materialized_wal_deltas(ops),
@@ -95,6 +102,7 @@ mod tests {
         for op in ops {
             overlay.apply_validated_op_mut(
                 committed_seq,
+                &commit_id(committed_seq),
                 &loonfs_api::ActorRef::loonfs_system(),
                 4_200,
                 op,
@@ -498,12 +506,14 @@ mod tests {
         let mut replayed = MetadataState::default();
         replayed.apply_committed_wal_deltas_mut(
             first_seq,
+            &commit_id(first_seq),
             &loonfs_api::ActorRef::loonfs_system(),
             4_200,
             &materialized_wal_deltas(&first_ops),
         );
         replayed.apply_committed_wal_deltas_mut(
             second_seq,
+            &commit_id(second_seq),
             &loonfs_api::ActorRef::loonfs_system(),
             4_200,
             &materialized_wal_deltas(&second_ops),

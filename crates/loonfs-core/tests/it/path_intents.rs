@@ -863,6 +863,52 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
 }
 
 #[tokio::test]
+async fn revision_history_and_change_feed_name_the_same_supplied_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let supplied_commit_id = CommitId::parse("c_cross_projection").expect("commit id");
+
+    let response = write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/provenance.txt",
+        b"provenance",
+        &context,
+        Some(supplied_commit_id.as_str()),
+    )
+    .await
+    .expect("commit file mutation");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint committed row");
+
+    let revisions = list_file_revisions(&store, &namespace_id, "/docs/provenance.txt")
+        .await
+        .expect("read revision history");
+    let revision = revisions
+        .revisions
+        .iter()
+        .find(|revision| revision.committed_seq == response.committed_seq)
+        .expect("committed revision");
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+        .await
+        .expect("read change feed");
+    let change = changes
+        .changes
+        .iter()
+        .find(|change| change.committed_seq == response.committed_seq)
+        .expect("committed change");
+
+    assert_eq!(revision.commit_id, change.commit_id);
+    assert_eq!(revision.commit_id, supplied_commit_id);
+}
+
+#[tokio::test]
 async fn revision_queries_read_historical_bytes_and_path_restore_appends_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

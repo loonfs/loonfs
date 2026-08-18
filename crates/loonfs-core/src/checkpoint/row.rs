@@ -64,6 +64,7 @@ pub(super) fn manifest_rows_for_family(
                 inode_id: inode.inode_id,
                 inode_kind: inode.inode_kind,
                 created_seq: inode.created_seq,
+                commit_id: inode.commit_id.clone(),
                 created_by: inode.created_by.clone(),
                 created_at_ms: inode.created_at_ms,
             })
@@ -104,6 +105,7 @@ pub(super) fn manifest_rows_for_family(
                     inode_id: revision.inode_id,
                     revision_no: revision.revision_no,
                     committed_seq: revision.committed_seq,
+                    commit_id: revision.commit_id.clone(),
                     committed_at_ms: revision.committed_at_ms,
                     actor: revision.actor.clone(),
                     revision_delta_index: revision.revision_delta_index,
@@ -117,6 +119,7 @@ pub(super) fn manifest_rows_for_family(
             .map(|tombstone| MetadataRow::Tombstone {
                 root_inode_id: tombstone.root_inode_id,
                 generation: tombstone.generation,
+                commit_id: tombstone.commit_id.clone(),
                 action: tombstone_row_action(&tombstone.action),
                 deleted_at_ms: tombstone.deleted_at_ms,
                 actor: tombstone.actor.clone(),
@@ -146,6 +149,7 @@ pub(super) fn manifest_rows_for_family(
                 inode_id: record.inode_id,
                 attributes_revision_no: record.attributes_revision_no,
                 committed_seq: record.committed_seq,
+                commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
                 actor: record.actor.clone(),
                 updated_at_ms: record.updated_at_ms,

@@ -7,12 +7,13 @@ use super::{
 };
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_api::{ActorRef, ChangeSeq};
+use loonfs_api::{ActorRef, ChangeSeq, CommitId};
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
+        commit_id: &CommitId,
         actor: &ActorRef,
         committed_at_ms: u64,
         deltas: &[WalDelta],
@@ -20,6 +21,7 @@ impl MetadataState {
         let mut metadata_state = self.clone();
         metadata_state.apply_committed_wal_deltas_mut(
             committed_seq,
+            commit_id,
             actor,
             committed_at_ms,
             deltas,
@@ -30,12 +32,19 @@ impl MetadataState {
     pub fn apply_committed_wal_deltas_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        commit_id: &CommitId,
         actor: &ActorRef,
         committed_at_ms: u64,
         deltas: &[WalDelta],
     ) {
         for delta in deltas {
-            self.apply_committed_wal_delta_mut(committed_seq, actor, committed_at_ms, delta);
+            self.apply_committed_wal_delta_mut(
+                committed_seq,
+                commit_id,
+                actor,
+                committed_at_ms,
+                delta,
+            );
         }
     }
 
@@ -49,6 +58,7 @@ impl MetadataState {
     pub(crate) fn apply_committed_wal_delta_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        commit_id: &CommitId,
         actor: &ActorRef,
         committed_at_ms: u64,
         delta: &WalDelta,
@@ -63,6 +73,7 @@ impl MetadataState {
                     inode_id: *inode_id,
                     inode_kind: *inode_kind,
                     created_seq: committed_seq,
+                    commit_id: commit_id.clone(),
                     created_by: actor.clone(),
                     created_at_ms: committed_at_ms,
                 });
@@ -113,6 +124,7 @@ impl MetadataState {
                     inode_id: *inode_id,
                     revision_no: *revision_no,
                     committed_seq,
+                    commit_id: commit_id.clone(),
                     committed_at_ms,
                     actor: actor.clone(),
                     revision_delta_index: *delta_index,
@@ -130,6 +142,7 @@ impl MetadataState {
                         seq: committed_seq,
                         delta_index: *delta_index,
                     },
+                    commit_id: commit_id.clone(),
                     deleted_at_ms: committed_at_ms,
                     actor: actor.clone(),
                     action: SubtreeTombstoneAction::Set {
@@ -148,6 +161,7 @@ impl MetadataState {
                         seq: committed_seq,
                         delta_index: *delta_index,
                     },
+                    commit_id: commit_id.clone(),
                     deleted_at_ms: committed_at_ms,
                     actor: actor.clone(),
                     action: SubtreeTombstoneAction::Revoke { target: *target },
@@ -163,6 +177,7 @@ impl MetadataState {
                     inode_id: *inode_id,
                     attributes_revision_no: *attributes_revision_no,
                     committed_seq,
+                    commit_id: commit_id.clone(),
                     delta_index: *delta_index,
                     actor: actor.clone(),
                     updated_at_ms: committed_at_ms,
@@ -194,6 +209,7 @@ impl MetadataState {
         for delta in deltas {
             self.apply_committed_wal_delta_mut(
                 receipt.committed_seq,
+                &receipt.commit_id,
                 &receipt.actor,
                 receipt.committed_at_ms,
                 &delta.delta,

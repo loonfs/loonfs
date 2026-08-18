@@ -44,6 +44,8 @@ pub struct InodeRecord {
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
     pub created_seq: ChangeSeq,
+    /// The commit that produced this row.
+    pub commit_id: CommitId,
     pub created_by: ActorRef,
     /// Time the inode was created, in Unix milliseconds. `created_seq`
     /// determines order.
@@ -79,6 +81,8 @@ pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     pub committed_seq: ChangeSeq,
+    /// The commit that produced this row.
+    pub commit_id: CommitId,
     /// Observational wall-clock stamp of the owning commit; never a
     /// validity input — `committed_seq` is the order.
     pub committed_at_ms: u64,
@@ -93,6 +97,8 @@ pub struct SubtreeTombstoneRecord {
     /// This event's own generation: the delete's committed position for a
     /// `Set`, the undelete's for a `Revoke`.
     pub generation: TombstoneGeneration,
+    /// The commit that produced this row.
+    pub commit_id: CommitId,
     /// Wall-clock stamp of the recording commit.
     pub deleted_at_ms: u64,
     pub actor: ActorRef,
@@ -273,6 +279,8 @@ pub struct AttributesRevisionRecord {
     pub inode_id: InodeId,
     pub attributes_revision_no: AttributeRevisionNo,
     pub committed_seq: ChangeSeq,
+    /// The commit that produced this row.
+    pub commit_id: CommitId,
     pub delta_index: u32,
     pub actor: ActorRef,
     /// Time of the attribute update, in Unix milliseconds. `committed_seq`
@@ -523,11 +531,15 @@ fn metadata_decoded_bytes(state: &MetadataState) -> usize {
 }
 
 fn inode_decoded_bytes(record: &InodeRecord) -> usize {
-    size_of::<InodeRecord>() + actor_ref_decoded_bytes(&record.created_by)
+    size_of::<InodeRecord>()
+        + record.commit_id.as_str().len()
+        + actor_ref_decoded_bytes(&record.created_by)
 }
 
 fn subtree_tombstone_decoded_bytes(record: &SubtreeTombstoneRecord) -> usize {
-    size_of::<SubtreeTombstoneRecord>() + actor_ref_decoded_bytes(&record.actor)
+    size_of::<SubtreeTombstoneRecord>()
+        + record.commit_id.as_str().len()
+        + actor_ref_decoded_bytes(&record.actor)
 }
 
 fn direntry_bind_decoded_bytes(record: &DirentryBindRecord) -> usize {
@@ -542,6 +554,7 @@ fn direntry_unbind_decoded_bytes(record: &DirentryUnbindRecord) -> usize {
 
 fn revision_decoded_bytes(record: &RevisionRecord) -> usize {
     size_of::<RevisionRecord>()
+        + record.commit_id.as_str().len()
         + actor_ref_decoded_bytes(&record.actor)
         + content_ref_decoded_bytes(&record.content_ref)
 }
@@ -558,6 +571,7 @@ fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
 /// maps are caller-sized, so the map's own bytes are what this row weighs.
 fn attributes_revision_decoded_bytes(record: &AttributesRevisionRecord) -> usize {
     size_of::<AttributesRevisionRecord>()
+        + record.commit_id.as_str().len()
         + actor_ref_decoded_bytes(&record.actor)
         + record.attributes.logical_bytes()
 }

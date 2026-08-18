@@ -1673,6 +1673,7 @@ fn sample_tombstone_set_row() -> MetadataRow {
             seq: ChangeSeq(8),
             delta_index: 0,
         },
+        commit_id: commit_id(),
         action: TombstoneRowAction::Set {
             deleted_direntry: Some(DeletedDirentry {
                 parent_inode_id: InodeId(1),
@@ -1694,6 +1695,7 @@ fn sample_tombstone_revoke_row() -> MetadataRow {
             seq: ChangeSeq(9),
             delta_index: 0,
         },
+        commit_id: commit_id(),
         action: TombstoneRowAction::Revoke {
             target: TombstoneGeneration {
                 seq: ChangeSeq(8),
@@ -1745,6 +1747,7 @@ fn sample_cleared_attributes_row() -> MetadataRow {
         inode_id: InodeId(2),
         attributes_revision_no: AttributeRevisionNo(3),
         committed_seq: ChangeSeq(7),
+        commit_id: commit_id(),
         delta_index: 1,
         actor: actor(),
         updated_at_ms: 7_000,
@@ -1758,6 +1761,7 @@ fn sample_populated_attributes_row() -> MetadataRow {
         inode_id: InodeId(5),
         attributes_revision_no: AttributeRevisionNo(2),
         committed_seq: ChangeSeq(5),
+        commit_id: commit_id(),
         delta_index: 0,
         actor: actor(),
         updated_at_ms: 5_000,
@@ -1776,6 +1780,52 @@ fn sample_commit_receipt_row() -> MetadataRow {
     }
 }
 
+fn sample_inode_rows() -> [MetadataRow; 2] {
+    [
+        MetadataRow::Inode {
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Directory,
+            created_seq: ChangeSeq(1),
+            commit_id: commit_id(),
+            created_by: actor(),
+            created_at_ms: 1_000,
+        },
+        MetadataRow::Inode {
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            created_seq: ChangeSeq(3),
+            commit_id: commit_id(),
+            created_by: actor(),
+            created_at_ms: 3_000,
+        },
+    ]
+}
+
+fn sample_revision_rows() -> [MetadataRow; 2] {
+    [
+        MetadataRow::Revision {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(1),
+            committed_seq: ChangeSeq(3),
+            commit_id: commit_id(),
+            committed_at_ms: 3_000,
+            actor: actor(),
+            revision_delta_index: 0,
+            content_ref: sample_content_ref(),
+        },
+        MetadataRow::Revision {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(2),
+            committed_seq: ChangeSeq(4),
+            commit_id: commit_id(),
+            committed_at_ms: 4_000,
+            actor: actor(),
+            revision_delta_index: 0,
+            content_ref: sample_crc_content_ref(),
+        },
+    ]
+}
+
 fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
     use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
     // A tiny target block size forces several data blocks, so the fixture
@@ -1783,7 +1833,7 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
     let mut builder = SegmentBlocksBuilder::new(
         std::num::NonZeroUsize::new(256).expect("target block size should be non-zero"),
     );
-    let rows = [
+    let mut rows = vec![
         // `active-deletion-` sorts ahead of every other family prefix, so
         // these two rows open the first data block the fixture below pins.
         // The pair covers both actions: the removal that an undelete writes,
@@ -1827,41 +1877,10 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             unbind_seq: ChangeSeq(8),
             unbind_delta_index: 0,
         },
-        MetadataRow::Inode {
-            inode_id: InodeId(1),
-            inode_kind: InodeKind::Directory,
-            created_seq: ChangeSeq(1),
-            created_by: actor(),
-            created_at_ms: 1_000,
-        },
-        MetadataRow::Inode {
-            inode_id: InodeId(2),
-            inode_kind: InodeKind::File,
-            created_seq: ChangeSeq(3),
-            created_by: actor(),
-            created_at_ms: 3_000,
-        },
-        MetadataRow::Revision {
-            inode_id: InodeId(2),
-            revision_no: RevisionNo(1),
-            committed_seq: ChangeSeq(3),
-            committed_at_ms: 3_000,
-            actor: actor(),
-            revision_delta_index: 0,
-            content_ref: sample_content_ref(),
-        },
-        MetadataRow::Revision {
-            inode_id: InodeId(2),
-            revision_no: RevisionNo(2),
-            committed_seq: ChangeSeq(4),
-            committed_at_ms: 4_000,
-            actor: actor(),
-            revision_delta_index: 0,
-            content_ref: sample_crc_content_ref(),
-        },
-        sample_tombstone_set_row(),
-        sample_tombstone_revoke_row(),
     ];
+    rows.extend(sample_inode_rows());
+    rows.extend(sample_revision_rows());
+    rows.extend([sample_tombstone_set_row(), sample_tombstone_revoke_row()]);
     for row in &rows {
         let key = row.row_key();
         builder.push(&key, &key, row).expect("push sample row");
@@ -1935,6 +1954,26 @@ fn decode_golden_data_block(name: &str) -> loonfs_api::wire::sst_blocks::Decoded
     decode_data_block(&stored, &handle).expect("decode golden data block")
 }
 
+fn assert_rows_match_single_block_golden(name: &str, rows: &[MetadataRow]) {
+    use loonfs_api::wire::sst_blocks::{decode_data_block, SegmentBlocksBuilder};
+
+    let mut builder = SegmentBlocksBuilder::new(
+        std::num::NonZeroUsize::new(4096).expect("target block size should be non-zero"),
+    );
+    for row in rows {
+        let key = row.row_key();
+        builder.push(&key, &key, row).expect("push golden row");
+    }
+    let built = builder.finish().expect("finish golden segment");
+    let index = sample_segment_index(&built);
+    assert_eq!(index.len(), 1, "the row fixture should be one block");
+    let entry = &index[0];
+    let block = decode_data_block(segment_section(&built.bytes, &entry.block), &entry.block)
+        .expect("decode golden block");
+    assert_eq!(block.rows, rows);
+    assert_matches_golden(name, &unzstd(segment_section(&built.bytes, &entry.block)));
+}
+
 #[test]
 fn sst_block_data_payload_matches_golden_bytes() {
     let built = sample_segment_blocks();
@@ -1987,29 +2026,41 @@ fn sst_block_data_golden_decodes_to_sample_rows() {
     assert_eq!(block.row_keys[0], block.rows[0].row_key());
 }
 
-/// The attribute rows no longer open the segment, so the first-block fixture
-/// stopped covering them. This pins their block instead: the populated map and
-/// the cleared one both have encodings nothing else states.
+#[test]
+fn sst_block_data_inode_rows_match_golden_bytes() {
+    assert_rows_match_single_block_golden("sst_block_data_inodes.v1.bin", &sample_inode_rows());
+}
+
+#[test]
+fn sst_block_data_inode_golden_decodes_to_sample_rows() {
+    let block = decode_golden_data_block("sst_block_data_inodes.v1.bin");
+    assert_eq!(block.rows, sample_inode_rows());
+}
+
+#[test]
+fn sst_block_data_revision_rows_match_golden_bytes() {
+    assert_rows_match_single_block_golden(
+        "sst_block_data_revisions.v1.bin",
+        &sample_revision_rows(),
+    );
+}
+
+#[test]
+fn sst_block_data_revision_golden_decodes_to_sample_rows() {
+    let block = decode_golden_data_block("sst_block_data_revisions.v1.bin");
+    assert_eq!(block.rows, sample_revision_rows());
+}
+
+/// The populated map and the cleared one both have encodings nothing else
+/// states, so their family has a dedicated single-block fixture.
 #[test]
 fn sst_block_data_attribute_rows_match_golden_bytes() {
-    let built = sample_segment_blocks();
-    let index = sample_segment_index(&built);
-    let position = family_block_position(&built, &index, "attributes-");
-    let entry = &index[position];
-    let block = loonfs_api::wire::sst_blocks::decode_data_block(
-        segment_section(&built.bytes, &entry.block),
-        &entry.block,
-    )
-    .expect("decode attribute block");
-    assert_eq!(
-        rows_under_prefix(&block, "attributes-"),
-        2,
-        "both attribute rows belong to the block this pins: {:?}",
-        block.row_keys
-    );
-    assert_matches_golden(
+    assert_rows_match_single_block_golden(
         "sst_block_data_attributes.v1.bin",
-        &unzstd(segment_section(&built.bytes, &entry.block)),
+        &[
+            sample_cleared_attributes_row(),
+            sample_populated_attributes_row(),
+        ],
     );
 }
 
@@ -2027,24 +2078,9 @@ fn sst_block_data_attribute_golden_decodes_to_sample_rows() {
 
 #[test]
 fn sst_block_data_commit_receipt_rows_match_golden_bytes() {
-    let built = sample_segment_blocks();
-    let index = sample_segment_index(&built);
-    let position = family_block_position(&built, &index, "commit-receipt-");
-    let entry = &index[position];
-    let block = loonfs_api::wire::sst_blocks::decode_data_block(
-        segment_section(&built.bytes, &entry.block),
-        &entry.block,
-    )
-    .expect("decode commit receipt block");
-    assert_eq!(
-        rows_under_prefix(&block, "commit-receipt-"),
-        1,
-        "the attributed receipt belongs to the block this pins: {:?}",
-        block.row_keys
-    );
-    assert_matches_golden(
+    assert_rows_match_single_block_golden(
         "sst_block_data_commit_receipts.v1.bin",
-        &unzstd(segment_section(&built.bytes, &entry.block)),
+        &[sample_commit_receipt_row()],
     );
 }
 
@@ -2058,33 +2094,9 @@ fn sst_block_data_commit_receipt_golden_decodes_to_sample_row() {
 /// separate fixture keeps block splitting from separating the pair.
 #[test]
 fn sst_block_data_tombstone_rows_match_golden_bytes() {
-    use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
-
-    let mut builder = SegmentBlocksBuilder::new(
-        std::num::NonZeroUsize::new(4096).expect("target block size should be non-zero"),
-    );
-    for row in [sample_tombstone_set_row(), sample_tombstone_revoke_row()] {
-        let key = row.row_key();
-        builder.push(&key, &key, &row).expect("push tombstone row");
-    }
-    let built = builder.finish().expect("finish tombstone segment");
-    let index = sample_segment_index(&built);
-    assert_eq!(index.len(), 1, "the tombstone fixture should be one block");
-    let entry = &index[0];
-    let block = loonfs_api::wire::sst_blocks::decode_data_block(
-        segment_section(&built.bytes, &entry.block),
-        &entry.block,
-    )
-    .expect("decode tombstone block");
-    assert_eq!(
-        rows_under_prefix(&block, "tombstone-"),
-        2,
-        "both tombstone rows belong to the block this pins: {:?}",
-        block.row_keys
-    );
-    assert_matches_golden(
+    assert_rows_match_single_block_golden(
         "sst_block_data_tombstones.v1.bin",
-        &unzstd(segment_section(&built.bytes, &entry.block)),
+        &[sample_tombstone_set_row(), sample_tombstone_revoke_row()],
     );
 }
 
@@ -2247,38 +2259,40 @@ fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
     );
 }
 
-/// Actors and timestamps are required in version-one metadata rows. Decoding
-/// must fail when either field is missing.
+/// Commit identities, actors, and timestamps are required in version-one
+/// provenance rows. Decoding must fail when any required field is missing.
 #[test]
-fn attributed_rows_reject_every_missing_required_actor_or_timestamp() {
+fn provenance_rows_reject_every_missing_required_field() {
     let cases = [
         (
             MetadataRow::Inode {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(3),
+                commit_id: commit_id(),
                 created_by: actor(),
                 created_at_ms: 3_000,
             },
-            &["created_by", "created_at_ms"][..],
+            &["commit_id", "created_by", "created_at_ms"][..],
         ),
         (
             MetadataRow::Revision {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(3),
+                commit_id: commit_id(),
                 committed_at_ms: 3_000,
                 actor: actor(),
                 revision_delta_index: 0,
                 content_ref: sample_content_ref(),
             },
-            &["actor"][..],
+            &["commit_id", "actor"][..],
         ),
-        (sample_tombstone_set_row(), &["actor"][..]),
+        (sample_tombstone_set_row(), &["commit_id", "actor"][..]),
         (sample_active_deletion_listed_row(), &["deleted_by"][..]),
         (
             sample_populated_attributes_row(),
-            &["actor", "updated_at_ms"][..],
+            &["commit_id", "actor", "updated_at_ms"][..],
         ),
     ];
 
@@ -2312,6 +2326,7 @@ fn attribute_rows_reject_the_retired_tagged_value_shape() {
         inode_id: InodeId(2),
         attributes_revision_no: AttributeRevisionNo(1),
         committed_seq: ChangeSeq(5),
+        commit_id: commit_id(),
         delta_index: 0,
         actor: actor(),
         updated_at_ms: 5_000,
@@ -2341,6 +2356,7 @@ fn attribute_rows_reject_a_map_over_its_limits() {
         inode_id: InodeId(2),
         attributes_revision_no: AttributeRevisionNo(1),
         committed_seq: ChangeSeq(5),
+        commit_id: commit_id(),
         delta_index: 0,
         actor: actor(),
         updated_at_ms: 5_000,
@@ -2394,6 +2410,7 @@ fn sst_block_filter_matches_golden_bytes_and_answers() {
             inode_id: InodeId(1),
             inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(1),
+            commit_id: commit_id(),
             created_by: actor(),
             created_at_ms: 1_000,
         }

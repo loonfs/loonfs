@@ -6,13 +6,13 @@
 //! the implementations would remove the independence those tests require.
 //!
 //! Inodes, file revisions, tombstones, and stored attribute revisions copy
-//! their actor and timestamp from the WAL commit. Directory bindings do not
-//! store attribution. The initial root inode uses
+//! their commit identity, actor, and timestamp from the WAL commit. Directory
+//! bindings do not store attribution. The initial root inode uses
 //! `ActorRef::loonfs_system()`, and the initial empty attribute state has no
 //! actor or timestamp because it is not stored as a revision.
 
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{ActorRef, ChangeSeq, ContentRef, InodeId, InodeKind, RevisionNo};
+use loonfs_api::{ActorRef, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -36,6 +36,7 @@ pub struct InodeRecord {
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
     pub created_seq: ChangeSeq,
+    pub commit_id: CommitId,
     pub created_by: ActorRef,
     pub created_at_ms: u64,
 }
@@ -69,6 +70,7 @@ pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     pub committed_seq: ChangeSeq,
+    pub commit_id: CommitId,
     pub committed_at_ms: u64,
     pub actor: ActorRef,
     pub revision_delta_index: u32,
@@ -80,6 +82,7 @@ pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
+    pub commit_id: CommitId,
     pub deleted_at_ms: u64,
     pub actor: ActorRef,
     /// Action recorded by this event. The newest event for each root determines
@@ -94,6 +97,7 @@ pub struct ModelAttributeRevision {
     pub inode_id: InodeId,
     pub revision: u64,
     pub committed_seq: ChangeSeq,
+    pub commit_id: CommitId,
     pub delta_index: u32,
     pub actor: ActorRef,
     pub updated_at_ms: u64,
@@ -142,6 +146,7 @@ impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
+        commit_id: &CommitId,
         actor: &ActorRef,
         committed_at_ms: u64,
         deltas: &[WalDelta],
@@ -159,6 +164,7 @@ impl MetadataState {
                         inode_id: *inode_id,
                         inode_kind: *inode_kind,
                         created_seq: committed_seq,
+                        commit_id: commit_id.clone(),
                         created_by: actor.clone(),
                         created_at_ms: committed_at_ms,
                     });
@@ -209,6 +215,7 @@ impl MetadataState {
                         inode_id: *inode_id,
                         revision_no: *revision_no,
                         committed_seq,
+                        commit_id: commit_id.clone(),
                         committed_at_ms,
                         actor: actor.clone(),
                         revision_delta_index: *delta_index,
@@ -226,6 +233,7 @@ impl MetadataState {
                             root_inode_id: *root_inode_id,
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
+                            commit_id: commit_id.clone(),
                             deleted_at_ms: committed_at_ms,
                             actor: actor.clone(),
                             action: SubtreeTombstoneAction::Set {
@@ -250,6 +258,7 @@ impl MetadataState {
                             root_inode_id: *root_inode_id,
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
+                            commit_id: commit_id.clone(),
                             deleted_at_ms: committed_at_ms,
                             actor: actor.clone(),
                             action: SubtreeTombstoneAction::Revoke {
@@ -272,6 +281,7 @@ impl MetadataState {
                             inode_id: *inode_id,
                             revision: attributes_revision_no.0,
                             committed_seq,
+                            commit_id: commit_id.clone(),
                             delta_index: *delta_index,
                             actor: actor.clone(),
                             updated_at_ms: committed_at_ms,
@@ -297,10 +307,15 @@ mod tests {
     use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
     use loonfs_api::NameKey;
 
+    fn commit_id() -> CommitId {
+        CommitId::parse("c_model_metadata").expect("commit id")
+    }
+
     #[test]
     fn bind_direntry_replay_uses_persisted_name_key() {
         let applied = MetadataState::default().apply_committed_wal_deltas(
             ChangeSeq(1),
+            &commit_id(),
             &ActorRef::loonfs_system(),
             4_200,
             &[WalDelta::BindDirentry {
@@ -321,6 +336,7 @@ mod tests {
     fn tombstone_replay_restates_the_deleted_binding_and_the_revoked_generation() {
         let applied = MetadataState::default().apply_committed_wal_deltas(
             ChangeSeq(9),
+            &commit_id(),
             &ActorRef::loonfs_system(),
             4_200,
             &[

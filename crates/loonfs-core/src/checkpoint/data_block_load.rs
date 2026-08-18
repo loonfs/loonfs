@@ -291,7 +291,7 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
     const FIXED_ROW_OVERHEAD: usize = 32;
     const ALLOCATED_ROW_OVERHEAD: usize = 96;
     match row {
-        MetadataRow::Inode { .. } => FIXED_ROW_OVERHEAD,
+        MetadataRow::Inode { commit_id, .. } => ALLOCATED_ROW_OVERHEAD + commit_id.as_str().len(),
         MetadataRow::DirentryBind {
             name_key,
             display_name,
@@ -300,10 +300,18 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
         MetadataRow::DirentryUnbind { name_key, .. } => {
             ALLOCATED_ROW_OVERHEAD + name_key.as_str().len()
         }
-        MetadataRow::Revision { content_ref, .. } => {
-            ALLOCATED_ROW_OVERHEAD + content_ref_evidence_bytes(content_ref)
+        MetadataRow::Revision {
+            commit_id,
+            content_ref,
+            ..
+        } => {
+            ALLOCATED_ROW_OVERHEAD
+                + commit_id.as_str().len()
+                + content_ref_evidence_bytes(content_ref)
         }
-        MetadataRow::Tombstone { .. } => FIXED_ROW_OVERHEAD,
+        MetadataRow::Tombstone { commit_id, .. } => {
+            ALLOCATED_ROW_OVERHEAD + commit_id.as_str().len()
+        }
         MetadataRow::ActiveDeletion { action, .. } => match action {
             ActiveDeletionRowAction::Listed {
                 deleted_direntry, ..
@@ -330,8 +338,10 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
                 + message.as_ref().map_or(0, String::len)
         }
         // The map's key and value bytes are what an attribute row weighs.
-        MetadataRow::AttributesRevision { attributes, .. } => {
-            ALLOCATED_ROW_OVERHEAD + attributes.logical_bytes()
-        }
+        MetadataRow::AttributesRevision {
+            commit_id,
+            attributes,
+            ..
+        } => ALLOCATED_ROW_OVERHEAD + commit_id.as_str().len() + attributes.logical_bytes(),
     }
 }

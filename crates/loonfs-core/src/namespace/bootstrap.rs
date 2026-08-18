@@ -192,6 +192,7 @@ pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
             inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(0),
+            commit_id: loonfs_api::wire::control::genesis_commit_id(),
             created_by: loonfs_api::ActorRef::loonfs_system(),
             created_at_ms,
         }],

@@ -2,7 +2,7 @@
 //! index maintenance, and seq-gated queries.
 
 use super::*;
-use loonfs_api::wire::wal::WalDelta;
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::ContentId;
 use loonfs_api::{
     AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
@@ -13,14 +13,72 @@ fn actor() -> ActorRef {
     loonfs_test_support::test_actor()
 }
 
+fn commit_id(seq: u64) -> CommitId {
+    CommitId::parse(format!("c_metadata_{seq}")).expect("commit id")
+}
+
 fn name_key(value: &str) -> NameKey {
     NameKey::parse(value).expect("valid name key")
+}
+
+#[test]
+fn every_provenance_row_copies_the_wal_payload_commit_id() {
+    let owning_commit_id = CommitId::parse("c_all_provenance_rows").expect("commit id");
+    let deltas = [
+        WalDelta::CreateInode {
+            delta_index: 0,
+            inode_id: InodeId(7),
+            inode_kind: InodeKind::File,
+        },
+        WalDelta::AppendFileRevision {
+            delta_index: 1,
+            inode_id: InodeId(7),
+            revision_no: RevisionNo(1),
+            content_ref: ContentRef::blob_v1(ContentId::generate(), b"revision"),
+        },
+        WalDelta::TombstoneSubtree {
+            delta_index: 2,
+            root_inode_id: InodeId(7),
+            deleted_direntry: None,
+        },
+        WalDelta::AppendAttributesRevision {
+            delta_index: 3,
+            inode_id: InodeId(7),
+            attributes_revision_no: AttributeRevisionNo(1),
+            attributes: Attributes::default(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(semantic_op_index, delta)| WalCommitDelta {
+        semantic_op_index: u32::try_from(semantic_op_index).expect("operation index"),
+        delta,
+    })
+    .collect();
+    let payload = WalCommitPayload {
+        seq: ChangeSeq(9),
+        commit_id: owning_commit_id.clone(),
+        actor: actor(),
+        semantic_commit_fingerprint: "v1:sha256:test".to_owned(),
+        committed_at_ms: 4_200,
+        message: None,
+        deltas,
+    };
+
+    let mut state = MetadataState::default();
+    state.apply_committed_wal_record_mut(&payload);
+
+    assert_eq!(state.inodes()[0].commit_id, owning_commit_id);
+    assert_eq!(state.revisions()[0].commit_id, owning_commit_id);
+    assert_eq!(state.subtree_tombstones()[0].commit_id, owning_commit_id);
+    assert_eq!(state.attributes_revisions()[0].commit_id, owning_commit_id);
 }
 
 #[test]
 fn bind_direntry_replay_uses_persisted_name_key() {
     let applied = MetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(1),
+        &commit_id(1),
         &actor(),
         4_200,
         &[WalDelta::BindDirentry {
@@ -47,6 +105,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
+                commit_id: commit_id(1),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -54,6 +113,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(1),
+                commit_id: commit_id(1),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -89,6 +149,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(0),
+                commit_id: commit_id(0),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -96,6 +157,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
+                commit_id: commit_id(1),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -103,6 +165,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 inode_id: InodeId(3),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(2),
+                commit_id: commit_id(2),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -152,6 +215,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
         ChangeSeq(3),
+        &commit_id(3),
         &actor(),
         4_200,
         &[WalDelta::UnbindDirentry {
@@ -173,6 +237,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
         ChangeSeq(4),
+        &commit_id(4),
         &actor(),
         4_200,
         &[WalDelta::BindDirentry {
@@ -196,6 +261,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
         ChangeSeq(5),
+        &commit_id(5),
         &actor(),
         4_200,
         &[WalDelta::TombstoneSubtree {
@@ -224,6 +290,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(0),
+                commit_id: commit_id(0),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -231,6 +298,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(1),
+                commit_id: commit_id(1),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -238,6 +306,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 inode_id: InodeId(3),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(2),
+                commit_id: commit_id(2),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -287,6 +356,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
+                commit_id: commit_id(1),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -294,6 +364,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(1),
+                commit_id: commit_id(1),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -375,7 +446,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 /// query routing.
 #[test]
 fn revisions_advance_watermark_and_receipt_index() {
-    let commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
+    let receipt_commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
     let content_ref = ContentRef::blob_v1(ContentId::generate(), b"first revision bytes");
     let replacement_ref = ContentRef::blob_v1(ContentId::generate(), b"second revision bytes");
 
@@ -384,6 +455,7 @@ fn revisions_advance_watermark_and_receipt_index() {
         inode_id: InodeId(7),
         inode_kind: InodeKind::File,
         created_seq: ChangeSeq(1),
+        commit_id: commit_id(1),
         created_by: actor(),
         created_at_ms: 4_200,
     });
@@ -391,6 +463,7 @@ fn revisions_advance_watermark_and_receipt_index() {
         inode_id: InodeId(7),
         revision_no: RevisionNo(1),
         committed_seq: ChangeSeq(2),
+        commit_id: commit_id(2),
         committed_at_ms: 4_200,
         actor: actor(),
         revision_delta_index: 0,
@@ -400,13 +473,14 @@ fn revisions_advance_watermark_and_receipt_index() {
         inode_id: InodeId(7),
         revision_no: RevisionNo(2),
         committed_seq: ChangeSeq(3),
+        commit_id: commit_id(3),
         committed_at_ms: 4_200,
         actor: actor(),
         revision_delta_index: 0,
         content_ref: replacement_ref.clone(),
     });
     builder.push_commit_receipt(CommitReceiptRecord {
-        commit_id: commit_id.clone(),
+        commit_id: receipt_commit_id.clone(),
         actor: loonfs_test_support::test_actor(),
         semantic_commit_fingerprint: "fingerprint".to_owned(),
         committed_seq: ChangeSeq(3),
@@ -428,7 +502,7 @@ fn revisions_advance_watermark_and_receipt_index() {
     );
     assert_eq!(
         metadata_state
-            .find_commit_receipt(&commit_id)
+            .find_commit_receipt(&receipt_commit_id)
             .expect("commit receipt")
             .committed_seq,
         ChangeSeq(3)
@@ -436,7 +510,7 @@ fn revisions_advance_watermark_and_receipt_index() {
 
     assert_eq!(
         metadata_state
-            .find_commit_receipt(&commit_id)
+            .find_commit_receipt(&receipt_commit_id)
             .expect("indexed receipt")
             .semantic_commit_fingerprint,
         "fingerprint"
@@ -479,6 +553,7 @@ fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
     let mut metadata_state = MetadataState::default();
     metadata_state.apply_committed_wal_deltas_mut(
         ChangeSeq(4),
+        &commit_id(4),
         &actor(),
         4_200,
         &[
@@ -514,6 +589,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(2),
+        &commit_id(2),
         &actor(),
         4_200,
         &[append_attributes(
@@ -525,6 +601,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     );
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(5),
+        &commit_id(5),
         &actor(),
         4_200,
         &[append_attributes(
@@ -576,6 +653,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
 fn attribute_row_accounting_counts_key_and_value_bytes() {
     let small = MetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(1),
+        &commit_id(1),
         &actor(),
         4_200,
         &[append_attributes(
@@ -588,6 +666,7 @@ fn attribute_row_accounting_counts_key_and_value_bytes() {
     let large_value = "v".repeat(4_096);
     let large = MetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(1),
+        &commit_id(1),
         &actor(),
         4_200,
         &[append_attributes(
@@ -618,6 +697,7 @@ fn churned_binding_state() -> MetadataState {
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(0),
+        &commit_id(0),
         &actor(),
         4_200,
         &[WalDelta::CreateInode {
@@ -628,6 +708,7 @@ fn churned_binding_state() -> MetadataState {
     );
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(1),
+        &commit_id(1),
         &actor(),
         4_200,
         &[
@@ -661,6 +742,7 @@ fn churned_binding_state() -> MetadataState {
     );
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(2),
+        &commit_id(2),
         &actor(),
         4_200,
         &[
@@ -696,6 +778,7 @@ fn churned_binding_state() -> MetadataState {
     );
     state.apply_committed_wal_deltas_mut(
         ChangeSeq(3),
+        &commit_id(3),
         &actor(),
         4_200,
         &[
@@ -823,6 +906,7 @@ fn has_visible_children_sees_through_unbinds() {
                 inode_id: dir,
                 inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
+                commit_id: commit_id(1),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },
@@ -830,6 +914,7 @@ fn has_visible_children_sees_through_unbinds() {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 created_seq: ChangeSeq(2),
+                commit_id: commit_id(2),
                 created_by: actor(),
                 created_at_ms: 4_200,
             },

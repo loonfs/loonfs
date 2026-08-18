@@ -425,6 +425,8 @@ pub struct FileRevision {
     pub revision_no: RevisionNo,
     /// Namespace sequence that created this revision.
     pub committed_seq: ChangeSeq,
+    /// The commit that produced this revision.
+    pub commit_id: CommitId,
     /// Wall-clock stamp of the commit that created this revision, in Unix
     /// milliseconds. Observational: `committed_seq` is the order.
     pub committed_at_ms: u64,
@@ -1083,12 +1085,13 @@ mod tests {
     use crate::ContentId;
 
     #[test]
-    fn file_revision_uses_committed_by_on_the_wire() {
+    fn file_revision_provenance_fields_are_pinned_on_the_wire() {
         let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
         let revision = FileRevision {
             inode_id: InodeId(2),
             revision_no: RevisionNo(3),
             committed_seq: ChangeSeq(7),
+            commit_id: CommitId::parse("c_revision_owner").expect("commit id"),
             committed_at_ms: 1_752_624_000_000,
             committed_by: crate::ActorRef::loonfs_system(),
             content_ref: content_ref.clone(),
@@ -1100,6 +1103,7 @@ mod tests {
                 "inode_id": "ino_2",
                 "revision_no": 3,
                 "committed_seq": 7,
+                "commit_id": "c_revision_owner",
                 "committed_at_ms": 1_752_624_000_000_u64,
                 "committed_by": { "kind": "system", "id": "loonfs" },
                 "content_ref": content_ref,
