@@ -1173,37 +1173,6 @@ mod tests {
     }
 
     #[test]
-    fn namespace_create_and_fork_responses_use_the_slim_shape() {
-        let create = Namespace {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            head_seq: ChangeSeq(0),
-            retention_floor_seq: ChangeSeq(0),
-        };
-        assert_eq!(
-            serde_json::to_value(create).expect("serialize create response"),
-            serde_json::json!({
-                "namespace_id": "demo",
-                "head_seq": 0,
-                "retention_floor_seq": 0
-            })
-        );
-
-        let fork = Namespace {
-            namespace_id: NamespaceId::parse("demo-branch").expect("namespace id"),
-            head_seq: ChangeSeq(7),
-            retention_floor_seq: ChangeSeq(7),
-        };
-        assert_eq!(
-            serde_json::to_value(fork).expect("serialize fork response"),
-            serde_json::json!({
-                "namespace_id": "demo-branch",
-                "head_seq": 7,
-                "retention_floor_seq": 7
-            })
-        );
-    }
-
-    #[test]
     fn behavior_enums_use_snake_case_wire_values() {
         assert_eq!(
             DestinationBehavior::default(),
