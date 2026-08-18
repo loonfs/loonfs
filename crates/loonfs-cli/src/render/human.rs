@@ -546,7 +546,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             )
         }
         CommandData::Version { version } => version.clone(),
-        CommandData::StreamBytes(_) | CommandData::StreamedToStdout => String::new(),
+        CommandData::CompletionScript(_)
+        | CommandData::StreamBytes(_)
+        | CommandData::StreamedToStdout => String::new(),
     }
 }
 

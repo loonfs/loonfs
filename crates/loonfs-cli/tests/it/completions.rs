@@ -1,56 +1,84 @@
-use clap::{CommandFactory, Parser, ValueHint};
-use clap_complete::Shell;
-use loonfs_cli::Cli;
+use std::process::{Command, Output, Stdio};
 
 #[test]
-fn completions_command_parses() {
-    assert!(Cli::try_parse_from(["loonfs", "completions", "zsh"]).is_ok());
-}
+fn completion_generates_for_zsh_and_bash() {
+    for shell in ["zsh", "bash"] {
+        let output = loonfs()
+            .args(["completion", "--shell", shell])
+            .output()
+            .expect("run completion generation");
 
-#[test]
-fn completions_generate_for_zsh_and_bash() {
-    for shell in [Shell::Zsh, Shell::Bash] {
-        let mut script = Vec::new();
-        clap_complete::generate(shell, &mut Cli::command(), "loonfs", &mut script);
-
-        assert!(!script.is_empty());
-        assert!(String::from_utf8_lossy(&script).contains("loonfs"));
+        assert!(output.status.success(), "{output:?}");
+        assert!(!output.stdout.is_empty());
+        assert!(stdout(&output).contains("loonfs"));
     }
 }
 
 #[test]
-fn completions_use_local_and_remote_path_hints() {
-    let command = Cli::command();
+fn completion_detects_the_shell_from_the_environment() {
+    let output = loonfs()
+        .arg("completion")
+        .env("SHELL", "/bin/zsh")
+        .output()
+        .expect("run completion generation");
 
-    assert_hint(&command, "config", ValueHint::FilePath);
-
-    let put = subcommand(&command, "put");
-    assert_hint(put, "local_path", ValueHint::AnyPath);
-    assert_hint(put, "remote_path", ValueHint::Other);
-
-    let get = subcommand(&command, "get");
-    assert_hint(get, "local_destination", ValueHint::AnyPath);
-    assert_hint(get, "remote_path", ValueHint::Other);
-
-    let cat = subcommand(&command, "cat");
-    assert_hint(cat, "path", ValueHint::Other);
-
-    let mv = subcommand(&command, "mv");
-    assert_hint(mv, "source_path", ValueHint::Other);
-    assert_hint(mv, "destination_path", ValueHint::Other);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!output.stdout.is_empty());
 }
 
-fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {
-    command
-        .get_subcommands()
-        .find(|subcommand| subcommand.get_name() == name)
-        .unwrap_or_else(|| panic!("missing {name} subcommand"))
+#[test]
+fn completion_without_a_shell_fails_cleanly() {
+    let output = loonfs()
+        .arg("completion")
+        .env_remove("SHELL")
+        .output()
+        .expect("run completion generation");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("--shell"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
-fn assert_hint(command: &clap::Command, id: &str, expected: ValueHint) {
-    let argument = command
-        .get_arguments()
-        .find(|argument| argument.get_id() == id)
-        .unwrap_or_else(|| panic!("missing {id} argument"));
-    assert_eq!(argument.get_value_hint(), expected);
+#[test]
+fn completion_does_not_panic_when_stdout_closes() {
+    let mut child = loonfs()
+        .args(["completion", "--shell", "zsh"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn completion generation");
+    drop(child.stdout.take().expect("piped stdout"));
+
+    let output = child
+        .wait_with_output()
+        .expect("wait for completion generation");
+    let stderr = stderr(&output);
+    assert_ne!(output.status.code(), Some(101), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[test]
+fn completion_rejects_json_output() {
+    let output = loonfs()
+        .args(["--json", "completion", "--shell", "zsh"])
+        .output()
+        .expect("run completion generation");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("--json"), "{stderr}");
+    assert!(stderr.contains("not supported"), "{stderr}");
+}
+
+fn loonfs() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_loonfs"))
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
 }

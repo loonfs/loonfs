@@ -21,9 +21,11 @@ where
 
 pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
     match &output.data {
-        CommandData::StreamBytes(_) | CommandData::StreamedToStdout => Err(io::Error::new(
+        CommandData::CompletionScript(_)
+        | CommandData::StreamBytes(_)
+        | CommandData::StreamedToStdout => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "streaming output does not support json rendering",
+            "raw output does not support json rendering",
         )),
         data => serde_json::to_string_pretty(&JsonEnvelope {
             kind: output.kind.as_str(),

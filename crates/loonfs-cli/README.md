@@ -8,13 +8,15 @@ filesystem operations, and namespace maintenance against LoonFS.
 Generate completion scripts for Bash, Zsh, Fish, PowerShell, or Elvish with:
 
 ```sh
-loonfs completions <shell>
+loonfs completion --shell zsh
 ```
+
+When omitted, `--shell` defaults from `$SHELL`.
 
 For example, enable Zsh completion in the current shell with:
 
 ```sh
-source <(loonfs completions zsh)
+source <(loonfs completion --shell zsh)
 ```
 
 ## Command Reference

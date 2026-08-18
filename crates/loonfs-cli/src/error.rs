@@ -149,10 +149,10 @@ impl CliError {
         Self::new("invalid_usage", message)
     }
 
-    pub(crate) fn json_not_supported_for_streaming() -> Self {
+    pub(crate) fn json_not_supported() -> Self {
         Self::new(
             "json_not_supported_for_streaming",
-            "streaming commands do not support `--json`",
+            "`--json` is not supported for this command",
         )
     }
 

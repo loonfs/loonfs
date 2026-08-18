@@ -13,7 +13,7 @@ fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
 /// Defines the `loonfs` command-line interface.
 #[derive(Debug, Parser)]
 #[command(name = "loonfs", version)]
-pub struct Cli {
+pub(crate) struct Cli {
     /// Config file to use, ahead of LOONFS_CONFIG and the default location.
     #[arg(
         long,
@@ -108,16 +108,17 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Print shell completions to stdout.
-    Completions(CompletionsArgs),
+    /// Print a shell completion script to stdout.
+    Completion(CompletionArgs),
     /// Print version and build metadata.
     Version,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct CompletionsArgs {
+pub(crate) struct CompletionArgs {
     /// Shell to generate completions for.
-    pub shell: clap_complete::Shell,
+    #[arg(long, value_enum, value_name = "bash|zsh|fish|powershell|elvish")]
+    pub(crate) shell: Option<clap_complete::Shell>,
 }
 
 #[derive(Debug, Args)]
@@ -1053,6 +1054,7 @@ impl RuntimeBehavior {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandKind {
+    Completion,
     Init,
     ProfileCreate,
     ProfileList,
@@ -1102,6 +1104,7 @@ pub(crate) enum CommandKind {
 impl CommandKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            CommandKind::Completion => "completion",
             CommandKind::Init => "init",
             CommandKind::ProfileCreate => "profile_create",
             CommandKind::ProfileList => "profile_list",
@@ -1150,14 +1153,14 @@ impl CommandKind {
     }
 
     pub(crate) fn supports_json(self) -> bool {
-        !matches!(self, CommandKind::FilesystemCat)
+        !matches!(self, CommandKind::Completion | CommandKind::FilesystemCat)
     }
 }
 
 impl Cli {
-    pub(crate) fn kind(&self) -> Option<CommandKind> {
-        Some(match &self.command {
-            Command::Completions(_) => return None,
+    pub(crate) fn kind(&self) -> CommandKind {
+        match &self.command {
+            Command::Completion(_) => CommandKind::Completion,
             Command::Init(_) => CommandKind::Init,
             Command::Profile { command } => match command {
                 ProfileCommand::Create(_) => CommandKind::ProfileCreate,
@@ -1210,6 +1213,48 @@ impl Cli {
                 ConfigCommand::Show => CommandKind::ConfigShow,
             },
             Command::Version => CommandKind::Version,
-        })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_and_remote_paths_have_completion_hints() {
+        let command = Cli::command();
+
+        assert_hint(&command, "config", ValueHint::FilePath);
+
+        let put = subcommand(&command, "put");
+        assert_hint(put, "local_path", ValueHint::AnyPath);
+        assert_hint(put, "remote_path", ValueHint::Other);
+
+        let get = subcommand(&command, "get");
+        assert_hint(get, "local_destination", ValueHint::AnyPath);
+        assert_hint(get, "remote_path", ValueHint::Other);
+
+        let cat = subcommand(&command, "cat");
+        assert_hint(cat, "path", ValueHint::Other);
+
+        let mv = subcommand(&command, "mv");
+        assert_hint(mv, "source_path", ValueHint::Other);
+        assert_hint(mv, "destination_path", ValueHint::Other);
+    }
+
+    fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {
+        command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == name)
+            .expect("subcommand exists")
+    }
+
+    fn assert_hint(command: &clap::Command, id: &str, expected: ValueHint) {
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == id)
+            .expect("argument exists");
+        assert_eq!(argument.get_value_hint(), expected);
     }
 }

@@ -15,34 +15,32 @@ pub(crate) use self::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, MaintenanceKeyReport,
 };
 
-use crate::args::{Cli, Command, RuntimeBehavior};
+use crate::args::{Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior};
 use crate::config::resolve_config_location;
+use crate::error::CliError;
 use clap::CommandFactory;
+use clap_complete::Shell;
+use std::path::Path;
+
+const COMPLETION_SHELL_REQUIRED: &str =
+    "pass `--shell` with one of: bash, zsh, fish, powershell, elvish (`$SHELL` is unset or unsupported)";
 
 pub(crate) async fn run(
     cli: Cli,
     runtime: RuntimeBehavior,
-) -> Result<Option<CommandOutput>, CommandFailure> {
-    if let Command::Completions(args) = &cli.command {
-        clap_complete::generate(
-            args.shell,
-            &mut Cli::command(),
-            "loonfs",
-            &mut std::io::stdout(),
-        );
-        return Ok(None);
-    }
-
-    let kind = cli
-        .kind()
-        .expect("completion generation returns before command dispatch");
+) -> Result<CommandOutput, CommandFailure> {
+    let kind = cli.kind();
     if runtime.json && !kind.supports_json() {
         return Err(CommandFailure {
             kind,
             profile: None,
             mode: None,
-            error: Box::new(crate::error::CliError::json_not_supported_for_streaming()),
+            error: Box::new(CliError::json_not_supported()),
         });
+    }
+
+    if let Command::Completion(args) = &cli.command {
+        return run_completion(kind, args);
     }
 
     // One resolution for the whole invocation: every command below reads
@@ -51,8 +49,10 @@ pub(crate) async fn run(
         .map_err(|error| context::fail(kind, None, None, error))?;
     let config_path = location.path.as_path();
 
-    let result = match cli.command {
-        Command::Completions(_) => return Ok(None),
+    match cli.command {
+        // Completion returns before config resolution above. This twin keeps
+        // dispatch exhaustive and deliberately uses the same output path.
+        Command::Completion(args) => run_completion(kind, &args),
         Command::Version => Ok(CommandOutput {
             kind,
             profile: None,
@@ -90,6 +90,42 @@ pub(crate) async fn run(
         Command::Admin { command } => {
             admin::run_admin_command(kind, config_path, command, runtime).await
         }
-    };
-    result.map(Some)
+    }
+}
+
+fn run_completion(
+    kind: CommandKind,
+    args: &CompletionArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let shell = args
+        .shell
+        .or_else(completion_shell_from_environment)
+        .ok_or_else(|| {
+            context::fail(
+                kind,
+                None,
+                None,
+                CliError::invalid_input(COMPLETION_SHELL_REQUIRED),
+            )
+        })?;
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "loonfs", &mut script);
+    Ok(CommandOutput {
+        kind,
+        profile: None,
+        mode: None,
+        data: CommandData::CompletionScript(script),
+    })
+}
+
+fn completion_shell_from_environment() -> Option<Shell> {
+    let shell = std::env::var_os("SHELL")?;
+    match Path::new(&shell).file_name()?.to_str()? {
+        "bash" => Some(Shell::Bash),
+        "zsh" => Some(Shell::Zsh),
+        "fish" => Some(Shell::Fish),
+        "pwsh" | "powershell" => Some(Shell::PowerShell),
+        "elvish" => Some(Shell::Elvish),
+        _ => None,
+    }
 }
