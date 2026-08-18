@@ -3,6 +3,7 @@
 
 use super::context::{fail, fail_for, parse_public_ordinal_arg, resolve_command_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
+use super::pagination::{write_jsonl_page, PagePlan};
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointCommand, AdminCheckpointListArgs,
     AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminIndexCommand, AdminIndexEnableArgs,
@@ -22,6 +23,7 @@ use loonfs_api::{
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
+use std::io::{self, BufWriter};
 use std::path::Path;
 
 // --- maintenance/admin plane ---
@@ -284,23 +286,42 @@ async fn run_admin_checkpoint_list(
     args: AdminCheckpointListArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let single_page = args.limit.is_some() || args.cursor.is_some();
-    let mut response = context
-        .target
-        .list_checkpoints_page(&context.namespace, args.limit, args.cursor.as_deref())
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-    if !single_page {
-        while let Some(cursor) = response.next_cursor.take() {
-            let page = context
-                .target
-                .list_checkpoints_page(&context.namespace, None, Some(&cursor))
-                .await
+    let mut plan = PagePlan::new(&args.pagination);
+    let mut cursor = args.cursor.clone();
+    let mut response: Option<loonfs_api::ListCheckpointsResponse> = None;
+    let stdout = io::stdout();
+    let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
+    loop {
+        let page = context
+            .target
+            .list_checkpoints_page(&context.namespace, plan.request_size(), cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        plan.record(page.checkpoints.len());
+        cursor = page.next_cursor.clone();
+        if args.pagination.jsonl {
+            write_jsonl_page(&mut stdout, &page.checkpoints)
+                .map_err(crate::error::CliError::io)
                 .map_err(|error| context.fail(kind, error))?;
+        } else if let Some(response) = response.as_mut() {
             response.checkpoints.extend(page.checkpoints);
             response.next_cursor = page.next_cursor;
+        } else {
+            response = Some(page);
+        }
+        if !plan.should_continue(cursor.is_some()) {
+            break;
         }
     }
+    if args.pagination.jsonl {
+        return Ok(CommandOutput {
+            kind,
+            profile: Some(context.profile_name),
+            mode: Some(context.mode),
+            data: CommandData::StreamedToStdout,
+        });
+    }
+    let response = response.expect("checkpoint loop should fetch at least one page");
 
     Ok(CommandOutput {
         kind,
@@ -547,11 +568,44 @@ pub(crate) async fn run_admin_changes(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let after_seq = parse_public_ordinal_arg("--after", args.after.unwrap_or(0), ChangeSeq::parse)
         .map_err(|error| context.fail(kind, error))?;
-    let response = context
-        .target
-        .list_changes(&context.namespace, after_seq, args.limit)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let mut plan = PagePlan::new(&args.pagination);
+    let mut cursor = after_seq;
+    let mut response: Option<loonfs_api::v0::ChangesResponse> = None;
+    let stdout = io::stdout();
+    let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
+    loop {
+        let page = context
+            .target
+            .list_changes(&context.namespace, cursor, plan.request_size())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        plan.record(page.changes.len());
+        let next_after_seq = page.next_after_seq;
+        if args.pagination.jsonl {
+            write_jsonl_page(&mut stdout, &page.changes)
+                .map_err(crate::error::CliError::io)
+                .map_err(|error| context.fail(kind, error))?;
+        } else if let Some(response) = response.as_mut() {
+            response.through_seq = page.through_seq;
+            response.next_after_seq = page.next_after_seq;
+            response.changes.extend(page.changes);
+        } else {
+            response = Some(page);
+        }
+        if !plan.should_continue(next_after_seq.is_some()) {
+            break;
+        }
+        cursor = next_after_seq.expect("continuation was checked above");
+    }
+    if args.pagination.jsonl {
+        return Ok(CommandOutput {
+            kind,
+            profile: Some(context.profile_name),
+            mode: Some(context.mode),
+            data: CommandData::StreamedToStdout,
+        });
+    }
+    let response = response.expect("changes loop should fetch at least one page");
 
     Ok(CommandOutput {
         kind,
@@ -672,7 +726,7 @@ async fn run_admin_index_gc(
     // is what keeps a remote pass and an embedded one the same size.
     let mut request = GrepGcRequest {
         max_objects: args.max_objects,
-        cursor: None,
+        cursor: args.cursor,
     };
     let mut progress = PassProgress::new(runtime);
     let mut response: Option<loonfs_api::v0::GrepGcResponse> = None;
@@ -692,7 +746,7 @@ async fn run_admin_index_gc(
             Some(total) => accumulate_grep_gc_response(total, pass),
             None => response = Some(pass),
         }
-        if single_pass || next_cursor.is_none() {
+        if single_pass || next_cursor.is_none() || next_cursor == request.cursor {
             break;
         }
         request.cursor = next_cursor;

@@ -26,6 +26,90 @@ fn display_names(entries: &[AuthoritativePathEntry]) -> Vec<&str> {
 }
 
 #[test]
+fn collect_up_to_keeps_unused_entries_for_the_next_call() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "path-pager-collect-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+
+    let mut pager = fs.reader.list_path_entries_pager(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+        Default::default(),
+    );
+    let collected = block_on(pager.collect_up_to(1)).expect("collect one entry");
+    assert_eq!(display_names(&collected), vec!["a.txt"]);
+
+    let rest_of_first = block_on(pager.next())
+        .expect("buffered page remainder")
+        .expect("page succeeds");
+    assert_eq!(display_names(&rest_of_first.entries), vec!["b.txt"]);
+    let final_page = block_on(pager.next())
+        .expect("final page")
+        .expect("page succeeds");
+    assert_eq!(display_names(&final_page.entries), vec!["c.txt"]);
+    assert!(block_on(pager.next()).is_none());
+}
+
+#[test]
+fn path_entries_pager_preserves_each_page_head() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "path-pager-drift-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("put file");
+    }
+
+    let mut pager = fs.reader.list_path_entries_pager(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+        Default::default(),
+    );
+    let first = block_on(pager.next())
+        .expect("first page")
+        .expect("page succeeds");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/z.txt",
+        b"newer",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("put later file");
+    let second = block_on(pager.next())
+        .expect("second page")
+        .expect("page succeeds");
+
+    assert_ne!(first.head_seq, second.head_seq);
+    assert_eq!(display_names(&second.entries), vec!["c.txt", "z.txt"]);
+}
+
+#[test]
 fn directory_pages_use_canonical_name_key_order() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-order-test");

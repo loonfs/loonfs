@@ -321,6 +321,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             matches,
             tail_scanned,
             truncated,
+            next_cursor,
             ..
         } => {
             let mut lines: Vec<String> = matches
@@ -329,7 +330,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 .collect();
             if *truncated {
                 lines.push(format!(
-                    "{} matches for `{pattern}` (stopped at --max-matches; there are more)",
+                    "{} matches for `{pattern}` (stopped at --limit; there are more)",
                     matches.len()
                 ));
             } else {
@@ -340,6 +341,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     "warning: recent commits were not scanned (allow_stale); results may be stale"
                         .to_owned(),
                 );
+            }
+            if let Some(cursor) = next_cursor {
+                lines.push(format!("next_cursor: {cursor}"));
             }
             lines.join("\n")
         }

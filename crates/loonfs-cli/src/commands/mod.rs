@@ -7,6 +7,7 @@ mod fs;
 mod inspection;
 mod namespace;
 mod output;
+mod pagination;
 mod partial;
 mod profile;
 mod profile_config;

@@ -83,7 +83,10 @@ pub(crate) struct Cli {
 }
 
 pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
-    if cli.json && matches!(&cli.command, Command::Ls(args) if args.jsonl) {
+    let Some(pagination) = cli.command.pagination() else {
+        return Ok(());
+    };
+    if cli.json && pagination.jsonl {
         let mut error = Cli::command().error(
             clap::error::ErrorKind::ArgumentConflict,
             "the argument '--jsonl' cannot be used with '--json'",
@@ -91,6 +94,17 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
         error.insert(
             clap::error::ContextKind::InvalidArg,
             clap::error::ContextValue::String("--jsonl".to_owned()),
+        );
+        return Err(error);
+    }
+    if cli.json && pagination.all && pagination.limit.is_none() {
+        let mut error = Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "'--all --json' requires '--limit'; use '--jsonl' to stream without a limit",
+        );
+        error.insert(
+            clap::error::ContextKind::InvalidArg,
+            clap::error::ContextValue::String("--all".to_owned()),
         );
         return Err(error);
     }
@@ -168,6 +182,25 @@ pub(crate) enum Command {
     Completion(CompletionArgs),
     /// Print version and build metadata.
     Version,
+}
+
+impl Command {
+    fn pagination(&self) -> Option<&PaginationArgs> {
+        match self {
+            Self::Ls(args) => Some(&args.pagination),
+            Self::Grep(args) => Some(&args.pagination),
+            Self::Revisions(args) => Some(&args.pagination),
+            Self::Trash(args) => Some(&args.pagination),
+            Self::Changes(args) => Some(&args.pagination),
+            Self::Admin {
+                command:
+                    AdminCommand::Checkpoint {
+                        command: AdminCheckpointCommand::List(args),
+                    },
+            } => Some(&args.pagination),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -579,23 +612,32 @@ pub(crate) struct NamespaceForkArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct PaginationArgs {
+    /// Return at most this many items.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Request this many items per page.
+    #[arg(long)]
+    pub page_size: Option<u32>,
+    /// Continue until the limit is reached or no pages remain.
+    #[arg(long)]
+    pub all: bool,
+    /// Write one JSON item per line until the limit is reached or no pages remain.
+    #[arg(long)]
+    pub jsonl: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct FilesystemLsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: Option<String>,
-    /// Stop after this many entries in total.
-    #[arg(long, conflicts_with = "all")]
-    pub limit: Option<u32>,
-    /// Resume cursor from a previous bounded listing.
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    /// Resume from a cursor returned by a previous listing.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
-    /// Follow every page and print entries as pages arrive.
-    #[arg(long)]
-    pub all: bool,
-    /// Print one JSON entry per line as pages arrive.
-    #[arg(long)]
-    pub jsonl: bool,
 }
 
 #[derive(Debug, Args)]
@@ -705,9 +747,8 @@ pub(crate) struct FilesystemRevisionsArgs {
     pub target: TargetSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
-    /// Maximum revisions to return in this page.
-    #[arg(long)]
-    pub limit: Option<u32>,
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
     /// Resume cursor from a previous revisions page.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
@@ -737,14 +778,11 @@ pub(crate) struct FilesystemGrepArgs {
     /// Match ASCII letters without regard to case.
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
-    /// Matches fetched per page, bounded by the deployment's
-    /// `query.grep.max_limit`. To bound the total, use --max-matches.
-    #[arg(long)]
-    pub limit: Option<u32>,
-    /// Stop after this many matches in total. Without it the command
-    /// follows cursors to completion and prints every match.
-    #[arg(long)]
-    pub max_matches: Option<u32>,
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    /// Resume from a cursor returned by a previous search.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub cursor: Option<String>,
     /// Permit a capped exhaustive scan for patterns with no literal bytes.
     #[arg(long)]
     pub allow_scan: bool,
@@ -907,9 +945,8 @@ pub(crate) struct FilesystemUndeleteArgs {
 pub(crate) struct TrashArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Maximum number of entries to return.
-    #[arg(long)]
-    pub limit: Option<u32>,
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
     /// Resume cursor from a previous page.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
@@ -923,9 +960,8 @@ pub(crate) struct ChangesArgs {
     /// start of retained history).
     #[arg(long)]
     pub after: Option<u64>,
-    /// Maximum number of changes to return.
-    #[arg(long)]
-    pub limit: Option<u32>,
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1080,6 +1116,9 @@ pub(crate) struct AdminIndexGcArgs {
     /// Omit to loop bounded passes through completion.
     #[arg(long)]
     pub max_objects: Option<u64>,
+    /// Resume from `next_cursor` returned by a previous pass.
+    #[arg(long, value_name = "TOKEN", value_hint = ValueHint::Other)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1105,10 +1144,9 @@ pub(crate) struct AdminCheckpointArgs {
 pub(crate) struct AdminCheckpointListArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Maximum checkpoints to return. Supplying this requests one page.
-    #[arg(long)]
-    pub limit: Option<u32>,
-    /// Resume cursor from a previous page. Supplying this requests one page.
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    /// Resume from a cursor returned by a previous listing.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
 }
@@ -1392,6 +1430,154 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_paginated_listing_accepts_the_shared_flags() {
+        let cases: &[&[&str]] = &[
+            &[
+                "loonfs",
+                "ls",
+                "--limit",
+                "5",
+                "--page-size",
+                "2",
+                "--all",
+                "--jsonl",
+                "--cursor",
+                "c",
+            ],
+            &[
+                "loonfs",
+                "revisions",
+                "/f",
+                "--limit",
+                "5",
+                "--page-size",
+                "2",
+                "--all",
+                "--jsonl",
+                "--cursor",
+                "c",
+            ],
+            &[
+                "loonfs",
+                "trash",
+                "--limit",
+                "5",
+                "--page-size",
+                "2",
+                "--all",
+                "--jsonl",
+                "--cursor",
+                "c",
+            ],
+            &[
+                "loonfs",
+                "changes",
+                "--limit",
+                "5",
+                "--page-size",
+                "2",
+                "--all",
+                "--jsonl",
+                "--after",
+                "1",
+            ],
+            &[
+                "loonfs",
+                "grep",
+                "x",
+                "--limit",
+                "5",
+                "--page-size",
+                "2",
+                "--all",
+                "--jsonl",
+                "--cursor",
+                "c",
+            ],
+            &[
+                "loonfs",
+                "admin",
+                "checkpoint",
+                "list",
+                "--limit",
+                "5",
+                "--page-size",
+                "2",
+                "--all",
+                "--jsonl",
+                "--cursor",
+                "c",
+            ],
+        ];
+        for arguments in cases {
+            let cli = Cli::try_parse_from(*arguments).expect("pagination arguments parse");
+            let pagination = cli.command.pagination().expect("paginated command");
+            assert_eq!(pagination.limit, Some(5));
+            assert_eq!(pagination.page_size, Some(2));
+            assert!(pagination.all);
+            assert!(pagination.jsonl);
+        }
+    }
+
+    #[test]
+    fn unbounded_all_json_is_rejected_for_every_paginated_listing() {
+        let cases: &[&[&str]] = &[
+            &["loonfs", "--json", "ls", "--all"],
+            &["loonfs", "--json", "revisions", "/f", "--all"],
+            &["loonfs", "--json", "trash", "--all"],
+            &["loonfs", "--json", "changes", "--all"],
+            &["loonfs", "--json", "grep", "x", "--all"],
+            &["loonfs", "--json", "admin", "checkpoint", "list", "--all"],
+        ];
+        for arguments in cases {
+            let cli = Cli::try_parse_from(*arguments).expect("arguments parse");
+            let error = validate_cli(&cli).expect_err("unbounded JSON must fail");
+            assert!(error
+                .to_string()
+                .contains("use '--jsonl' to stream without a limit"));
+        }
+    }
+
+    #[test]
+    fn max_matches_is_removed_and_changes_uses_after_to_resume() {
+        assert!(Cli::try_parse_from(["loonfs", "grep", "x", "--max-matches", "1"]).is_err());
+        assert!(Cli::try_parse_from(["loonfs", "changes", "--cursor", "opaque"]).is_err());
+    }
+
+    #[test]
+    fn index_gc_accepts_the_same_cursor_flag_as_core_gc() {
+        let cli = Cli::try_parse_from([
+            "loonfs",
+            "admin",
+            "index",
+            "gc",
+            "--max-objects",
+            "7",
+            "--cursor",
+            "resume",
+        ])
+        .expect("index gc arguments");
+        assert!(matches!(
+            &cli.command,
+            Command::Admin {
+                command: AdminCommand::Index {
+                    command: AdminIndexCommand::Gc(_),
+                },
+            }
+        ));
+        if let Command::Admin {
+            command:
+                AdminCommand::Index {
+                    command: AdminIndexCommand::Gc(args),
+                },
+        } = &cli.command
+        {
+            assert_eq!(args.max_objects, Some(7));
+            assert_eq!(args.cursor.as_deref(), Some("resume"));
+        }
+    }
 
     #[test]
     fn command_kind_envelope_values_are_pinned() {

@@ -3,6 +3,60 @@
 use super::*;
 use crate::transport::append_optional_pagination_query;
 
+/// Fetches active-checkpoint pages as needed.
+#[must_use]
+pub struct CheckpointsPager {
+    client: Client,
+    namespace_id: NamespaceId,
+    page_size: Option<u32>,
+    cursor: Option<String>,
+    pending: Option<ListCheckpointsResponse>,
+    exhausted: bool,
+}
+
+impl CheckpointsPager {
+    /// Returns the next checkpoint page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListCheckpointsResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .client
+            .list_checkpoints_page(&self.namespace_id, self.page_size, self.cursor.as_deref())
+            .await;
+        Some(page.inspect(|page| {
+            self.cursor = page.next_cursor.clone();
+            self.exhausted = self.cursor.is_none();
+        }))
+    }
+
+    /// Returns at most `max_items` checkpoints.
+    ///
+    /// Unused checkpoints from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<Checkpoint>> {
+        let mut checkpoints = Vec::new();
+        while checkpoints.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - checkpoints.len()).min(page.checkpoints.len());
+            if take < page.checkpoints.len() {
+                let remaining = page.checkpoints.split_off(take);
+                checkpoints.extend(page.checkpoints);
+                page.checkpoints = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            checkpoints.extend(page.checkpoints);
+        }
+        Ok(checkpoints)
+    }
+}
+
 impl Client {
     /// Returns namespace state and storage details used by maintenance.
     pub async fn namespace_diagnostics(
@@ -34,32 +88,21 @@ impl Client {
         self.request_json(self.post(&url), Some(request)).await
     }
 
-    /// Lists every active checkpoint record by following bounded pages
-    /// (admin plane).
-    ///
-    /// A checkpoint name is a label rather than a key, so this is how a pin
-    /// is found again once its creation response is gone. An expired record
-    /// that no collection pass has released yet is still listed, with its
-    /// expiry in the entry.
-    pub async fn list_checkpoints_all(
+    /// Creates a checkpoint pager beginning at `cursor` (admin plane).
+    pub fn list_checkpoints_pager(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<ListCheckpointsResponse> {
-        let first_page = self.list_checkpoints_page(namespace_id, None, None).await?;
-        let mut response = ListCheckpointsResponse {
-            namespace_id: first_page.namespace_id,
-            checkpoints: first_page.checkpoints,
-            next_cursor: None,
-        };
-        let mut next_cursor = first_page.next_cursor;
-        while let Some(cursor) = next_cursor {
-            let page = self
-                .list_checkpoints_page(namespace_id, None, Some(&cursor))
-                .await?;
-            response.checkpoints.extend(page.checkpoints);
-            next_cursor = page.next_cursor;
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> CheckpointsPager {
+        CheckpointsPager {
+            client: self.clone(),
+            namespace_id: namespace_id.clone(),
+            page_size,
+            cursor,
+            pending: None,
+            exhausted: false,
         }
-        Ok(response)
     }
 
     /// Lists one bounded page of active checkpoint records (admin plane).

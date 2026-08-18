@@ -166,12 +166,18 @@ Namespace management
   loonfs current
     Show the selected profile and namespace
 
+Pagination
+  ls, grep, revisions, trash, changes, and admin checkpoint list return one
+  page by default. --limit sets the maximum number of results, --page-size
+  controls each request, and --cursor resumes a previous result. --all keeps
+  fetching until no pages remain or the limit is reached. --jsonl does the
+  same while writing one result per line. changes uses --after instead of
+  --cursor.
+
 Reading
-  loonfs ls [path] [--limit <n> | --all] [--cursor <cursor>] [--jsonl]
-    List the entries of a directory, `/` when the path is omitted. Without
-    --limit or --all, one server page is printed. --limit stops
-    after that many entries in total and reports a next_cursor, which
-    --cursor resumes; --all streams pages except in JSON; --jsonl streams entries
+  loonfs ls [path] [--limit <n>] [--page-size <n>] [--cursor <cursor>]
+                   [--all] [--jsonl]
+    List the entries of a directory, or `/` when the path is omitted
 
   loonfs stat <path>
     Describe one path: kind, size, revision, content digest, and the
@@ -189,15 +195,13 @@ Reading
     an older revision of one file
 
   loonfs grep <pattern> [--path-prefix <path>] [-i] [--limit <n>]
-                        [--max-matches <n>] [--allow-scan] [--allow-stale]
+                        [--page-size <n>] [--cursor <cursor>] [--all] [--jsonl]
+                        [--allow-scan] [--allow-stale]
     Search file content through the gram index with a pattern in the Rust
-    regex dialect, and print every match; -i ignores ASCII case,
-    --path-prefix narrows to a subtree, --limit sizes a page (bounded by the
-    deployment's query.grep.max_limit) while --max-matches caps the total
-    and reports that it stopped early,
-    --allow-scan permits a capped scan for a pattern with no literal bytes,
-    and --allow-stale accepts indexed-only results when the unindexed tail
-    exceeds the scan budget
+    regex dialect. -i ignores ASCII case, --path-prefix limits the search to
+    a subtree, --allow-scan permits a bounded scan for patterns with no
+    literal bytes, and --allow-stale permits results that omit an unindexed
+    tail that is too large to scan
 
 Writing
   Every writing command accepts --actor-kind <user|service|system> together
@@ -245,16 +249,18 @@ Writing
     --force replaces an existing destination
 
 History and recovery
-  loonfs revisions <path> [--limit <n>] [--cursor <cursor>]
-    List a file's revision history newest first, one page at a time
+  loonfs revisions <path> [--limit <n>] [--page-size <n>] [--cursor <cursor>]
+                          [--all] [--jsonl]
+    List a file's revision history, newest first
 
   loonfs restore <path> --revision <n>
                  [--actor-kind <kind> --actor-id <id>]
     Write a prior revision's content as the file's next revision
 
-  loonfs trash [--limit <n>] [--cursor <cursor>]
-    List recoverable deletions: what was deleted, when, and the exact
-    `loonfs undelete` command that recovers each one
+  loonfs trash [--limit <n>] [--page-size <n>] [--cursor <cursor>]
+               [--all] [--jsonl]
+    List recoverable deletions, including when each item was deleted and the
+    exact `loonfs undelete` command that restores it
 
   loonfs undelete [<path>] --inode <id> --deletion-seq <seq>
                   [--actor-kind <kind> --actor-id <id>]
@@ -265,9 +271,10 @@ History and recovery
     works if an enclosing directory was renamed. Pass <path> to restore it
     somewhere else, or when the deletion did not record a binding
 
-  loonfs changes [--after <seq>] [--limit <n>]
-    List committed changes after a sequence number, from the start of
-    retained history when --after is omitted
+  loonfs changes [--after <seq>] [--limit <n>] [--page-size <n>]
+                 [--all] [--jsonl]
+    List committed changes after a sequence number. When --after is omitted,
+    start at the beginning of retained history
 
 Inspection and diagnostics
   loonfs capabilities [--profile <name>]
@@ -319,11 +326,10 @@ Maintenance
     Pin the namespace's current state. --ttl-ms sets an expiry; without it,
     the checkpoint remains until release.
 
-  loonfs admin checkpoint list [--limit <n>] [--cursor <cursor>]
-    List active checkpoints in ID order. By default the command follows all
-    pages. --limit or --cursor requests one page and prints next_cursor when
-    more results are available. Expired checkpoints remain visible until
-    garbage collection removes them.
+  loonfs admin checkpoint list [--limit <n>] [--page-size <n>]
+                               [--cursor <cursor>] [--all] [--jsonl]
+    List active checkpoints in ID order. Expired checkpoints remain visible
+    until garbage collection removes them.
 
   loonfs admin checkpoint release <checkpoint-id>
     Release a checkpoint pin
@@ -339,9 +345,10 @@ Maintenance
   loonfs admin index disable
     Disable the gram content index
 
-  loonfs admin index gc [--max-objects <n>]
-    Remove unreferenced gram-index objects. By default the command follows
-    all bounded passes. --max-objects runs one pass with that read limit.
+  loonfs admin index gc [--max-objects <n>] [--cursor <token>]
+    Remove unreferenced gram-index objects. Without --max-objects, continue
+    until collection is complete. --max-objects limits one pass to that many
+    reads, and --cursor resumes a previous pass.
 
 Profile create options
   Used by:

@@ -755,8 +755,8 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() 
         .create_checkpoint_blocking(&source)
         .expect("create user checkpoint");
 
-    let before_delete =
-        block_on(fs.admin.list_checkpoints_all(&source)).expect("list checkpoints before deletion");
+    let before_delete = block_on(collect_checkpoints(&fs.admin, &source))
+        .expect("list checkpoints before deletion");
     let fork_checkpoint = before_delete
         .checkpoints
         .iter()
@@ -787,7 +787,7 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() 
             .build(),
     )
     .expect("build post-delete admin");
-    let listed = block_on(admin.list_checkpoints_all(&source))
+    let listed = block_on(collect_checkpoints(&admin, &source))
         .expect("list checkpoints on deleted namespace");
     assert_eq!(listed.checkpoints.len(), 2);
     assert!(listed

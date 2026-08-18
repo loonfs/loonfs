@@ -1,7 +1,7 @@
 //! What the node-local block cache carries from one server to the next.
 
 use crate::common::http_split_support::*;
-use crate::common::{scrape, series, start_graceful_server};
+use crate::common::{collect_path_entries, scrape, series, start_graceful_server};
 use loonfs_api::CreateCheckpointRequest;
 use loonfs_client::NamespacePath;
 use loonfs_server::{LocalCacheConfig, MaintenanceMode, ServerConfig};
@@ -98,9 +98,7 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
         .await
         .expect("put file after the checkpoint");
 
-    let warmed = first
-        .client
-        .list_path_entries_all(&listing, &Default::default())
+    let warmed = collect_path_entries(&first.client, &listing, &Default::default())
         .await
         .expect("warm the cache");
     assert_eq!(warmed.entries.len(), 5);
@@ -123,9 +121,7 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
         "local-cache-second",
     ))
     .await;
-    let served = second
-        .client
-        .list_path_entries_all(&listing, &Default::default())
+    let served = collect_path_entries(&second.client, &listing, &Default::default())
         .await
         .expect("list from the restarted server");
     assert_eq!(served.entries, warmed.entries);

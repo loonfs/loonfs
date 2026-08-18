@@ -186,14 +186,19 @@ impl EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    pub(super) async fn list_path_entries_all(
+    pub(super) fn list_path_entries_pager(
         &self,
         spec: &NamespacePath,
-    ) -> Result<ListPathEntriesResponse, BackendError> {
-        self.reader
-            .list_path_entries_all(spec.namespace(), spec.absolute_path().as_str())
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
+        page_size: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<loonfs::PathEntriesPager, BackendError> {
+        let request = cli_page_request(page_size, cursor)?;
+        Ok(self.reader.list_path_entries_pager(
+            spec.namespace(),
+            spec.absolute_path().as_str(),
+            request,
+            ListPathEntriesOptions::default(),
+        ))
     }
 
     pub(super) async fn list_path_entries_page(

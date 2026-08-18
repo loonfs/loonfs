@@ -9,10 +9,11 @@ use crate::maintenance_runner::CompactionStart;
 use crate::FsAdmin;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenancePlan,
-    MaintenanceStepResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
+    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions,
+    CreateCheckpointResponse, ErrorCode, FlushWalOutcome, FlushWalResponse,
+    ListCheckpointsResponse, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceOptions,
+    MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
@@ -53,6 +54,61 @@ enum ReorganizationStep {
     /// A family group has outgrown a bounded step. The caller starts the job
     /// as background work, or runs it in its own task.
     CompactionPlanned(loonfs_core::MetadataCompactionSpec),
+}
+
+/// Fetches active-checkpoint pages as needed.
+#[must_use]
+pub struct CheckpointsPager {
+    admin: FsAdmin,
+    namespace_id: NamespaceId,
+    request: PageRequest<CheckpointPageCursor>,
+    pending: Option<ListCheckpointsResponse>,
+    exhausted: bool,
+}
+
+impl CheckpointsPager {
+    /// Returns the next checkpoint page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListCheckpointsResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .admin
+            .list_checkpoints_page_typed(&self.namespace_id, self.request.clone())
+            .await;
+        Some(page.and_then(|(mut page, next_cursor)| {
+            page.next_cursor = super::core::encode_next_cursor(next_cursor.as_ref())?;
+            self.exhausted = next_cursor.is_none();
+            self.request.cursor = next_cursor;
+            Ok(page)
+        }))
+    }
+
+    /// Returns at most `max_items` checkpoints.
+    ///
+    /// Unused checkpoints from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<Checkpoint>> {
+        let mut checkpoints = Vec::new();
+        while checkpoints.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - checkpoints.len()).min(page.checkpoints.len());
+            if take < page.checkpoints.len() {
+                let remaining = page.checkpoints.split_off(take);
+                checkpoints.extend(page.checkpoints);
+                page.checkpoints = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            checkpoints.extend(page.checkpoints);
+        }
+        Ok(checkpoints)
+    }
 }
 
 impl FsAdmin {
@@ -636,49 +692,19 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Lists every active checkpoint by following bounded pages.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.maintenance.list_checkpoints",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "maintenance.list_checkpoints",
-            method = "list_checkpoints_all",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn list_checkpoints_all(
+    /// Creates a checkpoint pager beginning at `request.cursor`.
+    pub fn list_checkpoints_pager(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<ListCheckpointsResponse> {
-        self.core.record_trace_context(&tracing::Span::current());
-        let limit = super::core::default_page_limit();
-        let (mut response, mut next_cursor) = self
-            .list_checkpoints_page_typed(
-                namespace_id,
-                PageRequest {
-                    limit,
-                    cursor: None,
-                },
-            )
-            .await?;
-        while let Some(cursor) = next_cursor {
-            let (page, page_next_cursor) = self
-                .list_checkpoints_page_typed(
-                    namespace_id,
-                    PageRequest {
-                        limit,
-                        cursor: Some(cursor),
-                    },
-                )
-                .await?;
-            response.checkpoints.extend(page.checkpoints);
-            next_cursor = page_next_cursor;
+        request: PageRequest<CheckpointPageCursor>,
+    ) -> CheckpointsPager {
+        CheckpointsPager {
+            admin: self.clone(),
+            namespace_id: namespace_id.clone(),
+            request,
+            pending: None,
+            exhausted: false,
         }
-        Ok(response)
     }
 
     /// Lists one page of active checkpoints in ascending id order. The cursor

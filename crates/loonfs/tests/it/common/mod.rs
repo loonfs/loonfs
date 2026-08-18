@@ -12,8 +12,8 @@ use loonfs::{
     CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
     DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
     ListChangesOptions, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceResponse,
-    MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest, PutFileOptions, RuntimeError,
-    SharedObjectStore, UploadContentResponse, UploadId, UploadSessionResponse,
+    MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions,
+    RuntimeError, SharedObjectStore, UploadContentResponse, UploadId, UploadSessionResponse,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -25,6 +25,49 @@ use std::sync::Arc;
 
 pub(crate) fn store(root: &Path) -> SharedObjectStore {
     Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
+}
+
+pub(crate) async fn collect_path_entries(
+    reader: &FsReader,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
+    let request = PageRequest {
+        limit: PaginationPolicy::default()
+            .resolve_limit(None)
+            .expect("default page limit"),
+        cursor: None,
+    };
+    let mut pager =
+        reader.list_path_entries_pager(namespace_id, absolute_path, request, Default::default());
+    let mut response = pager.next().await.expect("first page")?;
+    while let Some(page) = pager.next().await {
+        let page = page?;
+        response.head_seq = page.head_seq;
+        response.entries.extend(page.entries);
+        response.next_cursor = page.next_cursor;
+    }
+    Ok(response)
+}
+
+pub(crate) async fn collect_checkpoints(
+    admin: &FsAdmin,
+    namespace_id: &NamespaceId,
+) -> loonfs::Result<loonfs::ListCheckpointsResponse> {
+    let request = PageRequest {
+        limit: PaginationPolicy::default()
+            .resolve_limit(None)
+            .expect("default page limit"),
+        cursor: None,
+    };
+    let mut pager = admin.list_checkpoints_pager(namespace_id, request);
+    let mut response = pager.next().await.expect("first page")?;
+    while let Some(page) = pager.next().await {
+        let page = page?;
+        response.checkpoints.extend(page.checkpoints);
+        response.next_cursor = page.next_cursor;
+    }
+    Ok(response)
 }
 
 /// The upkeep report a step that selected metadata is obliged to carry.
@@ -147,11 +190,11 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
-        Ok(self
-            .reader
-            .list_path_entries_all(namespace_id, absolute_path)
-            .await?
-            .entries)
+        Ok(
+            collect_path_entries(&self.reader, namespace_id, absolute_path)
+                .await?
+                .entries,
+        )
     }
 
     pub(crate) async fn list_path_entries(
@@ -159,9 +202,7 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
-        self.reader
-            .list_path_entries_all(namespace_id, absolute_path)
-            .await
+        collect_path_entries(&self.reader, namespace_id, absolute_path).await
     }
 
     pub(crate) async fn list_path_entries_page(
@@ -389,10 +430,11 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
-        block_on(
-            self.reader
-                .list_path_entries_all(namespace_id, absolute_path),
-        )
+        block_on(collect_path_entries(
+            &self.reader,
+            namespace_id,
+            absolute_path,
+        ))
         .map(|response| response.entries)
     }
 

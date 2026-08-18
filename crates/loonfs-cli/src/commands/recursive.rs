@@ -626,42 +626,40 @@ async fn walk_remote_tree(
         };
         let spec = NamespacePath::parse(context.namespace.as_str(), listed)
             .map_err(|error| context.fail(kind, CliError::invalid_input(error.to_string())))?;
-        let response = context
+        let mut pager = context
             .target
-            .list_path_entries_all(&spec)
-            .await
+            .list_path_entries_pager(&spec, None, None)
             .map_err(|error| context.fail(kind, error))?;
-        let response_head_seq = response.head_seq;
-        for entry in response.entries {
-            // Aggregated entries retain the head of the page that supplied
-            // them, in page order; the envelope carries the final page head.
-            heads.observe(entry.head_seq);
-            let Some(name) = entry.display_name.as_ref() else {
-                continue;
-            };
-            let mut child_components = components.clone();
-            child_components.push(name.as_str().to_owned());
-            match entry.kind {
-                AuthoritativePathEntryKind::Directory {} => {
-                    tree.directories.push(child_components.clone());
-                    queue.push_back((
-                        format!("{remote_dir}/{name}", name = name.as_str()),
-                        child_components,
-                    ));
+        while let Some(response) = pager.next().await {
+            let response = response.map_err(|error| context.fail(kind, error))?;
+            heads.observe(response.head_seq);
+            for entry in response.entries {
+                let Some(name) = entry.display_name.as_ref() else {
+                    continue;
+                };
+                let mut child_components = components.clone();
+                child_components.push(name.as_str().to_owned());
+                match entry.kind {
+                    AuthoritativePathEntryKind::Directory {} => {
+                        tree.directories.push(child_components.clone());
+                        queue.push_back((
+                            format!("{remote_dir}/{name}", name = name.as_str()),
+                            child_components,
+                        ));
+                    }
+                    AuthoritativePathEntryKind::File {
+                        size_bytes,
+                        content_ref,
+                        ..
+                    } => tree.files.push(FileJob {
+                        local: PathBuf::from(child_components.join("/")),
+                        remote: format!("{remote_dir}/{name}", name = name.as_str()),
+                        size_bytes: Some(size_bytes),
+                        content_ref: Some(content_ref),
+                    }),
                 }
-                AuthoritativePathEntryKind::File {
-                    size_bytes,
-                    content_ref,
-                    ..
-                } => tree.files.push(FileJob {
-                    local: PathBuf::from(child_components.join("/")),
-                    remote: format!("{remote_dir}/{name}", name = name.as_str()),
-                    size_bytes: Some(size_bytes),
-                    content_ref: Some(content_ref),
-                }),
             }
         }
-        heads.observe(response_head_seq);
     }
     tree.head_drift = heads.drift();
     Ok(tree)

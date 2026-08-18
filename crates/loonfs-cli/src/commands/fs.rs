@@ -10,13 +10,14 @@ use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
     TrashListing,
 };
+use super::pagination::{write_jsonl_page, PagePlan};
 use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
 use crate::args::{
     CommandKind, FilesystemAnnotateArgs, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs,
     FilesystemLsArgs, FilesystemMkdirArgs, FilesystemPutArgs, FilesystemRestoreArgs,
     FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemStatArgs, FilesystemTransferArgs,
-    FilesystemUndeleteArgs, RuntimeBehavior, TrashArgs,
+    FilesystemUndeleteArgs, PaginationArgs, RuntimeBehavior, TrashArgs,
 };
 use crate::backend::FileDownload;
 use crate::config::ConfigLocation;
@@ -77,23 +78,17 @@ async fn follow_path_entry_pages(
     context: &CommandContext,
     kind: CommandKind,
     spec: &NamespacePath,
-    limit: Option<u32>,
+    pagination: &PaginationArgs,
     cursor: Option<&str>,
-    follow: bool,
     mut visit: impl FnMut(Vec<loonfs_api::AuthoritativePathEntry>) -> Result<(), CliError>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
-    let mut visited = 0_u32;
+    let mut plan = PagePlan::new(pagination);
     let mut cursor = cursor.map(ToOwned::to_owned);
     let mut heads = ListingHeadObservation::default();
     loop {
-        let page_limit = limit.map(|limit| {
-            limit
-                .saturating_sub(visited)
-                .min(loonfs_api::DEFAULT_PAGE_LIMIT)
-        });
         let page = context
             .target
-            .list_path_entries_page(spec, page_limit, cursor.as_deref())
+            .list_path_entries_page(spec, plan.request_size(), cursor.as_deref())
             .await
             .map_err(|error| context.fail(kind, error))?;
         let ListPathEntriesResponse {
@@ -104,12 +99,11 @@ async fn follow_path_entry_pages(
             next_cursor,
         } = page;
         heads.observe(head_seq);
-        visited = visited.saturating_add(entries.len() as u32);
+        plan.record(entries.len());
         visit(entries).map_err(|error| context.fail(kind, error))?;
         cursor = next_cursor;
 
-        let filled = limit.is_some_and(|limit| visited >= limit);
-        if filled || !follow || cursor.is_none() {
+        if !plan.should_continue(cursor.is_some()) {
             return Ok(FollowedPathEntryPages {
                 namespace_id,
                 path: absolute_path,
@@ -137,8 +131,7 @@ pub(crate) async fn run_filesystem_ls(
         allow_root,
     )
     .map_err(|error| context.fail(kind, error))?;
-    let follow = args.all || args.limit.is_some();
-    let streams_pages = args.jsonl || (args.all && !runtime.json);
+    let streams_pages = args.pagination.jsonl || (args.pagination.all && !runtime.json);
     if streams_pages {
         let stdout = io::stdout();
         let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
@@ -146,23 +139,16 @@ pub(crate) async fn run_filesystem_ls(
             &context,
             kind,
             &spec,
-            args.limit,
+            &args.pagination,
             args.cursor.as_deref(),
-            follow,
             |entries| {
-                write_path_entries_page(&mut stdout, &entries, args.jsonl).map_err(CliError::io)
+                write_path_entries_page(&mut stdout, &entries, args.pagination.jsonl)
+                    .map_err(CliError::io)
             },
         )
         .await?;
-        if let Some(cursor) = followed.next_cursor {
-            // Standard output stays machine-pure in `--jsonl`, so the
-            // continuation signal goes to standard error, where this CLI
-            // already reports progress. Without it a one-page stream would
-            // truncate silently.
-            crate::render::write_stderr_progress(crate::render::more_entries_hint(&cursor));
-        }
-        // Like the continuation signal above, the drift note is operational
-        // and goes to standard error in every streaming mode.
+        // Write head-drift warnings to stderr so streamed stdout contains
+        // only entries.
         if let Some(drift) = followed.head_drift {
             crate::render::write_listing_drift_warning(&drift);
         }
@@ -179,9 +165,8 @@ pub(crate) async fn run_filesystem_ls(
         &context,
         kind,
         &spec,
-        args.limit,
+        &args.pagination,
         args.cursor.as_deref(),
-        follow,
         |page| {
             entries.extend(page);
             Ok(())
@@ -368,20 +353,18 @@ pub(crate) async fn run_filesystem_grep(
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
         path_prefix,
-        cursor: None,
-        limit: args.limit,
+        cursor: args.cursor.clone(),
+        limit: None,
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,
     };
     let mut matches = Vec::new();
     let mut tail_scanned = true;
-    let mut truncated = false;
-    // `--limit` sizes a page and is bounded by the deployment's
-    // `query.grep.max_limit`; `--max-matches` bounds the whole command. They
-    // are separate because a total cap larger than that per-page maximum
-    // would be rejected if it were sent as one.
-    let max_matches = args.max_matches.map(|max| max as usize);
-    let (namespace_id, head_seq, built_through_seq) = loop {
+    let mut plan = PagePlan::new(&args.pagination);
+    let stdout = io::stdout();
+    let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
+    let (namespace_id, head_seq, built_through_seq, next_cursor) = loop {
+        request.limit = plan.request_size();
         let response = context
             .target
             .grep(&context.namespace, &request)
@@ -392,23 +375,29 @@ pub(crate) async fn run_filesystem_grep(
             response.head_seq,
             response.built_through_seq,
         );
-        matches.extend(response.matches);
+        plan.record(response.matches.len());
+        if args.pagination.jsonl {
+            write_jsonl_page(&mut stdout, &response.matches)
+                .map_err(CliError::io)
+                .map_err(|error| context.fail(kind, error))?;
+        } else {
+            matches.extend(response.matches);
+        }
         tail_scanned &= response.tail_scanned;
-        if let Some(max_matches) = max_matches {
-            if matches.len() >= max_matches {
-                // A page can overshoot the cap; the extra matches are real
-                // but were not asked for.
-                truncated = matches.len() > max_matches || response.next_cursor.is_some();
-                matches.truncate(max_matches);
-                break snapshot;
-            }
+        let next_cursor = response.next_cursor;
+        if !plan.should_continue(next_cursor.is_some()) {
+            break (snapshot.0, snapshot.1, snapshot.2, next_cursor);
         }
-        match response.next_cursor {
-            Some(cursor) => request.cursor = Some(cursor),
-            // The final page's snapshot describes the completed query.
-            None => break snapshot,
-        }
+        request.cursor.clone_from(&next_cursor);
     };
+    if args.pagination.jsonl {
+        return Ok(CommandOutput {
+            kind,
+            profile: Some(context.profile_name),
+            mode: Some(context.mode),
+            data: CommandData::StreamedToStdout,
+        });
+    }
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
@@ -420,7 +409,8 @@ pub(crate) async fn run_filesystem_grep(
             built_through_seq,
             matches,
             tail_scanned,
-            truncated,
+            truncated: next_cursor.is_some(),
+            next_cursor,
         },
     })
 }
@@ -753,11 +743,43 @@ pub(crate) async fn run_filesystem_trash(
     args: TrashArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &location.path, &args.target).await?;
-    let response = context
-        .target
-        .list_trash(&context.namespace, args.limit, args.cursor.as_deref())
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let mut plan = PagePlan::new(&args.pagination);
+    let mut cursor = args.cursor.clone();
+    let mut response: Option<loonfs_api::ListTrashResponse> = None;
+    let stdout = io::stdout();
+    let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
+    loop {
+        let page = context
+            .target
+            .list_trash(&context.namespace, plan.request_size(), cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        plan.record(page.entries.len());
+        cursor = page.next_cursor.clone();
+        if args.pagination.jsonl {
+            write_jsonl_page(&mut stdout, &page.entries)
+                .map_err(CliError::io)
+                .map_err(|error| context.fail(kind, error))?;
+        } else if let Some(response) = response.as_mut() {
+            response.head_seq = page.head_seq;
+            response.entries.extend(page.entries);
+            response.next_cursor = page.next_cursor;
+        } else {
+            response = Some(page);
+        }
+        if !plan.should_continue(cursor.is_some()) {
+            break;
+        }
+    }
+    if args.pagination.jsonl {
+        return Ok(CommandOutput {
+            kind,
+            profile: Some(context.profile_name),
+            mode: Some(context.mode),
+            data: CommandData::StreamedToStdout,
+        });
+    }
+    let response = response.expect("trash loop should fetch at least one page");
     let hint = UndeleteHint::new(&context, location, args.target.profile.profile.is_some());
     // An entry that recorded its binding restores in place with no
     // destination in the command; only a legacy entry that recorded none
@@ -793,11 +815,38 @@ pub(crate) async fn run_filesystem_revisions(
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let response = context
-        .target
-        .list_file_revisions_page(&spec, args.limit, args.cursor.as_deref())
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let mut plan = PagePlan::new(&args.pagination);
+    let mut cursor = args.cursor.clone();
+    let mut revisions = Vec::new();
+    let stdout = io::stdout();
+    let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
+    loop {
+        let page = context
+            .target
+            .list_file_revisions_page(&spec, plan.request_size(), cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        plan.record(page.revisions.len());
+        cursor = page.next_cursor;
+        if args.pagination.jsonl {
+            write_jsonl_page(&mut stdout, &page.revisions)
+                .map_err(CliError::io)
+                .map_err(|error| context.fail(kind, error))?;
+        } else {
+            revisions.extend(page.revisions);
+        }
+        if !plan.should_continue(cursor.is_some()) {
+            break;
+        }
+    }
+    if args.pagination.jsonl {
+        return Ok(CommandOutput {
+            kind,
+            profile: Some(context.profile_name),
+            mode: Some(context.mode),
+            data: CommandData::StreamedToStdout,
+        });
+    }
 
     Ok(CommandOutput {
         kind,
@@ -805,8 +854,8 @@ pub(crate) async fn run_filesystem_revisions(
         mode: Some(context.mode),
         data: CommandData::FileRevisions {
             target: render_target(&context.namespace, spec.absolute_path()),
-            revisions: response.revisions,
-            next_cursor: response.next_cursor,
+            revisions,
+            next_cursor: cursor,
         },
     })
 }

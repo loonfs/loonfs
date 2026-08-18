@@ -13,10 +13,10 @@ use crate::{
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
-    encode_cursor, CapabilityDocument, EffectiveLimit, FileRevision, FileRevisionsPageCursor, Page,
-    PageCursor, PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
+    PaginationPolicy, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
     PROTOCOL_VERSION,
@@ -295,12 +295,6 @@ pub(crate) fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
         Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => true,
         _ => false,
     }
-}
-
-pub(super) fn default_page_limit() -> EffectiveLimit {
-    PaginationPolicy::default()
-        .resolve_limit(None)
-        .expect("default pagination policy must resolve its default limit")
 }
 
 pub(super) fn encode_next_cursor<C: PageCursor>(

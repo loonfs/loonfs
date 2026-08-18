@@ -3,6 +3,258 @@
 use super::*;
 use crate::transport::{append_optional_pagination_query, append_query_param};
 
+/// Fetches directory pages as needed.
+///
+/// [`Self::next`] returns one page with its metadata. [`Self::collect_up_to`]
+/// returns at most the requested number of entries and saves unused entries
+/// for later calls.
+#[must_use]
+pub struct PathEntriesPager {
+    client: Client,
+    spec: NamespacePath,
+    page_size: Option<u32>,
+    cursor: Option<String>,
+    options: ListPathEntriesOptions,
+    pending: Option<ListPathEntriesResponse>,
+    exhausted: bool,
+}
+
+impl PathEntriesPager {
+    /// Returns the next directory page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListPathEntriesResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .client
+            .list_path_entries_page(
+                &self.spec,
+                self.page_size,
+                self.cursor.as_deref(),
+                &self.options,
+            )
+            .await;
+        Some(page.inspect(|page| {
+            self.cursor = page.next_cursor.clone();
+            self.exhausted = self.cursor.is_none();
+        }))
+    }
+
+    /// Returns at most `max_items` entries.
+    ///
+    /// Unused entries from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<AuthoritativePathEntry>> {
+        let mut entries = Vec::new();
+        while entries.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - entries.len()).min(page.entries.len());
+            if take < page.entries.len() {
+                let remaining = page.entries.split_off(take);
+                entries.extend(page.entries);
+                page.entries = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            entries.extend(page.entries);
+        }
+        Ok(entries)
+    }
+}
+
+enum FileRevisionsTarget {
+    Path(NamespacePath),
+    Inode {
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+    },
+}
+
+/// Fetches file-revision pages as needed for a path or inode.
+#[must_use]
+pub struct FileRevisionsPager {
+    client: Client,
+    target: FileRevisionsTarget,
+    page_size: Option<u32>,
+    cursor: Option<String>,
+    pending: Option<ListFileRevisionsResponse>,
+    exhausted: bool,
+}
+
+impl FileRevisionsPager {
+    /// Returns the next revision page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListFileRevisionsResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = match &self.target {
+            FileRevisionsTarget::Path(spec) => {
+                self.client
+                    .list_file_revisions_page(spec, self.page_size, self.cursor.as_deref())
+                    .await
+            }
+            FileRevisionsTarget::Inode {
+                namespace_id,
+                inode_id,
+            } => {
+                self.client
+                    .list_file_revisions_by_inode_page(
+                        namespace_id,
+                        *inode_id,
+                        self.page_size,
+                        self.cursor.as_deref(),
+                    )
+                    .await
+            }
+        };
+        Some(page.inspect(|page| {
+            self.cursor = page.next_cursor.clone();
+            self.exhausted = self.cursor.is_none();
+        }))
+    }
+
+    /// Returns at most `max_items` revisions.
+    ///
+    /// Unused revisions from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<FileRevision>> {
+        let mut revisions = Vec::new();
+        while revisions.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - revisions.len()).min(page.revisions.len());
+            if take < page.revisions.len() {
+                let remaining = page.revisions.split_off(take);
+                revisions.extend(page.revisions);
+                page.revisions = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            revisions.extend(page.revisions);
+        }
+        Ok(revisions)
+    }
+}
+
+/// Fetches recoverable-deletion pages as needed.
+#[must_use]
+pub struct TrashPager {
+    client: Client,
+    namespace_id: NamespaceId,
+    page_size: Option<u32>,
+    cursor: Option<String>,
+    pending: Option<ListTrashResponse>,
+    exhausted: bool,
+}
+
+impl TrashPager {
+    /// Returns the next trash page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListTrashResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .client
+            .list_trash_page(&self.namespace_id, self.page_size, self.cursor.as_deref())
+            .await;
+        Some(page.inspect(|page| {
+            self.cursor = page.next_cursor.clone();
+            self.exhausted = self.cursor.is_none();
+        }))
+    }
+
+    /// Returns at most `max_items` deletions.
+    ///
+    /// Unused deletions from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<TrashEntry>> {
+        let mut entries = Vec::new();
+        while entries.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - entries.len()).min(page.entries.len());
+            if take < page.entries.len() {
+                let remaining = page.entries.split_off(take);
+                entries.extend(page.entries);
+                page.entries = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            entries.extend(page.entries);
+        }
+        Ok(entries)
+    }
+}
+
+/// Fetches change-feed pages as needed, using sequence numbers to resume.
+#[must_use]
+pub struct ChangesPager {
+    client: Client,
+    namespace_id: NamespaceId,
+    after_seq: ChangeSeq,
+    page_size: Option<u32>,
+    pending: Option<ChangesResponse>,
+    exhausted: bool,
+}
+
+impl ChangesPager {
+    /// Returns the next change page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ChangesResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .client
+            .list_changes(&self.namespace_id, self.after_seq, self.page_size)
+            .await;
+        Some(page.inspect(|page| {
+            self.exhausted = page.next_after_seq.is_none();
+            if let Some(next_after_seq) = page.next_after_seq {
+                self.after_seq = next_after_seq;
+            }
+        }))
+    }
+
+    /// Returns at most `max_items` changes.
+    ///
+    /// Unused changes from the last page remain available to later calls.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<CommittedChange>> {
+        let mut changes = Vec::new();
+        while changes.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - changes.len()).min(page.changes.len());
+            if take < page.changes.len() {
+                let remaining = page.changes.split_off(take);
+                changes.extend(page.changes);
+                page.changes = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            changes.extend(page.changes);
+        }
+        Ok(changes)
+    }
+}
+
 impl Client {
     /// Creates an empty namespace with the given ID and returns its genesis state.
     pub async fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
@@ -66,41 +318,23 @@ impl Client {
         .await
     }
 
-    /// Lists a directory by aggregating every page into one response.
-    ///
-    /// Listing cursors tolerate commits landing mid-listing — each page
-    /// resumes in name-key order against the head the server has loaded —
-    /// so aggregation never restarts. The envelope's `head_seq` reports the
-    /// newest head that served a page. Use
-    /// [`Self::list_path_entries_page`] for page-level control. `options`
-    /// selects the entry projection.
-    pub async fn list_path_entries_all(
+    /// Creates a directory pager beginning at `cursor`.
+    pub fn list_path_entries_pager(
         &self,
         spec: &NamespacePath,
+        page_size: Option<u32>,
+        cursor: Option<String>,
         options: &ListPathEntriesOptions,
-    ) -> Result<ListPathEntriesResponse> {
-        let first_page = self
-            .list_path_entries_page(spec, None, None, options)
-            .await?;
-        let mut envelope = ListPathEntriesResponse {
-            namespace_id: first_page.namespace_id,
-            path: first_page.path,
-            head_seq: first_page.head_seq,
-            entries: first_page.entries,
-            next_cursor: None,
-        };
-        let mut next_cursor = first_page.next_cursor;
-        while let Some(cursor) = next_cursor {
-            let page = self
-                .list_path_entries_page(spec, None, Some(&cursor), options)
-                .await?;
-            envelope.head_seq = envelope.head_seq.max(page.head_seq);
-            envelope.entries.extend(page.entries);
-            next_cursor = page.next_cursor;
+    ) -> PathEntriesPager {
+        PathEntriesPager {
+            client: self.clone(),
+            spec: spec.clone(),
+            page_size,
+            cursor,
+            options: options.clone(),
+            pending: None,
+            exhausted: false,
         }
-        // Pages arrive in canonical name-key order; concatenation preserves
-        // it, so aggregation must not re-sort.
-        Ok(envelope)
     }
 
     /// Lists one directory page using the requested projection.
@@ -233,6 +467,23 @@ impl Client {
             .await
     }
 
+    /// Creates a path-based revision pager beginning at `cursor`.
+    pub fn list_file_revisions_pager(
+        &self,
+        spec: &NamespacePath,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> FileRevisionsPager {
+        FileRevisionsPager {
+            client: self.clone(),
+            target: FileRevisionsTarget::Path(spec.clone()),
+            page_size,
+            cursor,
+            pending: None,
+            exhausted: false,
+        }
+    }
+
     /// Returns one page of retained revisions for a file inode.
     pub async fn list_file_revisions_by_inode_page(
         &self,
@@ -250,6 +501,27 @@ impl Client {
         append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None)
             .await
+    }
+
+    /// Creates an inode-based revision pager beginning at `cursor`.
+    pub fn list_file_revisions_by_inode_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> FileRevisionsPager {
+        FileRevisionsPager {
+            client: self.clone(),
+            target: FileRevisionsTarget::Inode {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+            },
+            page_size,
+            cursor,
+            pending: None,
+            exhausted: false,
+        }
     }
 
     /// Returns one page of recoverable deletions in a namespace.
@@ -270,6 +542,23 @@ impl Client {
             .await
     }
 
+    /// Creates a trash pager beginning at `cursor`.
+    pub fn list_trash_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> TrashPager {
+        TrashPager {
+            client: self.clone(),
+            namespace_id: namespace_id.clone(),
+            page_size,
+            cursor,
+            pending: None,
+            exhausted: false,
+        }
+    }
+
     /// Returns committed changes after the given sequence number.
     pub async fn list_changes(
         &self,
@@ -286,5 +575,22 @@ impl Client {
         }
         self.request_json::<(), ChangesResponse>(self.get(&url), None)
             .await
+    }
+
+    /// Creates a change-feed pager beginning after `after_seq`.
+    pub fn list_changes_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        page_size: Option<u32>,
+    ) -> ChangesPager {
+        ChangesPager {
+            client: self.clone(),
+            namespace_id: namespace_id.clone(),
+            after_seq,
+            page_size,
+            pending: None,
+            exhausted: false,
+        }
     }
 }

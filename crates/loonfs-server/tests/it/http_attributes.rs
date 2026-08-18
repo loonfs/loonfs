@@ -5,7 +5,7 @@
 // A transport failure is not an outcome under test; it panics with what it saw.
 
 use crate::common::http_split_support::*;
-use crate::common::start_server;
+use crate::common::{collect_path_entries, start_server};
 use loonfs_api::AttributeRevisionNo;
 use loonfs_client::{
     ListPathEntriesOptions, NamespacePath, PutFileOptions, StatPathOptions, UpdateAttributesOptions,
@@ -252,9 +252,7 @@ async fn the_client_round_trips_the_read_options() {
         .expect("stat without attributes");
     assert!(without.attributes.is_none());
 
-    let listing = harness
-        .client
-        .list_path_entries_all(&path("/docs"), &Default::default())
+    let listing = collect_path_entries(&harness.client, &path("/docs"), &Default::default())
         .await
         .expect("list");
     assert!(listing
@@ -262,16 +260,15 @@ async fn the_client_round_trips_the_read_options() {
         .iter()
         .all(|entry| entry.attributes.is_none()));
 
-    let projected = harness
-        .client
-        .list_path_entries_all(
-            &path("/docs"),
-            &ListPathEntriesOptions {
-                include_attributes: true,
-            },
-        )
-        .await
-        .expect("list with attributes");
+    let projected = collect_path_entries(
+        &harness.client,
+        &path("/docs"),
+        &ListPathEntriesOptions {
+            include_attributes: true,
+        },
+    )
+    .await
+    .expect("list with attributes");
     assert!(projected
         .entries
         .iter()
