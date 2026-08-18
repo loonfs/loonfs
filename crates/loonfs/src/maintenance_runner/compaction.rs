@@ -368,11 +368,7 @@ impl CompactionClaim {
     }
 }
 
-/// Holds a namespace's compaction slot and gives it back exactly once.
-///
-/// Dropping is the only way the slot is released — on a normal finish, on a
-/// panic, and on a task discarded with its runtime — so no namespace is ever
-/// left claiming a job that is not running.
+/// Releases a namespace's compaction slot when the job ends or is dropped.
 struct CompactionSlot {
     namespaces: Arc<Mutex<BTreeMap<NamespaceId, NamespaceCompactions>>>,
     permits: Arc<Semaphore>,
@@ -387,9 +383,7 @@ impl CompactionSlot {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Reports how many jobs are running and how many are waiting for a
-    /// permit, from the two facts that decide it: the slots claimed, and the
-    /// permits taken.
+    /// Updates the running and waiting compaction metrics.
     fn report_counts(&self) {
         let Some(runner) = self.runner.upgrade() else {
             return;

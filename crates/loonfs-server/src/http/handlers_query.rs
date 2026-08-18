@@ -283,10 +283,7 @@ pub(super) async fn gc_grep_index(
 fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> ApiResponseError {
     let code = error.code();
     match error {
-        // One name for the capability, whichever half is missing: a
-        // deployment that does not serve grep and a namespace whose index is
-        // not built both leave `query.grep` unavailable, which is the key
-        // capability discovery advertises it under.
+        // Both cases mean the advertised query.grep capability is unavailable.
         error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
             ApiResponseError::not_supported(FEATURE_QUERY_GREP, &error.to_string())
         }

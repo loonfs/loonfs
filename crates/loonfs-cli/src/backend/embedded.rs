@@ -881,8 +881,7 @@ fn current_unix_ms() -> Result<u64, BackendError> {
 }
 
 fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendError> {
-    // The server maps this same policy error to `invalid_request`; embedded
-    // mode must report the identical registry code for the identical failure.
+    // Embedded and remote modes use the same error code for an invalid limit.
     PaginationPolicy::default()
         .resolve_limit(limit)
         .map_err(|error| BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
@@ -903,8 +902,7 @@ fn cli_page_request<C: loonfs_api::PageCursor>(
     })
 }
 
-/// Renders a probe report as the wire shape both backends answer with, so
-/// an embedded run and a remote one print the same thing.
+/// Converts a store probe report to the response returned by both backends.
 fn store_probe_response(report: StoreProbeReport) -> StoreProbeResponse {
     StoreProbeResponse {
         run_id: report.run_id,

@@ -730,9 +730,8 @@ impl GrepService {
                     )
                     .into());
                 }
-                // The walk enumerates current state, so a plan-less scan has
-                // no unindexed tail of its own: everything committed through
-                // this head is already a candidate.
+                // A full scan includes all files at the current head, so it
+                // does not need a separate scan of recent unindexed changes.
                 candidates.unfiltered = scan_candidate_inodes(reads, scope.as_ref()).await?;
                 None
             }
@@ -966,16 +965,11 @@ impl GrepService {
     }
 }
 
-/// Every visible file inside the query's scope, for plan-less scans.
+/// Collects visible files in the query scope for a full scan.
 ///
-/// A plan-less pattern has no gram filter, so the candidates are the files
-/// themselves: a bounded directory walk from the scope root — the namespace
-/// root when the request names no prefix — at the pinned head. The walk
-/// reads current state, so it covers revisions the index has not reached
-/// yet and needs no separate tail. Refuses past the scan budget, which
-/// bounds directories as well as files: a namespace deep enough to exhaust
-/// it is past what a plan-less query serves either way, and the count is
-/// also what stops a walk if bindings ever formed a cycle.
+/// The bounded walk starts at the requested path, or at the namespace root
+/// when no path is given. The directory limit bounds the work and prevents a
+/// binding cycle from running forever.
 async fn scan_candidate_inodes(
     reads: &NamespaceReads<'_>,
     scope: Option<&AuthoritativePathEntry>,
@@ -983,7 +977,7 @@ async fn scan_candidate_inodes(
     let mut inodes = BTreeSet::new();
     let root = match scope {
         Some(entry) if entry.inode_kind() == InodeKind::File => {
-            // A file-shaped scope names exactly one candidate.
+            // A file scope contains only that file.
             inodes.insert(entry.inode_id);
             return Ok(inodes);
         }

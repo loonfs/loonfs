@@ -973,9 +973,8 @@ pub(crate) async fn publish_batch_with_engine(
         .into_iter()
         .map(|result| result.map_err(RuntimeError::Core))
         .collect::<Vec<_>>();
-    // One reading of what landed serves both the host's observer and the
-    // jobs that asked to hear about publications.
-    if let Some(committed_seq) = landed_committed_seq(&results) {
+    // Notify observers only when at least one commit succeeded.
+    if let Some(committed_seq) = highest_committed_seq(&results) {
         notify_publish_observer(writer, namespace_id, committed_seq);
         writer
             .maintenance
@@ -985,9 +984,8 @@ pub(crate) async fn publish_batch_with_engine(
     results
 }
 
-/// The furthest sequence this batch actually committed, or `None` when
-/// nothing in it landed.
-fn landed_committed_seq(results: &[Result<CommitResponse>]) -> Option<ChangeSeq> {
+/// Returns the highest sequence committed by the batch.
+fn highest_committed_seq(results: &[Result<CommitResponse>]) -> Option<ChangeSeq> {
     results
         .iter()
         .filter_map(|result| result.as_ref().ok())

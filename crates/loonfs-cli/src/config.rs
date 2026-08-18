@@ -188,7 +188,7 @@ impl ProfileConfig {
                 default_namespace,
                 ..
             } => {
-                validate_common(name, actor, default_namespace.as_ref())?;
+                validate_actor_and_default_namespace(name, actor, default_namespace.as_deref())?;
                 store
                     .validate()
                     .map_err(|error| profile_store_error(name, &error))
@@ -200,7 +200,7 @@ impl ProfileConfig {
                 auth_token,
                 ca_cert_path,
             } => {
-                validate_common(name, actor, default_namespace.as_ref())?;
+                validate_actor_and_default_namespace(name, actor, default_namespace.as_deref())?;
                 validate_http_url(&profile_field(name, "server_url"), server_url)?;
                 if let Some(token) = auth_token {
                     require_non_empty(&profile_field(name, "auth_token"), token.expose())?;
@@ -243,10 +243,10 @@ impl ProfileConfig {
     }
 }
 
-fn validate_common(
+fn validate_actor_and_default_namespace(
     name: &str,
     actor: &ProfileActorConfig,
-    default_namespace: Option<&String>,
+    default_namespace: Option<&str>,
 ) -> Result<(), CliError> {
     actor.validate(name)?;
     if let Some(namespace) = default_namespace {
@@ -255,16 +255,11 @@ fn validate_common(
     Ok(())
 }
 
-/// Prefixes a shared store-validation error (`store.<field>`-rooted) with the
-/// profile name, preserving the CLI's `missing `<profile>.store.<field>``
-/// message shape.
+/// Adds the profile name to a store validation error.
 fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError {
     match error {
-        // A missing credential reports as a missing field here, without the
-        // shared error's environment hint: this loader does not consult the
-        // environment. A profile stores the credentials it was created
-        // with, and `profile create`/`update` is where the environment is
-        // read.
+        // Profiles store credentials directly. Only profile creation and
+        // updates read credentials from the environment.
         StoreConfigError::MissingField { field }
         | StoreConfigError::MissingCredential { field, .. } => {
             CliError::invalid_config(format!("missing `{profile_name}.{field}`"))

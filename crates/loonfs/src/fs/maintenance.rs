@@ -149,8 +149,8 @@ impl FsAdmin {
             ));
         }
         if let Some(gc) = &mut plan.gc {
-            // Every pass a step runs is bounded, however the plan reached
-            // here; only a direct `gc_namespace` call sweeps unbounded.
+            // Maintenance steps always bound GC work. Direct `gc_namespace`
+            // calls remain unbounded unless the caller sets a limit.
             gc.max_objects
                 .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
         }
@@ -331,11 +331,8 @@ impl FsAdmin {
                 ..
             } => {
                 self.invalidate_namespace(namespace_id);
-                // A merge that had to start above the group's base leaves the
-                // base frozen and the group's retention stopped. One step
-                // cannot see how long that has been true, so the count that
-                // decides when to stop merging deltas and start the job lives
-                // here.
+                // Track delta-only merges across steps so the runner knows
+                // when to schedule a full compaction.
                 if let Some(compactions) = &self.compactions {
                     compactions.record_merge(namespace_id, group, bottom_anchored_merge_blocked);
                 }
@@ -530,12 +527,10 @@ impl FsAdmin {
                 output_segments,
                 ..
             }) => {
-                // The manifest moved, so every cached view of this namespace
-                // is one manifest behind.
+                // Compaction changed the manifest, so cached views are stale.
                 self.invalidate_namespace(namespace_id);
-                // The group's base is no longer frozen, so the delta merges it
-                // published over that base are spent. It starts counting again
-                // from nothing.
+                // A full compaction includes the base run, so reset the count
+                // of delta-only merges.
                 if let Some(compactions) = &self.compactions {
                     compactions.clear_published_delta_merges(namespace_id, spec.group());
                 }

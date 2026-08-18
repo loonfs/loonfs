@@ -498,8 +498,7 @@ pub(super) struct OverBudgetRun {
     pub(super) run_seq: ChangeSeq,
     pub(super) level: u32,
     pub(super) rows: u64,
-    /// The run's decoded byte total, or `None` when the row budget ruled
-    /// the run out before its byte total was read.
+    /// Decoded bytes, or `None` if the row limit rejected the run first.
     pub(super) decoded_bytes: Option<u64>,
 }
 

@@ -222,7 +222,7 @@ impl VecObjectStoreMetricsRecorder {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Returns a snapshot copy of every sample recorded so far.
+    /// Returns a copy of all recorded samples.
     pub fn samples(&self) -> Vec<ObjectStoreMetricSample> {
         self.lock().clone()
     }

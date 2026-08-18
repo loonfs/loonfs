@@ -54,9 +54,7 @@ impl PassBudget {
         self.remaining() == 0
     }
 
-    /// How many units are left to spend. An unmetered pass reports the
-    /// largest count there is, so a caller that sizes work by what remains
-    /// puts no cap on it.
+    /// Returns the remaining allowance. An unlimited pass returns `u64::MAX`.
     pub(super) fn remaining(&self) -> u64 {
         self.max_objects.map_or(u64::MAX, |max_objects| {
             max_objects.saturating_sub(self.spent)

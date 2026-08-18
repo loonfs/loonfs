@@ -315,7 +315,7 @@ pub(super) async fn app_with_store_and_direct_transfers(
     let grep_maintenance = if maintains_grep_index {
         let grep_worker = grep_worker
             .as_ref()
-            .expect("an index-maintaining deployment composes a grep worker");
+            .expect("grep maintenance requires a grep worker");
         let policy = config
             .grep
             .worker_config()
@@ -325,9 +325,8 @@ pub(super) async fn app_with_store_and_direct_transfers(
         writer
             .register_maintenance_job(job.clone())
             .map_err(grep_config_error)?;
-        // Reclaiming what the index leaves behind is upkeep for the same
-        // namespaces, gated by the same switch: a deployment that builds
-        // grep objects is the one that should collect them.
+        // Register garbage collection with index maintenance so deployments
+        // that create grep objects also reclaim them.
         writer
             .register_maintenance_job(Arc::new(GrepGcJob::new(grep_worker.clone())))
             .map_err(grep_config_error)?;

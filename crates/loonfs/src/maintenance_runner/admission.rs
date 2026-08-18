@@ -605,9 +605,7 @@ impl Admission {
         }
     }
 
-    /// Backs a failed key off and leaves its continuation alone: a failure
-    /// says nothing about where the last step stopped, and the retry should
-    /// pick up from the same place.
+    /// Applies retry backoff without changing the job's continuation.
     fn record_failure(&mut self, key: &MaintenanceKey, now_ms: u64) {
         let ticket = self.take_ticket();
         let Some(state) = self.keys.get_mut(key) else {

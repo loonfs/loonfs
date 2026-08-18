@@ -483,7 +483,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             .map_err(|error| CoreError::store(key, &error))
     }
 
-    /// Folds one retained candidate's future deadline into the report.
+    /// Records the earliest future reclamation deadline.
     fn note_reclamation_deadline(&mut self, at_ms: Option<u64>) {
         let Some(at_ms) = at_ms.filter(|at_ms| *at_ms > self.mutation.now_ms) else {
             return;

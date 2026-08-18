@@ -139,17 +139,15 @@ fn not_enabled_step() -> MaintenanceStepReport {
 
 /// Runs one bounded grep garbage-collection pass.
 ///
-/// The runner stores the enumeration cursor as the job continuation. Every
-/// resumed pass rebuilds liveness from durable state, so losing the cursor
-/// only restarts enumeration and cannot authorize deletion.
+/// The continuation stores the enumeration cursor. Each pass reloads live
+/// references from durable state, so a missing cursor can only repeat work.
 #[derive(Debug, Clone)]
 pub struct GrepGcJob<S> {
     worker: GrepWorker<S>,
 }
 
 impl<S: ObjectStore + Clone> GrepGcJob<S> {
-    /// Creates the executor a host registers, over the worker that owns
-    /// grep's durable keyspace.
+    /// Creates a grep garbage-collection maintenance job.
     pub fn new(worker: GrepWorker<S>) -> Self {
         Self { worker }
     }
@@ -167,8 +165,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
         continuation: Option<&str>,
     ) -> Result<MaintenanceStepReport> {
         let request = GrepGcOptions {
-            // The pass resolves the absent candidate budget to the per-step
-            // default, which is what bounds it.
+            // Use the default per-step object limit.
             max_objects: None,
             cursor: continuation.map(str::to_owned),
         };

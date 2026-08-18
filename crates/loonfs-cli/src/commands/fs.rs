@@ -980,19 +980,13 @@ async fn commit_put(
     })
 }
 
-/// Uploads one payload and commits it at `spec`: the one way this CLI
-/// moves a file, whether the command named it or a recursive walk found it.
+/// Uploads one file and commits it at `spec`.
 ///
-/// The payload decides how it travels, and nothing else does. One small
-/// enough to hold goes as bytes; one that is large — or that cannot say how
-/// large it is — is read once, in pieces, whichever transport the profile
-/// selects, so what the upload costs in memory follows the transport's
-/// window and not the file's length. Where a payload travels in parts, an
-/// interrupted transfer of it is picked up rather than started over.
+/// Small payloads are buffered. Large payloads and streams are uploaded in
+/// chunks with bounded memory. Multipart uploads from files can resume after
+/// an interruption.
 ///
-/// `progress` counts what the payload gives up. A tree hands the same
-/// reporter to every file it is uploading, which is why the counting lives
-/// here rather than in the callers.
+/// Recursive uploads share `progress` across their files.
 pub(super) async fn put_payload(
     context: &CommandContext,
     spec: &NamespacePath,
@@ -1000,9 +994,8 @@ pub(super) async fn put_payload(
     options: &PutFileOptions,
     progress: &Arc<ProgressReporter>,
 ) -> Result<CommitResponse, CliError> {
-    // Only a payload large enough to travel in parts has anything an
-    // interruption could leave half-done, and only a source that can be
-    // opened twice can pick it up: a pipe is gone once it is read.
+    // Resume only multipart uploads backed by a file that can be reopened.
+    // Streams cannot be read again after an interruption.
     let journal = payload
         .resumable_source()
         .and_then(|local_path| resume_journal(context, spec, local_path));
