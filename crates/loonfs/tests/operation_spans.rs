@@ -1,7 +1,7 @@
 #![allow(clippy::panic)]
-// Tracing-capture tests panic in helper assertions for precise diagnostics.
+// Include the captured output when an assertion fails.
 
-//! Smoke-tests the facade operation-span contract in its own process.
+//! Checks operation spans for the writer, reader, and admin handles.
 
 use loonfs::{CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsWriter, StoreConfig};
 use loonfs_test_support::block_on::block_on;
