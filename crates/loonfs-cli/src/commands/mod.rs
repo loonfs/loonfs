@@ -35,7 +35,7 @@ pub(crate) async fn run(
 
     let kind = cli
         .kind()
-        .expect("completions is the only kindless command, and it returned above");
+        .expect("completion generation returns before command dispatch");
     if runtime.json && !kind.supports_json() {
         return Err(CommandFailure {
             kind,
@@ -52,7 +52,6 @@ pub(crate) async fn run(
     let config_path = location.path.as_path();
 
     let result = match cli.command {
-        // Completion generation returned before config resolution above.
         Command::Completions(_) => return Ok(None),
         Command::Version => Ok(CommandOutput {
             kind,

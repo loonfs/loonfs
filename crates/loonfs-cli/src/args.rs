@@ -10,7 +10,7 @@ fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
     loonfs_api::public_inode_id::decode(value).map_err(|error| error.to_string())
 }
 
-/// Parsed `loonfs` command line and its Clap command model.
+/// Defines the `loonfs` command-line interface.
 #[derive(Debug, Parser)]
 #[command(name = "loonfs", version)]
 pub struct Cli {
@@ -108,7 +108,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Print a shell completion script to stdout.
+    /// Print shell completions to stdout.
     Completions(CompletionsArgs),
     /// Print version and build metadata.
     Version,
@@ -116,7 +116,7 @@ pub(crate) enum Command {
 
 #[derive(Debug, Args)]
 pub(crate) struct CompletionsArgs {
-    /// Shell to generate for.
+    /// Shell to generate completions for.
     pub shell: clap_complete::Shell,
 }
 

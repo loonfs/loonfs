@@ -5,13 +5,13 @@ filesystem operations, and namespace maintenance against LoonFS.
 
 ## Shell completion
 
-Print a completion script for bash, zsh, fish, powershell, or elvish with:
+Generate completion scripts for Bash, Zsh, Fish, PowerShell, or Elvish with:
 
 ```sh
 loonfs completions <shell>
 ```
 
-For example, load zsh completion for the current session with:
+For example, enable Zsh completion in the current shell with:
 
 ```sh
 source <(loonfs completions zsh)
