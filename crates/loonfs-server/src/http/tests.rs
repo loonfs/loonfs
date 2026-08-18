@@ -350,7 +350,7 @@ fn is_snake_case_token(token: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
-use loonfs_test_support::http::raw_agent;
+use loonfs_test_support::http::{raw_agent, retry_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, BufferWatchStore, FailStore, InjectedError, KeyPredicate, OperationClass,
@@ -1728,10 +1728,35 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
     server.abort();
 }
 
-/// Malformed query strings, path parameters, and JSON bodies answer inside
-/// the JSON error envelope as `invalid_request` — never as a framework
-/// plain-text rejection — and authorization is checked first, so the same
-/// malformed request without credentials answers 401.
+/// Sends a request and checks its JSON error response.
+///
+/// On macOS, ureq can hit EINVAL when the server rejects a request before
+/// reading its body. The retry helper handles only that socket error.
+fn expect_enveloped(
+    send: impl Fn() -> Result<ureq::Response, ureq::Error>,
+    expectation: &str,
+    status: u16,
+    code: &str,
+) -> serde_json::Value {
+    retry_on_macos_teardown_einval(|| {
+        let error = send().expect_err(expectation);
+        let ureq::Error::Status(actual_status, response) = error else {
+            panic!("expected a status error, got {error:?}");
+        };
+        assert_eq!(actual_status, status);
+        assert!(response.header("x-request-id").is_some());
+        let body = response.into_string().expect("read error body");
+        let body: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|_| panic!("json body, got: {body}"));
+        assert_eq!(body["code"], code);
+        body
+    })
+}
+
+/// Checks that malformed requests return JSON API errors and that
+/// authentication runs before request parsing.
+// The request closures return ureq's large error type.
+#[allow(clippy::result_large_err)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1746,27 +1771,19 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    let expect_enveloped = |error: ureq::Error, status: u16, code: &str| {
-        let ureq::Error::Status(actual_status, response) = error else {
-            panic!("expected a status error, got {error:?}");
-        };
-        assert_eq!(actual_status, status);
-        assert!(response.header("x-request-id").is_some());
-        let body = response.into_string().expect("read error body");
-        let body: serde_json::Value =
-            serde_json::from_str(&body).unwrap_or_else(|_| panic!("json body, got: {body}"));
-        assert_eq!(body["code"], code);
-        body
-    };
-
-    // A query value that fails its field type: enveloped invalid_request.
+    // An invalid numeric query value returns invalid_request.
     let changes_url = format!("http://{addr}/v0/namespaces/demo/changes?after_seq=abc");
-    let error = raw_agent()
-        .get(&changes_url)
-        .set("authorization", "Bearer test-token")
-        .call()
-        .expect_err("malformed after_seq should answer 400");
-    let body = expect_enveloped(error, 400, "invalid_request");
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .get(&changes_url)
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "malformed after_seq should answer 400",
+        400,
+        "invalid_request",
+    );
     assert!(
         body["message"]
             .as_str()
@@ -1774,47 +1791,62 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "{body}"
     );
 
-    // The maximum valid value reaches namespace lookup. The next value is
+    // The largest allowed value reaches namespace lookup. One higher is
     // rejected while parsing the query.
-    let error = raw_agent()
-        .get(&format!(
-            "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740991"
-        ))
-        .set("authorization", "Bearer test-token")
-        .call()
-        .expect_err("valid sequence reaches the missing namespace");
-    expect_enveloped(error, 404, "namespace_not_found");
+    expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740991"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "valid sequence reaches the missing namespace",
+        404,
+        "namespace_not_found",
+    );
 
-    let error = raw_agent()
-        .get(&format!(
-            "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740992"
-        ))
-        .set("authorization", "Bearer test-token")
-        .call()
-        .expect_err("out-of-range after_seq should return 400");
-    let body = expect_enveloped(error, 400, "invalid_request");
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740992"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "out-of-range after_seq should return 400",
+        400,
+        "invalid_request",
+    );
     assert_eq!(
         body["message"],
         "invalid after_seq `9007199254740992`: must be an integer from 0 through 9007199254740991"
     );
 
-    // The same malformed query without credentials: 401 wins.
-    let error = raw_agent()
-        .get(&changes_url)
-        .call()
-        .expect_err("unauthorized should answer 401");
-    expect_enveloped(error, 401, "unauthorized");
+    // Without credentials, authentication fails before the query is parsed.
+    expect_enveloped(
+        || raw_agent().get(&changes_url).call(),
+        "unauthorized should answer 401",
+        401,
+        "unauthorized",
+    );
 
-    // Optional numeric query fields use the same hand-parse policy and name
-    // themselves in the rejection rather than leaking framework wording.
-    let error = raw_agent()
-        .delete(&format!(
-            "http://{addr}/v0/namespaces/demo?expected_head_seq=abc"
-        ))
-        .set("authorization", "Bearer test-token")
-        .call()
-        .expect_err("malformed expected_head_seq should answer 400");
-    let body = expect_enveloped(error, 400, "invalid_request");
+    // Optional numeric fields return a message that identifies the field.
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .delete(&format!(
+                    "http://{addr}/v0/namespaces/demo?expected_head_seq=abc"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "malformed expected_head_seq should answer 400",
+        400,
+        "invalid_request",
+    );
     assert!(
         body["message"]
             .as_str()
@@ -1822,53 +1854,76 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "{body}"
     );
 
-    // A missing required query parameter: enveloped invalid_request.
-    let error = raw_agent()
-        .get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
-        .set("authorization", "Bearer test-token")
-        .call()
-        .expect_err("missing path parameter should answer 400");
-    expect_enveloped(error, 400, "invalid_request");
+    // A missing required query parameter returns invalid_request.
+    expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "missing path parameter should answer 400",
+        400,
+        "invalid_request",
+    );
 
-    // A malformed JSON body: enveloped invalid_request with credentials,
-    // 401 without — the body is not read before authorization.
+    // A malformed JSON body returns invalid_request after authentication.
+    // Without credentials, the server returns 401 before reading the body.
     let create_url = format!("http://{addr}/v0/namespaces");
-    let error = raw_agent()
-        .post(&create_url)
-        .set("authorization", "Bearer test-token")
-        .set("content-type", "application/json")
-        .send_string("{not json")
-        .expect_err("malformed body should answer 400");
-    expect_enveloped(error, 400, "invalid_request");
-    let error = raw_agent()
-        .post(&create_url)
-        .set("content-type", "application/json")
-        .send_string("{not json")
-        .expect_err("unauthorized malformed body should answer 401");
-    expect_enveloped(error, 401, "unauthorized");
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&create_url)
+                .set("authorization", "Bearer test-token")
+                .set("content-type", "application/json")
+                .send_string("{not json")
+        },
+        "malformed body should answer 400",
+        400,
+        "invalid_request",
+    );
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&create_url)
+                .set("content-type", "application/json")
+                .send_string("{not json")
+        },
+        "unauthorized malformed body should answer 401",
+        401,
+        "unauthorized",
+    );
 
-    // Commit operation paths now validate while the authorized JSON body
-    // is decoded. The served code stays the same invalid_request
-    // classification the former handler-boundary validation used.
+    // Invalid operation paths return invalid_request after authentication.
     let commits_url = format!("http://{addr}/v0/namespaces/demo/commits");
     let invalid_operation = r#"{
         "commit_id":"invalid-path",
         "actor":{"kind":"service","id":"test-service"},
         "operations":[{"kind":"create_directory","path":"relative"}]
     }"#;
-    let error = raw_agent()
-        .post(&commits_url)
-        .set("authorization", "Bearer test-token")
-        .set("content-type", "application/json")
-        .send_string(invalid_operation)
-        .expect_err("invalid operation path should answer 400");
-    expect_enveloped(error, 400, "invalid_request");
-    let error = raw_agent()
-        .post(&commits_url)
-        .set("content-type", "application/json")
-        .send_string(invalid_operation)
-        .expect_err("authorization should precede operation path decoding");
-    expect_enveloped(error, 401, "unauthorized");
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&commits_url)
+                .set("authorization", "Bearer test-token")
+                .set("content-type", "application/json")
+                .send_string(invalid_operation)
+        },
+        "invalid operation path should answer 400",
+        400,
+        "invalid_request",
+    );
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&commits_url)
+                .set("content-type", "application/json")
+                .send_string(invalid_operation)
+        },
+        "authorization should precede operation path decoding",
+        401,
+        "unauthorized",
+    );
 
     for (body, description) in [
         (
@@ -1880,38 +1935,57 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             "malformed actor",
         ),
     ] {
-        let error = raw_agent()
-            .post(&commits_url)
-            .set("authorization", "Bearer test-token")
-            .set("content-type", "application/json")
-            .send_string(body)
-            .expect_err(description);
-        expect_enveloped(error, 400, "invalid_request");
-        let error = raw_agent()
-            .post(&commits_url)
-            .set("content-type", "application/json")
-            .send_string(body)
-            .expect_err(description);
-        expect_enveloped(error, 401, "unauthorized");
+        expect_enveloped(
+            || {
+                raw_agent()
+                    .post(&commits_url)
+                    .set("authorization", "Bearer test-token")
+                    .set("content-type", "application/json")
+                    .send_string(body)
+            },
+            description,
+            400,
+            "invalid_request",
+        );
+        expect_enveloped(
+            || {
+                raw_agent()
+                    .post(&commits_url)
+                    .set("content-type", "application/json")
+                    .send_string(body)
+            },
+            description,
+            401,
+            "unauthorized",
+        );
     }
 
-    // Grep scope paths make the same boundary move and retain the same
-    // invalid_request code.
+    // Invalid grep path prefixes return invalid_request after authentication.
     let grep_url = format!("http://{addr}/v0/namespaces/demo/query/grep");
     let invalid_grep = r#"{"pattern":"needle","path_prefix":"relative"}"#;
-    let error = raw_agent()
-        .post(&grep_url)
-        .set("authorization", "Bearer test-token")
-        .set("content-type", "application/json")
-        .send_string(invalid_grep)
-        .expect_err("invalid grep path should answer 400");
-    expect_enveloped(error, 400, "invalid_request");
-    let error = raw_agent()
-        .post(&grep_url)
-        .set("content-type", "application/json")
-        .send_string(invalid_grep)
-        .expect_err("authorization should precede grep path decoding");
-    expect_enveloped(error, 401, "unauthorized");
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&grep_url)
+                .set("authorization", "Bearer test-token")
+                .set("content-type", "application/json")
+                .send_string(invalid_grep)
+        },
+        "invalid grep path should answer 400",
+        400,
+        "invalid_request",
+    );
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&grep_url)
+                .set("content-type", "application/json")
+                .send_string(invalid_grep)
+        },
+        "authorization should precede grep path decoding",
+        401,
+        "unauthorized",
+    );
 
     server.abort();
 }
