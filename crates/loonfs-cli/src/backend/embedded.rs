@@ -25,7 +25,7 @@ use loonfs_api::{
     CreateCheckpointRequest, CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest,
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
+    Namespace, NamespaceId, PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
@@ -141,7 +141,7 @@ impl EmbeddedBackend {
     pub(super) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse, BackendError> {
+    ) -> Result<Namespace, BackendError> {
         let result = self
             .writer
             .create_namespace(namespace_id, CreateNamespaceOptions::default())
@@ -168,7 +168,7 @@ impl EmbeddedBackend {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse, BackendError> {
+    ) -> Result<Namespace, BackendError> {
         let result = self
             .writer
             .fork_namespace(source_namespace_id, new_namespace_id)
@@ -180,8 +180,8 @@ impl EmbeddedBackend {
     pub(super) async fn namespace_status(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse, BackendError> {
-        self.admin
+    ) -> Result<Namespace, BackendError> {
+        self.reader
             .namespace_status(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
@@ -1085,9 +1085,10 @@ mod tests {
         for namespace_id in [&indexed, &unindexed] {
             let status = target
                 .backend
-                .namespace_status(namespace_id)
+                .admin
+                .namespace_diagnostics(namespace_id)
                 .await
-                .expect("status after the drain");
+                .expect("diagnostics after the drain");
             assert!(
                 status.wal_tail_segments < checkpoint_threshold(),
                 "`{namespace_id}` kept a WAL tail of {} segments past the checkpoint threshold",
@@ -1203,9 +1204,10 @@ mod tests {
         // host left rather than a race with it.
         let status = target
             .backend
-            .namespace_status(&namespace)
+            .admin
+            .namespace_diagnostics(&namespace)
             .await
-            .expect("status after hosting");
+            .expect("diagnostics after hosting");
         assert!(
             status.wal_tail_segments < checkpoint_threshold(),
             "the hosted runner left a WAL tail of {} segments",

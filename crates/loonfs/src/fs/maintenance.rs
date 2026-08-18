@@ -7,7 +7,7 @@
 
 use crate::maintenance_runner::CompactionStart;
 use crate::FsAdmin;
-use crate::NamespaceStatusResponse;
+use crate::NamespaceDiagnostics;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
     ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenancePlan,
@@ -16,7 +16,7 @@ use crate::{
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
-use loonfs_core::cache::{load_namespace_flush_basis, load_namespace_head_summary};
+use loonfs_core::cache::load_namespace_flush_basis;
 use loonfs_core::CheckpointPageCursor;
 use tokio::time::Instant;
 
@@ -91,26 +91,25 @@ impl FsAdmin {
         result
     }
 
-    /// Summarizes a namespace's current head: manifest, latest checkpoint,
-    /// WAL tail, and retention floor.
+    /// Returns namespace state and storage details used by maintenance.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.namespace_status",
+        name = "loonfs.namespace_diagnostics",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "namespace_status",
+            operation = "namespace_diagnostics",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn namespace_status(
+    pub async fn namespace_diagnostics(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse> {
+    ) -> Result<NamespaceDiagnostics> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(load_namespace_head_summary(self.core.store(), namespace_id).await?)
+        Ok(loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?)
     }
 
     /// Runs one bounded maintenance step against a namespace.
@@ -155,7 +154,7 @@ impl FsAdmin {
                 .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
         }
         let collects_only = plan.gc.is_some() && plan.metadata.is_none() && !plan.advance_retention;
-        let status_before = match self.namespace_status(namespace_id).await {
+        let status_before = match self.namespace_diagnostics(namespace_id).await {
             Ok(status) => status,
             // A tombstoned namespace keeps reclaimable derived state — WAL
             // segments, tables, manifests, checkpoint records — until GC
@@ -168,7 +167,7 @@ impl FsAdmin {
             Err(RuntimeError::Core(error))
                 if error.code() == ErrorCode::NamespaceDeleted && collects_only =>
             {
-                loonfs_core::cache::load_deleted_namespace_head_summary(
+                loonfs_core::cache::load_deleted_namespace_diagnostics(
                     self.core.store(),
                     namespace_id,
                 )
@@ -211,7 +210,7 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
         options: MetadataMaintenanceOptions,
-        status_before: &NamespaceStatusResponse,
+        status_before: &NamespaceDiagnostics,
     ) -> Result<MetadataMaintenanceResponse> {
         let flush = status_before.wal_tail_segments >= options.max_wal_tail_segments.get();
         self.flush_then_reorganize(namespace_id, flush, status_before.head_seq)

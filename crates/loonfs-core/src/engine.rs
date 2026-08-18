@@ -33,8 +33,8 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
-    NamespaceId, NamespaceStatusResponse, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo,
-    TrashEntry, TrashPageCursor, UploadId,
+    Namespace, NamespaceId, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo, TrashEntry,
+    TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -223,7 +223,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn bootstrap_namespace(
         &self,
         options: BootstrapOptions,
-    ) -> std::result::Result<NamespaceStatusResponse, BootstrapNamespaceError> {
+    ) -> std::result::Result<Namespace, BootstrapNamespaceError> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
@@ -237,7 +237,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
     /// Returns the target's status at the fork point.
-    pub async fn fork_namespace(&self, target: &NamespaceId) -> Result<NamespaceStatusResponse> {
+    pub async fn fork_namespace(&self, target: &NamespaceId) -> Result<Namespace> {
         fork::fork_namespace(
             &self.store,
             &self.namespace_id,

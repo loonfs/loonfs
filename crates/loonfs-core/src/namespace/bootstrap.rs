@@ -15,8 +15,7 @@ use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, HeadState, NamespaceState, WriterBlock,
 };
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, NamespaceId, NamespaceStatusResponse,
-    ROOT_INODE_ID,
+    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, Namespace, NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -80,7 +79,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     allow_existing: bool,
-) -> Result<NamespaceStatusResponse, BootstrapNamespaceError> {
+) -> Result<Namespace, BootstrapNamespaceError> {
     if context.writer_id.trim().is_empty() {
         return Err(BootstrapNamespaceError::EmptyHolderId);
     }
@@ -119,7 +118,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         }
     }
 
-    crate::namespace::status::load_namespace_head_summary(store, namespace_id)
+    crate::namespace::status::load_namespace(store, namespace_id)
         .await
         .map_err(BootstrapNamespaceError::Core)
 }

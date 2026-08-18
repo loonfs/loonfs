@@ -701,11 +701,9 @@ mod tests {
     #[tokio::test]
     async fn retry_policy_read_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let response = NamespaceStatusResponse {
+        let response = Namespace {
             namespace_id: namespace_id.clone(),
             head_seq: ChangeSeq(0),
-            current_manifest_id: None,
-            wal_tail_segments: 0,
             retention_floor_seq: ChangeSeq(0),
         };
         let transport = crate::transport::test_transport::failure_then_success(

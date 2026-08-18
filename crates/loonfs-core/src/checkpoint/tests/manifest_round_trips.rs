@@ -287,7 +287,7 @@ async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
         .put_overwrite(&orphan_key, Bytes::from_static(b"not a wal envelope"))
         .await
         .expect("write orphan wal");
-    let status = load_namespace_head_summary(&store, &namespace_id)
+    let status = load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("load namespace status");
     // Status reports the documented visible-chain length, not race-loser

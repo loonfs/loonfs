@@ -3,8 +3,7 @@
 use super::core::{should_invalidate_after_result, ReadCore, WriterIdentity};
 use crate::FsWriter;
 use crate::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespaceId,
-    NamespaceStatusResponse,
+    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, Namespace, NamespaceId,
 };
 use crate::{Result, RuntimeError};
 
@@ -29,7 +28,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> Result<NamespaceStatusResponse> {
+    ) -> Result<Namespace> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(namespace_id)
@@ -61,7 +60,7 @@ impl FsWriter {
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse> {
+    ) -> Result<Namespace> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(source)

@@ -1,4 +1,4 @@
-//! Read-only status for live and deleted namespaces.
+//! Reads namespace state and storage diagnostics.
 
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
@@ -6,7 +6,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::basis::{load_head_and_metadata_basis, resolve_retention_floor_seq};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
-use loonfs_api::{ChangeSeq, ManifestId, NamespaceId, NamespaceStatusResponse};
+use loonfs_api::{ChangeSeq, ManifestId, Namespace, NamespaceDiagnostics, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 /// Whether a namespace carries visible commits its basis manifest does not
@@ -17,8 +17,7 @@ pub struct NamespaceFlushBasis {
     pub has_unflushed_wal_tail: bool,
 }
 
-/// The head-derived half of a status: everything it reports except the WAL
-/// tail count.
+/// Namespace diagnostics before the WAL tail is counted.
 struct LoadedHeadBasis {
     head: HeadState,
     current_manifest_id: Option<ManifestId>,
@@ -81,18 +80,39 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Summarizes a live namespace head.
-///
-/// The WAL tail is counted from the head's tip and predecessor hints
-/// (`recent_segments`, published under the same CAS and long enough to name
-/// every predecessor a legal unflushed tail can hold); no segment body is
-/// read. A head that under-describes its own tail fails the summary rather
-/// than being walked. The count is for inspection and maintenance gating —
-/// replay consumers load the validated chain instead.
-pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
+/// Loads the current state of a live namespace.
+pub async fn load_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceStatusResponse> {
+) -> Result<Namespace> {
+    let head = crate::namespace::control::load_head_object(store, expected_namespace_id)
+        .await
+        .map_err(CoreError::load_head)?
+        .state;
+    if head.state == NamespaceState::Deleted {
+        return Err(CoreError::NamespaceDeleted {
+            namespace_id: expected_namespace_id.clone(),
+        });
+    }
+    let retention_floor_seq = resolve_retention_floor_seq(store, &head)
+        .await
+        .map_err(CoreError::load_head)?;
+    Ok(Namespace {
+        namespace_id: head.namespace_id,
+        head_seq: head.seq,
+        retention_floor_seq,
+    })
+}
+
+/// Loads storage diagnostics for a live namespace.
+///
+/// The head stores enough recent segment IDs to count the visible WAL tail
+/// without reading segment bodies. This returns an error if those IDs do not
+/// cover the full tail. WAL readers validate the full chain separately.
+pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace_id: &NamespaceId,
+) -> Result<NamespaceDiagnostics> {
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
     let wal_tail_segments = count_visible_wal_tail_segments(&WalChainLoadRequest {
         namespace_id: expected_namespace_id,
@@ -105,18 +125,18 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
-    Ok(NamespaceStatusResponse {
+    Ok(NamespaceDiagnostics {
         namespace_id: loaded.head.namespace_id,
         head_seq: loaded.head.seq,
+        retention_floor_seq: loaded.retention_floor_seq,
         current_manifest_id: loaded.current_manifest_id,
         wal_tail_segments,
-        retention_floor_seq: loaded.retention_floor_seq,
     })
 }
 
 /// Returns the head sequence and whether the namespace has WAL data to flush.
 ///
-/// Unlike [`load_namespace_head_summary`], this does not count WAL segments.
+/// Unlike [`load_namespace_diagnostics`], this does not count WAL segments.
 /// It can therefore be used to repair a head whose segment hints are incomplete.
 pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     store: &S,
@@ -129,17 +149,15 @@ pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Summarizes a namespace whose head is a deletion tombstone.
+/// Loads diagnostics for a deleted namespace.
 ///
-/// Reads only the two control objects that outlive reclamation — the head
-/// and the WAL floor — because garbage collection may already have reaped
-/// the manifest and chain a live summary would consult. Callers reach for
-/// this only after [`load_namespace_head_summary`] reported the deletion;
-/// a live head here is an invariant breach, not a state to serve.
-pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
+/// Garbage collection may already have removed the manifest and WAL, so this
+/// reads only the head and WAL floor. Call this only after
+/// [`load_namespace_diagnostics`] reports that the namespace is deleted.
+pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceStatusResponse> {
+) -> Result<NamespaceDiagnostics> {
     let head = crate::namespace::control::load_head_object(store, expected_namespace_id)
         .await
         .map_err(|error| {
@@ -148,7 +166,7 @@ pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
         .state;
     if head.state != NamespaceState::Deleted {
         return Err(CoreError::Internal(format!(
-            "namespace `{expected_namespace_id}` is not deleted; the live head summary serves it"
+            "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"
         )));
     }
     let retention_floor_seq = resolve_retention_floor_seq(store, &head)
@@ -156,11 +174,11 @@ pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
-    Ok(NamespaceStatusResponse {
+    Ok(NamespaceDiagnostics {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
+        retention_floor_seq,
         current_manifest_id: None,
         wal_tail_segments: 0,
-        retention_floor_seq,
     })
 }

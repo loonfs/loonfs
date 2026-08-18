@@ -1025,7 +1025,6 @@ fn external_remote_profile_executes_through_http() {
             "kind": "namespace_status",
             "namespace_id": "demo",
             "head_seq": 0,
-            "wal_tail_segments": 0,
             "retention_floor_seq": 0
         })
     );
@@ -1037,7 +1036,6 @@ fn external_remote_profile_executes_through_http() {
             "kind": "namespace_status",
             "namespace_id": "clone",
             "head_seq": 0,
-            "wal_tail_segments": 0,
             "retention_floor_seq": 0
         })
     );

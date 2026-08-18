@@ -12,7 +12,7 @@ use loonfs::{
     CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
     DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
     ListChangesOptions, MaintenancePlan, MaintenanceStepResponse, MetadataMaintenanceResponse,
-    MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError,
+    MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest, PutFileOptions, RuntimeError,
     SharedObjectStore, UploadContentResponse, UploadId, UploadSessionResponse,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -104,7 +104,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs::NamespaceStatusResponse> {
+    ) -> loonfs::Result<loonfs::Namespace> {
         self.writer.create_namespace(namespace_id, options).await
     }
 
@@ -230,16 +230,16 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs::NamespaceStatusResponse>;
+    ) -> loonfs::Result<loonfs::Namespace>;
     fn fork_namespace_blocking(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> loonfs::Result<loonfs::NamespaceStatusResponse>;
-    fn namespace_status_blocking(
+    ) -> loonfs::Result<loonfs::Namespace>;
+    fn namespace_diagnostics_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<NamespaceStatusResponse>;
+    ) -> loonfs::Result<NamespaceDiagnostics>;
     fn maintenance_step_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -339,7 +339,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs::NamespaceStatusResponse> {
+    ) -> loonfs::Result<loonfs::Namespace> {
         block_on(self.writer.create_namespace(namespace_id, options))
     }
 
@@ -347,15 +347,15 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> loonfs::Result<loonfs::NamespaceStatusResponse> {
+    ) -> loonfs::Result<loonfs::Namespace> {
         block_on(self.writer.fork_namespace(source, target))
     }
 
-    fn namespace_status_blocking(
+    fn namespace_diagnostics_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<NamespaceStatusResponse> {
-        block_on(self.admin.namespace_status(namespace_id))
+    ) -> loonfs::Result<NamespaceDiagnostics> {
+        block_on(self.admin.namespace_diagnostics(namespace_id))
     }
 
     fn maintenance_step_namespace_blocking(

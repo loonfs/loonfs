@@ -48,7 +48,7 @@ use loonfs_api::{
     DeleteNamespaceResponse, ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest,
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, PutRetryAttempt, PutRetryErrorClassification,
+    Namespace, NamespaceDiagnostics, NamespaceId, PutRetryAttempt, PutRetryErrorClassification,
     PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo, SecretString, StreamingChecksum,
     UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,

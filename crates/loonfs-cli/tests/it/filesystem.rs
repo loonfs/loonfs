@@ -967,7 +967,6 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
             "kind": "namespace_status",
             "namespace_id": "clone",
             "head_seq": 1,
-            "wal_tail_segments": 0,
             "retention_floor_seq": 1
         })
     );

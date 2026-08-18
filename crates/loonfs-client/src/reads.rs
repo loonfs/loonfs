@@ -4,14 +4,11 @@ use super::*;
 use crate::transport::{append_optional_pagination_query, append_query_param};
 
 impl Client {
-    /// Creates an empty namespace with the given ID and returns its genesis status.
-    pub async fn create_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse> {
+    /// Creates an empty namespace with the given ID and returns its genesis state.
+    pub async fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
-        self.request_json_once::<_, NamespaceStatusResponse>(
+        self.request_json_once::<_, Namespace>(
             self.post(&url),
             Some(&CreateNamespaceRequest {
                 namespace_id: namespace_id.clone(),
@@ -20,15 +17,12 @@ impl Client {
         .await
     }
 
-    /// Returns the namespace's current status.
-    pub async fn namespace_status(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse> {
+    /// Returns the namespace's current state.
+    pub async fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
         // Validated namespace ids are URL-safe by construction, like the
         // other parsed id segments interpolated into paths here and below.
         let url = format!("{}/v0/namespaces/{namespace_id}", self.base_url);
-        self.request_json::<(), NamespaceStatusResponse>(self.get(&url), None)
+        self.request_json::<(), Namespace>(self.get(&url), None)
             .await
     }
 
@@ -52,18 +46,18 @@ impl Client {
     }
 
     /// Creates a new namespace from the source namespace's current state and
-    /// returns the target's status at the fork point.
+    /// returns the target's state at the fork point.
     pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse> {
+    ) -> Result<Namespace> {
         let url = format!(
             "{}/v0/namespaces/{source_namespace_id}/forks",
             self.base_url
         );
         // Namespace forks have no durable request identity to replay after an ambiguous success.
-        self.request_json_once::<_, NamespaceStatusResponse>(
+        self.request_json_once::<_, Namespace>(
             self.post(&url),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),

@@ -11,12 +11,10 @@ use std::sync::Arc;
 
 /// Read-only handle for latest namespace views.
 ///
-/// `FsReader` serves stat, list, read, revision, and change-feed queries. It
-/// carries no actor identity at all — no writer id, no writer session —
-/// publishes nothing, and never schedules maintenance, so read-only workers
-/// cannot accidentally participate in writer scheduling. Reads revalidate
-/// cached control state against durable state, so a standalone reader stays
-/// consistent without any writer coordination.
+/// `FsReader` reads namespace state, paths, content, revisions, and the change
+/// feed. It has no writer identity or session, cannot publish changes, and
+/// does not schedule maintenance. Reads check cached control state against
+/// durable state, so a standalone reader does not need writer coordination.
 ///
 /// The handle is runtime-bound: open it with `build().await` inside the
 /// Tokio runtime that will drive its reads. `FsReader` is cheap to clone.

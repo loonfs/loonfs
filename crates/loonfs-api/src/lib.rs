@@ -159,6 +159,6 @@ pub use v0::{
     ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
     ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
     MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, NamespaceStatusResponse, ReleaseCheckpointResponse,
+    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, ReleaseCheckpointResponse,
     ReorganizeStepOutcome, RetainedCandidates, RetainedReason, TrashEntry, WalFlushStepOutcome,
 };

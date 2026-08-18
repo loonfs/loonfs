@@ -44,7 +44,7 @@ use self::handlers_inodes::{
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, delete_namespace, fork_namespace, list_checkpoints,
-    maintenance_step, namespace_status, release_checkpoint,
+    maintenance_step, namespace_diagnostics, namespace_status, release_checkpoint,
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_index_not_maintained,
@@ -232,6 +232,10 @@ fn router(state: AppState) -> Router {
             get(namespace_status).delete(delete_namespace),
         )
         .route("/v0/namespaces/{namespace_id}/forks", post(fork_namespace))
+        .route(
+            "/v0/admin/namespaces/{namespace_id}/diagnostics",
+            get(namespace_diagnostics),
+        )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/list",
             get(list_path_entries),

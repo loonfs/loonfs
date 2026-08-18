@@ -9,9 +9,9 @@
 //!
 //! - [`FsWriter`] for writes, with [`FsBackgroundWork`] controlling whether
 //!   the writer schedules non-destructive maintenance after writes.
-//! - [`FsReader`] for read-only latest views.
-//! - [`FsAdmin`] for explicit maintenance: status, checkpoints, retention,
-//!   and garbage collection.
+//! - [`FsReader`] for namespace state and read-only latest views.
+//! - [`FsAdmin`] for explicit maintenance: diagnostics, checkpoints,
+//!   retention, and garbage collection.
 //!
 //! ```no_run
 //! # async fn open(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
@@ -96,10 +96,10 @@ pub use loonfs_api::{
     FileRevision, FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest,
     GcResponse, InodeId, InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, MaintenanceStepRequest, MaintenanceStepResponse, ManifestId,
-    MetadataMaintenanceRequest, MetadataMaintenanceResponse, NameKey, NamespaceId,
-    NamespaceStatusResponse, Page, PageRequest, PaginationPolicy, ReleaseCheckpointResponse,
-    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo, UploadId,
-    WalFlushStepOutcome, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET,
+    MetadataMaintenanceRequest, MetadataMaintenanceResponse, NameKey, Namespace,
+    NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    RevisionNo, UploadId, WalFlushStepOutcome, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
     PROFILE_CORE_V0, PROTOCOL_VERSION,
