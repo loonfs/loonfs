@@ -17,5 +17,8 @@ writer_id = "loonfs-server-azure"
 kind = "azure-abs"
 account_name = "your-storage-account"
 container_name = "your-container"
-access_key = "YOUR_ACCOUNT_ACCESS_KEY"
 key_prefix = "loonfs-demo"
+
+[store.credentials]
+kind = "access-key"
+access_key = "YOUR_ACCOUNT_ACCESS_KEY"

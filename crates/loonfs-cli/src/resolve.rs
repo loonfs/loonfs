@@ -10,6 +10,7 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
+use loonfs_api::env::AUTH_TOKEN_ENV;
 use loonfs_api::{ActorId, ActorKind, ActorRef, ErrorCode, NamespaceId, SecretString};
 use loonfs_client::{Client, ClientConfig};
 use loonfs_grep::{GrepBlockCache, GrepService, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
@@ -198,7 +199,7 @@ impl ResolvedTarget {
                 ..
             } => Ok(Self::Remote(RemoteTarget::new(
                 server_url,
-                auth_token.clone(),
+                resolve_remote_auth_token(auth_token),
                 ca_cert_path.as_deref(),
                 no_retry,
             )?)),
@@ -211,6 +212,21 @@ impl ResolvedTarget {
             ResolvedTarget::Remote(_) => "remote",
         }
     }
+}
+
+fn resolve_remote_auth_token(stored: &Option<SecretString>) -> Option<SecretString> {
+    resolve_remote_auth_token_from(stored, non_empty_env)
+}
+
+fn resolve_remote_auth_token_from(
+    stored: &Option<SecretString>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<SecretString> {
+    stored.clone().or_else(|| {
+        lookup(AUTH_TOKEN_ENV)
+            .filter(|token| !token.trim().is_empty())
+            .map(SecretString::from)
+    })
 }
 
 impl EmbeddedTarget {
@@ -292,5 +308,29 @@ impl RemoteTarget {
         })
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
         Ok(Self { client })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_remote_auth_token_from;
+    use loonfs_api::SecretString;
+
+    #[test]
+    fn remote_auth_prefers_the_stored_token_then_falls_back_to_the_environment() {
+        let stored = Some(SecretString::from("stored-token"));
+        let resolved = resolve_remote_auth_token_from(&stored, |_| Some("env-token".to_owned()));
+        assert_eq!(
+            resolved.as_ref().map(SecretString::expose),
+            Some("stored-token")
+        );
+
+        let resolved = resolve_remote_auth_token_from(&None, |_| Some("env-token".to_owned()));
+        assert_eq!(
+            resolved.as_ref().map(SecretString::expose),
+            Some("env-token")
+        );
+
+        assert!(resolve_remote_auth_token_from(&None, |_| Some("  ".to_owned())).is_none());
     }
 }

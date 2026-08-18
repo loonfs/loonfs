@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use loonfs_objectstore::StoreConfig;
 
-pub(crate) const CONFIG_VERSION: u32 = 1;
+pub(crate) const CONFIG_VERSION: u32 = 2;
 
 /// Environment override for the config file, and the escape hatch a shell
 /// session reaches for when the default file is one the CLI will not read.
@@ -121,8 +121,9 @@ impl CliConfig {
     pub(crate) fn validate(&self) -> Result<(), CliError> {
         if self.config_version != CONFIG_VERSION {
             return Err(CliError::invalid_config(format!(
-                "unsupported `config_version`: expected `{CONFIG_VERSION}`, got `{}`",
-                self.config_version
+                "unsupported `config_version`: found `{}`, required `{CONFIG_VERSION}`; profiles \
+                 must be recreated",
+                self.config_version,
             )));
         }
         if let Some(default_profile) = &self.default_profile {
@@ -258,10 +259,7 @@ fn validate_actor_and_default_namespace(
 /// Adds the profile name to a store validation error.
 fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError {
     match error {
-        // Profiles store credentials directly. Only profile creation and
-        // updates read credentials from the environment.
-        StoreConfigError::MissingField { field }
-        | StoreConfigError::MissingCredential { field, .. } => {
+        StoreConfigError::MissingField { field } => {
             CliError::invalid_config(format!("missing `{profile_name}.{field}`"))
         }
         StoreConfigError::InvalidField { field, reason } => {
@@ -448,8 +446,8 @@ fn load_config_source(path: &Path) -> Result<ConfigDocument, CliError> {
             Some(version) if version == i64::from(CONFIG_VERSION) => {}
             Some(version) => {
                 return Err(unusable_config(format!(
-                    "config {} declares `config_version = {version}`; this build supports \
-                     `{CONFIG_VERSION}`",
+                    "config {} declares `config_version = {version}`; this build requires \
+                     `config_version = {CONFIG_VERSION}` and profiles must be recreated",
                     path.display()
                 )));
             }
@@ -605,7 +603,7 @@ fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> 
 
 /// Key names whose values never leave the file unmasked, whatever shape the
 /// config is in. Mirrors the typed redaction: the `SecretString` store
-/// fields plus the remote profile's `auth_token`.
+/// fields nested under `credentials` plus the remote profile's `auth_token`.
 const SECRET_CONFIG_KEYS: &[&str] = &[
     "access_key",
     "access_key_id",
@@ -680,7 +678,7 @@ mod tests {
     fn cli_config_debug_redacts_secrets() {
         let config = parse(
             r#"
-config_version = 1
+config_version = 2
 default_profile = "cloud"
 
 [profiles.cloud]
@@ -690,6 +688,9 @@ mode = "embedded"
 kind = "aws-s3"
 bucket = "bucket"
 region = "us-east-1"
+
+[profiles.cloud.store.credentials]
+kind = "static"
 access_key_id = "debug-access-key-id"
 secret_access_key = "debug-secret-access-key"
 session_token = "debug-session-token"
@@ -716,7 +717,7 @@ auth_token = "debug-auth-token"
     fn redacted_config_serializes_without_secrets() {
         let config = parse(
             r#"
-config_version = 1
+config_version = 2
 
 [profiles.cloud]
 mode = "embedded"
@@ -726,6 +727,9 @@ kind = "cloudflare-r2"
 bucket = "bucket"
 account_id = "account"
 endpoint_url = "https://account.r2.cloudflarestorage.com"
+
+[profiles.cloud.store.credentials]
+kind = "static"
 access_key_id = "plain-access-key-id"
 secret_access_key = "plain-secret-access-key"
 
@@ -750,7 +754,7 @@ auth_token = "plain-auth-token"
     fn unknown_keys_are_rejected_at_every_level() {
         let top_level = parse(
             r#"
-config_version = 1
+config_version = 2
 default_profil = "typo"
 "#,
         )
@@ -759,7 +763,7 @@ default_profil = "typo"
 
         let profile_level = parse(
             r#"
-config_version = 1
+config_version = 2
 
 [profiles.local]
 mode = "embedded"
@@ -775,7 +779,7 @@ root = "/tmp/store"
 
         let store_level = parse(
             r#"
-config_version = 1
+config_version = 2
 
 [profiles.local]
 mode = "embedded"
@@ -794,7 +798,7 @@ key_prefiks = "typo"
     fn validation_reports_profile_prefixed_store_fields() {
         let config = parse(
             r#"
-config_version = 1
+config_version = 2
 
 [profiles.cloud]
 mode = "embedded"
@@ -803,6 +807,9 @@ mode = "embedded"
 kind = "aws-s3"
 bucket = " "
 region = "us-east-1"
+
+[profiles.cloud.store.credentials]
+kind = "static"
 access_key_id = "access"
 secret_access_key = "secret"
 "#,
@@ -841,6 +848,73 @@ secret_access_key = "secret"
         );
     }
 
+    /// The loader must not reinterpret an ambient credential source when the
+    /// environment happens to carry credentials. The server loader carries the
+    /// same pin in its own crate, and resolution itself is pinned in
+    /// loonfs-objectstore — together those make the two binaries agree without
+    /// this crate linking the server.
+    #[test]
+    fn the_loader_preserves_the_serialized_credential_source() {
+        let store = loonfs_objectstore::StoreConfig::AwsS3 {
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            credentials: loonfs_objectstore::AwsS3Credentials::Ambient {},
+            key_prefix: None,
+            force_path_style: false,
+        };
+        let serialized = toml::to_string_pretty(&store).expect("serialize shared store");
+        let qualified = format!(
+            "[profiles.parity.store]\n{}",
+            serialized.replace("[credentials]", "[profiles.parity.store.credentials]")
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli_path = dir.path().join("cli.toml");
+        std::fs::write(
+            &cli_path,
+            format!(
+                "config_version = 2\ndefault_profile = \"parity\"\n\n\
+                 [profiles.parity]\nmode = \"embedded\"\n\n{qualified}"
+            ),
+        )
+        .expect("write cli config");
+
+        let access_key = EnvGuard::set("AWS_ACCESS_KEY_ID", "parity-access");
+        let secret_key = EnvGuard::set("AWS_SECRET_ACCESS_KEY", "parity-secret");
+        let cli = super::load_config(&cli_path).expect("load cli config");
+        drop((access_key, secret_key));
+        let ProfileConfig::Embedded {
+            store: cli_store, ..
+        } = cli.profiles.get("parity").expect("parity profile")
+        else {
+            panic!("expected embedded profile")
+        };
+        assert_eq!(cli_store.credentials_kind(), Some("ambient"));
+    }
+
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     #[test]
     fn load_errors_name_the_file_and_probe_the_version_first() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -857,10 +931,10 @@ secret_access_key = "secret"
 
         // The version verdict beats unknown-field noise: a config written
         // for another version says so directly.
-        write("config_version = 2\nfuture_setting = true\n");
+        write("config_version = 3\nfuture_setting = true\n");
         let version = super::load_config(&path).expect_err("future version");
         assert!(
-            version.message.contains("`config_version = 2`"),
+            version.message.contains("`config_version = 3`"),
             "{}",
             version.message
         );
@@ -878,7 +952,7 @@ secret_access_key = "secret"
             unversioned.message
         );
 
-        write("config_version = 1\ndefault_profil = \"typo\"\n");
+        write("config_version = 2\ndefault_profil = \"typo\"\n");
         let unknown = super::load_config(&path).expect_err("unknown field");
         assert!(unknown.message.contains(&shown_path), "{}", unknown.message);
         assert!(
@@ -898,11 +972,11 @@ secret_access_key = "secret"
 
         for contents in [
             "config_version = ",
-            "config_version = 2\n",
+            "config_version = 3\n",
             "default_profile = \"x\"\n",
-            "config_version = 1\ndefault_profil = \"typo\"\n",
+            "config_version = 2\ndefault_profil = \"typo\"\n",
             // Semantic failures are as much a wall as shape failures.
-            "config_version = 1\ndefault_profile = \"missing\"\n",
+            "config_version = 2\ndefault_profile = \"missing\"\n",
         ] {
             write(contents);
             let error = super::load_config(&path).expect_err("unreadable config");
@@ -1016,14 +1090,23 @@ secret_access_key = "secret"
         std::fs::write(
             &path,
             r#"
-config_version = 1
+config_version = 2
 default_profile = "broken"
 
 [profiles.broken]
-mode = "remote"
-server_url = "https://loonfs.example.com"
-auth_token = "degraded-auth-token"
+mode = "embedded"
 unknown_knob = true
+
+[profiles.broken.store]
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+
+[profiles.broken.store.credentials]
+kind = "static"
+access_key_id = "degraded-access-key-id"
+secret_access_key = "degraded-secret-access-key"
+session_token = "degraded-session-token"
 
 [profiles.ok]
 mode = "embedded"
@@ -1044,7 +1127,12 @@ root = "/tmp/store"
 
         let redacted = toml::to_string_pretty(&super::redacted_config_table(&table))
             .expect("render redacted table");
-        assert!(!redacted.contains("degraded-auth-token"), "{redacted}");
+        assert!(!redacted.contains("degraded-access-key-id"), "{redacted}");
+        assert!(
+            !redacted.contains("degraded-secret-access-key"),
+            "{redacted}"
+        );
+        assert!(!redacted.contains("degraded-session-token"), "{redacted}");
         assert!(redacted.contains("<redacted>"), "{redacted}");
         assert!(redacted.contains("unknown_knob"), "{redacted}");
 
@@ -1052,7 +1140,7 @@ root = "/tmp/store"
         // strict decoder accepts what remains.
         let removed =
             crate::profiles::delete_profile_in_table(&mut table, "broken").expect("delete broken");
-        assert_eq!(removed.mode, "remote");
+        assert_eq!(removed.mode, "embedded");
         crate::profiles::make_default_profile_in_table(&mut table, "ok").expect("switch default");
         assert!(
             crate::profiles::make_default_profile_in_table(&mut table, "gone").is_err(),

@@ -148,21 +148,19 @@ pub(crate) struct InitArgs {
     /// AWS region.
     #[arg(long)]
     pub region: Option<String>,
-    // Provider secrets fall back to the standard environment variables, but
-    // not through clap's `env`: a value clap filled from the environment is
-    // indistinguishable from one the caller typed, which turns an ambient
-    // AWS key into a flag "passed" to a GCS profile. The fallback is applied
-    // where the value is consumed instead — see `AmbientCredentials`.
-    /// AWS or R2 access key id (env AWS_ACCESS_KEY_ID).
+    /// AWS or R2 credential source.
+    #[arg(long, value_name = "ambient|static")]
+    pub credential_source: Option<String>,
+    /// AWS or R2 static access key id.
     #[arg(long)]
     pub access_key_id: Option<String>,
-    /// AWS or R2 secret access key (env AWS_SECRET_ACCESS_KEY).
+    /// AWS or R2 static secret access key.
     #[arg(long)]
     pub secret_access_key: Option<String>,
     /// Custom provider endpoint URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
-    /// Optional AWS session token (env AWS_SESSION_TOKEN).
+    /// Optional static AWS session token.
     #[arg(long)]
     pub session_token: Option<String>,
     /// Use path-style S3 addressing.
@@ -186,7 +184,7 @@ pub(crate) struct InitArgs {
     /// Remote LoonFS server URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
-    /// Remote LoonFS bearer token (env LOONFS_AUTH_TOKEN).
+    /// Remote bearer token to store; omitted profiles use LOONFS_AUTH_TOKEN at request time.
     #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
@@ -249,17 +247,19 @@ pub(crate) struct ProfileCreateArgs {
     /// AWS region.
     #[arg(long)]
     pub region: Option<String>,
-    // Same environment fallbacks as `InitArgs`, and for the same reason.
-    /// AWS or R2 access key id (env AWS_ACCESS_KEY_ID).
+    /// AWS or R2 credential source.
+    #[arg(long, value_name = "ambient|static")]
+    pub credential_source: Option<String>,
+    /// AWS or R2 static access key id.
     #[arg(long)]
     pub access_key_id: Option<String>,
-    /// AWS or R2 secret access key (env AWS_SECRET_ACCESS_KEY).
+    /// AWS or R2 static secret access key.
     #[arg(long)]
     pub secret_access_key: Option<String>,
     /// Custom provider endpoint URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
-    /// Optional AWS session token (env AWS_SESSION_TOKEN).
+    /// Optional static AWS session token.
     #[arg(long)]
     pub session_token: Option<String>,
     /// Use path-style S3 addressing.
@@ -283,7 +283,7 @@ pub(crate) struct ProfileCreateArgs {
     /// Remote LoonFS server URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
-    /// Remote LoonFS bearer token (env LOONFS_AUTH_TOKEN).
+    /// Remote bearer token to store; omitted profiles use LOONFS_AUTH_TOKEN at request time.
     #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
@@ -315,16 +315,19 @@ pub(crate) struct ProfileUpdateArgs {
     /// AWS region.
     #[arg(long)]
     pub region: Option<String>,
-    /// AWS or R2 access key id.
+    /// AWS or R2 credential source.
+    #[arg(long, value_name = "ambient|static")]
+    pub credential_source: Option<String>,
+    /// AWS or R2 static access key id.
     #[arg(long)]
     pub access_key_id: Option<String>,
-    /// AWS or R2 secret access key.
+    /// AWS or R2 static secret access key.
     #[arg(long)]
     pub secret_access_key: Option<String>,
     /// Custom provider endpoint URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
-    /// Optional AWS session token.
+    /// Optional static AWS session token.
     #[arg(long)]
     pub session_token: Option<String>,
     /// Cloudflare R2 account id.
@@ -345,7 +348,7 @@ pub(crate) struct ProfileUpdateArgs {
     /// Remote LoonFS server URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
-    /// Remote LoonFS bearer token.
+    /// Remote bearer token to store; an empty value clears the stored token.
     #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an

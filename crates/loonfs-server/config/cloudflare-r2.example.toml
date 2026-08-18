@@ -18,9 +18,10 @@ kind = "cloudflare-r2"
 bucket = "your-bucket"
 account_id = "YOUR_ACCOUNT_ID"
 endpoint_url = "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com"
-# R2 speaks the S3 API, so these may be left out of this file and supplied
-# through AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY instead. A value
-# named here wins over the environment.
+key_prefix = "loonfs-demo"
+
+# Static credentials are stored in this file.
+[store.credentials]
+kind = "static"
 access_key_id = "YOUR_ACCESS_KEY_ID"
 secret_access_key = "YOUR_SECRET_ACCESS_KEY"
-key_prefix = "loonfs-demo"

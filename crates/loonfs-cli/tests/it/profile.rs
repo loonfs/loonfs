@@ -138,7 +138,7 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
 fn broken_configs_stay_repairable_with_the_repair_commands() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
-        r#"config_version = 1
+        r#"config_version = 2
 default_profile = "broken"
 
 [profiles.broken]
@@ -197,12 +197,20 @@ root = "{}"
     // A config for another version is a hard error, named before any
     // unknown-field noise; repair commands do not edit files written for a
     // different version.
-    harness.write_cli_config("config_version = 2\nfuture_setting = true\n");
+    harness.write_cli_config("config_version = 3\nfuture_setting = true\n");
     let future = harness.run(&["config", "show"]);
     assert_failure(&future);
     let future_message = stderr_string(&future);
     assert!(
-        future_message.contains("`config_version = 2`"),
+        future_message.contains("`config_version = 3`"),
+        "{future_message}"
+    );
+    assert!(
+        future_message.contains("requires `config_version = 2`"),
+        "{future_message}"
+    );
+    assert!(
+        future_message.contains("profiles must be recreated"),
         "{future_message}"
     );
     assert!(
@@ -301,7 +309,7 @@ fn config_resolution_prefers_the_flag_then_the_environment_then_xdg_then_legacy(
 #[test]
 fn config_path_answers_while_the_config_file_is_unreadable() {
     let harness = Harness::new();
-    harness.write_cli_config("config_version = 1\nunknown_knob = true\n");
+    harness.write_cli_config("config_version = 2\nunknown_knob = true\n");
 
     assert_failure(&harness.run(&["profile", "list"]));
 
@@ -329,7 +337,7 @@ fn config_path_answers_while_the_config_file_is_unreadable() {
 #[test]
 fn init_runs_through_an_override_while_the_default_config_is_unreadable() {
     let harness = Harness::new();
-    harness.write_cli_config("config_version = 1\nunknown_knob = true\n");
+    harness.write_cli_config("config_version = 2\nunknown_knob = true\n");
     let broken = fs::read_to_string(&harness.config_path).expect("read broken config");
 
     let flagged_path = harness.temp_dir.path().join("recovery").join("config.toml");
@@ -394,7 +402,7 @@ fn init_runs_through_an_override_while_the_default_config_is_unreadable() {
 #[test]
 fn unreadable_config_errors_name_the_file_the_field_and_the_way_out() {
     let harness = Harness::new();
-    harness.write_cli_config("config_version = 1\ndefault_profil = \"typo\"\n");
+    harness.write_cli_config("config_version = 2\ndefault_profil = \"typo\"\n");
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_failure(&list);
@@ -412,7 +420,7 @@ fn unreadable_config_errors_name_the_file_the_field_and_the_way_out() {
 
     // A semantic failure is just as much a wall, so it carries the same way
     // past it.
-    harness.write_cli_config("config_version = 1\ndefault_profile = \"missing\"\n");
+    harness.write_cli_config("config_version = 2\ndefault_profile = \"missing\"\n");
     let unresolvable = harness.run(&["--json", "profile", "list"]);
     assert_failure(&unresolvable);
     let message = json_error(&unresolvable)["message"]
@@ -622,7 +630,7 @@ fn profile_update_with_only_service_account_key_path_applies() {
     let show = harness.run(&["--json", "profile", "show", "gcp"]);
     assert_success(&show);
     assert_eq!(
-        json_data(&show)["store"]["service_account_key_path"],
+        json_data(&show)["store"]["credentials"]["path"],
         "/new/service-account.json"
     );
 }
@@ -752,7 +760,7 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
     );
     assert_success(&local_fs);
 
-    // The same environment still fills the providers that use it.
+    // The same environment selects no static fields and is never captured.
     let s3 = harness.run_with_env(
         ambient,
         &[
@@ -771,7 +779,12 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
         ],
     );
     assert_success(&s3);
-    assert_eq!(json_data(&s3)["store"]["access_key_id"], "<redacted>");
+    assert_eq!(json_data(&s3)["store"]["credentials"]["kind"], "ambient");
+    let persisted = fs::read_to_string(&harness.config_path).expect("read config");
+    assert!(!persisted.contains("ambient-access"), "{persisted}");
+    assert!(!persisted.contains("ambient-secret"), "{persisted}");
+    assert!(!persisted.contains("ambient-session"), "{persisted}");
+    assert!(!persisted.contains("ambient-token"), "{persisted}");
 
     // And a typed flag that does not apply is still rejected.
     let typed = harness.run_with_env(
@@ -803,11 +816,118 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
 }
 
 #[test]
+fn remote_profile_creation_does_not_capture_the_environment_token() {
+    let harness = Harness::new();
+    let create = harness.run_with_env(
+        &[("LOONFS_AUTH_TOKEN", "ambient-auth-token")],
+        &[
+            "--json",
+            "profile",
+            "create",
+            "remote",
+            "--mode",
+            "remote",
+            "--server-url",
+            "https://loonfs.example.com",
+        ],
+    );
+    assert_success(&create);
+    assert!(json_data(&create)["auth_token"].is_null());
+
+    let persisted = fs::read_to_string(&harness.config_path).expect("read config");
+    assert!(!persisted.contains("ambient-auth-token"), "{persisted}");
+    assert!(!persisted.contains("auth_token"), "{persisted}");
+}
+
+#[test]
+fn profile_update_switches_credential_source_atomically() {
+    let harness = Harness::new();
+    let create = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "s3",
+        "--mode",
+        "embedded",
+        "--store-kind",
+        "aws-s3",
+        "--bucket",
+        "bucket",
+        "--region",
+        "us-east-1",
+    ]);
+    assert_success(&create);
+    let before = fs::read_to_string(&harness.config_path).expect("read ambient config");
+
+    let failed = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "s3",
+        "--credential-source",
+        "static",
+        "--access-key-id",
+        "partial-access",
+    ]);
+    assert_failure(&failed);
+    assert!(json_error(&failed)["message"]
+        .as_str()
+        .expect("message")
+        .contains("secret-access-key"));
+    assert_eq!(
+        fs::read_to_string(&harness.config_path).expect("read unchanged config"),
+        before
+    );
+
+    let switched = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "s3",
+        "--credential-source",
+        "static",
+        "--access-key-id",
+        "static-access",
+        "--secret-access-key",
+        "static-secret",
+        "--session-token",
+        "static-session",
+    ]);
+    assert_success(&switched);
+    let credentials = &json_data(&switched)["store"]["credentials"];
+    assert_eq!(credentials["kind"], "static");
+    assert_eq!(credentials["access_key_id"], "<redacted>");
+    assert_eq!(credentials["secret_access_key"], "<redacted>");
+    assert_eq!(credentials["session_token"], "<redacted>");
+
+    let ambient = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "s3",
+        "--credential-source",
+        "ambient",
+    ]);
+    assert_success(&ambient);
+    assert_eq!(
+        json_data(&ambient)["store"]["credentials"]["kind"],
+        "ambient"
+    );
+    let persisted = fs::read_to_string(&harness.config_path).expect("read ambient config");
+    assert!(!persisted.contains("static-access"), "{persisted}");
+    assert!(!persisted.contains("static-secret"), "{persisted}");
+    assert!(!persisted.contains("static-session"), "{persisted}");
+}
+
+#[test]
 fn init_rejects_existing_config_file() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
         r#"
-config_version = 1
+config_version = 2
 default_profile = "default"
 
 [profiles.default]
@@ -850,7 +970,7 @@ fn profiles_nest_under_their_own_table() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
         r#"
-config_version = 1
+config_version = 2
 
 [profiles.default_profile]
 mode = "embedded"
@@ -872,7 +992,7 @@ fn empty_default_profile_in_config_is_rejected() {
     let harness = Harness::new();
     harness.write_cli_config(
         r#"
-config_version = 1
+config_version = 2
 default_profile = ""
 "#,
     );
@@ -892,7 +1012,7 @@ fn whitespace_default_profile_in_config_is_rejected() {
     let harness = Harness::new();
     harness.write_cli_config(
         r#"
-config_version = 1
+config_version = 2
 default_profile = "   "
 "#,
     );
@@ -912,7 +1032,7 @@ fn invalid_store_field_messages_use_flattened_paths() {
     let harness = Harness::new();
     harness.write_cli_config(
         r#"
-config_version = 1
+config_version = 2
 default_profile = "default"
 
 [profiles.default]
@@ -939,7 +1059,7 @@ fn invalid_default_namespace_in_config_is_rejected() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
         r#"
-config_version = 1
+config_version = 2
 default_profile = "default"
 
 [profiles.default]
@@ -1217,7 +1337,7 @@ fn current_uses_profile_default_without_namespace_environment() {
 fn current_does_not_require_backend_resolution() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
-        r#"config_version = 1
+        r#"config_version = 2
 default_profile = "broken"
 
 [profiles.broken]
