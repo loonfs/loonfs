@@ -16,10 +16,9 @@ use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
-fn post_checkpoint(
-    server_url: &str,
-    namespace: &str,
-) -> Result<CreateCheckpointResponse, ApiError> {
+type ApiResult<T> = Result<T, Box<ApiError>>;
+
+fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<CreateCheckpointResponse> {
     post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoints"),
         "test-token",
@@ -31,7 +30,7 @@ fn post_checkpoint_release(
     server_url: &str,
     namespace: &str,
     checkpoint_id: &str,
-) -> Result<loonfs_api::ReleaseCheckpointResponse, ApiError> {
+) -> ApiResult<loonfs_api::ReleaseCheckpointResponse> {
     post_admin_json(
         &format!(
             "{server_url}/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release"
@@ -40,7 +39,7 @@ fn post_checkpoint_release(
     )
 }
 
-fn post_gc(server_url: &str, namespace: &str) -> Result<loonfs_api::GcResponse, ApiError> {
+fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_api::GcResponse> {
     post_gc_with(server_url, namespace, serde_json::json!({}))
 }
 
@@ -64,8 +63,8 @@ fn post_gc_with(
     server_url: &str,
     namespace: &str,
     gc: serde_json::Value,
-) -> Result<loonfs_api::GcResponse, ApiError> {
-    let step: Result<loonfs_api::MaintenanceStepResponse, ApiError> = post_admin_json_body(
+) -> ApiResult<loonfs_api::GcResponse> {
+    let step: ApiResult<loonfs_api::MaintenanceStepResponse> = post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
         serde_json::json!({ "gc": gc }),
@@ -80,7 +79,7 @@ fn post_gc_with(
 fn post_maintenance_step(
     server_url: &str,
     namespace: &str,
-) -> Result<loonfs_api::MaintenanceStepResponse, ApiError> {
+) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
     post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
@@ -92,7 +91,7 @@ fn post_maintenance_step(
 fn post_empty_maintenance_step(
     server_url: &str,
     namespace: &str,
-) -> Result<loonfs_api::MaintenanceStepResponse, ApiError> {
+) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
     post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
@@ -104,7 +103,7 @@ fn post_empty_maintenance_step(
 fn post_retention_advance(
     server_url: &str,
     namespace: &str,
-) -> Result<loonfs_api::MaintenanceStepResponse, ApiError> {
+) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
     post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
@@ -112,10 +111,7 @@ fn post_retention_advance(
     )
 }
 
-fn post_admin_json<T: serde::de::DeserializeOwned>(
-    url: &str,
-    auth_token: &str,
-) -> Result<T, ApiError> {
+fn post_admin_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> ApiResult<T> {
     let request = raw_agent()
         .post(url)
         .set("authorization", &format!("Bearer {auth_token}"));
@@ -126,7 +122,7 @@ fn post_admin_json_body<T: serde::de::DeserializeOwned>(
     url: &str,
     auth_token: &str,
     body: serde_json::Value,
-) -> Result<T, ApiError> {
+) -> ApiResult<T> {
     let request = raw_agent()
         .post(url)
         .set("authorization", &format!("Bearer {auth_token}"));
@@ -135,32 +131,38 @@ fn post_admin_json_body<T: serde::de::DeserializeOwned>(
 
 fn decode_admin_response<T: serde::de::DeserializeOwned>(
     result: Result<ureq::Response, ureq::Error>,
-) -> Result<T, ApiError> {
+) -> ApiResult<T> {
     match result {
-        Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| ApiError {
-            code: "invalid_json".to_owned(),
-            feature: None,
-            message: err.to_string(),
-            request_id: None,
-            details: None,
+        Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| {
+            Box::new(ApiError {
+                code: "invalid_json".to_owned(),
+                feature: None,
+                message: err.to_string(),
+                param: None,
+                request_id: None,
+                details: None,
+            })
         }),
-        Err(ureq::Error::Status(_, response)) => Err(serde_json::from_reader::<_, ApiError>(
-            response.into_reader(),
-        )
-        .unwrap_or_else(|err| ApiError {
-            code: "invalid_json".to_owned(),
-            feature: None,
-            message: err.to_string(),
-            request_id: None,
-            details: None,
-        })),
-        Err(ureq::Error::Transport(error)) => Err(ApiError {
+        Err(ureq::Error::Status(_, response)) => Err(Box::new(
+            serde_json::from_reader::<_, ApiError>(response.into_reader()).unwrap_or_else(|err| {
+                ApiError {
+                    code: "invalid_json".to_owned(),
+                    feature: None,
+                    message: err.to_string(),
+                    param: None,
+                    request_id: None,
+                    details: None,
+                }
+            }),
+        )),
+        Err(ureq::Error::Transport(error)) => Err(Box::new(ApiError {
             code: "transport".to_owned(),
             feature: None,
             message: error.to_string(),
+            param: None,
             request_id: None,
             details: None,
-        }),
+        })),
     }
 }
 
@@ -594,7 +596,7 @@ async fn http_admin_store_probe_requires_a_token_and_accepts_a_bodyless_request(
     .await;
     let url = format!("{}/v0/admin/store/probe", harness.server_url);
 
-    let unauthorized: Result<loonfs_api::v0::StoreProbeResponse, ApiError> =
+    let unauthorized: ApiResult<loonfs_api::v0::StoreProbeResponse> =
         post_admin_json_body(&url, "wrong-token", serde_json::json!({}));
     assert_eq!(
         unauthorized.expect_err("a wrong token is refused").code,

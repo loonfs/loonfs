@@ -1,6 +1,6 @@
 //! Defines [`ClientError`], returned by asynchronous client operations.
 
-use loonfs_api::{ErrorCode, ErrorDetails};
+use loonfs_api::{ApiError, ErrorCode, ErrorDetails};
 use thiserror::Error;
 
 /// Error returned by the asynchronous HTTP client.
@@ -53,6 +53,12 @@ pub enum ClientError {
         feature: Option<String>,
         /// Error message returned by the server.
         message: String,
+        /// Identifies which input was invalid; code-specific expected and actual values stay in `details`.
+        /// JSON body inputs use JSON Pointer.
+        /// Query parameters use their parameter name.
+        /// Path parameters use their parameter name.
+        /// CLI-local inputs use their flag or argument spelling.
+        param: Option<String>,
         /// Correlation ID assigned to the failed request.
         request_id: Option<String>,
         /// Additional structured error details, when provided by the server.
@@ -85,6 +91,19 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// Builds the client representation of a decoded API error body.
+    pub fn from_api_error(status: u16, body: ApiError) -> Self {
+        Self::Api {
+            status,
+            code: body.code,
+            feature: body.feature,
+            message: body.message,
+            param: body.param,
+            request_id: body.request_id,
+            details: body.details,
+        }
+    }
+
     /// Returns the typed code for [`ClientError::Api`].
     ///
     /// Returns `None` for other error variants and for API codes this client

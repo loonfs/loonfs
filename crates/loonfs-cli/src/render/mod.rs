@@ -57,13 +57,24 @@ pub(crate) fn render_error(failure: &CommandFailure, json_mode: bool) -> io::Res
         stderr.write_all(body.as_bytes())?;
         stderr.write_all(b"\n")?;
     } else {
-        stderr.write_all(failure.error.message.as_bytes())?;
-        if let Some(request_id) = &failure.error.request_id {
-            stderr.write_all(format!(" (request id: {request_id})").as_bytes())?;
-        }
+        stderr.write_all(human_error(&failure.error).as_bytes())?;
         stderr.write_all(b"\n")?;
     }
     Ok(())
+}
+
+fn human_error(error: &CliError) -> String {
+    let mut rendered = error.message.clone();
+    if let Some(request_id) = &error.request_id {
+        rendered.push_str(&format!(" (request id: {request_id})"));
+    }
+    if let Some(feature) = &error.feature {
+        rendered.push_str(&format!("\nfeature: {feature}"));
+    }
+    if let Some(param) = &error.param {
+        rendered.push_str(&format!("\nparam: {param}"));
+    }
+    rendered
 }
 
 pub(crate) fn write_stderr_warning(message: impl std::fmt::Display) {
@@ -94,8 +105,8 @@ pub(crate) fn more_entries_hint(cursor: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        human_success, json_error, json_success, listing_drift_warning, AttributeValue,
-        ListingHeadDrift,
+        human_error, human_success, json_error, json_success, listing_drift_warning,
+        AttributeValue, ListingHeadDrift,
     };
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
@@ -107,6 +118,38 @@ mod tests {
         AbsolutePath, AttributesProjection, AuthoritativePathEntry, AuthoritativePathEntryKind,
         ChangeSeq, DisplayName, InodeId, NamespaceId,
     };
+    use loonfs_client::ClientError;
+
+    fn rendered_remote_error(server_boundary: &str) -> serde_json::Value {
+        let body: loonfs_api::ApiError =
+            serde_json::from_str(server_boundary).expect("server boundary is valid JSON");
+        let error = CliError::from(crate::backend_error::BackendError::from(
+            ClientError::from_api_error(400, body),
+        ));
+        let failure = CommandFailure {
+            kind: CommandKind::ConfigShow,
+            profile: Some("remote".to_owned()),
+            mode: Some("remote".to_owned()),
+            error: Box::new(error),
+        };
+        serde_json::from_str(&json_error(&failure).expect("JSON error renders"))
+            .expect("rendered error is valid JSON")
+    }
+
+    fn assert_server_fields_survive(server_boundary: &str, rendered: &serde_json::Value) {
+        let boundary: serde_json::Value =
+            serde_json::from_str(server_boundary).expect("server boundary is valid JSON");
+        for (field, value) in boundary
+            .as_object()
+            .expect("server error boundary is an object")
+        {
+            assert_eq!(
+                rendered.pointer(&format!("/error/{field}")),
+                Some(value),
+                "server field `{field}` was lost before CLI JSON"
+            );
+        }
+    }
 
     fn path_entry(path: &str, display_name: Option<&str>) -> AuthoritativePathEntry {
         AuthoritativePathEntry {
@@ -292,6 +335,177 @@ mod tests {
             &json_error(&failure).expect("json error renders")
         )
         .expect("rendered error is valid json"));
+    }
+
+    #[test]
+    fn server_feature_survives_client_and_cli_json() {
+        let boundary = r#"{
+            "code": "not_supported",
+            "feature": "query.grep",
+            "message": "grep is not served",
+            "request_id": "req_feature"
+        }"#;
+        let rendered = rendered_remote_error(boundary);
+        let expected: serde_json::Value = serde_json::from_str(
+            r#"{
+                "kind": "config_show",
+                "format_version": 1,
+                "profile": "remote",
+                "mode": "remote",
+                "error": {
+                    "code": "not_supported",
+                    "feature": "query.grep",
+                    "message": "grep is not served",
+                    "request_id": "req_feature"
+                }
+            }"#,
+        )
+        .expect("pinned JSON is valid");
+        assert_eq!(rendered, expected);
+        assert_server_fields_survive(boundary, &rendered);
+    }
+
+    #[test]
+    fn malformed_request_param_survives_client_and_cli_json() {
+        let boundary = r#"{
+            "code": "invalid_request",
+            "message": "path must be absolute",
+            "param": "/operations/0/path",
+            "request_id": "req_param",
+            "details": { "operation_index": 0 }
+        }"#;
+        let rendered = rendered_remote_error(boundary);
+        let expected: serde_json::Value = serde_json::from_str(
+            r#"{
+                "kind": "config_show",
+                "format_version": 1,
+                "profile": "remote",
+                "mode": "remote",
+                "error": {
+                    "code": "invalid_request",
+                    "message": "path must be absolute",
+                    "param": "/operations/0/path",
+                    "request_id": "req_param",
+                    "details": { "operation_index": 0 }
+                }
+            }"#,
+        )
+        .expect("pinned JSON is valid");
+        assert_eq!(rendered, expected);
+        assert_server_fields_survive(boundary, &rendered);
+    }
+
+    #[test]
+    fn future_error_code_survives_client_and_cli_json() {
+        let boundary = r#"{
+            "code": "newer_server_code",
+            "message": "a newer server failure",
+            "param": "limit",
+            "request_id": "req_future"
+        }"#;
+        let rendered = rendered_remote_error(boundary);
+        let expected: serde_json::Value = serde_json::from_str(
+            r#"{
+                "kind": "config_show",
+                "format_version": 1,
+                "profile": "remote",
+                "mode": "remote",
+                "error": {
+                    "code": "newer_server_code",
+                    "message": "a newer server failure",
+                    "param": "limit",
+                    "request_id": "req_future"
+                }
+            }"#,
+        )
+        .expect("pinned JSON is valid");
+        assert_eq!(rendered, expected);
+        assert_server_fields_survive(boundary, &rendered);
+    }
+
+    #[test]
+    fn remote_request_id_is_absent_from_equivalent_embedded_error() {
+        let remote_boundary = r#"{
+            "code": "invalid_request",
+            "message": "limit must be greater than zero",
+            "param": "limit",
+            "request_id": "req_remote"
+        }"#;
+        let remote = rendered_remote_error(remote_boundary);
+        let embedded_error = CliError::from(
+            crate::backend_error::BackendError::new(
+                loonfs_api::ErrorCode::InvalidRequest.as_str(),
+                "limit must be greater than zero",
+            )
+            .with_param("limit"),
+        );
+        let embedded_failure = CommandFailure {
+            kind: CommandKind::ConfigShow,
+            profile: Some("embedded".to_owned()),
+            mode: Some("embedded".to_owned()),
+            error: Box::new(embedded_error),
+        };
+        let embedded: serde_json::Value = serde_json::from_str(
+            &json_error(&embedded_failure).expect("embedded JSON error renders"),
+        )
+        .expect("embedded error is valid JSON");
+        let expected_embedded: serde_json::Value = serde_json::from_str(
+            r#"{
+                "kind": "config_show",
+                "format_version": 1,
+                "profile": "embedded",
+                "mode": "embedded",
+                "error": {
+                    "code": "invalid_request",
+                    "message": "limit must be greater than zero",
+                    "param": "limit"
+                }
+            }"#,
+        )
+        .expect("pinned JSON is valid");
+
+        assert_eq!(remote["error"]["request_id"], "req_remote");
+        assert_eq!(embedded, expected_embedded);
+        assert!(embedded["error"].get("request_id").is_none());
+        assert_server_fields_survive(remote_boundary, &remote);
+    }
+
+    #[test]
+    fn cli_parse_error_json_names_the_flag_param() {
+        use clap::Parser;
+
+        let clap_error =
+            crate::args::Cli::try_parse_from(["loonfs", "--json", "ls", "--limit", "not-a-number"])
+                .expect_err("invalid --limit must fail parsing");
+        let failure = crate::parse_failure_error(&clap_error);
+        let rendered: serde_json::Value = serde_json::from_str(
+            &super::json::json_parse_error(&failure).expect("parse error JSON renders"),
+        )
+        .expect("parse error is valid JSON");
+
+        assert_eq!(
+            rendered["error"],
+            serde_json::json!({
+                "code": "invalid_usage",
+                "message": failure.message,
+                "param": "--limit"
+            })
+        );
+        assert_eq!(rendered["kind"], "parse_error");
+        assert_eq!(rendered["format_version"], 1);
+    }
+
+    #[test]
+    fn human_errors_render_feature_and_param_diagnostics() {
+        let mut error = CliError::new("not_supported", "grep is not served");
+        error.feature = Some("query.grep".to_owned());
+        error.param = Some("/pattern".to_owned());
+        error.request_id = Some("req_human".to_owned());
+
+        assert_eq!(
+            human_error(&error),
+            "grep is not served (request id: req_human)\nfeature: query.grep\nparam: /pattern"
+        );
     }
 
     #[test]

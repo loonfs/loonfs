@@ -38,13 +38,13 @@ use tracing::Instrument;
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct PathQuery {
-    path: String,
+    path: Option<String>,
     include_attributes: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct PathPageQuery {
-    path: String,
+    path: Option<String>,
     limit: Option<String>,
     cursor: Option<String>,
 }
@@ -54,7 +54,7 @@ pub(super) struct PathPageQuery {
 /// `serde_urlencoded`, which does not support `#[serde(flatten)]`.
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct ListPathPageQuery {
-    path: String,
+    path: Option<String>,
     limit: Option<String>,
     cursor: Option<String>,
     include_attributes: Option<String>,
@@ -68,7 +68,7 @@ pub(super) struct PageQuery {
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct ContentQuery {
-    path: String,
+    path: Option<String>,
     revision_no: Option<String>,
 }
 
@@ -105,7 +105,7 @@ impl Stream for DownloadBodyStream {
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct ChangesQuery {
-    after_seq: String,
+    after_seq: Option<String>,
     limit: Option<String>,
 }
 
@@ -199,7 +199,7 @@ pub(super) async fn list_path_entries(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
-    let path = query.path;
+    let path = required_query_param(query.path, "path")?;
     // An absent parameter leaves the option type's own default in place, so
     // the HTTP surface and the in-process one cannot answer differently.
     let mut options = ListPathEntriesOptions::default();
@@ -218,7 +218,10 @@ pub(super) async fn list_path_entries(
             options,
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("path")
+        })?;
     Ok(Json(listing))
 }
 
@@ -254,7 +257,7 @@ pub(super) async fn stat_path(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
-    let path = query.path;
+    let path = required_query_param(query.path, "path")?;
     let mut options = StatPathOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
@@ -263,7 +266,10 @@ pub(super) async fn stat_path(
         .reader
         .stat_path(&namespace_id, &path, options)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("path")
+        })?;
     Ok(Json(entry))
 }
 
@@ -310,7 +316,7 @@ pub(super) async fn get_file_bytes(
             state.metrics.download_rejected_as_busy();
             super::server_busy_error("proxied content reads")
         })?;
-    let path = query.path;
+    let path = required_query_param(query.path, "path")?;
     let revision_no = query
         .revision_no
         .as_deref()
@@ -325,7 +331,10 @@ pub(super) async fn get_file_bytes(
         }
         None => state.reader.get_file_bytes(&namespace_id, &path).await,
     }
-    .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    .map_err(|error| {
+        ApiResponseError::runtime_for_namespace(&namespace_id, error)
+            .with_invalid_request_param("path")
+    })?;
     Ok(buffered_download_response(file.bytes, permit))
 }
 
@@ -407,7 +416,7 @@ pub(super) async fn list_file_revisions(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
-    let path = query.path;
+    let path = required_query_param(query.path, "path")?;
     let response = state
         .reader
         .list_file_revisions_page(
@@ -419,7 +428,10 @@ pub(super) async fn list_file_revisions(
             },
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("path")
+        })?;
     Ok(Json(response))
 }
 
@@ -567,7 +579,7 @@ pub(super) async fn list_changes(
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
     let query = query.into_params()?;
-    let after_seq = parse_after_seq(&query.after_seq)?;
+    let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = resolve_page_limit(query.limit)?;
     let response = state
         .reader
@@ -585,6 +597,17 @@ fn parse_after_seq(value: &str) -> Result<loonfs_api::ChangeSeq, ApiResponseErro
     parse_public_ordinal("after_seq", value, loonfs_api::ChangeSeq::parse)
 }
 
+fn required_query_param(value: Option<String>, name: &str) -> Result<String, ApiResponseError> {
+    value.ok_or_else(|| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!("missing required query parameter `{name}`"),
+        )
+        .with_param(name)
+    })
+}
+
 pub(super) fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {
     match value {
         "true" => Ok(true),
@@ -593,7 +616,8 @@ pub(super) fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseE
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &format!("invalid include_attributes `{other}`: expected `true` or `false`"),
-        )),
+        )
+        .with_param("include_attributes")),
     }
 }
 
@@ -622,6 +646,7 @@ fn public_ordinal_response_error(
         ErrorCode::InvalidRequest,
         &format!("invalid {name} `{value}`: {error}"),
     )
+    .with_param(name)
 }
 
 pub(super) fn resolve_page_limit(
@@ -640,6 +665,7 @@ fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
             ErrorCode::InvalidRequest,
             &format!("invalid limit `{value}`: {error}"),
         )
+        .with_param("limit")
     })
 }
 
@@ -659,6 +685,7 @@ fn limit_response_error(error: LimitError) -> ApiResponseError {
         ErrorCode::InvalidRequest,
         &error.to_string(),
     )
+    .with_param("limit")
 }
 
 fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
@@ -667,6 +694,7 @@ fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
         ErrorCode::InvalidRequest,
         &error.to_string(),
     )
+    .with_param("cursor")
 }
 
 #[cfg(test)]

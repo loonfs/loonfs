@@ -302,7 +302,8 @@ async fn run_admin_checkpoint_release(
     let checkpoint_id = CheckpointId::parse(&args.checkpoint_id).map_err(|error| {
         context.fail(
             kind,
-            crate::error::CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()),
+            crate::error::CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                .with_param("checkpoint_id"),
         )
     })?;
     let response = context
@@ -397,7 +398,9 @@ async fn run_admin_run(
     let namespaces = args
         .namespaces
         .iter()
-        .map(|namespace| parse_namespace_id(namespace))
+        .map(|namespace| {
+            parse_namespace_id(namespace).map_err(|error| error.with_param("--namespace"))
+        })
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     // Sorted and deduplicated, so the keys are driven in the order the

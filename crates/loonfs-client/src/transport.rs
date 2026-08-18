@@ -507,14 +507,7 @@ pub(crate) struct FailedAttempt {
 
 pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
     match serde_json::from_slice::<ApiError>(body) {
-        Ok(body) => ClientError::Api {
-            status,
-            code: body.code,
-            feature: body.feature,
-            message: body.message,
-            request_id: body.request_id,
-            details: body.details,
-        },
+        Ok(body) => ClientError::from_api_error(status, body),
         // A status with a non-envelope body is most commonly an intermediary
         // answering for the server (a load balancer's HTML 502): keep the
         // status — it is the only signal the response carried.

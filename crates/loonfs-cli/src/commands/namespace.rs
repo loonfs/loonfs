@@ -44,6 +44,7 @@ async fn run_namespace_create(
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     let namespace_id = parse_namespace_id(&args.namespace_id)
+        .map_err(|error| error.with_param("namespace_id"))
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let namespace = resolved
         .target
@@ -71,6 +72,7 @@ async fn run_namespace_delete(
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     let namespace_id = parse_namespace_id(&args.namespace_id)
+        .map_err(|error| error.with_param("namespace_id"))
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let expected_head_seq = args
         .expected_head_seq
@@ -140,8 +142,10 @@ async fn run_namespace_fork(
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     let source_namespace_id = parse_namespace_id(&args.source)
+        .map_err(|error| error.with_param("source"))
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let new_namespace_id = parse_namespace_id(&args.new_namespace_id)
+        .map_err(|error| error.with_param("new_namespace_id"))
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let namespace = resolved
         .target
@@ -171,6 +175,7 @@ pub(crate) async fn run_namespace_use(
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     let namespace_id = parse_namespace_id(&args.namespace)
+        .map_err(|error| error.with_param("namespace"))
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     resolved

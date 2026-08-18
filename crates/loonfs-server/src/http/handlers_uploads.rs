@@ -175,7 +175,8 @@ async fn begin_direct_put_upload(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
             &message,
-        ));
+        )
+        .with_param("/content/checksum/algorithm"));
     }
     let max_content_bytes = issuer.max_content_bytes();
     if claim.size_bytes > max_content_bytes {
@@ -190,7 +191,8 @@ async fn begin_direct_put_upload(
                  `{FEATURE_UPLOADS_DIRECT_MULTIPART}` is advertised",
                 claim.size_bytes,
             ),
-        ));
+        )
+        .with_param("/content/size_bytes"));
     }
 
     let prepared = state
@@ -264,7 +266,10 @@ async fn begin_direct_multipart_upload(
         .writer
         .begin_direct_multipart_upload_target(&namespace_id, options)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("/multipart/part_size_bytes")
+        })?;
 
     Ok(Json(BeginUploadResponse::DirectMultipart {
         namespace_id: prepared.namespace_id,
@@ -377,6 +382,7 @@ pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError 
     match error {
         ObjectStoreError::InvalidContentRef(message) => {
             ApiResponseError::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
+                .with_param("/content")
         }
         error => ApiResponseError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -867,6 +873,7 @@ fn parse_upload_id(value: &str) -> Result<UploadId, ApiResponseError> {
             ErrorCode::InvalidRequest,
             &error.to_string(),
         )
+        .with_param("upload_id")
     })
 }
 

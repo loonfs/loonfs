@@ -13,6 +13,10 @@
 //! live in `loonfs-api`) so their arguments cannot drift apart.
 
 #![warn(missing_docs)]
+#![allow(
+    clippy::result_large_err,
+    reason = "ClientError::Api preserves the server's additive error fields as public values"
+)]
 
 mod admin;
 mod config;

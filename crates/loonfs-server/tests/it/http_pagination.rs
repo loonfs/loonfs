@@ -159,35 +159,44 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     harness.server.abort();
 }
 
-fn get_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> Result<T, ApiError> {
+fn get_json<T: serde::de::DeserializeOwned>(
+    url: &str,
+    auth_token: &str,
+) -> Result<T, Box<ApiError>> {
     let request = raw_agent()
         .get(url)
         .set("authorization", &format!("Bearer {auth_token}"));
     match request.call() {
-        Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| ApiError {
-            code: "invalid_json".to_owned(),
-            feature: None,
-            message: err.to_string(),
-            request_id: None,
-            details: None,
+        Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| {
+            Box::new(ApiError {
+                code: "invalid_json".to_owned(),
+                feature: None,
+                message: err.to_string(),
+                param: None,
+                request_id: None,
+                details: None,
+            })
         }),
-        Err(ureq::Error::Status(_, response)) => Err(serde_json::from_reader::<_, ApiError>(
-            response.into_reader(),
-        )
-        .unwrap_or_else(|err| ApiError {
-            code: "invalid_json".to_owned(),
-            feature: None,
-            message: err.to_string(),
-            request_id: None,
-            details: None,
-        })),
-        Err(ureq::Error::Transport(error)) => Err(ApiError {
+        Err(ureq::Error::Status(_, response)) => Err(Box::new(
+            serde_json::from_reader::<_, ApiError>(response.into_reader()).unwrap_or_else(|err| {
+                ApiError {
+                    code: "invalid_json".to_owned(),
+                    feature: None,
+                    message: err.to_string(),
+                    param: None,
+                    request_id: None,
+                    details: None,
+                }
+            }),
+        )),
+        Err(ureq::Error::Transport(error)) => Err(Box::new(ApiError {
             code: "transport".to_owned(),
             feature: None,
             message: error.to_string(),
+            param: None,
             request_id: None,
             details: None,
-        }),
+        })),
     }
 }
 
@@ -281,7 +290,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     assert_eq!(raw_first_page.entries.len(), 1);
     assert!(raw_first_page.next_cursor.is_some());
 
-    let nonnumeric_limit: Result<ListPathEntriesResponse, ApiError> = get_json(
+    let nonnumeric_limit: Result<ListPathEntriesResponse, Box<ApiError>> = get_json(
         &format!(
             "{}/v0/namespaces/demo/filesystem/list?path=/docs&limit=not-a-number",
             harness.server_url

@@ -287,7 +287,18 @@ fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> A
         error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
             ApiResponseError::not_supported(FEATURE_QUERY_GREP, &error.to_string())
         }
-        GrepError::Runtime(error) => ApiResponseError::runtime_for_namespace(namespace_id, error),
+        GrepError::Runtime(error) => {
+            let cursor_is_invalid = matches!(
+                &error,
+                loonfs::RuntimeError::Core(loonfs::CoreError::InvalidCursor(_))
+            );
+            let response = ApiResponseError::runtime_for_namespace(namespace_id, error);
+            if cursor_is_invalid {
+                response.with_param("/cursor")
+            } else {
+                response
+            }
+        }
         error => ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string()),
     }
 }

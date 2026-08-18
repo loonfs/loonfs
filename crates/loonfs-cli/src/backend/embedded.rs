@@ -751,7 +751,10 @@ impl EmbeddedBackend {
         self.admin
             .create_checkpoint(namespace_id, CreateCheckpointOptions::from_request(request))
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .map_err(|error| {
+                map_namespace_scoped_runtime_error(namespace_id, error)
+                    .with_invalid_request_param("/name")
+            })
     }
 
     pub(super) async fn list_checkpoints_page(
@@ -796,8 +799,10 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
     ) -> Result<MaintenanceStepResponse, BackendError> {
-        let plan = MaintenancePlan::from_request(request)
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?;
+        let plan = MaintenancePlan::from_request(request).map_err(|error| {
+            map_namespace_scoped_runtime_error(namespace_id, error)
+                .with_invalid_request_param("/metadata/max_wal_tail_segments")
+        })?;
         self.admin
             .maintenance_step_namespace(namespace_id, plan)
             .await
@@ -884,7 +889,10 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
     // Embedded and remote modes use the same error code for an invalid limit.
     PaginationPolicy::default()
         .resolve_limit(limit)
-        .map_err(|error| BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
+        .map_err(|error| {
+            BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                .with_param("limit")
+        })
 }
 
 fn cli_page_request<C: loonfs_api::PageCursor>(
@@ -898,6 +906,7 @@ fn cli_page_request<C: loonfs_api::PageCursor>(
             .transpose()
             .map_err(|error| {
                 BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                    .with_param("cursor")
             })?,
     })
 }
@@ -931,8 +940,8 @@ fn store_probe_response(report: StoreProbeReport) -> StoreProbeResponse {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        map_runtime_error, resolve_cli_page_limit, GrepError, StepBudget, GREP_GC_JOB,
-        GREP_INDEX_JOB,
+        cli_page_request, map_runtime_error, resolve_cli_page_limit, GrepError, StepBudget,
+        GREP_GC_JOB, GREP_INDEX_JOB,
     };
     use crate::backend_error::map_namespace_scoped_grep_error;
     use crate::config::StoreConfig;
@@ -1271,6 +1280,12 @@ mod tests {
         // CLI-local `invalid_input` rewrite.
         let error = resolve_cli_page_limit(Some(0)).expect_err("zero limit is invalid");
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+        assert_eq!(error.param.as_deref(), Some("limit"));
+
+        let error = cli_page_request::<loonfs_api::DirectoryPageCursor>(None, Some("not-a-cursor"))
+            .expect_err("malformed cursor is invalid");
+        assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+        assert_eq!(error.param.as_deref(), Some("cursor"));
     }
 
     #[test]

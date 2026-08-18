@@ -3409,6 +3409,13 @@
             "type": "string",
             "description": "Human-readable error message."
           },
+          "param": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Identifies which input was invalid; code-specific expected and actual values stay in `details`.\nJSON body inputs use JSON Pointer.\nQuery parameters use their parameter name.\nPath parameters use their parameter name.\nCLI-local inputs use their flag or argument spelling."
+          },
           "request_id": {
             "type": [
               "string",
@@ -6928,6 +6935,13 @@
                 "message": {
                   "type": "string",
                   "description": "Human-readable error message."
+                },
+                "param": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Identifies which input was invalid; code-specific expected and actual values stay in `details`.\nJSON body inputs use JSON Pointer.\nQuery parameters use their parameter name.\nPath parameters use their parameter name.\nCLI-local inputs use their flag or argument spelling."
                 },
                 "request_id": {
                   "type": [

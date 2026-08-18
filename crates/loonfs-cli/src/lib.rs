@@ -8,6 +8,10 @@
 // the boxed entrypoint, rustc's future-layout query depth needs headroom
 // here. This is the raise rustc itself prescribes.
 #![recursion_limit = "256"]
+#![allow(
+    clippy::result_large_err,
+    reason = "CLI errors preserve backend and request diagnostics as structured fields"
+)]
 mod args;
 mod backend;
 mod backend_error;
@@ -87,9 +91,36 @@ fn render_parse_failure(error: &clap::Error) -> ExitCode {
         error.print().ok();
         return ExitCode::from(USAGE_EXIT_CODE);
     }
-    let failure = error::CliError::invalid_usage(error.render().to_string());
+    let failure = parse_failure_error(error);
     let _ = render::render_parse_error(&failure);
     ExitCode::from(USAGE_EXIT_CODE)
+}
+
+fn parse_failure_error(error: &clap::Error) -> error::CliError {
+    let failure = error::CliError::invalid_usage(error.render().to_string());
+    match parse_error_param(error) {
+        Some(param) => failure.with_param(param),
+        None => failure,
+    }
+}
+
+fn parse_error_param(error: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue};
+
+    let value = error.get(ContextKind::InvalidArg)?;
+    let rendered = match value {
+        ContextValue::String(value) => value.clone(),
+        ContextValue::Strings(values) => values.first()?.clone(),
+        ContextValue::StyledStr(value) => value.to_string(),
+        ContextValue::StyledStrs(values) => values.first()?.to_string(),
+        _ => return None,
+    };
+    let token = rendered.split_whitespace().next()?;
+    Some(
+        token
+            .trim_matches(|character| matches!(character, '`' | '\'' | '[' | ']'))
+            .to_owned(),
+    )
 }
 
 /// Whether the raw arguments asked for `--json`, scanned the way clap would

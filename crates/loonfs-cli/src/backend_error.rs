@@ -18,8 +18,16 @@ use thiserror::Error;
 pub(crate) struct BackendError {
     /// Registry or backend-local error code.
     pub code: String,
+    /// Capability feature key accompanying `not_supported` errors.
+    pub feature: Option<String>,
     /// Human-readable description of the failure.
     pub message: String,
+    /// Identifies which input was invalid; code-specific expected and actual values stay in `details`.
+    /// JSON body inputs use JSON Pointer.
+    /// Query parameters use their parameter name.
+    /// Path parameters use their parameter name.
+    /// CLI-local inputs use their flag or argument spelling.
+    pub param: Option<String>,
     /// Correlation id the server assigned to the failed request. Always
     /// `None` for embedded and local failures, which have no server hop.
     pub request_id: Option<String>,
@@ -32,7 +40,9 @@ impl BackendError {
     pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
+            feature: None,
             message: message.into(),
+            param: None,
             request_id: None,
             details: None,
         }
@@ -62,6 +72,19 @@ impl BackendError {
     pub(crate) fn runtime_error(message: impl Into<String>) -> Self {
         Self::new("runtime_error", message)
     }
+
+    pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
+        self.param = Some(param.into());
+        self
+    }
+
+    pub(crate) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
+        if self.code == ErrorCode::InvalidRequest.as_str() {
+            self.with_param(param)
+        } else {
+            self
+        }
+    }
 }
 
 impl From<ClientError> for BackendError {
@@ -87,14 +110,18 @@ impl From<ClientError> for BackendError {
             | ClientError::Json(message)
             | ClientError::Protocol(message) => Self::client_error(message),
             ClientError::Api {
+                status: _,
                 code,
+                feature,
                 message,
+                param,
                 request_id,
                 details,
-                ..
             } => Self {
                 code,
+                feature,
                 message,
+                param,
                 request_id,
                 details,
             },
@@ -116,7 +143,9 @@ pub(crate) fn map_runtime_error(error: RuntimeError) -> BackendError {
         // consumers read one contract from both backends.
         error => BackendError {
             code: error.code().as_str().to_owned(),
+            feature: None,
             message: error.to_string(),
+            param: None,
             request_id: None,
             details: error.details().map(Box::new),
         },
@@ -145,7 +174,18 @@ pub(crate) fn map_namespace_scoped_grep_error(
     error: GrepError,
 ) -> BackendError {
     match error {
-        GrepError::Runtime(error) => map_namespace_scoped_runtime_error(namespace_id, error),
+        GrepError::Runtime(error) => {
+            let cursor_is_invalid = matches!(
+                &error,
+                RuntimeError::Core(loonfs::CoreError::InvalidCursor(_))
+            );
+            let response = map_namespace_scoped_runtime_error(namespace_id, error);
+            if cursor_is_invalid {
+                response.with_param("/cursor")
+            } else {
+                response
+            }
+        }
         error => BackendError::new(error.code().as_str(), error.to_string()),
     }
 }
@@ -178,6 +218,7 @@ mod tests {
             code: "namespace_not_found".to_owned(),
             feature: None,
             message: "namespace `demo` does not exist".to_owned(),
+            param: None,
             request_id: None,
             details: None,
         });

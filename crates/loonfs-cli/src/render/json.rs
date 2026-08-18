@@ -47,7 +47,14 @@ const PARSE_ERROR_KIND: &str = "parse_error";
 /// Writes the parse-failure envelope to stderr, in the shape a runtime
 /// failure uses.
 pub(crate) fn render_parse_error(error: &CliError) -> io::Result<()> {
-    let body = serde_json::to_string_pretty(&JsonEnvelope::<serde_json::Value> {
+    let body = json_parse_error(error)?;
+    let mut stderr = io::stderr().lock();
+    stderr.write_all(body.as_bytes())?;
+    stderr.write_all(b"\n")
+}
+
+pub(crate) fn json_parse_error(error: &CliError) -> io::Result<String> {
+    serde_json::to_string_pretty(&JsonEnvelope::<serde_json::Value> {
         kind: PARSE_ERROR_KIND,
         format_version: FORMAT_VERSION,
         profile: None,
@@ -55,10 +62,7 @@ pub(crate) fn render_parse_error(error: &CliError) -> io::Result<()> {
         data: None,
         error: Some(error),
     })
-    .map_err(io::Error::other)?;
-    let mut stderr = io::stderr().lock();
-    stderr.write_all(body.as_bytes())?;
-    stderr.write_all(b"\n")
+    .map_err(io::Error::other)
 }
 
 pub(crate) fn json_error(failure: &CommandFailure) -> io::Result<String> {

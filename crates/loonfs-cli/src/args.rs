@@ -37,10 +37,15 @@ pub(crate) struct Cli {
 
 pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
     if cli.json && matches!(&cli.command, Command::Ls(args) if args.jsonl) {
-        return Err(Cli::command().error(
+        let mut error = Cli::command().error(
             clap::error::ErrorKind::ArgumentConflict,
             "the argument '--jsonl' cannot be used with '--json'",
-        ));
+        );
+        error.insert(
+            clap::error::ContextKind::InvalidArg,
+            clap::error::ContextValue::String("--jsonl".to_owned()),
+        );
+        return Err(error);
     }
     Ok(())
 }
