@@ -703,11 +703,11 @@ fn admin_run_refuses_a_remote_profile() {
     assert!(error["message"]
         .as_str()
         .expect("error message")
-        .contains("embedded-only"));
+        .contains("requires an embedded profile"));
 }
 
-/// The admin plane and the change feed work end to end, and both profile
-/// modes emit the same `--json` shapes and error codes for them.
+/// Verifies matching JSON fields and errors for admin and change-feed
+/// commands through embedded and remote profiles.
 #[test]
 fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
     let harness = Harness::new();
@@ -968,7 +968,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["checkpoint_id"], checkpoint_id.as_str());
 
-        // `admin maintenance flush` runs one metadata-upkeep pass at a threshold of one
+        // `maintenance flush` runs metadata maintenance with a flush threshold of one.
         // segment, so it reports both halves and nothing else.
         let flush = harness.run(&[
             "--json",
@@ -1030,7 +1030,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(retention_data["kind"], "maintenance_stepped");
         assert_eq!(retention_data["namespace_id"], "demo");
         assert_eq!(retention_data["retention"]["retention_floor_seq"], 2);
-        // `retention advance` names one action, so the report carries one.
+        // `retention advance` reports only retention work.
         assert!(retention_data.get("metadata").is_none());
 
         // The checkpoint above already covers the head, so a step reports

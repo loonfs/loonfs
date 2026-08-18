@@ -33,7 +33,7 @@ Context and configuration:
   profile     Manage connection profiles
   namespace   Manage namespaces
   use         Set a profile's default namespace
-  current     Show the active profile and default namespace
+  current     Show the selected profile and namespace
   config      Inspect the CLI config file
 
 Inspection:
@@ -113,7 +113,7 @@ pub(crate) enum Command {
     /// This sets the interactive default; concurrent automation should pass
     /// `--namespace` or set `LOONFS_NAMESPACE`.
     Use(NamespaceUseArgs),
-    /// Show the active profile and its default namespace.
+    /// Show the selected profile and namespace.
     Current(CurrentArgs),
     /// List a directory.
     Ls(FilesystemLsArgs),
@@ -953,8 +953,7 @@ pub(crate) enum AdminIndexCommand {
     Enable(AdminIndexEnableArgs),
     /// Disable the gram content index.
     Disable(AdminNamespaceArgs),
-    /// Report where the gram content index is: disabled, backfilling, or
-    /// active at a watermark.
+    /// Show whether the gram content index is disabled, backfilling, or active.
     Status(AdminNamespaceArgs),
     /// Collect the namespace's unreferenced gram-index objects.
     Gc(AdminIndexGcArgs),
@@ -962,10 +961,9 @@ pub(crate) enum AdminIndexCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AdminMaintenanceCommand {
-    /// Host maintenance in-process for assigned namespaces; this command is
-    /// embedded-only.
+    /// Run maintenance for selected namespaces. Requires an embedded profile.
     Run(AdminRunArgs),
-    /// Run one core maintenance step (WAL flush and metadata folds).
+    /// Run one metadata maintenance step.
     Step(AdminStepArgs),
     /// Flush the WAL tail into a durable segment.
     Flush(AdminNamespaceArgs),
@@ -973,21 +971,20 @@ pub(crate) enum AdminMaintenanceCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AdminRetentionCommand {
-    /// Advance the retention floor, surrendering replay history below the
-    /// flushed manifest head. File revision history is never affected.
+    /// Advance the retention floor and discard older replay history.
+    /// This does not remove file revisions.
     Advance(AdminNamespaceArgs),
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AdminStoreCommand {
-    /// Prove the profile's object store honours the contract LoonFS
-    /// depends on, and report what it found check by check.
+    /// Test the object-store operations LoonFS requires.
     Probe(AdminStoreProbeArgs),
 }
 
-/// Floor on `--poll-interval-ms`. A re-assertion is a nudge per assigned
-/// key and the runner answers each one by reading durable state, so a
-/// cadence below this buys nothing and only spends provider requests.
+/// Minimum `--poll-interval-ms`. Each poll reads durable state for every
+/// assigned key, so shorter intervals add provider requests without improving
+/// scheduling precision.
 const MIN_POLL_INTERVAL_MS: u64 = 100;
 
 #[derive(Debug, Args)]
@@ -1110,8 +1107,8 @@ pub(crate) struct AdminStepArgs {
     /// segments (server default when omitted).
     #[arg(long)]
     pub max_wal_tail_segments: Option<u64>,
-    /// Advance the retention floor after the step's flush work. Replay
-    /// history below the flushed manifest head is surrendered.
+    /// Advance the retention floor after the step's flush work. This discards
+    /// replay history below the flushed manifest head.
     #[arg(long)]
     pub retention: bool,
     /// Run a garbage-collection pass after the step's flush work.

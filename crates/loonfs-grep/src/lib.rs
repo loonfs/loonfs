@@ -39,11 +39,10 @@
 //! or miss a rename without ever returning a wrong match — and it is why
 //! per-call reads suffice where a pinned snapshot once seemed necessary.
 //!
-//! **Three ways to run the same job.** A server can register
-//! [`GrepMaintenanceJob`] with its maintenance runner. A separate
-//! `loonfs admin maintenance run` process can maintain assigned namespaces.
-//! The CLI's `index enable` command can also run the job until it reaches a
-//! captured sequence. All three use the same durable protocol.
+//! [`GrepMaintenanceJob`] can run in a server or in a dedicated
+//! `loonfs admin maintenance run` process. The CLI's `index enable` command
+//! can also run it until the index reaches a captured sequence. All three use
+//! the same durable state and update protocol.
 //!
 //! **An extension owns its keyspace and its garbage.** Grep's durable state
 //! lives under each namespace's `extensions/grep/` prefix and is

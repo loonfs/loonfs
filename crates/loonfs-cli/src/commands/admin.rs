@@ -81,8 +81,8 @@ async fn run_admin_step(
     args: AdminStepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    // Metadata upkeep is what `step` means; the flags add the two actions
-    // that cost something an operator has to ask for.
+    // A step always runs metadata maintenance. The flags add retention or
+    // garbage collection when requested.
     let request = MaintenanceStepRequest {
         metadata: Some(MetadataMaintenanceRequest {
             max_wal_tail_segments: args.max_wal_tail_segments,
@@ -104,14 +104,10 @@ async fn run_admin_step(
     })
 }
 
-/// Sweeps the namespace, looping the cursor through completion unless
-/// `--max-objects` asks for one pass.
-///
-/// A run that takes several passes says where it has got to as each pass
-/// lands, on standard error: the summary on standard output is still one
-/// accumulated report per invocation, whether the run took one pass or
-/// twenty, and `--json` is untouched by the progress. A single-pass run
-/// prints no progress at all — its summary is the whole story.
+/// Runs garbage collection until it finishes unless `--max-objects` requests
+/// one bounded pass. Multi-pass human output writes progress to stderr and a
+/// combined summary to stdout. JSON and single-pass output contain no progress
+/// lines.
 async fn run_admin_gc(
     kind: CommandKind,
     config_path: &Path,
@@ -489,8 +485,8 @@ async fn run_admin_store_probe(
     })
 }
 
-/// The jobs to host, in the order the runner keys them, with no repeats.
-/// An empty selection is every job this host knows how to run.
+/// Returns the selected jobs in a stable order without duplicates.
+/// An empty selection enables every available job.
 fn selected_jobs(requested: &[MaintenanceJobArg]) -> Vec<MaintenanceJobId> {
     MaintenanceJobArg::value_variants()
         .iter()

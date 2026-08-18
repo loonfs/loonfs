@@ -132,7 +132,8 @@ Profile management
     List configured profiles and mark the default
 
   loonfs profile show [name]
-    Show one profile with secrets redacted, or the default profile
+    Show one profile with secrets redacted. Without a name, show the profile
+    selected by LOONFS_PROFILE or the configured default.
 
   loonfs profile update <name> [update-options]
     Change fields of an existing profile; with no flags on a terminal it
@@ -163,7 +164,7 @@ Namespace management
     Set the default namespace for a profile
 
   loonfs current
-    Show the active profile and its default namespace
+    Show the selected profile and namespace
 
 Reading
   loonfs ls [path] [--limit <n> | --all] [--cursor <cursor>] [--jsonl]
@@ -269,7 +270,7 @@ History and recovery
     retained history when --after is omitted
 
 Maintenance
-  loonfs admin maintenance run --namespaces <ns>... [--job <job>...] [--drain] [--max-steps <n>] [--deadline-ms <ms>]
+  loonfs admin maintenance run --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]
     Run maintenance for explicitly named namespaces in embedded mode. The
     command runs until stopped. With --drain, it finishes the current
     assignments and exits. --job selects metadata, core-gc, grep-index, or
@@ -334,12 +335,12 @@ Profile create options
   Used by:
     loonfs profile create <provider> <name>
 
-  A field the store requires and the command line omits is asked for on a
-  terminal, and is an error under --no-input or --json. Each provider
-  subcommand exposes only the flags that provider accepts. S3 and R2 use
-  ambient credentials by default, reading AWS_ACCESS_KEY_ID and
-  AWS_SECRET_ACCESS_KEY when the store is opened. Passing static credential
-  flags selects a stored static credential set.
+  If a required value is missing, the CLI prompts for it on a terminal. Under
+  --no-input or --json, the command returns an error instead. Each provider
+  exposes only its own flags. S3 and R2 use ambient credentials by default,
+  reading AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY when the store is
+  opened. Passing static credential flags stores those credentials in the
+  profile.
 
   Every embedded profile:
     --key-prefix <prefix>              optional
@@ -377,7 +378,8 @@ Profile create options
 
   loonfs profile create remote:
     --server-url <url>
-    --auth-token <token>               optional, env LOONFS_AUTH_TOKEN
+    --auth-token <token>               optional; otherwise read
+                                       LOONFS_AUTH_TOKEN when used
     --ca-cert-path <path>              optional, PEM bundle of extra
                                        certificate authorities to trust for
                                        an https server url
@@ -590,11 +592,9 @@ Behavior notes
   file by file: its byte count moves through a large file as that file is
   read, and advances a whole file at a time over the small ones
 
-  An embedded profile's edit latency grows with the WAL tail between
-  maintenance passes: every write appends, and reads replay what has not
-  been folded into the metadata yet, so a namespace that is written to and
-  never maintained gets slower. Embedded profiles run maintenance manually
-  with `loonfs admin maintenance run --namespaces <ns>` or one step with
-  `loonfs admin maintenance step`. Servers maintain the namespaces they
-  serve automatically.
+  Embedded profiles do not run continuous maintenance. Run
+  `loonfs admin maintenance run --namespaces <ns>` for ongoing maintenance,
+  or `loonfs admin maintenance step` for one step. Without maintenance, the
+  WAL tail grows and reads become slower. Servers maintain the namespaces
+  they use automatically.
 ```

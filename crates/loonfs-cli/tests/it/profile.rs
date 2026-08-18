@@ -765,7 +765,8 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
     assert!(!persisted.contains("ambient-session"), "{persisted}");
     assert!(!persisted.contains("ambient-token"), "{persisted}");
 
-    // A typed flag that does not apply is absent from this provider's grammar.
+    // Provider-specific commands reject flags for other providers during
+    // parsing.
     let typed = harness.run_with_env(
         ambient,
         &[

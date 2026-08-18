@@ -25,7 +25,8 @@ The `grep-gc` job resumes bounded collection passes where the previous pass
 stopped. `loonfs admin index gc` runs those passes directly for one namespace,
 including an absent or deleted namespace whose old index data remains.
 
-Bounded-step budgets are `GrepWorkerConfig`, which a server reads from its `[grep]` table:
+`GrepWorkerConfig` controls how much work one step may perform. A server reads
+these values from its `[grep]` table:
 
 ```toml
 [grep]
@@ -38,6 +39,6 @@ max_mid_runs = 8
 max_decoded_input_rows_per_step = 131072
 ```
 
-Every step budget must be greater than zero. How many steps may run at once is not configured
-here: every host schedules grep through the runtime's maintenance runner, whose one permit pool
-`max_concurrent_maintenance` bounds every maintenance family together.
+Every step budget must be greater than zero. These values do not control
+concurrency. The runtime's shared `max_concurrent_maintenance` limit applies
+across all maintenance jobs, including grep.

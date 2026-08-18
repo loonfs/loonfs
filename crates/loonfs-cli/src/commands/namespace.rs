@@ -1,4 +1,4 @@
-//! `loonfs namespace` commands: create, fork, delete, use, and current.
+//! `loonfs namespace` commands: create, show, fork, and delete.
 
 use super::context::{fail, fail_for, parse_public_ordinal_arg};
 use super::output::{CommandData, CommandFailure, CommandOutput};
@@ -250,9 +250,9 @@ pub(crate) async fn run_namespace_current(
         crate::profiles::resolve_profile(&loaded.config, explicit_profile)
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = profile.mode_str().to_owned();
-    // `current` is a status command, so an unassigned namespace remains a
-    // successful `null`; configured values still use normal flag/env/profile
-    // precedence and validation.
+    // `current` is a status command, so an unset namespace is returned as
+    // `null`. Environment selection still takes precedence over the profile
+    // default.
     let namespace = match resolve_namespace(&loaded.config, explicit_profile, None) {
         Ok(resolved) => Some(resolved.namespace.to_string()),
         Err(error) if error.is_no_default_namespace() => None,
