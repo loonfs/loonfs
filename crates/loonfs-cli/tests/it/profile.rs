@@ -122,7 +122,7 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
         .as_array()
         .expect("changes")
         .iter()
-        .map(|change| change["actor"].clone())
+        .map(|change| change["committed_by"].clone())
         .collect::<Vec<_>>();
     assert_eq!(
         actors,

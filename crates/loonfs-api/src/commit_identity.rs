@@ -1126,7 +1126,7 @@ mod tests {
             changes: vec![crate::v0::CommittedChange {
                 committed_seq,
                 commit_id: commit_id.clone(),
-                actor: test_actor(),
+                committed_by: test_actor(),
                 committed_at_ms: 1,
                 message: None,
                 events: vec![crate::v0::FilesystemChange::FileCreated {

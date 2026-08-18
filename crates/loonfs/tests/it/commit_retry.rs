@@ -106,7 +106,7 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
         .into_iter()
         .find(|change| change.committed_seq == committed.committed_seq)
         .expect("committed change");
-    assert_eq!(change.actor, actor);
+    assert_eq!(change.committed_by, actor);
 }
 
 /// The retry that motivates all of this: the same command run twice with

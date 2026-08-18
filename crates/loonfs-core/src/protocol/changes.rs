@@ -75,7 +75,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                 changes.push(CommittedChange {
                     committed_seq,
                     commit_id: record.commit_id.clone(),
-                    actor: record.actor.clone(),
+                    committed_by: record.actor.clone(),
                     committed_at_ms: record.committed_at_ms,
                     message: record.message.clone(),
                     events: events_from_wal_deltas(&record.deltas)?,

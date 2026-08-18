@@ -299,12 +299,17 @@ fn human_output_shows_dates_and_event_names() {
     assert_success(&revisions);
     let table = stdout_string(&revisions);
     assert!(
-        table.contains("REVISION\tDATE\tACTOR\tSEQ\tSIZE\tDIGEST"),
+        table.contains("REVISION\tDATE\tCOMMITTED_BY\tSEQ\tSIZE\tDIGEST"),
         "{table}"
     );
 
     let stat_file = harness.run(&["stat", "/doc.txt"]);
     assert_success(&stat_file);
+    assert!(
+        stdout_string(&stat_file).contains("revision_committed_by: service:loonfs-cli"),
+        "{}",
+        stdout_string(&stat_file)
+    );
     assert!(
         stdout_string(&stat_file).contains("modified: "),
         "{}",
@@ -318,8 +323,14 @@ fn human_output_shows_dates_and_event_names() {
         serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
     );
     assert_eq!(
-        entry["revision_actor"],
+        entry["revision_committed_by"],
         serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
+    );
+    assert!(
+        entry["revision_committed_at_ms"]
+            .as_u64()
+            .expect("revision commit time")
+            > 0
     );
     assert!(entry["created_at_ms"].as_u64().expect("creation time") > 0);
 }

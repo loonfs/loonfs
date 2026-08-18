@@ -385,14 +385,20 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 revision_no,
                 size_bytes,
                 content_ref,
-                revision_actor,
-                committed_at_ms,
+                revision_committed_by,
+                revision_committed_at_ms,
             } = &entry.kind
             {
                 lines.push(format!("size: {size_bytes}"));
                 lines.push(format!("revision: {}", revision_no.0));
-                lines.push(format!("revision_actor: {}", render_actor(revision_actor)));
-                lines.push(format!("modified: {}", format_utc_ms(*committed_at_ms)));
+                lines.push(format!(
+                    "revision_committed_by: {}",
+                    render_actor(revision_committed_by)
+                ));
+                lines.push(format!(
+                    "modified: {}",
+                    format_utc_ms(*revision_committed_at_ms)
+                ));
                 lines.push(format!("content_id: {}", content_ref.content_id));
                 lines.push(format!("content_kind: {}", content_ref.kind));
             }
@@ -425,14 +431,14 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         } => {
             let mut lines = vec![
                 format!("revisions for {target}"),
-                "REVISION\tDATE\tACTOR\tSEQ\tSIZE\tDIGEST".to_owned(),
+                "REVISION\tDATE\tCOMMITTED_BY\tSEQ\tSIZE\tDIGEST".to_owned(),
             ];
             for revision in revisions {
                 lines.push(format!(
                     "{}\t{}\t{}\t{}\t{}\t{}",
                     revision.revision_no.0,
                     format_utc_ms(revision.committed_at_ms),
-                    render_actor(&revision.actor),
+                    render_actor(&revision.committed_by),
                     revision.committed_seq.0,
                     revision.content_ref.size_bytes,
                     revision.content_ref.content_id

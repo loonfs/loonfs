@@ -53,12 +53,12 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 
     let revisions = harness.run(&["--json", "revisions", "/docs/hello.txt"]);
     assert_success(&revisions);
+    let revisions_data = json_data(&revisions);
+    let revision_items = revisions_data["revisions"].as_array().expect("json array");
+    assert_eq!(revision_items.len(), 2);
     assert_eq!(
-        json_data(&revisions)["revisions"]
-            .as_array()
-            .expect("json array")
-            .len(),
-        2
+        revision_items[0]["committed_by"],
+        serde_json::json!({"kind":"service","id":"loonfs-cli"})
     );
 
     let old_cat = harness.run(&["cat", "--revision", "1", "/docs/hello.txt"]);

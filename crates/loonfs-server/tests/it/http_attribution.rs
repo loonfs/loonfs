@@ -82,7 +82,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .await
         .expect("stat created file");
     assert_eq!(created.created_by, creator);
-    assert_eq!(created.kind.revision_actor(), Some(&creator));
+    assert_eq!(created.kind.revision_committed_by(), Some(&creator));
     assert_eq!(created.created_at_ms, create_change.committed_at_ms);
     for parent_path in ["/implicit", "/implicit/parent"] {
         let parent = harness
@@ -114,7 +114,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .expect("stat replaced file");
     assert_eq!(replaced.created_by, creator);
     assert_eq!(replaced.created_at_ms, created.created_at_ms);
-    assert_eq!(replaced.kind.revision_actor(), Some(&replacer));
+    assert_eq!(replaced.kind.revision_committed_by(), Some(&replacer));
 
     let restorer = actor("restorer");
     harness
@@ -137,10 +137,10 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
             .iter()
             .find(|revision| revision.revision_no == RevisionNo(1))
             .expect("historical revision")
-            .actor,
+            .committed_by,
         creator
     );
-    assert_eq!(revisions.revisions[0].actor, restorer);
+    assert_eq!(revisions.revisions[0].committed_by, restorer);
 
     let copier = actor("copier");
     let copy = harness
@@ -159,7 +159,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .await
         .expect("stat copy");
     assert_eq!(copied.created_by, copier);
-    assert_eq!(copied.kind.revision_actor(), Some(&copier));
+    assert_eq!(copied.kind.revision_committed_by(), Some(&copier));
     assert_eq!(copied.created_at_ms, copy_change.committed_at_ms);
 
     let before_move = copied.clone();
@@ -241,7 +241,9 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .await
         .expect("undelete file");
     assert_eq!(
-        change_at(&harness, undelete.committed_seq).await.actor,
+        change_at(&harness, undelete.committed_seq)
+            .await
+            .committed_by,
         undelete_actor
     );
     assert!(harness

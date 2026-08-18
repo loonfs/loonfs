@@ -737,7 +737,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .expect("json string")
             .starts_with("c_"));
         assert_eq!(
-            listed[0]["actor"],
+            listed[0]["committed_by"],
             serde_json::json!({"kind":"service","id":"loonfs-cli"})
         );
         assert!(!listed[1]["events"]
