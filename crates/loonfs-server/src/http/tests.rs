@@ -1728,17 +1728,10 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
     server.abort();
 }
 
-/// Sends the exchange and asserts the error answers inside the JSON
-/// envelope with the expected status and code, returning the body.
+/// Sends a request and checks its JSON error response.
 ///
-/// The exchange runs behind [`retry_on_macos_teardown_einval`] because
-/// the unauthorized requests here carry bodies the server never reads:
-/// answering 401 before the body is exactly the behavior under test, and
-/// closing the connection afterwards with those bytes unread makes the
-/// close a TCP reset, which macOS can turn into a client-side EINVAL
-/// even though the envelope already arrived. The envelope assertions
-/// themselves never retry: a wrong status, code, or body panics with a
-/// message the retry does not match and fails the test on first sight.
+/// On macOS, ureq can hit EINVAL when the server rejects a request before
+/// reading its body. The retry helper handles only that socket error.
 fn expect_enveloped(
     send: impl Fn() -> Result<ureq::Response, ureq::Error>,
     expectation: &str,
@@ -1760,12 +1753,9 @@ fn expect_enveloped(
     })
 }
 
-/// Malformed query strings, path parameters, and JSON bodies answer inside
-/// the JSON error envelope as `invalid_request` — never as a framework
-/// plain-text rejection — and authorization is checked first, so the same
-/// malformed request without credentials answers 401.
-// The exchange closures relay ureq's own call() signature, whose error
-// type is large by ureq's design.
+/// Checks that malformed requests return JSON API errors and that
+/// authentication runs before request parsing.
+// The request closures return ureq's large error type.
 #[allow(clippy::result_large_err)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
@@ -1781,7 +1771,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    // A query value that fails its field type: enveloped invalid_request.
+    // An invalid numeric query value returns invalid_request.
     let changes_url = format!("http://{addr}/v0/namespaces/demo/changes?after_seq=abc");
     let body = expect_enveloped(
         || {
@@ -1801,7 +1791,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "{body}"
     );
 
-    // The maximum valid value reaches namespace lookup. The next value is
+    // The largest allowed value reaches namespace lookup. One higher is
     // rejected while parsing the query.
     expect_enveloped(
         || {
@@ -1835,7 +1825,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "invalid after_seq `9007199254740992`: must be an integer from 0 through 9007199254740991"
     );
 
-    // The same malformed query without credentials: 401 wins.
+    // Without credentials, authentication fails before the query is parsed.
     expect_enveloped(
         || raw_agent().get(&changes_url).call(),
         "unauthorized should answer 401",
@@ -1843,8 +1833,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "unauthorized",
     );
 
-    // Optional numeric query fields use the same hand-parse policy and name
-    // themselves in the rejection rather than leaking framework wording.
+    // Optional numeric fields return a message that identifies the field.
     let body = expect_enveloped(
         || {
             raw_agent()
@@ -1865,7 +1854,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "{body}"
     );
 
-    // A missing required query parameter: enveloped invalid_request.
+    // A missing required query parameter returns invalid_request.
     expect_enveloped(
         || {
             raw_agent()
@@ -1878,8 +1867,8 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "invalid_request",
     );
 
-    // A malformed JSON body: enveloped invalid_request with credentials,
-    // 401 without — the body is not read before authorization.
+    // A malformed JSON body returns invalid_request after authentication.
+    // Without credentials, the server returns 401 before reading the body.
     let create_url = format!("http://{addr}/v0/namespaces");
     expect_enveloped(
         || {
@@ -1905,9 +1894,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "unauthorized",
     );
 
-    // Commit operation paths now validate while the authorized JSON body
-    // is decoded. The served code stays the same invalid_request
-    // classification the former handler-boundary validation used.
+    // Invalid operation paths return invalid_request after authentication.
     let commits_url = format!("http://{addr}/v0/namespaces/demo/commits");
     let invalid_operation = r#"{
         "commit_id":"invalid-path",
@@ -1973,8 +1960,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         );
     }
 
-    // Grep scope paths make the same boundary move and retain the same
-    // invalid_request code.
+    // Invalid grep path prefixes return invalid_request after authentication.
     let grep_url = format!("http://{addr}/v0/namespaces/demo/query/grep");
     let invalid_grep = r#"{"pattern":"needle","path_prefix":"relative"}"#;
     expect_enveloped(

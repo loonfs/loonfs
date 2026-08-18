@@ -1,11 +1,9 @@
-//! HTTP-client setup shared by raw server tests.
+//! HTTP helpers shared by server tests.
 
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
-/// Raw-request agent with socket inactivity timeouts. A starved or wedged
-/// server must produce a readable transport error, not an indefinite hang
-/// or a panic inside the HTTP client's response path — the failure mode a
-/// loaded CI runner once hit through the default timeout-less agent.
+/// Creates an HTTP client with read and write timeouts so a stalled server
+/// fails the test instead of waiting indefinitely.
 pub fn raw_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_read(std::time::Duration::from_secs(30))
@@ -13,28 +11,11 @@ pub fn raw_agent() -> ureq::Agent {
         .build()
 }
 
-/// Runs one raw HTTP exchange, retrying it when macOS tears the socket
-/// down under the client between the response head and the body read.
+/// Retries an HTTP exchange when ureq hits a known macOS socket error.
 ///
-/// When the server answers without consuming the request body and then
-/// closes the connection, the unread bytes make the close a TCP reset.
-/// Once the reset lands, the client socket is shut down in both
-/// directions, and macOS rejects every later setsockopt on it with
-/// EINVAL, where Linux accepts them. ureq resets its socket read timeout
-/// after parsing the response head and again when it pools the
-/// connection, so losing that race turns an already-delivered response
-/// into either a body read that fails with "Invalid argument (os error
-/// 22)" or a panic inside ureq's own pool-return expect. The server
-/// answered correctly in both shapes; only the client-side timeout
-/// bookkeeping raced the teardown. Under load the window stretches from
-/// microseconds to milliseconds and the race becomes reachable.
-///
-/// The retry stays honest about real failures. Only a panic carrying the
-/// EINVAL signature is retried, so a wrong or missing envelope fails on
-/// the first attempt, and the last attempt runs outside the catch so a
-/// persistent failure surfaces with its real message.
-// The breadcrumb prints straight to the test log so a tolerated race
-// stays visible instead of vanishing into a silent retry.
+/// This can happen when the server rejects a request before reading its body.
+/// Only the matching EINVAL panic is retried. Other panics are rethrown, and
+/// the final attempt runs normally so a persistent failure keeps its message.
 #[allow(clippy::print_stderr)]
 pub fn retry_on_macos_teardown_einval<T>(exchange: impl Fn() -> T) -> T {
     if !cfg!(target_os = "macos") {
@@ -55,10 +36,7 @@ pub fn retry_on_macos_teardown_einval<T>(exchange: impl Fn() -> T) -> T {
     exchange()
 }
 
-/// Matches both shapes the teardown race takes inside ureq: the reader
-/// that reports `Custom { kind: InvalidInput, error: "Invalid argument
-/// (os error 22)" }` and the internal expect that panics with
-/// `Os { code: 22, kind: InvalidInput, ... }`.
+/// Returns true for the ureq panic caused by the macOS socket error.
 fn panic_is_teardown_einval(payload: &(dyn std::any::Any + Send)) -> bool {
     let message = if let Some(owned) = payload.downcast_ref::<String>() {
         owned.as_str()
