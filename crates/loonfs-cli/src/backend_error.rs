@@ -1,4 +1,4 @@
-//! [`BackendError`] and the runtime-error shaping the CLI's backends share.
+//! Shared backend errors and runtime error conversion.
 
 use loonfs::RuntimeError;
 use loonfs_api::{ErrorCode, ErrorDetails, NamespaceId};
@@ -6,7 +6,7 @@ use loonfs_client::ClientError;
 use loonfs_grep::GrepError;
 use thiserror::Error;
 
-/// Normalized error returned by either CLI backend.
+/// Error returned by either CLI backend.
 ///
 /// `code` is either a shared [`loonfs_api::ErrorCode`] string or one of the
 /// local codes created below: `invalid_config`, `invalid_input`,
@@ -18,15 +18,13 @@ use thiserror::Error;
 pub(crate) struct BackendError {
     /// Registry or backend-local error code.
     pub code: String,
-    /// Capability feature key accompanying `not_supported` errors.
+    /// Feature key for `not_supported` errors.
     pub feature: Option<String>,
     /// Human-readable description of the failure.
     pub message: String,
-    /// Identifies which input was invalid; code-specific expected and actual values stay in `details`.
-    /// JSON body inputs use JSON Pointer.
-    /// Query parameters use their parameter name.
-    /// Path parameters use their parameter name.
-    /// CLI-local inputs use their flag or argument spelling.
+    /// Identifies the invalid input. Body fields use JSON Pointer paths;
+    /// query and path parameters use their names; CLI errors use the flag or
+    /// argument as written.
     pub param: Option<String>,
     /// Correlation id the server assigned to the failed request. Always
     /// `None` for embedded and local failures, which have no server hop.
@@ -206,7 +204,7 @@ mod tests {
         ));
 
         assert_eq!(error.code, "stale_head");
-        let details = error.details.expect("core details survive the seam");
+        let details = error.details.expect("runtime error includes details");
         assert_eq!(details.expected_head_seq, Some(ChangeSeq(41)));
         assert_eq!(details.actual_head_seq, Some(ChangeSeq(45)));
     }

@@ -3414,7 +3414,7 @@
               "string",
               "null"
             ],
-            "description": "Identifies which input was invalid; code-specific expected and actual values stay in `details`.\nJSON body inputs use JSON Pointer.\nQuery parameters use their parameter name.\nPath parameters use their parameter name.\nCLI-local inputs use their flag or argument spelling."
+            "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
           },
           "request_id": {
             "type": [
@@ -6941,7 +6941,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Identifies which input was invalid; code-specific expected and actual values stay in `details`.\nJSON body inputs use JSON Pointer.\nQuery parameters use their parameter name.\nPath parameters use their parameter name.\nCLI-local inputs use their flag or argument spelling."
+                  "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
                 },
                 "request_id": {
                   "type": [

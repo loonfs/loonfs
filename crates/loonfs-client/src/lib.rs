@@ -15,7 +15,7 @@
 #![warn(missing_docs)]
 #![allow(
     clippy::result_large_err,
-    reason = "ClientError::Api preserves the server's additive error fields as public values"
+    reason = "ClientError::Api exposes all structured server error fields"
 )]
 
 mod admin;

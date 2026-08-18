@@ -28,15 +28,13 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CliError {
     pub code: String,
-    /// Capability feature key accompanying `not_supported` errors.
+    /// Feature key for `not_supported` errors.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feature: Option<String>,
     pub message: String,
-    /// Identifies which input was invalid; code-specific expected and actual values stay in `details`.
-    /// JSON body inputs use JSON Pointer.
-    /// Query parameters use their parameter name.
-    /// Path parameters use their parameter name.
-    /// CLI-local inputs use their flag or argument spelling.
+    /// Identifies the invalid input. Body fields use JSON Pointer paths;
+    /// query and path parameters use their names; CLI errors use the flag or
+    /// argument as written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
     /// Correlation id the server assigned to the failed request; absent for

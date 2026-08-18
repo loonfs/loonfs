@@ -60,13 +60,13 @@ impl ApiResponseError {
         self
     }
 
-    /// Attributes the failure to one request input.
+    /// Identifies the request input that caused the error.
     pub(super) fn with_param(mut self, param: impl Into<String>) -> Self {
         self.body.param = Some(param.into());
         self
     }
 
-    /// Attributes an invalid-request failure without relabeling other codes.
+    /// Sets `param` only for an `invalid_request` error.
     pub(super) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
         if self.body.code == ErrorCode::InvalidRequest.as_str() {
             self.with_param(param)

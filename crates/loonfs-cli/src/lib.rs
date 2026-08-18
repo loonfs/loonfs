@@ -10,7 +10,7 @@
 #![recursion_limit = "256"]
 #![allow(
     clippy::result_large_err,
-    reason = "CLI errors preserve backend and request diagnostics as structured fields"
+    reason = "CLI errors expose all structured backend fields"
 )]
 mod args;
 mod backend;

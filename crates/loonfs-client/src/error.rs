@@ -53,11 +53,9 @@ pub enum ClientError {
         feature: Option<String>,
         /// Error message returned by the server.
         message: String,
-        /// Identifies which input was invalid; code-specific expected and actual values stay in `details`.
-        /// JSON body inputs use JSON Pointer.
-        /// Query parameters use their parameter name.
-        /// Path parameters use their parameter name.
-        /// CLI-local inputs use their flag or argument spelling.
+        /// Identifies the invalid input. Body fields use JSON Pointer paths;
+        /// query and path parameters use their names; CLI errors use the flag
+        /// or argument as written.
         param: Option<String>,
         /// Correlation ID assigned to the failed request.
         request_id: Option<String>,
@@ -91,7 +89,7 @@ pub enum ClientError {
 }
 
 impl ClientError {
-    /// Builds the client representation of a decoded API error body.
+    /// Converts a decoded API error into a client error.
     pub fn from_api_error(status: u16, body: ApiError) -> Self {
         Self::Api {
             status,

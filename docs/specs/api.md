@@ -200,7 +200,10 @@ Every error response is a JSON body:
 }
 ```
 
-| `param` input source | Value |
+`param` is present when the error identifies one invalid input. Its format
+depends on where the input came from:
+
+| Input source | `param` value |
 | --- | --- |
 | JSON request body | JSON Pointer |
 | Query parameter | Parameter name |
