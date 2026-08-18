@@ -3594,17 +3594,11 @@
               "revision_no",
               "size_bytes",
               "content_ref",
-              "revision_actor",
-              "committed_at_ms",
+              "revision_committed_by",
+              "revision_committed_at_ms",
               "inode_kind"
             ],
             "properties": {
-              "committed_at_ms": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
-                "minimum": 0
-              },
               "content_ref": {
                 "$ref": "#/components/schemas/ContentRef",
                 "description": "Current content reference."
@@ -3615,7 +3609,13 @@
                   "file"
                 ]
               },
-              "revision_actor": {
+              "revision_committed_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
+                "minimum": 0
+              },
+              "revision_committed_by": {
                 "$ref": "#/components/schemas/ActorRef",
                 "description": "Actor responsible for the current revision."
               },
@@ -4187,15 +4187,11 @@
         "required": [
           "committed_seq",
           "commit_id",
-          "actor",
+          "committed_by",
           "committed_at_ms",
           "events"
         ],
         "properties": {
-          "actor": {
-            "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor responsible for the commit, as supplied by the application."
-          },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Client idempotency key for this logical commit."
@@ -4205,6 +4201,10 @@
             "format": "int64",
             "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `committed_seq` is the order.",
             "minimum": 0
+          },
+          "committed_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the commit, as supplied by the application."
           },
           "committed_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -4735,19 +4735,19 @@
           "revision_no",
           "committed_seq",
           "committed_at_ms",
-          "actor",
+          "committed_by",
           "content_ref"
         ],
         "properties": {
-          "actor": {
-            "$ref": "#/components/schemas/ActorRef",
-            "description": "Actor responsible for this revision, as supplied by the application."
-          },
           "committed_at_ms": {
             "type": "integer",
             "format": "int64",
             "description": "Wall-clock stamp of the commit that created this revision, in Unix\nmilliseconds. Observational: `committed_seq` is the order.",
             "minimum": 0
+          },
+          "committed_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for this revision, as supplied by the application."
           },
           "committed_seq": {
             "$ref": "#/components/schemas/ChangeSeq",

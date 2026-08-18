@@ -476,12 +476,13 @@ fingerprint.
 
 Responses expose attribution through these fields:
 
-- `created_by` and `created_at_ms` come from the commit that created an inode.
-- `revision_actor` identifies the actor for the current file revision. Each
-  revision-history entry also has an `actor`. Directories have neither field.
-- `attributes_updated_by` identifies who last changed the stored attributes.
-  The initial empty attributes at revision 0 have no updater.
-- `deleted_by` identifies the actor for an active trash entry.
+| Field | Meaning |
+| --- | --- |
+| `created_by`, `created_at_ms` | Commit attribution for inode creation. |
+| `revision_committed_by`, `revision_committed_at_ms` | Commit attribution for the current file revision on stat and list entries; absent on directories. |
+| `committed_by`, `committed_at_ms` | Commit attribution on revision-history items and committed changes. |
+| `attributes_updated_by`, `attributes_updated_at_ms` | Commit attribution for the latest stored attribute update; absent for the initial empty attributes at revision 0. |
+| `deleted_by`, `deleted_at_ms` | Commit attribution for an active trash entry. |
 
 ### 5.2 Commit responses and safe retry
 
@@ -1409,7 +1410,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "parent_inode_id": "ino_7",
   "display_name": "report.txt",
   "revision_no": 7,
-  "revision_actor": { "kind": "service", "id": "render-worker" },
+  "revision_committed_by": { "kind": "service", "id": "render-worker" },
   "size_bytes": 19482,
   "content_ref": {
     "kind": "blob_v1",
@@ -1417,7 +1418,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
     "size_bytes": 19482,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
   },
-  "committed_at_ms": 1752624000000,
+  "revision_committed_at_ms": 1752624000000,
   "attributes_revision_no": 3,
   "attributes_updated_by": { "kind": "user", "id": "metadata-editor" },
   "attributes_updated_at_ms": 1752623500000,
@@ -1426,7 +1427,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
 ```
 
 Every entry carries `created_by` and `created_at_ms` from its inode row. File
-entries additionally carry `revision_actor` and `committed_at_ms` from their
+entries additionally carry `revision_committed_by` and `revision_committed_at_ms` from their
 current revision row. These stamps are observational — sequences are the
 order, and no validity rule reads them. Directories have creation time but no
 modified time in v0; rename and move change neither attribution nor time.
@@ -1514,8 +1515,8 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "parent_inode_id": "ino_7",
       "display_name": "report.txt",
       "revision_no": 7,
-      "revision_actor": { "kind": "service", "id": "render-worker" },
-      "committed_at_ms": 1752624000000,
+      "revision_committed_by": { "kind": "service", "id": "render-worker" },
+      "revision_committed_at_ms": 1752624000000,
       "size_bytes": 19482,
       "content_ref": {
         "kind": "blob_v1",
@@ -1608,7 +1609,7 @@ retained. A directory returns `path_conflict`, an unknown inode returns
       "revision_no": 7,
       "committed_seq": 418,
       "committed_at_ms": 1752624000000,
-      "actor": { "kind": "service", "id": "render-worker" },
+      "committed_by": { "kind": "service", "id": "render-worker" },
       "content_ref": {
         "kind": "blob_v1",
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
@@ -2191,7 +2192,7 @@ presign writes either, no file it holds can be larger than it will proxy.
 ### 6.11 `GET /changes`
 
 Each change is one commit carrying its identity (`committed_seq`, `commit_id`,
-`actor`, observational `committed_at_ms`, optional `message`) and `events`:
+`committed_by`, observational `committed_at_ms`, optional `message`) and `events`:
 the semantic filesystem operations the commit
 applied, in the order it applied them. One request operation may apply
 several — a put creates each missing parent directory, a replacing move
@@ -2208,7 +2209,7 @@ more than three events. The events stay in request order.
     {
       "committed_seq": 419,
       "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-      "actor": { "kind": "user", "id": "usr_8f3c" },
+      "committed_by": { "kind": "user", "id": "usr_8f3c" },
       "committed_at_ms": 1752624000000,
       "message": "replace report bytes",
       "events": [

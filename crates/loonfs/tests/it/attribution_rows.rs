@@ -38,7 +38,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
         .stat_path_blocking(&namespace_id, "/implicit/parent/report.txt")
         .expect("stat created file");
     assert_eq!(created.created_by, creator);
-    assert_eq!(created.kind.revision_actor(), Some(&creator));
+    assert_eq!(created.kind.revision_committed_by(), Some(&creator));
     for path in ["/implicit", "/implicit/parent"] {
         let parent = fs
             .stat_path_blocking(&namespace_id, path)
@@ -64,7 +64,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
         .expect("stat replacement");
     assert_eq!(replaced.created_by, creator);
     assert_eq!(replaced.created_at_ms, created.created_at_ms);
-    assert_eq!(replaced.kind.revision_actor(), Some(&replacer));
+    assert_eq!(replaced.kind.revision_committed_by(), Some(&replacer));
 
     let restorer = actor("restorer");
     block_on(fs.writer.restore_file_revision(
@@ -83,8 +83,8 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
         },
     ))
     .expect("list revisions");
-    assert_eq!(revisions.revisions[0].actor, restorer);
-    assert_eq!(revisions.revisions[2].actor, creator);
+    assert_eq!(revisions.revisions[0].committed_by, restorer);
+    assert_eq!(revisions.revisions[2].committed_by, creator);
 
     let source_attribute_editor = actor("source-attribute-editor");
     block_on(fs.writer.update_attributes(
@@ -109,7 +109,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
         .stat_path_blocking(&namespace_id, "/copy.txt")
         .expect("stat copy");
     assert_eq!(copied.created_by, copier);
-    assert_eq!(copied.kind.revision_actor(), Some(&copier));
+    assert_eq!(copied.kind.revision_committed_by(), Some(&copier));
     assert_eq!(
         copied
             .attributes

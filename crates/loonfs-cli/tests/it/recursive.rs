@@ -298,7 +298,7 @@ fn recursive_transfers_roundtrip_a_tree() {
         .expect("recursive put changes")
     {
         assert_eq!(
-            change["actor"],
+            change["committed_by"],
             serde_json::json!({"kind":"user","id":"tree-actor"})
         );
     }

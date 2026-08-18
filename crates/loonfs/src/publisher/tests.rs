@@ -1501,7 +1501,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let feed_actors = changes
         .changes
         .into_iter()
-        .map(|change| (change.commit_id.to_string(), change.actor))
+        .map(|change| (change.commit_id.to_string(), change.committed_by))
         .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(feed_actors.get("req-a"), Some(&actor_a));
     assert_eq!(feed_actors.get("req-b"), Some(&actor_b));

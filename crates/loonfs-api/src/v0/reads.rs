@@ -92,12 +92,13 @@ impl AuthoritativePathEntry {
     }
 
     /// Returns the current revision's commit stamp for a file entry.
-    pub const fn committed_at_ms(&self) -> Option<u64> {
+    pub const fn revision_committed_at_ms(&self) -> Option<u64> {
         match &self.kind {
             AuthoritativePathEntryKind::Directory {} => None,
             AuthoritativePathEntryKind::File {
-                committed_at_ms, ..
-            } => Some(*committed_at_ms),
+                revision_committed_at_ms,
+                ..
+            } => Some(*revision_committed_at_ms),
         }
     }
 }
@@ -126,10 +127,10 @@ pub enum AuthoritativePathEntryKind {
         /// Current content reference.
         content_ref: ContentRef,
         /// Actor responsible for the current revision.
-        revision_actor: ActorRef,
+        revision_committed_by: ActorRef,
         /// Time of the current revision, in Unix milliseconds. Revision
         /// sequences determine order.
-        committed_at_ms: u64,
+        revision_committed_at_ms: u64,
     },
 }
 
@@ -144,10 +145,13 @@ impl AuthoritativePathEntryKind {
 
     /// Returns the actor responsible for the current file revision.
     /// Directories return `None`.
-    pub const fn revision_actor(&self) -> Option<&ActorRef> {
+    pub const fn revision_committed_by(&self) -> Option<&ActorRef> {
         match self {
             Self::Directory {} => None,
-            Self::File { revision_actor, .. } => Some(revision_actor),
+            Self::File {
+                revision_committed_by,
+                ..
+            } => Some(revision_committed_by),
         }
     }
 }
@@ -338,8 +342,8 @@ mod tests {
             revision_no: RevisionNo(7),
             size_bytes: 5,
             content_ref: content_ref.clone(),
-            revision_actor: ActorRef::loonfs_system(),
-            committed_at_ms: 1_752_624_000_000,
+            revision_committed_by: ActorRef::loonfs_system(),
+            revision_committed_at_ms: 1_752_624_000_000,
         };
 
         assert_eq!(
@@ -354,8 +358,8 @@ mod tests {
                 "revision_no": 7,
                 "size_bytes": 5,
                 "content_ref": content_ref,
-                "revision_actor": { "kind": "system", "id": "loonfs" },
-                "committed_at_ms": 1_752_624_000_000_u64,
+                "revision_committed_by": { "kind": "system", "id": "loonfs" },
+                "revision_committed_at_ms": 1_752_624_000_000_u64,
                 "head_seq": 3,
                 "parent_inode_id": "ino_1",
                 "display_name": "report.txt"
@@ -393,8 +397,8 @@ mod tests {
             revision_no: RevisionNo(1),
             size_bytes: 5,
             content_ref,
-            revision_actor: ActorRef::loonfs_system(),
-            committed_at_ms: 1,
+            revision_committed_by: ActorRef::loonfs_system(),
+            revision_committed_at_ms: 1,
         };
         assert_eq!(
             serde_json::to_value(file).expect("serialize file entry kind")["inode_kind"],

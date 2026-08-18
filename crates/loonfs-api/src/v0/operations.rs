@@ -424,7 +424,7 @@ pub struct FileRevision {
     /// milliseconds. Observational: `committed_seq` is the order.
     pub committed_at_ms: u64,
     /// Actor responsible for this revision, as supplied by the application.
-    pub actor: crate::ActorRef,
+    pub committed_by: crate::ActorRef,
     /// Content stored for this revision.
     pub content_ref: ContentRef,
 }
@@ -1077,6 +1077,30 @@ mod tests {
     use super::*;
     use crate::ContentId;
 
+    #[test]
+    fn file_revision_uses_committed_by_on_the_wire() {
+        let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
+        let revision = FileRevision {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(3),
+            committed_seq: ChangeSeq(7),
+            committed_at_ms: 1_752_624_000_000,
+            committed_by: crate::ActorRef::loonfs_system(),
+            content_ref: content_ref.clone(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(revision).expect("serialize file revision"),
+            serde_json::json!({
+                "inode_id": "ino_2",
+                "revision_no": 3,
+                "committed_seq": 7,
+                "committed_at_ms": 1_752_624_000_000_u64,
+                "committed_by": { "kind": "system", "id": "loonfs" },
+                "content_ref": content_ref,
+            })
+        );
+    }
     fn path(value: &str) -> AbsolutePath {
         AbsolutePath::parse(value).expect("valid test path")
     }

@@ -217,7 +217,7 @@ pub struct CommittedChange {
     /// Client idempotency key for this logical commit.
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
-    pub actor: crate::ActorRef,
+    pub committed_by: crate::ActorRef,
     /// Wall-clock stamp of the commit, in Unix milliseconds.
     /// Observational: `committed_seq` is the order.
     pub committed_at_ms: u64,
@@ -249,8 +249,31 @@ pub struct ChangesResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::FilesystemChange;
+    use super::{CommittedChange, FilesystemChange};
     use crate::InodeId;
+
+    #[test]
+    fn committed_change_uses_committed_by_on_the_wire() {
+        let change = CommittedChange {
+            committed_seq: crate::ChangeSeq(7),
+            commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
+            committed_by: crate::ActorRef::loonfs_system(),
+            committed_at_ms: 1_752_624_000_000,
+            message: None,
+            events: Vec::new(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(change).expect("serialize committed change"),
+            serde_json::json!({
+                "committed_seq": 7,
+                "commit_id": "example-commit",
+                "committed_by": { "kind": "system", "id": "loonfs" },
+                "committed_at_ms": 1_752_624_000_000_u64,
+                "events": [],
+            })
+        );
+    }
 
     #[test]
     fn filesystem_change_events_use_snake_case_kind_tags() {
