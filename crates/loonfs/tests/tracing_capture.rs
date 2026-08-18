@@ -142,7 +142,7 @@ fn background_step_conclusions_emit_debug_events() {
     for field in ["dispatched=", "ready_queued=", "oldest_queued_ms="] {
         assert!(dispatch.contains(field), "missing `{field}` in: {dispatch}");
     }
-    // The spans this work runs under say maintenance, which is what it is.
+    // Record both the maintenance operation and its WAL flush phase.
     for span_evidence in [
         "loonfs.maintenance.step",
         "loonfs.phase{phase=\"wal_flush\"",
