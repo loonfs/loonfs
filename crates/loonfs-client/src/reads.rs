@@ -3,12 +3,11 @@
 use super::*;
 use crate::transport::{append_optional_pagination_query, append_query_param};
 
-/// Lazy directory-page reader.
+/// Fetches directory pages as needed.
 ///
-/// Each call to [`Self::next`] returns one original response envelope, so a
-/// caller can observe head changes between pages. [`Self::collect_up_to`]
-/// collects only entries and keeps any unconsumed part of the final page for
-/// the next call to [`Self::next`].
+/// [`Self::next`] returns one page with its metadata. [`Self::collect_up_to`]
+/// returns at most the requested number of entries and saves unused entries
+/// for later calls.
 #[must_use]
 pub struct PathEntriesPager {
     client: Client,
@@ -44,7 +43,9 @@ impl PathEntriesPager {
         }))
     }
 
-    /// Collects at most `max_items` entries without losing a partially read page.
+    /// Returns at most `max_items` entries.
+    ///
+    /// Unused entries from the last page remain available to later calls.
     pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<AuthoritativePathEntry>> {
         let mut entries = Vec::new();
         while entries.len() < max_items {
@@ -74,7 +75,7 @@ enum FileRevisionsTarget {
     },
 }
 
-/// Lazy file-revision page reader for either a path or an inode.
+/// Fetches file-revision pages as needed for a path or inode.
 #[must_use]
 pub struct FileRevisionsPager {
     client: Client,
@@ -120,7 +121,9 @@ impl FileRevisionsPager {
         }))
     }
 
-    /// Collects at most `max_items` revisions without losing a partially read page.
+    /// Returns at most `max_items` revisions.
+    ///
+    /// Unused revisions from the last page remain available to later calls.
     pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<FileRevision>> {
         let mut revisions = Vec::new();
         while revisions.len() < max_items {
@@ -142,7 +145,7 @@ impl FileRevisionsPager {
     }
 }
 
-/// Lazy recoverable-deletion page reader.
+/// Fetches recoverable-deletion pages as needed.
 #[must_use]
 pub struct TrashPager {
     client: Client,
@@ -172,7 +175,9 @@ impl TrashPager {
         }))
     }
 
-    /// Collects at most `max_items` deletions without losing a partially read page.
+    /// Returns at most `max_items` deletions.
+    ///
+    /// Unused deletions from the last page remain available to later calls.
     pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<TrashEntry>> {
         let mut entries = Vec::new();
         while entries.len() < max_items {
@@ -194,7 +199,7 @@ impl TrashPager {
     }
 }
 
-/// Lazy change-feed page reader using sequence positions rather than opaque cursors.
+/// Fetches change-feed pages as needed, using sequence numbers to resume.
 #[must_use]
 pub struct ChangesPager {
     client: Client,
@@ -226,7 +231,9 @@ impl ChangesPager {
         }))
     }
 
-    /// Collects at most `max_items` changes without losing a partially read page.
+    /// Returns at most `max_items` changes.
+    ///
+    /// Unused changes from the last page remain available to later calls.
     pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<CommittedChange>> {
         let mut changes = Vec::new();
         while changes.len() < max_items {
@@ -311,7 +318,7 @@ impl Client {
         .await
     }
 
-    /// Creates a lazy directory pager beginning at `cursor`.
+    /// Creates a directory pager beginning at `cursor`.
     pub fn list_path_entries_pager(
         &self,
         spec: &NamespacePath,
@@ -460,7 +467,7 @@ impl Client {
             .await
     }
 
-    /// Creates a lazy path-based revision pager beginning at `cursor`.
+    /// Creates a path-based revision pager beginning at `cursor`.
     pub fn list_file_revisions_pager(
         &self,
         spec: &NamespacePath,
@@ -496,7 +503,7 @@ impl Client {
             .await
     }
 
-    /// Creates a lazy inode-based revision pager beginning at `cursor`.
+    /// Creates an inode-based revision pager beginning at `cursor`.
     pub fn list_file_revisions_by_inode_pager(
         &self,
         namespace_id: &NamespaceId,
@@ -535,7 +542,7 @@ impl Client {
             .await
     }
 
-    /// Creates a lazy trash pager beginning at `cursor`.
+    /// Creates a trash pager beginning at `cursor`.
     pub fn list_trash_pager(
         &self,
         namespace_id: &NamespaceId,
@@ -570,7 +577,7 @@ impl Client {
             .await
     }
 
-    /// Creates a lazy change-feed pager beginning after `after_seq`.
+    /// Creates a change-feed pager beginning after `after_seq`.
     pub fn list_changes_pager(
         &self,
         namespace_id: &NamespaceId,

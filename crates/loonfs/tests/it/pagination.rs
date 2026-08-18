@@ -26,7 +26,7 @@ fn display_names(entries: &[AuthoritativePathEntry]) -> Vec<&str> {
 }
 
 #[test]
-fn path_entries_pager_exhausts_and_collect_up_to_keeps_the_rest_of_a_page() {
+fn collect_up_to_keeps_unused_entries_for_the_next_call() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "path-pager-collect-test");
     let namespace_id = namespace_id("demo");
@@ -66,7 +66,7 @@ fn path_entries_pager_exhausts_and_collect_up_to_keeps_the_rest_of_a_page() {
 }
 
 #[test]
-fn path_entries_pager_keeps_each_pages_head_visible_across_drift() {
+fn path_entries_pager_preserves_each_page_head() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "path-pager-drift-test");
     let namespace_id = namespace_id("demo");

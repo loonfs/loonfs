@@ -3,7 +3,7 @@
 use super::*;
 use crate::transport::append_optional_pagination_query;
 
-/// Lazy active-checkpoint page reader.
+/// Fetches active-checkpoint pages as needed.
 #[must_use]
 pub struct CheckpointsPager {
     client: Client,
@@ -33,7 +33,9 @@ impl CheckpointsPager {
         }))
     }
 
-    /// Collects at most `max_items` checkpoints without losing a partially read page.
+    /// Returns at most `max_items` checkpoints.
+    ///
+    /// Unused checkpoints from the last page remain available to later calls.
     pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<Checkpoint>> {
         let mut checkpoints = Vec::new();
         while checkpoints.len() < max_items {
@@ -86,7 +88,7 @@ impl Client {
         self.request_json(self.post(&url), Some(request)).await
     }
 
-    /// Creates a lazy checkpoint pager beginning at `cursor` (admin plane).
+    /// Creates a checkpoint pager beginning at `cursor` (admin plane).
     pub fn list_checkpoints_pager(
         &self,
         namespace_id: &NamespaceId,

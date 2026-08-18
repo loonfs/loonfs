@@ -40,7 +40,7 @@ pub(crate) async fn collect_path_entries(
     };
     let mut pager =
         reader.list_path_entries_pager(namespace_id, absolute_path, request, Default::default());
-    let mut response = pager.next().await.expect("a fresh pager has one page")?;
+    let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
         response.head_seq = page.head_seq;
@@ -61,7 +61,7 @@ pub(crate) async fn collect_checkpoints(
         cursor: None,
     };
     let mut pager = admin.list_checkpoints_pager(namespace_id, request);
-    let mut response = pager.next().await.expect("a fresh pager has one page")?;
+    let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
         response.checkpoints.extend(page.checkpoints);

@@ -235,9 +235,9 @@ pub(crate) enum CommandData {
         built_through_seq: ChangeSeq,
         matches: Vec<GrepMatch>,
         tail_scanned: bool,
-        /// True when a bounded invocation stopped with matches left to find.
+        /// Whether more matches were available when the command stopped.
         truncated: bool,
-        /// Where a bounded search stopped, and how to resume it.
+        /// Cursor for the next search page.
         #[serde(skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
     },

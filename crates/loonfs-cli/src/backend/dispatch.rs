@@ -49,7 +49,7 @@ fn maintenance_host_needs_an_embedded_profile() -> BackendError {
     )
 }
 
-/// One lazy directory pager across either CLI backend.
+/// Directory pager for embedded and remote profiles.
 pub(crate) enum PathEntriesPager {
     Embedded {
         pager: loonfs::PathEntriesPager,
@@ -59,7 +59,7 @@ pub(crate) enum PathEntriesPager {
 }
 
 impl PathEntriesPager {
-    /// Returns the next original page envelope.
+    /// Returns the next page with its metadata.
     pub(crate) async fn next(&mut self) -> Option<Result<ListPathEntriesResponse, BackendError>> {
         match self {
             Self::Embedded {
@@ -172,7 +172,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Creates a lazy directory pager.
+    /// Creates a directory pager that fetches pages as needed.
     pub(crate) fn list_path_entries_pager(
         &self,
         spec: &NamespacePath,

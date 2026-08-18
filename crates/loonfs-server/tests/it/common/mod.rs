@@ -22,7 +22,7 @@ pub(crate) async fn collect_path_entries(
     options: &ListPathEntriesOptions,
 ) -> loonfs_client::Result<ListPathEntriesResponse> {
     let mut pager = client.list_path_entries_pager(spec, None, None, options);
-    let mut response = pager.next().await.expect("a fresh pager has one page")?;
+    let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
         response.head_seq = page.head_seq;
@@ -37,7 +37,7 @@ pub(crate) async fn collect_checkpoints(
     namespace_id: &NamespaceId,
 ) -> loonfs_client::Result<ListCheckpointsResponse> {
     let mut pager = client.list_checkpoints_pager(namespace_id, None, None);
-    let mut response = pager.next().await.expect("a fresh pager has one page")?;
+    let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
         response.checkpoints.extend(page.checkpoints);

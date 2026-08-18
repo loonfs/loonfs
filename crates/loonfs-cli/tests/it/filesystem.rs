@@ -3,7 +3,7 @@
 use super::common::*;
 
 #[test]
-fn revisions_and_trash_share_total_page_and_jsonl_behavior() {
+fn revisions_and_trash_use_the_shared_pagination_flags() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));

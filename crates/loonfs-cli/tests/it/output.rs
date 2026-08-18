@@ -681,8 +681,7 @@ fn ls_surfaces_head_drift_from_paged_responses() {
     server.join().expect("listing server");
 }
 
-/// `ls --limit` bounds the total, including when `--all` is also present,
-/// while unbounded buffered JSON fails before the command runs.
+/// `--limit` still applies with `--all`, and buffered JSON requires a limit.
 #[test]
 fn ls_limit_bounds_the_whole_listing_and_rejects_unbounded_json() {
     let harness = Harness::new();
@@ -704,7 +703,7 @@ fn ls_limit_bounds_the_whole_listing_and_rejects_unbounded_json() {
     let all = harness.run(&["--json", "ls", "--all"]);
     assert_failure(&all);
     assert_eq!(all.status.code(), Some(2));
-    assert!(stderr_string(&all).contains("use '--jsonl' or add '--limit'"));
+    assert!(stderr_string(&all).contains("use '--jsonl' to stream without a limit"));
 
     // A bound stops at exactly that many entries and returns a cursor.
     let first = harness.run(&["--json", "ls", "--limit", "2"]);

@@ -100,7 +100,7 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
     if cli.json && pagination.all && pagination.limit.is_none() {
         let mut error = Cli::command().error(
             clap::error::ErrorKind::ArgumentConflict,
-            "'--all --json' would buffer an unbounded array; use '--jsonl' or add '--limit'",
+            "'--all --json' requires '--limit'; use '--jsonl' to stream without a limit",
         );
         error.insert(
             clap::error::ContextKind::InvalidArg,
@@ -613,16 +613,16 @@ pub(crate) struct NamespaceForkArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct PaginationArgs {
-    /// Stop after this many items across all fetched pages.
+    /// Return at most this many items.
     #[arg(long)]
     pub limit: Option<u32>,
-    /// Request this many items per server page.
+    /// Request this many items per page.
     #[arg(long)]
     pub page_size: Option<u32>,
-    /// Follow pages to exhaustion.
+    /// Continue until the limit is reached or no pages remain.
     #[arg(long)]
     pub all: bool,
-    /// Stream one JSON item per line and follow pages to exhaustion.
+    /// Write one JSON item per line until the limit is reached or no pages remain.
     #[arg(long)]
     pub jsonl: bool,
 }
@@ -635,7 +635,7 @@ pub(crate) struct FilesystemLsArgs {
     pub path: Option<String>,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume cursor from a previous listing.
+    /// Resume from a cursor returned by a previous listing.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
 }
@@ -780,7 +780,7 @@ pub(crate) struct FilesystemGrepArgs {
     pub ignore_case: bool,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume cursor from a previous search page.
+    /// Resume from a cursor returned by a previous search.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
     /// Permit a capped exhaustive scan for patterns with no literal bytes.
@@ -1116,8 +1116,7 @@ pub(crate) struct AdminIndexGcArgs {
     /// Omit to loop bounded passes through completion.
     #[arg(long)]
     pub max_objects: Option<u64>,
-    /// Resume token from a previous pass's next_cursor; only valid for the
-    /// same namespace.
+    /// Resume from `next_cursor` returned by a previous pass.
     #[arg(long, value_name = "TOKEN", value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
 }
@@ -1147,7 +1146,7 @@ pub(crate) struct AdminCheckpointListArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub pagination: PaginationArgs,
-    /// Resume cursor from a previous page.
+    /// Resume from a cursor returned by a previous listing.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
 }
@@ -1535,12 +1534,14 @@ mod tests {
         for arguments in cases {
             let cli = Cli::try_parse_from(*arguments).expect("arguments parse");
             let error = validate_cli(&cli).expect_err("unbounded JSON must fail");
-            assert!(error.to_string().contains("use '--jsonl' or add '--limit'"));
+            assert!(error
+                .to_string()
+                .contains("use '--jsonl' to stream without a limit"));
         }
     }
 
     #[test]
-    fn grep_drops_max_matches_and_changes_does_not_gain_an_opaque_cursor() {
+    fn max_matches_is_removed_and_changes_uses_after_to_resume() {
         assert!(Cli::try_parse_from(["loonfs", "grep", "x", "--max-matches", "1"]).is_err());
         assert!(Cli::try_parse_from(["loonfs", "changes", "--cursor", "opaque"]).is_err());
     }

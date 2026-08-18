@@ -1,9 +1,9 @@
-//! Shared command-level pagination decisions.
+//! Pagination shared by CLI listing commands.
 
 use crate::args::PaginationArgs;
 use std::io::{self, Write};
 
-/// Tracks a command-wide item cap independently from transport page size.
+/// Tracks the total result limit and the size of each request.
 pub(super) struct PagePlan {
     limit: Option<u32>,
     page_size: Option<u32>,
@@ -11,8 +11,7 @@ pub(super) struct PagePlan {
     emitted: u32,
 }
 
-/// Writes serializable page items one per line and flushes before another
-/// page is fetched.
+/// Writes one JSON item per line and flushes the page before the next request.
 pub(super) fn write_jsonl_page<T: serde::Serialize>(
     stdout: &mut impl Write,
     items: &[T],
@@ -34,8 +33,9 @@ impl PagePlan {
         }
     }
 
-    /// Page size for the next request. A command-wide limit is split into
-    /// ordinary server pages and never sent as one oversized page request.
+    /// Returns the number of items to request on the next page.
+    ///
+    /// A total limit larger than one page is split across several requests.
     pub(super) fn request_size(&self) -> Option<u32> {
         self.limit.map_or(self.page_size, |limit| {
             let remaining = limit.saturating_sub(self.emitted);

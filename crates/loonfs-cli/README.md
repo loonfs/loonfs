@@ -166,14 +166,18 @@ Namespace management
   loonfs current
     Show the selected profile and namespace
 
+Pagination
+  ls, grep, revisions, trash, changes, and admin checkpoint list return one
+  page by default. --limit sets the maximum number of results, --page-size
+  controls each request, and --cursor resumes a previous result. --all keeps
+  fetching until no pages remain or the limit is reached. --jsonl does the
+  same while writing one result per line. changes uses --after instead of
+  --cursor.
+
 Reading
   loonfs ls [path] [--limit <n>] [--page-size <n>] [--cursor <cursor>]
                    [--all] [--jsonl]
-    List the entries of a directory, `/` when the path is omitted. Without
-    --limit, --all, or --jsonl, one server page is printed. --limit caps the
-    whole command, --page-size sizes each server request, --cursor resumes a
-    prior page, --all follows to exhaustion, and --jsonl follows while
-    streaming one entry per line
+    List the entries of a directory, or `/` when the path is omitted
 
   loonfs stat <path>
     Describe one path: kind, size, revision, content digest, and the
@@ -194,13 +198,10 @@ Reading
                         [--page-size <n>] [--cursor <cursor>] [--all] [--jsonl]
                         [--allow-scan] [--allow-stale]
     Search file content through the gram index with a pattern in the Rust
-    regex dialect, and print every match; -i ignores ASCII case,
-    --path-prefix narrows to a subtree, --limit caps total matches,
-    --page-size sizes each request, --cursor resumes, --all follows every
-    page, and --jsonl follows while streaming one match per line;
-    --allow-scan permits a capped scan for a pattern with no literal bytes,
-    and --allow-stale accepts indexed-only results when the unindexed tail
-    exceeds the scan budget
+    regex dialect. -i ignores ASCII case, --path-prefix limits the search to
+    a subtree, --allow-scan permits a bounded scan for patterns with no
+    literal bytes, and --allow-stale permits results that omit an unindexed
+    tail that is too large to scan
 
 Writing
   Every writing command accepts --actor-kind <user|service|system> together
@@ -250,9 +251,7 @@ Writing
 History and recovery
   loonfs revisions <path> [--limit <n>] [--page-size <n>] [--cursor <cursor>]
                           [--all] [--jsonl]
-    List a file's revision history newest first; one page by default,
-    --limit caps total revisions, --page-size sizes requests, --cursor
-    resumes, --all follows, and --jsonl streams revisions across pages
+    List a file's revision history, newest first
 
   loonfs restore <path> --revision <n>
                  [--actor-kind <kind> --actor-id <id>]
@@ -260,9 +259,8 @@ History and recovery
 
   loonfs trash [--limit <n>] [--page-size <n>] [--cursor <cursor>]
                [--all] [--jsonl]
-    List recoverable deletions: what was deleted, when, and the exact
-    `loonfs undelete` command that recovers each one; one page by default,
-    with the shared total, page-size, resume, follow, and JSONL flags
+    List recoverable deletions, including when each item was deleted and the
+    exact `loonfs undelete` command that restores it
 
   loonfs undelete [<path>] --inode <id> --deletion-seq <seq>
                   [--actor-kind <kind> --actor-id <id>]
@@ -275,10 +273,8 @@ History and recovery
 
   loonfs changes [--after <seq>] [--limit <n>] [--page-size <n>]
                  [--all] [--jsonl]
-    List committed changes after a sequence number, from the start of
-    retained history when --after is omitted; --after is the sequence resume
-    token, one page is the default, and the other pagination flags retain
-    their shared total, page-size, follow, and streaming meanings
+    List committed changes after a sequence number. When --after is omitted,
+    start at the beginning of retained history
 
 Inspection and diagnostics
   loonfs capabilities [--profile <name>]
@@ -332,11 +328,8 @@ Maintenance
 
   loonfs admin checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]
-    List active checkpoints in ID order. By default, the command prints one
-    page. --limit caps the total results, --page-size controls the size of each
-    request, --cursor resumes a previous listing, --all follows every page,
-    and --jsonl streams checkpoints one per line. Expired checkpoints remain
-    visible until garbage collection removes them.
+    List active checkpoints in ID order. Expired checkpoints remain visible
+    until garbage collection removes them.
 
   loonfs admin checkpoint release <checkpoint-id>
     Release a checkpoint pin
@@ -353,9 +346,9 @@ Maintenance
     Disable the gram content index
 
   loonfs admin index gc [--max-objects <n>] [--cursor <token>]
-    Remove unreferenced gram-index objects. By default, the command runs
-    bounded passes until it finishes. --max-objects runs one pass with that
-    read limit, and --cursor resumes a previous pass.
+    Remove unreferenced gram-index objects. Without --max-objects, continue
+    until collection is complete. --max-objects limits one pass to that many
+    reads, and --cursor resumes a previous pass.
 
 Profile create options
   Used by:

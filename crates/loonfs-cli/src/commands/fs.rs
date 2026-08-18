@@ -147,8 +147,8 @@ pub(crate) async fn run_filesystem_ls(
             },
         )
         .await?;
-        // The drift note is operational and goes to standard error in every
-        // streaming mode.
+        // Write head-drift warnings to stderr so streamed stdout contains
+        // only entries.
         if let Some(drift) = followed.head_drift {
             crate::render::write_listing_drift_warning(&drift);
         }
