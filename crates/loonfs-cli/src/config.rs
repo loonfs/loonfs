@@ -258,10 +258,7 @@ fn validate_actor_and_default_namespace(
 /// Adds the profile name to a store validation error.
 fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError {
     match error {
-        // Profiles store credentials directly. Only profile creation and
-        // updates read credentials from the environment.
-        StoreConfigError::MissingField { field }
-        | StoreConfigError::MissingCredential { field, .. } => {
+        StoreConfigError::MissingField { field } => {
             CliError::invalid_config(format!("missing `{profile_name}.{field}`"))
         }
         StoreConfigError::InvalidField { field, reason } => {
@@ -603,9 +600,8 @@ fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> 
     Ok(())
 }
 
-/// Key names whose values never leave the file unmasked, whatever shape the
-/// config is in. Mirrors the typed redaction: the `SecretString` store
-/// fields plus the remote profile's `auth_token`.
+/// Secret fields that are always redacted, even when the config cannot be
+/// decoded into the current typed format.
 const SECRET_CONFIG_KEYS: &[&str] = &[
     "access_key",
     "access_key_id",
@@ -690,6 +686,9 @@ mode = "embedded"
 kind = "aws-s3"
 bucket = "bucket"
 region = "us-east-1"
+
+[profiles.cloud.store.credentials]
+kind = "static"
 access_key_id = "debug-access-key-id"
 secret_access_key = "debug-secret-access-key"
 session_token = "debug-session-token"
@@ -726,6 +725,9 @@ kind = "cloudflare-r2"
 bucket = "bucket"
 account_id = "account"
 endpoint_url = "https://account.r2.cloudflarestorage.com"
+
+[profiles.cloud.store.credentials]
+kind = "static"
 access_key_id = "plain-access-key-id"
 secret_access_key = "plain-secret-access-key"
 
@@ -803,6 +805,9 @@ mode = "embedded"
 kind = "aws-s3"
 bucket = " "
 region = "us-east-1"
+
+[profiles.cloud.store.credentials]
+kind = "static"
 access_key_id = "access"
 secret_access_key = "secret"
 "#,
@@ -839,6 +844,70 @@ secret_access_key = "secret"
             examples >= 2,
             "expected at least 2 CLI example configs, found {examples}"
         );
+    }
+
+    /// Loading a config preserves its credential source. Environment
+    /// credentials are read only when the object store is constructed.
+    #[test]
+    fn the_loader_preserves_the_serialized_credential_source() {
+        let store = loonfs_objectstore::StoreConfig::AwsS3 {
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            credentials: loonfs_objectstore::AwsS3Credentials::Ambient {},
+            key_prefix: None,
+            force_path_style: false,
+        };
+        let serialized = toml::to_string_pretty(&store).expect("serialize shared store");
+        let qualified = format!(
+            "[profiles.parity.store]\n{}",
+            serialized.replace("[credentials]", "[profiles.parity.store.credentials]")
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli_path = dir.path().join("cli.toml");
+        std::fs::write(
+            &cli_path,
+            format!(
+                "config_version = 1\ndefault_profile = \"parity\"\n\n\
+                 [profiles.parity]\nmode = \"embedded\"\n\n{qualified}"
+            ),
+        )
+        .expect("write cli config");
+
+        let access_key = EnvGuard::set("AWS_ACCESS_KEY_ID", "parity-access");
+        let secret_key = EnvGuard::set("AWS_SECRET_ACCESS_KEY", "parity-secret");
+        let cli = super::load_config(&cli_path).expect("load cli config");
+        drop((access_key, secret_key));
+        let ProfileConfig::Embedded {
+            store: cli_store, ..
+        } = cli.profiles.get("parity").expect("parity profile")
+        else {
+            panic!("expected embedded profile")
+        };
+        assert_eq!(cli_store.credentials_kind(), Some("ambient"));
+    }
+
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
     }
 
     #[test]
@@ -1020,10 +1089,19 @@ config_version = 1
 default_profile = "broken"
 
 [profiles.broken]
-mode = "remote"
-server_url = "https://loonfs.example.com"
-auth_token = "degraded-auth-token"
+mode = "embedded"
 unknown_knob = true
+
+[profiles.broken.store]
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+
+[profiles.broken.store.credentials]
+kind = "static"
+access_key_id = "degraded-access-key-id"
+secret_access_key = "degraded-secret-access-key"
+session_token = "degraded-session-token"
 
 [profiles.ok]
 mode = "embedded"
@@ -1044,7 +1122,12 @@ root = "/tmp/store"
 
         let redacted = toml::to_string_pretty(&super::redacted_config_table(&table))
             .expect("render redacted table");
-        assert!(!redacted.contains("degraded-auth-token"), "{redacted}");
+        assert!(!redacted.contains("degraded-access-key-id"), "{redacted}");
+        assert!(
+            !redacted.contains("degraded-secret-access-key"),
+            "{redacted}"
+        );
+        assert!(!redacted.contains("degraded-session-token"), "{redacted}");
         assert!(redacted.contains("<redacted>"), "{redacted}");
         assert!(redacted.contains("unknown_knob"), "{redacted}");
 
@@ -1052,7 +1135,7 @@ root = "/tmp/store"
         // strict decoder accepts what remains.
         let removed =
             crate::profiles::delete_profile_in_table(&mut table, "broken").expect("delete broken");
-        assert_eq!(removed.mode, "remote");
+        assert_eq!(removed.mode, "embedded");
         crate::profiles::make_default_profile_in_table(&mut table, "ok").expect("switch default");
         assert!(
             crate::profiles::make_default_profile_in_table(&mut table, "gone").is_err(),

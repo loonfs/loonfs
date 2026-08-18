@@ -169,6 +169,45 @@ fn check_config_accepts_a_valid_config_and_names_what_it_validated() {
 }
 
 #[test]
+fn check_config_accepts_the_explicit_credential_source_shape() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("loonfs-server.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+bind = "127.0.0.1:9400"
+auth_token = "check-config-token"
+content_token_secret = "check-config-secret"
+writer_id = "check-config-writer"
+
+[store]
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+
+[store.credentials]
+kind = "static"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+    )
+    .expect("write server config");
+
+    let output = run_server(&config_path, &["--check-config"]);
+    assert!(
+        output.status.success(),
+        "expected success: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .expect("utf-8 stdout")
+            .trim(),
+        "config ok: bind 127.0.0.1:9400, store aws-s3"
+    );
+}
+
+#[test]
 fn check_config_reports_an_invalid_config_and_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("loonfs-server.toml");

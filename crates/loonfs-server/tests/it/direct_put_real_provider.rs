@@ -16,7 +16,9 @@ use loonfs_api::{
     DestinationBehavior, FilesystemOperation, NamespaceId,
 };
 use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{
+    AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
+};
 use loonfs_server::{ServerConfig, StoreConfig};
 use loonfs_test_support::http::raw_agent;
 use std::fmt;
@@ -105,9 +107,11 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
                 bucket: config.bucket,
                 region: config.region,
                 endpoint_url: config.endpoint,
-                access_key_id: config.access_key_id.into(),
-                secret_access_key: config.secret_access_key.into(),
-                session_token: config.session_token.map(Into::into),
+                credentials: AwsS3Credentials::Static {
+                    access_key_id: config.access_key_id.into(),
+                    secret_access_key: config.secret_access_key.into(),
+                    session_token: config.session_token.map(Into::into),
+                },
                 key_prefix: Some(config.prefix),
                 force_path_style: false,
             },
@@ -131,8 +135,10 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
                 bucket: config.bucket,
                 account_id: config.account_id,
                 endpoint_url: config.endpoint,
-                access_key_id: config.access_key_id.into(),
-                secret_access_key: config.secret_access_key.into(),
+                credentials: CloudflareR2Credentials::Static {
+                    access_key_id: config.access_key_id.into(),
+                    secret_access_key: config.secret_access_key.into(),
+                },
                 key_prefix: Some(config.prefix),
             },
             AUTH_TOKEN,
@@ -356,15 +362,11 @@ async fn assert_wrong_direct_put_bytes_rejected(
     );
 }
 
-/// Both signed headers are load-bearing, and neither can be dropped or
-/// rewritten in flight.
+/// Verifies that direct uploads reject missing or changed signed headers.
 ///
-/// The provider recomputes the signature over what it received, so a request
-/// missing a signed header — or carrying a different value for one — is not
-/// the request that was signed. Omission and tampering are checked
-/// separately: a provider could plausibly reject the first as malformed
-/// while quietly accepting the second, and only the second is what an
-/// attacker holding a capability would actually try.
+/// The provider includes these headers when it verifies the request
+/// signature. Test omission and modification separately because providers
+/// may validate them through different paths.
 async fn assert_direct_put_requires_its_signed_headers(
     client: &Client,
     namespace_id: &NamespaceId,
@@ -615,7 +617,9 @@ impl GcpGcsDirectPutConfig {
     fn store(self) -> StoreConfig {
         StoreConfig::GcpGcs {
             bucket: self.bucket,
-            service_account_key_path: self.service_account_key_path,
+            credentials: GcpGcsCredentials::ServiceAccountFile {
+                path: self.service_account_key_path,
+            },
             key_prefix: Some(self.prefix),
         }
     }
@@ -978,9 +982,11 @@ async fn aws_s3_direct_multipart_real_provider_round_trip() {
             bucket: config.bucket,
             region: config.region,
             endpoint_url: config.endpoint,
-            access_key_id: config.access_key_id.into(),
-            secret_access_key: config.secret_access_key.into(),
-            session_token: config.session_token.map(Into::into),
+            credentials: AwsS3Credentials::Static {
+                access_key_id: config.access_key_id.into(),
+                secret_access_key: config.secret_access_key.into(),
+                session_token: config.session_token.map(Into::into),
+            },
             key_prefix: Some(config.prefix),
             force_path_style: false,
         },
@@ -1001,8 +1007,10 @@ async fn cloudflare_r2_direct_multipart_real_provider_round_trip() {
             bucket: config.bucket,
             account_id: config.account_id,
             endpoint_url: config.endpoint,
-            access_key_id: config.access_key_id.into(),
-            secret_access_key: config.secret_access_key.into(),
+            credentials: CloudflareR2Credentials::Static {
+                access_key_id: config.access_key_id.into(),
+                secret_access_key: config.secret_access_key.into(),
+            },
             key_prefix: Some(config.prefix),
         },
         AUTH_TOKEN,

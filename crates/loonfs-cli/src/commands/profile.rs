@@ -4,7 +4,7 @@ use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::profile_config::{
     apply_update_flags, apply_update_interactive, build_profile_from_create_spec,
-    create_profile_spec_from_create, has_update_flags, AmbientCredentials,
+    create_profile_spec_from_create, has_update_flags,
 };
 use crate::args::{
     CommandKind, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior,
@@ -70,11 +70,8 @@ fn run_profile_create(
 ) -> Result<CommandOutput, CommandFailure> {
     let name = args.name.clone();
     let result = (|| -> Result<(String, ProfileConfig), CliError> {
-        let profile = build_profile_from_create_spec(
-            create_profile_spec_from_create(args),
-            &AmbientCredentials::from_env(),
-            runtime,
-        )?;
+        let profile =
+            build_profile_from_create_spec(create_profile_spec_from_create(args), runtime)?;
         mutate_config(config_path, |config| add_profile(config, &name, profile))
     })()
     .map_err(|error| fail(kind, Some(name.clone()), None, error))?;

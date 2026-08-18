@@ -622,7 +622,7 @@ fn profile_update_with_only_service_account_key_path_applies() {
     let show = harness.run(&["--json", "profile", "show", "gcp"]);
     assert_success(&show);
     assert_eq!(
-        json_data(&show)["store"]["service_account_key_path"],
+        json_data(&show)["store"]["credentials"]["path"],
         "/new/service-account.json"
     );
 }
@@ -752,7 +752,7 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
     );
     assert_success(&local_fs);
 
-    // The same environment still fills the providers that use it.
+    // Creating an ambient profile must not copy these values into the config.
     let s3 = harness.run_with_env(
         ambient,
         &[
@@ -771,7 +771,12 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
         ],
     );
     assert_success(&s3);
-    assert_eq!(json_data(&s3)["store"]["access_key_id"], "<redacted>");
+    assert_eq!(json_data(&s3)["store"]["credentials"]["kind"], "ambient");
+    let persisted = fs::read_to_string(&harness.config_path).expect("read config");
+    assert!(!persisted.contains("ambient-access"), "{persisted}");
+    assert!(!persisted.contains("ambient-secret"), "{persisted}");
+    assert!(!persisted.contains("ambient-session"), "{persisted}");
+    assert!(!persisted.contains("ambient-token"), "{persisted}");
 
     // And a typed flag that does not apply is still rejected.
     let typed = harness.run_with_env(
@@ -800,6 +805,113 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
         .as_str()
         .expect("json string")
         .contains("`--access-key-id` does not apply"));
+}
+
+#[test]
+fn remote_profile_creation_does_not_capture_the_environment_token() {
+    let harness = Harness::new();
+    let create = harness.run_with_env(
+        &[("LOONFS_AUTH_TOKEN", "ambient-auth-token")],
+        &[
+            "--json",
+            "profile",
+            "create",
+            "remote",
+            "--mode",
+            "remote",
+            "--server-url",
+            "https://loonfs.example.com",
+        ],
+    );
+    assert_success(&create);
+    assert!(json_data(&create)["auth_token"].is_null());
+
+    let persisted = fs::read_to_string(&harness.config_path).expect("read config");
+    assert!(!persisted.contains("ambient-auth-token"), "{persisted}");
+    assert!(!persisted.contains("auth_token"), "{persisted}");
+}
+
+#[test]
+fn profile_update_switches_credential_source_atomically() {
+    let harness = Harness::new();
+    let create = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "s3",
+        "--mode",
+        "embedded",
+        "--store-kind",
+        "aws-s3",
+        "--bucket",
+        "bucket",
+        "--region",
+        "us-east-1",
+    ]);
+    assert_success(&create);
+    let before = fs::read_to_string(&harness.config_path).expect("read ambient config");
+
+    let failed = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "s3",
+        "--credential-source",
+        "static",
+        "--access-key-id",
+        "partial-access",
+    ]);
+    assert_failure(&failed);
+    assert!(json_error(&failed)["message"]
+        .as_str()
+        .expect("message")
+        .contains("secret-access-key"));
+    assert_eq!(
+        fs::read_to_string(&harness.config_path).expect("read unchanged config"),
+        before
+    );
+
+    let switched = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "s3",
+        "--credential-source",
+        "static",
+        "--access-key-id",
+        "static-access",
+        "--secret-access-key",
+        "static-secret",
+        "--session-token",
+        "static-session",
+    ]);
+    assert_success(&switched);
+    let credentials = &json_data(&switched)["store"]["credentials"];
+    assert_eq!(credentials["kind"], "static");
+    assert_eq!(credentials["access_key_id"], "<redacted>");
+    assert_eq!(credentials["secret_access_key"], "<redacted>");
+    assert_eq!(credentials["session_token"], "<redacted>");
+
+    let ambient = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "s3",
+        "--credential-source",
+        "ambient",
+    ]);
+    assert_success(&ambient);
+    assert_eq!(
+        json_data(&ambient)["store"]["credentials"]["kind"],
+        "ambient"
+    );
+    let persisted = fs::read_to_string(&harness.config_path).expect("read ambient config");
+    assert!(!persisted.contains("static-access"), "{persisted}");
+    assert!(!persisted.contains("static-secret"), "{persisted}");
+    assert!(!persisted.contains("static-session"), "{persisted}");
 }
 
 #[test]
