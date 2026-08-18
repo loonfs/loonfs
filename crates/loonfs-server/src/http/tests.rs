@@ -76,6 +76,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_tokens",
     "created_by",
     "created_at_ms",
+    "current_manifest_id",
     "cursor_inode_id",
     "degraded_retention",
     "degraded_roots",
@@ -151,6 +152,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "ttl_ms",
     "unrecognized_key",
     "update_attributes",
+    "wal_tail_segments",
     "updated_at_ms",
     "updated_by",
     "upload_session_undecided",
@@ -467,6 +469,60 @@ async fn app_validates_directly_built_configs() {
         Err(other) => panic!("expected invalid field error, got {other:?}"),
         Ok(_) => panic!("app must reject a zero upload bound"),
     }
+}
+
+#[tokio::test]
+async fn admin_namespace_diagnostics_route_answers_storage_fields() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let (router, state) = app_with_store_and_state(
+        test_config(temp_dir.path(), "namespace-diagnostics-route-writer"),
+        store,
+    )
+    .await
+    .expect("build app");
+    let namespace_id = namespace_id("diagnostics");
+    state
+        .writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    state
+        .writer
+        .put_file_bytes(
+            &namespace_id,
+            "/note.txt",
+            b"diagnostic tail",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("publish one WAL segment");
+
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v0/admin/namespaces/diagnostics/diagnostics")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .expect("diagnostics request"),
+        )
+        .await
+        .expect("diagnostics response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("diagnostics body");
+    let diagnostics: loonfs_api::NamespaceDiagnostics =
+        serde_json::from_slice(&body).expect("namespace diagnostics response");
+    assert_eq!(diagnostics.namespace_id, namespace_id);
+    assert_eq!(diagnostics.head_seq, ChangeSeq(1));
+    assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(diagnostics.current_manifest_id, None);
+    assert_eq!(diagnostics.wal_tail_segments, 1);
+
+    state.writer.shutdown().await.expect("shutdown writer");
 }
 
 #[tokio::test]

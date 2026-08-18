@@ -4,6 +4,19 @@ use super::*;
 use crate::transport::append_optional_pagination_query;
 
 impl Client {
+    /// Returns namespace core state and storage-engine diagnostics (admin plane).
+    pub async fn namespace_diagnostics(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceDiagnostics> {
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace_id}/diagnostics",
+            self.base_url
+        );
+        self.request_json::<(), NamespaceDiagnostics>(self.get(&url), None)
+            .await
+    }
+
     /// Creates a named, user-owned checkpoint pinning the namespace's
     /// current view (admin plane). Every call creates a new checkpoint; the
     /// name is a label, not a key. This is a maintenance operation, not a

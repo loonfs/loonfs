@@ -71,20 +71,24 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .await
             .expect("create namespace");
 
-        writer
-            .reader()
+        let reader = writer.reader();
+        reader
             .stat_path(&namespace_id, "/", Default::default())
             .await
             .expect("stat namespace root");
+        reader
+            .namespace_status(&namespace_id)
+            .await
+            .expect("read namespace state");
 
         FsAdmin::builder_with_store(writer.object_store())
             .actor_id("operation-span-admin")
             .build()
             .await
             .expect("build admin")
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
-            .expect("read namespace status");
+            .expect("read namespace diagnostics");
     });
 
     let log = String::from_utf8(captured.lock().expect("capture lock").clone())
@@ -93,6 +97,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
         "loonfs.create_namespace",
         "loonfs.stat",
         "loonfs.namespace_status",
+        "loonfs.namespace_diagnostics",
     ] {
         let span = log
             .lines()

@@ -39,7 +39,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::NamespaceStatusResponse, CoreError> {
+) -> Result<loonfs_api::Namespace, CoreError> {
     namespace_engine(store, source_namespace_id, context)
         .fork_namespace(new_namespace_id)
         .await
@@ -107,8 +107,6 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
         .expect("bootstrap namespace");
     assert_eq!(created.namespace_id, namespace_id);
     assert_eq!(created.head_seq, ChangeSeq(0));
-    assert_eq!(created.current_manifest_id, None);
-    assert_eq!(created.wal_tail_segments, 0);
     assert_eq!(created.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
@@ -129,7 +127,7 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
         .await
         .expect("a fresh namespace serves reads");
     assert_eq!(root_entry.inode_kind(), loonfs_api::InodeKind::Directory);
-    let status = loonfs_core::cache::load_namespace_head_summary(&store, &namespace_id)
+    let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status");
     assert_eq!(status.current_manifest_id, None);
@@ -183,7 +181,7 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
             .bytes,
         b"hello"
     );
-    let status = loonfs_core::cache::load_namespace_head_summary(&store, &namespace_id)
+    let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status after flush");
     assert_eq!(status.current_manifest_id, Some(ManifestId(1)));
@@ -351,8 +349,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .expect("fork namespace");
     assert_eq!(forked.namespace_id, clone_namespace_id);
     assert_eq!(forked.head_seq, ChangeSeq(1));
-    assert_eq!(forked.current_manifest_id, None);
-    assert_eq!(forked.wal_tail_segments, 0);
     assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
         store.count(OperationClass::Read),

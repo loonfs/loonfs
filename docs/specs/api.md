@@ -24,8 +24,8 @@ within a plane is expressed as **named features** (section 2).
 
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
-| `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
-| `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
+| `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace state by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
+| `admin/v0` | Maintenance plane | Read namespace storage diagnostics; create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
 | `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace_id}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized active grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
@@ -688,7 +688,7 @@ A representative v0 binding is shown below.
 | --- | --- |
 | Read deployment capabilities | `GET /v0/capabilities` |
 | Create a namespace | `POST /v0/namespaces` |
-| Read one namespace's status | `GET /v0/namespaces/{ns}` |
+| Read one namespace's core state | `GET /v0/namespaces/{ns}` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
 | Stat an inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
@@ -710,6 +710,7 @@ A representative v0 binding is shown below.
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
+| Read namespace storage diagnostics | `GET /v0/admin/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; every call mints a new user-owned record under a new id, and that record is a GC root until it is released) |
 | List checkpoints | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` (one bounded page of active records in ascending checkpoint-id order, with the id the release route takes; see below) |
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
@@ -1300,15 +1301,13 @@ or separate display names. Representative request:
 }
 ```
 
-The response contains the new namespace's initial status. A new namespace
-starts at sequence 0 with a retention floor of 0 and no WAL tail. It does not
-have a manifest yet, so the optional manifest field is omitted:
+The response contains the new namespace's initial core state. A new namespace
+starts at sequence 0 with a retention floor of 0:
 
 ```json
 {
   "namespace_id": "demo",
   "head_seq": 0,
-  "wal_tail_segments": 0,
   "retention_floor_seq": 0
 }
 ```
@@ -1346,7 +1345,7 @@ The capability document of section 2.1.
 
 ### 6.2 `GET /v0/namespaces/{ns}`
 
-The namespace status read answers "does this namespace exist, and where is
+The namespace read answers "does this namespace exist, and where is
 its head?" without listing every namespace. Existence is exactly the head
 object: a namespace with no head is `404` with code `namespace_not_found`,
 and a namespace whose head records the terminal deleted state is `410` with
@@ -1356,9 +1355,36 @@ code `namespace_deleted`.
 {
   "namespace_id": "demo",
   "head_seq": 418,
-  "current_manifest_id": 410,
-  "wal_tail_segments": 3,
   "retention_floor_seq": 120
+}
+```
+
+The `Namespace` object has exactly these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `namespace_id` | Durable namespace id. |
+| `head_seq` | Current visible namespace sequence. |
+| `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
+
+The admin-plane `GET /v0/admin/namespaces/{ns}/diagnostics` operation returns
+`NamespaceDiagnostics`:
+
+| Field | Meaning |
+| --- | --- |
+| `namespace_id` | Durable namespace id. |
+| `head_seq` | Current visible namespace sequence. |
+| `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
+| `current_manifest_id` | Current manifest pointer recorded by the head; omitted before the namespace owns a manifest. |
+| `wal_tail_segments` | Number of visible WAL segments after the current manifest. |
+
+```json
+{
+  "namespace_id": "demo",
+  "head_seq": 418,
+  "retention_floor_seq": 120,
+  "current_manifest_id": 410,
+  "wal_tail_segments": 3
 }
 ```
 
@@ -2304,7 +2330,6 @@ Representative response:
 {
   "namespace_id": "demo-branch",
   "head_seq": 418,
-  "wal_tail_segments": 0,
   "retention_floor_seq": 418
 }
 ```
@@ -2317,10 +2342,9 @@ target may still read them, then installs the target namespace's head in one
 conditional write, then checks that the source checkpoint still holds. That
 head carries the fork provenance for the target's whole life.
 
-The response contains the new namespace's initial status. Its head sequence
-and retention floor are set to the source namespace's sequence at the fork
-point, and its WAL tail starts empty. The response omits the manifest field
-until the new namespace publishes its own manifest.
+The response contains the new namespace's initial core state. Its head
+sequence and retention floor are set to the source namespace's sequence at
+the fork point.
 
 If the target ID already exists or has been deleted, the server returns the
 same `namespace_exists` or `namespace_deleted` error as namespace creation.

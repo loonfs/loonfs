@@ -33,7 +33,7 @@ pub use operations::{
     FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
     GcRequest, GcResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
     MaintenanceStepRequest, MaintenanceStepResponse, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, NamespaceStatusResponse, ReleaseCheckpointResponse,
+    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, ReleaseCheckpointResponse,
     ReorganizeStepOutcome, RetainedCandidates, RetainedReason, StoreProbeCheckOutcome,
     StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse, WalFlushStepOutcome,
 };

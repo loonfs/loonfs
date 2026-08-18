@@ -54,14 +54,8 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             format!("profile: {profile}\nnamespace: {namespace}")
         }
         CommandData::NamespaceStatus(namespace) => format!(
-            "{} @ seq {} (manifest {}, WAL tail {} segments, retention floor {})",
-            namespace.namespace_id,
-            namespace.head_seq.0,
-            namespace
-                .current_manifest_id
-                .map_or_else(|| "none".to_owned(), |manifest_id| manifest_id.to_string()),
-            namespace.wal_tail_segments,
-            namespace.retention_floor_seq.0
+            "{} @ seq {} (retention floor {})",
+            namespace.namespace_id, namespace.head_seq.0, namespace.retention_floor_seq.0
         ),
         CommandData::NamespaceDeleted(response) => format!(
             "deleted {} (head_seq {})",

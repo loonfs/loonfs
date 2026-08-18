@@ -17,7 +17,7 @@ use loonfs_api::{
     CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, ReleaseCheckpointResponse, RevisionNo, UploadId,
+    Namespace, NamespaceId, ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use loonfs_client::{
     CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions, MoveOptions,
@@ -57,7 +57,7 @@ impl ResolvedTarget {
     pub(crate) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse, BackendError> {
+    ) -> Result<Namespace, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.create_namespace(namespace_id).await,
             Self::Remote(target) => Ok(target.client.create_namespace(namespace_id).await?),
@@ -90,7 +90,7 @@ impl ResolvedTarget {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse, BackendError> {
+    ) -> Result<Namespace, BackendError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -109,7 +109,7 @@ impl ResolvedTarget {
     pub(crate) async fn namespace_status(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse, BackendError> {
+    ) -> Result<Namespace, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.namespace_status(namespace_id).await,
             Self::Remote(target) => Ok(target.client.namespace_status(namespace_id).await?),

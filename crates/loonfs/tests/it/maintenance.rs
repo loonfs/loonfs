@@ -26,7 +26,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[test]
-fn namespace_status_reports_wal_tail_segments() {
+fn namespace_diagnostics_reports_wal_tail_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(CountingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -38,7 +38,7 @@ fn namespace_status_reports_wal_tail_segments() {
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
@@ -58,7 +58,7 @@ fn namespace_status_reports_wal_tail_segments() {
 
     store.reset();
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
     assert_eq!(status.current_manifest_id, None);
@@ -68,7 +68,7 @@ fn namespace_status_reports_wal_tail_segments() {
 }
 
 #[test]
-fn namespace_status_counts_wal_tail_without_reading_segments() {
+fn namespace_diagnostics_counts_wal_tail_without_reading_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     // Count only WAL segment reads: the head's chain pointers must be
@@ -93,7 +93,7 @@ fn namespace_status_counts_wal_tail_without_reading_segments() {
 
     store.reset();
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status with populated tail");
     assert_eq!(status.wal_tail_segments, 3);
     assert_eq!(store.count(OperationClass::Read), 0);
@@ -148,7 +148,7 @@ fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
     truncate_recent_segments(&store, &namespace_id, LEGACY_RECENT_SEGMENTS);
 
     let error = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect_err("a head that does not describe its tail cannot be counted");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(
@@ -168,7 +168,7 @@ fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
     );
 
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after the flush");
     assert_eq!(status.wal_tail_segments, 0);
 
@@ -181,19 +181,19 @@ fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
     )
     .expect("put file after the flush");
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after the flush");
     assert_eq!(status.wal_tail_segments, 1);
 }
 
 #[test]
-fn namespace_status_and_step_reject_missing_namespace() {
+fn namespace_diagnostics_and_step_reject_missing_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "missing-status-test");
     let namespace_id = namespace_id("demo");
 
     assert_core_error_kind(
-        fs.namespace_status_blocking(&namespace_id),
+        fs.namespace_diagnostics_blocking(&namespace_id),
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
@@ -205,7 +205,7 @@ fn namespace_status_and_step_reject_missing_namespace() {
 /// A namespace whose head is gone is a namespace that does not exist:
 /// there is no third answer between present and absent.
 #[test]
-fn namespace_status_and_step_reject_a_namespace_whose_head_is_gone() {
+fn namespace_diagnostics_and_step_reject_a_namespace_whose_head_is_gone() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
@@ -217,7 +217,7 @@ fn namespace_status_and_step_reject_a_namespace_whose_head_is_gone() {
     block_on(raw_store.delete(&wal_head(&namespace_id))).expect("delete head");
 
     assert_core_error_kind(
-        fs.namespace_status_blocking(&namespace_id),
+        fs.namespace_diagnostics_blocking(&namespace_id),
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
@@ -278,7 +278,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     );
 
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after wal flush");
     assert_eq!(status.current_manifest_id, Some(ManifestId(1)));
     assert_eq!(status.wal_tail_segments, 0);
@@ -325,7 +325,7 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
     );
     assert_eq!(step.retention, None);
     assert_eq!(
-        fs.namespace_status_blocking(&namespace_id)
+        fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status")
             .retention_floor_seq,
         ChangeSeq(0)
@@ -486,7 +486,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         "advancing an already-advanced floor is idempotent through either name"
     );
     assert_eq!(
-        fs.namespace_status_blocking(&namespace_id)
+        fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status")
             .retention_floor_seq,
         advanced.retention_floor_seq
@@ -529,7 +529,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     );
 
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after l0 wal flush");
     assert_eq!(status.current_manifest_id, Some(ManifestId(2)));
     assert_eq!(status.wal_tail_segments, 0);
@@ -595,7 +595,7 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
             .expect("flush the tail");
     }
     let manifest_before = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status before the call")
         .current_manifest_id;
 
@@ -607,7 +607,7 @@ fn a_standalone_admin_drives_metadata_compaction_itself() {
         MetadataCompactionOutcome::BoundedMergePublished
     );
     assert_ne!(
-        fs.namespace_status_blocking(&namespace_id)
+        fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status after the call")
             .current_manifest_id,
         manifest_before,
@@ -645,7 +645,7 @@ fn maintenance_step_counts_segments_not_commits() {
     assert!(first_batch.iter().all(Result::is_ok));
 
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after first batch");
     assert_eq!(status.head_seq, ChangeSeq(2));
     assert_eq!(status.wal_tail_segments, 1);
@@ -701,7 +701,7 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
         }
     );
     let status = fs
-        .namespace_status_blocking(&namespace_id)
+        .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after lost race");
     assert_eq!(status.current_manifest_id, None);
     assert_eq!(status.wal_tail_segments, 1);
@@ -807,7 +807,7 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() 
         ErrorCode::InvalidRequest,
     );
     assert_core_error_kind(
-        block_on(admin.namespace_status(&source)),
+        block_on(admin.namespace_diagnostics(&source)),
         ErrorCode::NamespaceDeleted,
     );
     assert_core_error_kind(

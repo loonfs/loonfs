@@ -120,8 +120,8 @@ pub mod cache {
         DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
-        load_deleted_namespace_head_summary, load_namespace_flush_basis,
-        load_namespace_head_summary, NamespaceFlushBasis,
+        load_deleted_namespace_diagnostics, load_namespace, load_namespace_diagnostics,
+        load_namespace_flush_basis, NamespaceFlushBasis,
     };
 }
 

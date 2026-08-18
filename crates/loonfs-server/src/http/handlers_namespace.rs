@@ -183,7 +183,7 @@ pub(super) async fn capabilities(
         description = "Creates a new empty namespace.",
         request_body = CreateNamespaceRequest,
         responses(
-            (status = 200, description = "Namespace created", body = loonfs_api::NamespaceStatusResponse),
+            (status = 200, description = "Namespace created", body = loonfs_api::Namespace),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 409, description = "Namespace already exists or is partial", body = ApiError),
@@ -195,14 +195,13 @@ pub(super) async fn capabilities(
 pub(super) async fn create_namespace(
     State(state): State<AppState>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
-) -> Result<Json<loonfs_api::NamespaceStatusResponse>, ApiResponseError> {
-    state
+) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
+    let namespace = state
         .writer
         .create_namespace(&request.namespace_id, CreateNamespaceOptions::default())
         .await
         .map_err(ApiResponseError::runtime)?;
-    let status = read_namespace_status(&state, &request.namespace_id).await?;
-    Ok(Json(status))
+    Ok(Json(namespace))
 }
 
 #[cfg_attr(
@@ -211,11 +210,11 @@ pub(super) async fn create_namespace(
         get,
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
-        summary = "Get namespace status",
-        description = "Returns the current head, manifest, WAL tail, and retention state for a namespace.",
+        summary = "Get namespace",
+        description = "Returns the current head and retention state for a namespace.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Namespace status", body = loonfs_api::NamespaceStatusResponse),
+            (status = 200, description = "Namespace", body = loonfs_api::Namespace),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -228,22 +227,49 @@ pub(super) async fn namespace_status(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     headers: HeaderMap,
-) -> Result<Json<loonfs_api::NamespaceStatusResponse>, ApiResponseError> {
+) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
     authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
-    let status = read_namespace_status(&state, &namespace_id).await?;
-    Ok(Json(status))
+    let namespace = state
+        .reader
+        .namespace_status(&namespace_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(namespace))
 }
 
-async fn read_namespace_status(
-    state: &AppState,
-    namespace_id: &loonfs_api::NamespaceId,
-) -> Result<loonfs_api::NamespaceStatusResponse, ApiResponseError> {
-    state
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/admin/namespaces/{namespace_id}/diagnostics",
+        tag = "admin",
+        summary = "Get namespace diagnostics",
+        description = "Returns namespace core state together with the current manifest and visible WAL tail.",
+        params(("namespace_id" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Namespace diagnostics", body = loonfs_api::NamespaceDiagnostics),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            crate::http::openapi::DeadlineExceededResponses
+        )
+    )
+)]
+pub(super) async fn namespace_diagnostics(
+    State(state): State<AppState>,
+    namespace_id_path: NamespaceIdPath,
+    headers: HeaderMap,
+) -> Result<Json<loonfs_api::NamespaceDiagnostics>, ApiResponseError> {
+    authorize(state.config.auth_policy(), &headers)?;
+    let namespace_id = namespace_id_path.into_id()?;
+    let diagnostics = state
         .admin
-        .namespace_status(namespace_id)
+        .namespace_diagnostics(&namespace_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(namespace_id, error))
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(diagnostics))
 }
 
 #[cfg_attr(
@@ -308,7 +334,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         params(("namespace_id" = String, Path, description = "Source namespace id")),
         request_body = ForkNamespaceRequest,
         responses(
-            (status = 200, description = "Namespace forked", body = loonfs_api::NamespaceStatusResponse),
+            (status = 200, description = "Namespace forked", body = loonfs_api::Namespace),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Source namespace not found", body = ApiError),
@@ -322,15 +348,14 @@ pub(super) async fn fork_namespace(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
     AppJson(request): AppJson<ForkNamespaceRequest>,
-) -> Result<Json<loonfs_api::NamespaceStatusResponse>, ApiResponseError> {
+) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
     let source_namespace_id = namespace_id_path.into_id()?;
-    state
+    let namespace = state
         .writer
         .fork_namespace(&source_namespace_id, &request.new_namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))?;
-    let status = read_namespace_status(&state, &request.new_namespace_id).await?;
-    Ok(Json(status))
+    Ok(Json(namespace))
 }
 
 #[cfg_attr(

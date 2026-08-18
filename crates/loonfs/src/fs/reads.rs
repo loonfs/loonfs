@@ -10,7 +10,7 @@ use crate::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse,
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, ContentRef, CoreError,
     CurrentFileState, FileContentStream, InodeId, ListChangesOptions, ListFileRevisionsResponse,
-    ListPathEntriesOptions, ListPathEntriesResponse, NamespaceId, ReadFileStreamOptions,
+    ListPathEntriesOptions, ListPathEntriesResponse, Namespace, NamespaceId, ReadFileStreamOptions,
     RevisionNo, RuntimeError, SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::{
@@ -18,6 +18,24 @@ use loonfs_api::{
 };
 
 impl FsReader {
+    /// Returns a namespace's current core state.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.namespace_status",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "namespace_status",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
+        self.core.record_trace_context(&tracing::Span::current());
+        Ok(loonfs_core::cache::load_namespace(self.core.store(), namespace_id).await?)
+    }
+
     /// Resolves an absolute path to its authoritative entry at the current
     /// head, projecting what `options` asks for.
     #[tracing::instrument(

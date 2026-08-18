@@ -6,11 +6,11 @@
 //! - [`FsWriter`] mutates namespaces and optionally schedules non-destructive
 //!   maintenance after writes, controlled by
 //!   [`FsBackgroundWork`](crate::FsBackgroundWork).
-//! - [`FsReader`] serves latest-view reads. It owns no writer session and
-//!   starts no maintenance.
-//! - [`FsAdmin`] runs explicit maintenance: status, checkpoints, retention
-//!   advancement, and garbage collection, always as one-shot calls in the
-//!   caller's task.
+//! - [`FsReader`] serves namespace state and latest-view reads. It owns no
+//!   writer session and starts no maintenance.
+//! - [`FsAdmin`] runs explicit maintenance: diagnostics, checkpoints,
+//!   retention advancement, and garbage collection, always as one-shot
+//!   calls in the caller's task.
 //!
 //! Builders prefer [`StoreConfig`](crate::StoreConfig) so the object-store
 //! client is constructed inside the handle's runtime ownership domain. The

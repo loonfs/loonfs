@@ -38,6 +38,7 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace_id}", "get"),
         ("/v0/namespaces/{namespace_id}", "delete"),
         ("/v0/namespaces/{namespace_id}/forks", "post"),
+        ("/v0/admin/namespaces/{namespace_id}/diagnostics", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/list", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/stat", "get"),
         ("/v0/namespaces/{namespace_id}/filesystem/content", "get"),
@@ -141,7 +142,7 @@ fn openapi_documents_current_server_paths() {
             assert!(!path_parameter_names.contains("namespace"));
         }
     }
-    assert_eq!(namespace_scoped_operations, 30);
+    assert_eq!(namespace_scoped_operations, 31);
 
     for (path, method, parameter, schema_name) in [
         (
@@ -289,6 +290,7 @@ fn openapi_operation_ids_are_the_frozen_public_registry() {
             "list_path_entries",
             "list_trash",
             "maintenance_step",
+            "namespace_diagnostics",
             "namespace_status",
             "probe_store",
             "read_upload_status",
@@ -301,6 +303,21 @@ fn openapi_operation_ids_are_the_frozen_public_registry() {
             "upload_content",
         ],
         "operationIds changed; {REGISTRY_MESSAGE}"
+    );
+}
+
+#[test]
+fn openapi_publishes_namespace_diagnostics_in_the_admin_plane() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let operation = &spec["paths"]["/v0/admin/namespaces/{namespace_id}/diagnostics"]["get"];
+    assert_eq!(operation["operationId"], "namespace_diagnostics");
+    assert_eq!(operation["tags"], serde_json::json!(["admin"]));
+    assert_eq!(
+        operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/NamespaceDiagnostics"
     );
 }
 

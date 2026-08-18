@@ -153,24 +153,39 @@ pub struct ForkNamespaceRequest {
     pub new_namespace_id: NamespaceId,
 }
 
-/// Status summary for one namespace.
+/// Core state for one namespace.
 ///
 /// This is the point-lookup answer to "does this namespace exist, and where
 /// is its head?" — cheaper than listing all namespaces when only one matters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct NamespaceStatusResponse {
+pub struct Namespace {
     /// Namespace being inspected.
     pub namespace_id: NamespaceId,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
+    /// Oldest sequence still promised for incremental replay.
+    pub retention_floor_seq: ChangeSeq,
+}
+
+/// Storage-engine diagnostics for one namespace.
+///
+/// This admin-plane shape carries the core namespace state together with the
+/// manifest and WAL details that drive maintenance decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NamespaceDiagnostics {
+    /// Namespace being inspected.
+    pub namespace_id: NamespaceId,
+    /// Current visible namespace sequence.
+    pub head_seq: ChangeSeq,
+    /// Oldest sequence still promised for incremental replay.
+    pub retention_floor_seq: ChangeSeq,
     /// Current manifest pointer recorded by the head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_manifest_id: Option<ManifestId>,
     /// Number of visible WAL segments after the current manifest.
     pub wal_tail_segments: u64,
-    /// Oldest sequence still promised for incremental replay.
-    pub retention_floor_seq: ChangeSeq,
 }
 
 /// Result of deleting a namespace.
@@ -1004,8 +1019,8 @@ pub enum ReorganizeStepOutcome {
 pub struct MaintenanceStepResponse {
     /// Namespace the step ran against.
     pub namespace_id: NamespaceId,
-    /// Namespace status observed before the step acted.
-    pub status_before: NamespaceStatusResponse,
+    /// Namespace diagnostics observed before the step acted.
+    pub status_before: NamespaceDiagnostics,
     /// What the metadata-upkeep action did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<MetadataMaintenanceResponse>,
@@ -1126,12 +1141,48 @@ mod tests {
     }
 
     #[test]
-    fn namespace_create_and_fork_responses_use_the_status_shape() {
-        let create = NamespaceStatusResponse {
+    fn namespace_wire_shape_has_only_core_state() {
+        let namespace = Namespace {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            head_seq: ChangeSeq(11),
+            retention_floor_seq: ChangeSeq(4),
+        };
+        assert_eq!(
+            serde_json::to_value(namespace).expect("serialize namespace"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "head_seq": 11,
+                "retention_floor_seq": 4
+            })
+        );
+    }
+
+    #[test]
+    fn namespace_diagnostics_wire_shape_keeps_storage_fields() {
+        let diagnostics = NamespaceDiagnostics {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            head_seq: ChangeSeq(11),
+            retention_floor_seq: ChangeSeq(4),
+            current_manifest_id: Some(ManifestId(8)),
+            wal_tail_segments: 3,
+        };
+        assert_eq!(
+            serde_json::to_value(diagnostics).expect("serialize namespace diagnostics"),
+            serde_json::json!({
+                "namespace_id": "demo",
+                "head_seq": 11,
+                "retention_floor_seq": 4,
+                "current_manifest_id": 8,
+                "wal_tail_segments": 3
+            })
+        );
+    }
+
+    #[test]
+    fn namespace_create_and_fork_responses_use_the_slim_shape() {
+        let create = Namespace {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             head_seq: ChangeSeq(0),
-            current_manifest_id: None,
-            wal_tail_segments: 0,
             retention_floor_seq: ChangeSeq(0),
         };
         assert_eq!(
@@ -1139,16 +1190,13 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "head_seq": 0,
-                "wal_tail_segments": 0,
                 "retention_floor_seq": 0
             })
         );
 
-        let fork = NamespaceStatusResponse {
+        let fork = Namespace {
             namespace_id: NamespaceId::parse("demo-branch").expect("namespace id"),
             head_seq: ChangeSeq(7),
-            current_manifest_id: None,
-            wal_tail_segments: 0,
             retention_floor_seq: ChangeSeq(7),
         };
         assert_eq!(
@@ -1156,7 +1204,6 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo-branch",
                 "head_seq": 7,
-                "wal_tail_segments": 0,
                 "retention_floor_seq": 7
             })
         );

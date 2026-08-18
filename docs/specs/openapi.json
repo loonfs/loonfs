@@ -369,6 +369,82 @@
         }
       }
     },
+    "/v0/admin/namespaces/{namespace_id}/diagnostics": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Get namespace diagnostics",
+        "description": "Returns namespace core state together with the current manifest and visible WAL tail.",
+        "operationId": "namespace_diagnostics",
+        "parameters": [
+          {
+            "name": "namespace_id",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Namespace diagnostics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceDiagnostics"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/admin/namespaces/{namespace_id}/grep/index": {
       "get": {
         "tags": [
@@ -932,7 +1008,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NamespaceStatusResponse"
+                  "$ref": "#/components/schemas/Namespace"
                 }
               }
             }
@@ -988,8 +1064,8 @@
         "tags": [
           "namespaces"
         ],
-        "summary": "Get namespace status",
-        "description": "Returns the current head, manifest, WAL tail, and retention state for a namespace.",
+        "summary": "Get namespace",
+        "description": "Returns the current head and retention state for a namespace.",
         "operationId": "namespace_status",
         "parameters": [
           {
@@ -1004,11 +1080,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Namespace status",
+            "description": "Namespace",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NamespaceStatusResponse"
+                  "$ref": "#/components/schemas/Namespace"
                 }
               }
             }
@@ -2010,7 +2086,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NamespaceStatusResponse"
+                  "$ref": "#/components/schemas/Namespace"
                 }
               }
             }
@@ -6066,8 +6142,8 @@
             ]
           },
           "status_before": {
-            "$ref": "#/components/schemas/NamespaceStatusResponse",
-            "description": "Namespace status observed before the step acted."
+            "$ref": "#/components/schemas/NamespaceDiagnostics",
+            "description": "Namespace diagnostics observed before the step acted."
           }
         }
       },
@@ -6117,20 +6193,37 @@
         "description": "Name-policy-derived directory entry key.\n\nUse this for exact name preconditions. Keep user-facing spelling in\n`DisplayName`.",
         "example": "report.txt"
       },
-      "NamespaceId": {
-        "type": "string",
-        "description": "Durable id for one namespace.\n\nA namespace is one filesystem history. This id is not a display name and\nshould not be reused after destruction. Its serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
-        "example": "demo",
-        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
-      },
-      "NamespaceStatusResponse": {
+      "Namespace": {
         "type": "object",
-        "description": "Status summary for one namespace.\n\nThis is the point-lookup answer to \"does this namespace exist, and where\nis its head?\" — cheaper than listing all namespaces when only one matters.",
+        "description": "Core state for one namespace.\n\nThis is the point-lookup answer to \"does this namespace exist, and where\nis its head?\" — cheaper than listing all namespaces when only one matters.",
         "required": [
           "namespace_id",
           "head_seq",
-          "wal_tail_segments",
           "retention_floor_seq"
+        ],
+        "properties": {
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Current visible namespace sequence."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace being inspected."
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Oldest sequence still promised for incremental replay."
+          }
+        }
+      },
+      "NamespaceDiagnostics": {
+        "type": "object",
+        "description": "Storage-engine diagnostics for one namespace.\n\nThis admin-plane shape carries the core namespace state together with the\nmanifest and WAL details that drive maintenance decisions.",
+        "required": [
+          "namespace_id",
+          "head_seq",
+          "retention_floor_seq",
+          "wal_tail_segments"
         ],
         "properties": {
           "current_manifest_id": {
@@ -6163,6 +6256,12 @@
             "minimum": 0
           }
         }
+      },
+      "NamespaceId": {
+        "type": "string",
+        "description": "Durable id for one namespace.\n\nA namespace is one filesystem history. This id is not a display name and\nshould not be reused after destruction. Its serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
+        "example": "demo",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
       },
       "ObjectTransferAccess": {
         "oneOf": [

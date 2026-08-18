@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 /// Administrative and maintenance handle.
 ///
-/// `FsAdmin` owns the explicit maintenance surface: namespace status and
-/// inspection, checkpoint creation, retention advancement, garbage
+/// `FsAdmin` owns the explicit maintenance surface: namespace diagnostics,
+/// checkpoint creation, retention advancement, garbage
 /// collection, and one-shot maintenance steps. Every call runs in the
 /// caller's async task — the admin handle starts no workers of its own.
 ///

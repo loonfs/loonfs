@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 /// Read-only handle for latest namespace views.
 ///
-/// `FsReader` serves stat, list, read, revision, and change-feed queries. It
-/// carries no actor identity at all — no writer id, no writer session —
+/// `FsReader` serves namespace state, stat, list, read, revision, and
+/// change-feed queries. It carries no actor identity at all — no writer id, no writer session —
 /// publishes nothing, and never schedules maintenance, so read-only workers
 /// cannot accidentally participate in writer scheduling. Reads revalidate
 /// cached control state against durable state, so a standalone reader stays

@@ -152,7 +152,7 @@ fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("status after deferred rerun");
         assert!(
@@ -213,7 +213,7 @@ fn a_step_queued_at_the_global_cap_runs_without_another_publish() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&queued_namespace)
+            .namespace_diagnostics(&queued_namespace)
             .await
             .expect("queued namespace status");
         assert!(
@@ -293,7 +293,7 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&write_stopped_namespace)
+            .namespace_diagnostics(&write_stopped_namespace)
             .await
             .expect("write-stopped namespace status");
         assert!(
@@ -359,7 +359,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&queued_namespace)
+            .namespace_diagnostics(&queued_namespace)
             .await
             .expect("queued namespace status after shutdown");
         assert_eq!(
@@ -389,7 +389,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             .await
             .expect("nothing may spawn after shutdown");
         let status = admin
-            .namespace_status(&queued_namespace)
+            .namespace_diagnostics(&queued_namespace)
             .await
             .expect("queued namespace status after the post-shutdown nudge");
         assert_eq!(
@@ -452,7 +452,7 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("namespace status");
         assert_eq!(status.namespace_id, namespace_id);
@@ -555,7 +555,7 @@ fn admin_over_writer_core_invalidates_shared_caches() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("status after the scheduled step");
         assert!(
@@ -696,7 +696,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("status after writes");
         assert_eq!(
@@ -721,7 +721,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             "step should act on the oversized tail"
         );
         let status = admin
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("status after explicit step");
         assert!(
@@ -757,7 +757,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("status after auto step");
         assert!(
@@ -805,7 +805,7 @@ fn enabled_writer_schedules_maintenance_with_caches_disabled() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("status after auto step");
         assert!(
@@ -847,7 +847,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .build()
             .await
             .expect("build admin")
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("status before the shutdown")
             .wal_tail_segments;
@@ -883,7 +883,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .await
             .expect("build admin");
         let status = admin
-            .namespace_status(&namespace_id)
+            .namespace_diagnostics(&namespace_id)
             .await
             .expect("status after the shutdown");
         assert_eq!(
