@@ -203,15 +203,7 @@ impl EmbeddedBackend {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListPathEntriesResponse, BackendError> {
-        let request = loonfs_api::PageRequest {
-            limit: resolve_cli_page_limit(limit)?,
-            cursor: cursor
-                .map(loonfs_api::decode_cursor)
-                .transpose()
-                .map_err(|error| {
-                    BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
-                })?,
-        };
+        let request = cli_page_request(limit, cursor)?;
         self.reader
             .list_path_entries_page(
                 spec.namespace(),
@@ -565,15 +557,7 @@ impl EmbeddedBackend {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListTrashResponse, BackendError> {
-        let request = loonfs_api::PageRequest {
-            limit: resolve_cli_page_limit(limit)?,
-            cursor: cursor
-                .map(loonfs_api::decode_cursor)
-                .transpose()
-                .map_err(|error| {
-                    BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
-                })?,
-        };
+        let request = cli_page_request(limit, cursor)?;
         self.reader
             .list_trash_page(namespace_id, request)
             .await
@@ -586,15 +570,7 @@ impl EmbeddedBackend {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, BackendError> {
-        let request = loonfs_api::PageRequest {
-            limit: resolve_cli_page_limit(limit)?,
-            cursor: cursor
-                .map(loonfs_api::decode_cursor)
-                .transpose()
-                .map_err(|error| {
-                    BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
-                })?,
-        };
+        let request = cli_page_request(limit, cursor)?;
         self.reader
             .list_file_revisions_page(spec.namespace(), spec.absolute_path().as_str(), request)
             .await
@@ -744,15 +720,15 @@ impl EmbeddedBackend {
 
     pub(super) async fn undelete(
         &self,
-        namespace: &NamespaceId,
-        path: Option<&AbsolutePath>,
+        namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
+        path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
-        self.publish_with_maintenance_recovery(namespace, || {
+        self.publish_with_maintenance_recovery(namespace_id, || {
             self.writer.undelete(
-                namespace,
+                namespace_id,
                 inode_id,
                 deletion_seq,
                 path.map(|path| path.as_str()),
@@ -910,6 +886,21 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
     PaginationPolicy::default()
         .resolve_limit(limit)
         .map_err(|error| BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
+}
+
+fn cli_page_request<C: loonfs_api::PageCursor>(
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) -> Result<loonfs_api::PageRequest<C>, BackendError> {
+    Ok(loonfs_api::PageRequest {
+        limit: resolve_cli_page_limit(limit)?,
+        cursor: cursor
+            .map(loonfs_api::decode_cursor)
+            .transpose()
+            .map_err(|error| {
+                BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+            })?,
+    })
 }
 
 /// Renders a probe report as the wire shape both backends answer with, so

@@ -313,41 +313,24 @@ pub(super) async fn app_with_store_and_direct_transfers(
         .serves_grep()
         .then(|| Arc::new(GrepService::with_block_cache(Arc::clone(&grep_block_cache))));
     let grep_maintenance = if maintains_grep_index {
+        let grep_worker = grep_worker
+            .as_ref()
+            .expect("an index-maintaining deployment composes a grep worker");
         let policy = config
             .grep
             .worker_config()
             .build_policy()
-            .map_err(|error| ServerConfigError::InvalidField {
-                field: "grep",
-                reason: error.to_string(),
-            })?;
-        let job = Arc::new(GrepMaintenanceJob::new(
-            grep_worker
-                .as_ref()
-                .expect("an index-maintaining deployment composes a grep worker")
-                .clone(),
-            policy,
-        ));
+            .map_err(grep_config_error)?;
+        let job = Arc::new(GrepMaintenanceJob::new(grep_worker.clone(), policy));
         writer
             .register_maintenance_job(job.clone())
-            .map_err(|error| ServerConfigError::InvalidField {
-                field: "grep",
-                reason: error.to_string(),
-            })?;
+            .map_err(grep_config_error)?;
         // Reclaiming what the index leaves behind is upkeep for the same
         // namespaces, gated by the same switch: a deployment that builds
         // grep objects is the one that should collect them.
         writer
-            .register_maintenance_job(Arc::new(GrepGcJob::new(
-                grep_worker
-                    .as_ref()
-                    .expect("an index-maintaining deployment composes a grep worker")
-                    .clone(),
-            )))
-            .map_err(|error| ServerConfigError::InvalidField {
-                field: "grep",
-                reason: error.to_string(),
-            })?;
+            .register_maintenance_job(Arc::new(GrepGcJob::new(grep_worker.clone())))
+            .map_err(grep_config_error)?;
         Some(GrepMaintenance {
             handle: writer.maintenance(),
             job,
@@ -376,6 +359,13 @@ pub(super) async fn app_with_store_and_direct_transfers(
         local_cache,
     };
     Ok((router(state.clone()), state))
+}
+
+fn grep_config_error(error: impl std::fmt::Display) -> ServerConfigError {
+    ServerConfigError::InvalidField {
+        field: "grep",
+        reason: error.to_string(),
+    }
 }
 
 /// Opens the node-local block cache the config asks for, or answers `None`

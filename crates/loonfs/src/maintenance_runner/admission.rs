@@ -610,17 +610,11 @@ impl Admission {
     /// pick up from the same place.
     fn record_failure(&mut self, key: &MaintenanceKey, now_ms: u64) {
         let ticket = self.take_ticket();
-        let Some(failures) = self
-            .keys
-            .get(key)
-            .map(|state| state.consecutive_failures.saturating_add(1))
-        else {
-            return;
-        };
-        let delay_ms = backoff_delay_ms(failures, self.clock.as_ref());
         let Some(state) = self.keys.get_mut(key) else {
             return;
         };
+        let failures = state.consecutive_failures.saturating_add(1);
+        let delay_ms = backoff_delay_ms(failures, self.clock.as_ref());
         state.consecutive_failures = failures;
         state.settle(Some(ReadyRun::gated(
             ticket,

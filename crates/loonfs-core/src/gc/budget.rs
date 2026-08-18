@@ -58,10 +58,9 @@ impl PassBudget {
     /// largest count there is, so a caller that sizes work by what remains
     /// puts no cap on it.
     pub(super) fn remaining(&self) -> u64 {
-        match self.max_objects {
-            Some(max_objects) => max_objects.saturating_sub(self.spent),
-            None => u64::MAX,
-        }
+        self.max_objects.map_or(u64::MAX, |max_objects| {
+            max_objects.saturating_sub(self.spent)
+        })
     }
 
     /// Charges one unit for work already done.

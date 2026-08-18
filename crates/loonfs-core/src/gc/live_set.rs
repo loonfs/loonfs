@@ -236,7 +236,7 @@ pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     grace_window_ms: u64,
-    anchor: Option<ReferenceAnchor>,
+    reused_anchor: Option<ReferenceAnchor>,
     budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<LiveSetCollection> {
@@ -251,7 +251,7 @@ pub(super) async fn recollect_live_set<S: ObjectStore + ?Sized>(
         namespace_id,
         &loaded,
         grace_window_ms,
-        anchor,
+        reused_anchor,
         budget,
         context,
     )

@@ -366,38 +366,33 @@ mod tests {
             "namespaces/ns-1/"
         );
         assert_eq!(
-            layout.wal_head(&namespace_id()).as_str(),
+            layout.wal_head(&namespace_id()),
             "namespaces/ns-1/wal/head.json"
         );
         assert_eq!(
-            layout.wal_floor(&namespace_id()).as_str(),
+            layout.wal_floor(&namespace_id()),
             "namespaces/ns-1/wal/floor.json"
         );
         assert_eq!(
-            layout
-                .wal_segment(
-                    &namespace_id(),
-                    &wal_segment_id("00000000000000000001-0123456789abcdef")
-                )
-                .as_str(),
+            layout.wal_segment(
+                &namespace_id(),
+                &wal_segment_id("00000000000000000001-0123456789abcdef")
+            ),
             "namespaces/ns-1/wal/segments/00000000000000000001-0123456789abcdef.wal.zst"
         );
         assert_eq!(
-            layout.metadata_root(&namespace_id()).as_str(),
+            layout.metadata_root(&namespace_id()),
             "namespaces/ns-1/metadata/root.json"
         );
         let manifest_object_id = ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
             .expect("valid manifest object id");
         assert_eq!(
             layout
-                .metadata_manifest_object(&namespace_id(), &manifest_object_id)
-                .as_str(),
+                .metadata_manifest_object(&namespace_id(), &manifest_object_id),
             "namespaces/ns-1/metadata/manifests/00000000000000000400-0123456789abcdef.manifest.json"
         );
         assert_eq!(
-            layout
-                .metadata_table(&namespace_id(), &metadata_table_id())
-                .as_str(),
+            layout.metadata_table(&namespace_id(), &metadata_table_id()),
             "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
@@ -406,32 +401,24 @@ mod tests {
                     &namespace_id(),
                     &metadata_compaction_id(1),
                     &metadata_table_id()
-                )
-                .as_str(),
+                ),
             "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/tables/tbl_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
-            layout
-                .metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1))
-                .as_str(),
+            layout.metadata_compaction_lease(&namespace_id(), &metadata_compaction_id(1)),
             "namespaces/ns-1/metadata/compactions/cmp_00000000000000000000000000000001/lease.json"
         );
         assert_eq!(
-            layout
-                .checkpoint_record(&namespace_id(), &checkpoint_id())
-                .as_str(),
+            layout.checkpoint_record(&namespace_id(), &checkpoint_id()),
             "namespaces/ns-1/checkpoints/chk_00000000000000000000000000000001.json"
         );
         assert_eq!(
-            layout
-                .upload_session(&namespace_id(), &upload_id())
-                .as_str(),
+            layout.upload_session(&namespace_id(), &upload_id()),
             "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
         );
         assert_eq!(
             layout
-                .content_blob(&content_store_id(), &content_id())
-                .as_str(),
+                .content_blob(&content_store_id(), &content_id()),
             "content-stores/cs_00000000000000000000000000000001/objects/ab/cd/con_abcdef0123456789abcdef0123456789"
         );
     }

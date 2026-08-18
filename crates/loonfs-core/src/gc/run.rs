@@ -398,10 +398,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         .await?
         {
             CheckpointSweep::Delete => {
-                self.store
-                    .delete(key)
-                    .await
-                    .map_err(|error| CoreError::store(key, &error))?;
+                self.delete_key(key).await?;
                 self.report.deleted_checkpoint_records += 1;
             }
             CheckpointSweep::Released => self.report.released_expired_checkpoints += 1,
@@ -428,10 +425,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         .await?
         {
             UploadSessionSweep::Delete { reclaimed_content } => {
-                self.store
-                    .delete(key)
-                    .await
-                    .map_err(|error| CoreError::store(key, &error))?;
+                self.delete_key(key).await?;
                 self.report.deleted_upload_sessions += 1;
                 if reclaimed_content {
                     self.report.deleted_content_objects += 1;
@@ -478,11 +472,15 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             }
             GraceAge::Aged => {}
         }
+        self.delete_key(key).await?;
+        Ok(true)
+    }
+
+    async fn delete_key(&self, key: &str) -> Result<()> {
         self.store
             .delete(key)
             .await
-            .map_err(|error| CoreError::store(key, &error))?;
-        Ok(true)
+            .map_err(|error| CoreError::store(key, &error))
     }
 
     /// Folds one retained candidate's future deadline into the report.
@@ -490,10 +488,11 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         let Some(at_ms) = at_ms.filter(|at_ms| *at_ms > self.mutation.now_ms) else {
             return;
         };
-        self.report.next_reclamation_at_ms = Some(match self.report.next_reclamation_at_ms {
-            Some(soonest_ms) => soonest_ms.min(at_ms),
-            None => at_ms,
-        });
+        self.report.next_reclamation_at_ms = Some(
+            self.report
+                .next_reclamation_at_ms
+                .map_or(at_ms, |soonest_ms| soonest_ms.min(at_ms)),
+        );
     }
 
     /// Produces the response after lease settlement. Budget-stop cursor and

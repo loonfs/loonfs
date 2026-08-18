@@ -188,13 +188,7 @@ impl ProfileConfig {
                 default_namespace,
                 ..
             } => {
-                actor.validate(name)?;
-                if let Some(namespace) = default_namespace {
-                    validate_default_namespace(
-                        &profile_field(name, "default_namespace"),
-                        namespace,
-                    )?;
-                }
+                validate_common(name, actor, default_namespace.as_ref())?;
                 store
                     .validate()
                     .map_err(|error| profile_store_error(name, &error))
@@ -206,13 +200,7 @@ impl ProfileConfig {
                 auth_token,
                 ca_cert_path,
             } => {
-                actor.validate(name)?;
-                if let Some(namespace) = default_namespace {
-                    validate_default_namespace(
-                        &profile_field(name, "default_namespace"),
-                        namespace,
-                    )?;
-                }
+                validate_common(name, actor, default_namespace.as_ref())?;
                 validate_http_url(&profile_field(name, "server_url"), server_url)?;
                 if let Some(token) = auth_token {
                     require_non_empty(&profile_field(name, "auth_token"), token.expose())?;
@@ -253,6 +241,18 @@ impl ProfileConfig {
             },
         }
     }
+}
+
+fn validate_common(
+    name: &str,
+    actor: &ProfileActorConfig,
+    default_namespace: Option<&String>,
+) -> Result<(), CliError> {
+    actor.validate(name)?;
+    if let Some(namespace) = default_namespace {
+        validate_default_namespace(&profile_field(name, "default_namespace"), namespace)?;
+    }
+    Ok(())
 }
 
 /// Prefixes a shared store-validation error (`store.<field>`-rooted) with the

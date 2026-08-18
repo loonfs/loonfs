@@ -185,8 +185,8 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
             ActiveDeletionRowAction::Listed { .. } => *deleted_at_seq,
             ActiveDeletionRowAction::Removed { revoked_at_seq } => *revoked_at_seq,
         },
-        MetadataRow::CommitReceipt { committed_seq, .. } => *committed_seq,
-        MetadataRow::AttributesRevision { committed_seq, .. } => *committed_seq,
+        MetadataRow::CommitReceipt { committed_seq, .. }
+        | MetadataRow::AttributesRevision { committed_seq, .. } => *committed_seq,
     }
 }
 

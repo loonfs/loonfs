@@ -381,6 +381,12 @@ struct CompactionSlot {
 }
 
 impl CompactionSlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<NamespaceId, NamespaceCompactions>> {
+        self.namespaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Reports how many jobs are running and how many are waiting for a
     /// permit, from the two facts that decide it: the slots claimed, and the
     /// permits taken.
@@ -389,9 +395,7 @@ impl CompactionSlot {
             return;
         };
         let claimed = self
-            .namespaces
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .filter(|entry| entry.active.is_some())
             .count();
@@ -405,10 +409,7 @@ impl CompactionSlot {
 impl Drop for CompactionSlot {
     fn drop(&mut self) {
         {
-            let mut namespaces = self
-                .namespaces
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut namespaces = self.lock();
             let Some(entry) = namespaces.get_mut(&self.namespace_id) else {
                 return;
             };

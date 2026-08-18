@@ -229,16 +229,14 @@ impl MetadataIndexes {
         if self
             .active_child_by_parent_name
             .get(&parent_name_key)
-            .map(|active| unbind_matches_binding(record, active))
-            .unwrap_or(false)
+            .is_some_and(|active| unbind_matches_binding(record, active))
         {
             self.active_child_by_parent_name.remove(&parent_name_key);
         }
         if self
             .active_parent_by_child
             .get(&record.child_inode_id)
-            .map(|active| unbind_matches_binding(record, active))
-            .unwrap_or(false)
+            .is_some_and(|active| unbind_matches_binding(record, active))
         {
             self.active_parent_by_child.remove(&record.child_inode_id);
         }
@@ -321,8 +319,7 @@ fn replace_if_newer_bind<K>(
 {
     let should_replace = map
         .get(&key)
-        .map(|existing| bind_order_key(&record) > bind_order_key(existing))
-        .unwrap_or(true);
+        .is_none_or(|existing| bind_order_key(&record) > bind_order_key(existing));
     if should_replace {
         map.insert(key, record);
     }
@@ -335,8 +332,7 @@ fn replace_if_newer_receipt(
 ) {
     let should_replace = map
         .get(&key)
-        .map(|existing| record.committed_seq > existing.committed_seq)
-        .unwrap_or(true);
+        .is_none_or(|existing| record.committed_seq > existing.committed_seq);
     if should_replace {
         map.insert(key, record);
     }
@@ -349,8 +345,7 @@ fn replace_if_newer_tombstone(
 ) {
     let should_replace = map
         .get(&key)
-        .map(|existing| tombstone_order_key(&record) > tombstone_order_key(existing))
-        .unwrap_or(true);
+        .is_none_or(|existing| tombstone_order_key(&record) > tombstone_order_key(existing));
     if should_replace {
         map.insert(key, record);
     }
@@ -362,8 +357,7 @@ fn remove_active_parent_if_same(
 ) {
     if active_parent_by_child
         .get(&record.child_inode_id)
-        .map(|active| active.same_binding(record))
-        .unwrap_or(false)
+        .is_some_and(|active| active.same_binding(record))
     {
         active_parent_by_child.remove(&record.child_inode_id);
     }
@@ -376,8 +370,7 @@ fn remove_active_child_if_same(
     let key = (record.parent_inode_id, record.name_key.clone());
     if active_child_by_parent_name
         .get(&key)
-        .map(|active| active.same_binding(record))
-        .unwrap_or(false)
+        .is_some_and(|active| active.same_binding(record))
     {
         active_child_by_parent_name.remove(&key);
     }

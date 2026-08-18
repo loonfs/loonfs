@@ -412,12 +412,10 @@ pub(super) async fn content_preparation_for_puts(
 ) -> Result<PutContentPreparation, ApiResponseError> {
     let mut prepared_content = Vec::new();
     let mut rejections = Vec::new();
-    let matching_tokens = tokens
+    for token in tokens
         .iter()
         .filter(|token| content_refs.contains(&&token.content_ref))
-        .cloned()
-        .collect::<Vec<_>>();
-    for token in &matching_tokens {
+    {
         match verifier
             .prepare(writer, namespace_id, token, now_ms)
             .await?

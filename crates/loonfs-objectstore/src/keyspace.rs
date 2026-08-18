@@ -76,9 +76,7 @@ pub(crate) fn scope_list_prefix(key_prefix: Option<&str>, prefix: &str) -> Resul
 pub(crate) fn unscope_listed_key(key_prefix: Option<&str>, scoped_key: &str) -> Option<String> {
     let key_prefix = key_prefix.filter(|value| !value.is_empty())?;
     let prefix = format!("{key_prefix}/");
-    scoped_key
-        .strip_prefix(&prefix)
-        .map(|unscoped| unscoped.to_owned())
+    scoped_key.strip_prefix(&prefix).map(str::to_owned)
 }
 
 /// A parsed `http(s)://authority[/base-path]` endpoint, shared by the

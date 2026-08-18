@@ -43,8 +43,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
                     && start_after_name_key
-                        .map(|last_name_key| direntry.name_key.as_str() > last_name_key)
-                        .unwrap_or(true)
+                        .is_none_or(|last_name_key| direntry.name_key.as_str() > last_name_key)
             })
             .map(|record| DirentryBindPageCandidate {
                 row_key: direntry_bind_row_key(record),

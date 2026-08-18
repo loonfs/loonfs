@@ -338,8 +338,7 @@ fn gc_conclusion(gc: &GcResponse, submitted_cursor: Option<&str>) -> Maintenance
         }
         Some(_) => MaintenanceStepConclusion::Progressed,
         None if reclaimed_anything(gc) => MaintenanceStepConclusion::Progressed,
-        None if gc.budget_exhausted => MaintenanceStepConclusion::Blocked,
-        None if gc.degraded_retention => MaintenanceStepConclusion::Blocked,
+        None if gc.budget_exhausted || gc.degraded_retention => MaintenanceStepConclusion::Blocked,
         None => MaintenanceStepConclusion::Idle,
     }
 }

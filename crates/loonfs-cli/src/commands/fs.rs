@@ -1003,10 +1003,9 @@ pub(super) async fn put_payload(
     // Only a payload large enough to travel in parts has anything an
     // interruption could leave half-done, and only a source that can be
     // opened twice can pick it up: a pipe is gone once it is read.
-    let journal = match payload.resumable_source() {
-        Some(local_path) => resume_journal(context, spec, local_path),
-        None => None,
-    };
+    let journal = payload
+        .resumable_source()
+        .and_then(|local_path| resume_journal(context, spec, local_path));
     if let Some(journal) = journal.as_ref() {
         if let Some(committed) =
             commit_a_finished_upload(context, spec, options, journal, progress).await?
@@ -1252,9 +1251,9 @@ pub(crate) async fn run_filesystem_undelete(
         .target
         .undelete(
             &context.namespace,
-            spec.as_ref().map(|spec| spec.absolute_path()),
             args.inode,
             deletion_seq,
+            spec.as_ref().map(|spec| spec.absolute_path()),
             &loonfs_client::UndeleteOptions {
                 commit: commit_options(&context.actor, commit_id, args.message.clone()),
             },
@@ -1441,6 +1440,11 @@ async fn run_filesystem_transfer(
 
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
+    let behavior = if args.force {
+        DestinationBehavior::Replace
+    } else {
+        DestinationBehavior::NoReplace
+    };
     let result = if transfer_kind == TransferKind::Copy {
         let entry = context
             .target
@@ -1485,11 +1489,6 @@ async fn run_filesystem_transfer(
                 )),
             ));
         }
-        let behavior = if args.force {
-            DestinationBehavior::Replace
-        } else {
-            DestinationBehavior::NoReplace
-        };
         context
             .target
             .copy_path(
@@ -1502,11 +1501,6 @@ async fn run_filesystem_transfer(
             )
             .await
     } else {
-        let behavior = if args.force {
-            DestinationBehavior::Replace
-        } else {
-            DestinationBehavior::NoReplace
-        };
         context
             .target
             .move_path(

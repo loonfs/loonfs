@@ -733,7 +733,7 @@ impl GrepService {
                 // The walk enumerates current state, so a plan-less scan has
                 // no unindexed tail of its own: everything committed through
                 // this head is already a candidate.
-                candidates.unfiltered = scan_candidate_inodes(reads, &scope).await?;
+                candidates.unfiltered = scan_candidate_inodes(reads, scope.as_ref()).await?;
                 None
             }
         };
@@ -978,7 +978,7 @@ impl GrepService {
 /// also what stops a walk if bindings ever formed a cycle.
 async fn scan_candidate_inodes(
     reads: &NamespaceReads<'_>,
-    scope: &Option<AuthoritativePathEntry>,
+    scope: Option<&AuthoritativePathEntry>,
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();
     let root = match scope {

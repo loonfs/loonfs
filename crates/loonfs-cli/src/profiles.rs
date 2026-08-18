@@ -31,17 +31,7 @@ pub(crate) fn show_profile(
     config: &CliConfig,
     explicit_name: Option<&str>,
 ) -> Result<(String, ProfileConfig), CliError> {
-    let name = match explicit_name {
-        Some(name) => name,
-        None => config
-            .default_profile
-            .as_deref()
-            .ok_or_else(CliError::no_default_profile)?,
-    };
-    let profile = config
-        .profiles
-        .get(name)
-        .ok_or_else(|| CliError::profile_not_found(name))?;
+    let (name, profile) = resolve_profile(config, explicit_name)?;
     Ok((name.to_owned(), profile.redacted()))
 }
 

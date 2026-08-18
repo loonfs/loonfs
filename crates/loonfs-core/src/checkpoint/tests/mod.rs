@@ -360,8 +360,8 @@ async fn run_planned_compaction<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         context,
-        policy,
         spec,
+        policy,
         &MetadataCompactionCancellation::default(),
     )
     .await

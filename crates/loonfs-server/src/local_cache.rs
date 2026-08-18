@@ -141,12 +141,7 @@ impl FoyerStoredMetadataBlockCache {
         recorder: &dyn MetricsRecorder,
     ) -> Result<Self, ServerConfigError> {
         let root = PathBuf::from(config.path.trim());
-        std::fs::create_dir_all(&root).map_err(|error| {
-            invalid_local_cache(format!(
-                "failed to create `{}`: {error}",
-                display_path(&root)
-            ))
-        })?;
+        create_directory(&root)?;
         let directory_lock = lock_directory(&root)?;
 
         let directory = root.join(CACHE_DIRECTORY);
@@ -400,12 +395,7 @@ fn prepare_directory(directory: &Path, capacity: usize) -> Result<(), ServerConf
         })?;
     }
 
-    std::fs::create_dir_all(directory).map_err(|error| {
-        invalid_local_cache(format!(
-            "failed to create `{}`: {error}",
-            display_path(directory)
-        ))
-    })?;
+    create_directory(directory)?;
     // A marker that already says exactly this is left alone. Every other
     // case — a discarded directory, and a kept one this start grows — needs
     // the new geometry on disk before any block file is.
@@ -519,6 +509,15 @@ fn invalid_local_cache(reason: String) -> ServerConfigError {
         field: "local_cache.path",
         reason,
     }
+}
+
+fn create_directory(path: &Path) -> Result<(), ServerConfigError> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        invalid_local_cache(format!(
+            "failed to create `{}`: {error}",
+            display_path(path)
+        ))
+    })
 }
 
 /// A path as a string, for an error message. A path that is not UTF-8 still

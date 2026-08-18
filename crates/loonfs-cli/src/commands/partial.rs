@@ -109,7 +109,7 @@ pub(super) struct PartialDownload {
 }
 
 impl PartialDownload {
-    /// Opens the partial file for a download that starts at `resume_from`,
+    /// Opens the partial file for a download that starts at `resumed_from`,
     /// and lays the note down beside it.
     ///
     /// The note is written before the first byte: bytes on disk with
@@ -120,7 +120,7 @@ impl PartialDownload {
     pub(super) fn open(
         destination: &Path,
         meta: Option<&PartialMeta>,
-        resume_from: u64,
+        resumed_from: u64,
     ) -> std::io::Result<Self> {
         let (Some(path), Some(meta_path)) = (
             sibling(destination, PARTIAL_SUFFIX),
@@ -146,8 +146,8 @@ impl PartialDownload {
             .open(&path)?;
         // One call covers both cases: it drops a longer partial's tail, and
         // it empties one this download is not resuming at all.
-        file.set_len(resume_from)?;
-        file.seek(std::io::SeekFrom::Start(resume_from))?;
+        file.set_len(resumed_from)?;
+        file.seek(std::io::SeekFrom::Start(resumed_from))?;
         Ok(Self {
             file: tempfile::NamedTempFile::from_parts(
                 file,
@@ -155,7 +155,7 @@ impl PartialDownload {
             ),
             _meta: meta,
             path,
-            resumed_from: resume_from,
+            resumed_from,
         })
     }
 

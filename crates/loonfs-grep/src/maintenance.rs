@@ -71,11 +71,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
     ) -> Result<MaintenanceStepReport> {
         let build = match self.worker.build_step(namespace_id, self.policy).await {
             Ok(report) => report.outcome,
-            Err(error) if has_nothing_to_index(&error) => {
-                return Ok(MaintenanceStepReport::concluded(
-                    MaintenanceStepConclusion::NotEnabled,
-                ))
-            }
+            Err(error) if has_nothing_to_index(&error) => return Ok(not_enabled_step()),
             Err(error) => return Err(step_failure(namespace_id, "grep_build", error)),
         };
         let GrepBuildOutcome::UpToDate { .. } = build else {
@@ -83,11 +79,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         };
         let reorganize = match self.worker.reorganize_step(namespace_id, self.policy).await {
             Ok(report) => report.outcome,
-            Err(error) if has_nothing_to_index(&error) => {
-                return Ok(MaintenanceStepReport::concluded(
-                    MaintenanceStepConclusion::NotEnabled,
-                ))
-            }
+            Err(error) if has_nothing_to_index(&error) => return Ok(not_enabled_step()),
             Err(error) => return Err(step_failure(namespace_id, "grep_reorganize", error)),
         };
         Ok(MaintenanceStepReport::concluded(reorganize_conclusion(
@@ -139,6 +131,10 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
             }
         }
     }
+}
+
+fn not_enabled_step() -> MaintenanceStepReport {
+    MaintenanceStepReport::concluded(MaintenanceStepConclusion::NotEnabled)
 }
 
 /// Runs one bounded grep garbage-collection pass.

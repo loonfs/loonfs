@@ -147,7 +147,10 @@ impl RuntimeCacheStatsInner {
 }
 
 impl RuntimeControlCache {
-    fn wal_head(&mut self, namespace_id: &NamespaceId) -> Option<CachedNamespaceAnchor> {
+    fn cached_namespace_head(
+        &mut self,
+        namespace_id: &NamespaceId,
+    ) -> Option<CachedNamespaceAnchor> {
         let head = self.namespaces.get(namespace_id)?.head.clone()?;
         self.touch_namespace(namespace_id);
         Some(head)
@@ -237,7 +240,10 @@ impl ReadCore {
                 .map(cached_anchor);
         }
 
-        let cached = self.inner.control_cache().wal_head(namespace_id);
+        let cached = self
+            .inner
+            .control_cache()
+            .cached_namespace_head(namespace_id);
         if let Some(head) = cached {
             match self
                 .cached_control_identity_matches(&wal_head(namespace_id), &head.head.identity)

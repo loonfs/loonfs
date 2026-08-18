@@ -418,10 +418,7 @@ pub(super) fn descriptor_may_intersect_range(
     if descriptor.max_key.as_str() < lower_bound {
         return false;
     }
-    if upper_bound
-        .map(|upper_bound| descriptor.min_key.as_str() >= upper_bound)
-        .unwrap_or(false)
-    {
+    if upper_bound.is_some_and(|upper_bound| descriptor.min_key.as_str() >= upper_bound) {
         return false;
     }
     true

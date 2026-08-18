@@ -530,14 +530,7 @@ impl RuntimeTestExt for TestRuntime {
     }
 
     fn create_checkpoint_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Checkpoint> {
-        block_on(self.admin.create_checkpoint(
-            namespace_id,
-            CreateCheckpointOptions {
-                name: "test-pin".to_owned(),
-                ttl_ms: None,
-            },
-        ))
-        .map(|response| response.checkpoint)
+        block_on(self.create_checkpoint(namespace_id))
     }
 
     fn advance_retention_floor_blocking(

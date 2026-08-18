@@ -676,10 +676,9 @@ impl RunnerInner {
     }
 
     fn runtime(&self) -> Option<tokio::runtime::Handle> {
-        match &self.runtime {
-            Some(handle) => Some(handle.clone()),
-            None => tokio::runtime::Handle::try_current().ok(),
-        }
+        self.runtime
+            .clone()
+            .or_else(|| tokio::runtime::Handle::try_current().ok())
     }
 
     /// Spawns maintenance on the owning runtime and tracks it for shutdown.

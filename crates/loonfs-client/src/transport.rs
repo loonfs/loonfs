@@ -422,7 +422,7 @@ impl Client {
             let mut body = body;
             let mut chunks = Vec::new();
             while let Some(chunk) = futures::StreamExt::next(&mut body).await {
-                chunks.push(chunk.map(|bytes| bytes.len()).unwrap_or(0));
+                chunks.push(chunk.map_or(0, |bytes| bytes.len()));
             }
             test_transport::record_streamed_body(chunks);
             return outcome;

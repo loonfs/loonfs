@@ -149,11 +149,10 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse> {
-    let commit_id = normalized_commit_id(commit_id);
     submit_operation(
         store,
         namespace_id,
-        commit_id,
+        normalized_commit_id(commit_id),
         FilesystemOperation::DeletePath {
             path: parse_mutation_path(absolute_path)?,
             behavior,
@@ -173,11 +172,10 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse> {
-    let commit_id = normalized_commit_id(commit_id);
     submit_operation(
         store,
         namespace_id,
-        commit_id,
+        normalized_commit_id(commit_id),
         FilesystemOperation::MovePath {
             from_path: parse_mutation_path(from_path)?,
             to_path: parse_mutation_path(to_path)?,
@@ -197,11 +195,10 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse> {
-    let commit_id = normalized_commit_id(commit_id);
     submit_operation(
         store,
         namespace_id,
-        commit_id,
+        normalized_commit_id(commit_id),
         FilesystemOperation::RestoreRevision {
             path: parse_mutation_path(absolute_path)?,
             source_revision_no,

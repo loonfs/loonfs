@@ -71,9 +71,9 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     'segments: for segment in wal_chain.segments() {
         for record in segment.records() {
             if record.seq > after_seq {
-                let seq = record.seq;
+                let committed_seq = record.seq;
                 changes.push(CommittedChange {
-                    committed_seq: seq,
+                    committed_seq,
                     commit_id: record.commit_id.clone(),
                     actor: record.actor.clone(),
                     committed_at_ms: record.committed_at_ms,
@@ -81,9 +81,9 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                     events: events_from_wal_deltas(&record.deltas)?,
                 });
                 if changes.len() == limit.as_usize() {
-                    through_seq = seq;
-                    if seq < head.seq {
-                        next_after_seq = Some(seq);
+                    through_seq = committed_seq;
+                    if committed_seq < head.seq {
+                        next_after_seq = Some(committed_seq);
                     }
                     break 'segments;
                 }
