@@ -143,8 +143,14 @@ fn background_step_conclusions_emit_debug_events() {
         assert!(dispatch.contains(field), "missing `{field}` in: {dispatch}");
     }
     // The spans this work runs under say maintenance, which is what it is.
-    for span in ["loonfs.maintenance.step", "loonfs.maintenance.wal_flush"] {
-        assert!(log.contains(span), "missing span `{span}` in:\n{log}");
+    for span_evidence in [
+        "loonfs.maintenance.step",
+        "loonfs.phase{phase=\"wal_flush\"",
+    ] {
+        assert!(
+            log.contains(span_evidence),
+            "missing span evidence `{span_evidence}` in:\n{log}"
+        );
     }
     assert!(
         !log.contains("compaction"),
