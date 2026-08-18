@@ -44,7 +44,7 @@ Create the release from the updated `main` branch. This command publishes the
 release and starts the release workflow:
 
 ```sh
-gh release create vX.Y.Z --target main --title "LoonFS vX.Y.Z" --notes-file notes.md
+gh release create vX.Y.Z --target main --title "vX.Y.Z" --notes-file notes.md
 ```
 
 Watch the workflow with `gh run watch`. After it completes, confirm that the
