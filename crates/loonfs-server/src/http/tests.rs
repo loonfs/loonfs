@@ -1793,6 +1793,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             .is_some_and(|message| message.starts_with("invalid after_seq `abc`:")),
         "{body}"
     );
+    assert_eq!(body["param"], "after_seq");
 
     // The largest allowed value reaches namespace lookup. One higher is
     // rejected while parsing the query.
@@ -1827,6 +1828,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         body["message"],
         "invalid after_seq `9007199254740992`: must be an integer from 0 through 9007199254740991"
     );
+    assert_eq!(body["param"], "after_seq");
 
     // Without credentials, authentication fails before the query is parsed.
     expect_enveloped(
@@ -1856,9 +1858,10 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             .is_some_and(|message| message.starts_with("invalid expected_head_seq `abc`:")),
         "{body}"
     );
+    assert_eq!(body["param"], "expected_head_seq");
 
     // A missing required query parameter returns invalid_request.
-    expect_enveloped(
+    let body = expect_enveloped(
         || {
             raw_agent()
                 .get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
@@ -1869,11 +1872,12 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         400,
         "invalid_request",
     );
+    assert_eq!(body["param"], "path");
 
     // A malformed JSON body returns invalid_request after authentication.
     // Without credentials, the server returns 401 before reading the body.
     let create_url = format!("http://{addr}/v0/namespaces");
-    expect_enveloped(
+    let body = expect_enveloped(
         || {
             raw_agent()
                 .post(&create_url)
@@ -1885,6 +1889,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         400,
         "invalid_request",
     );
+    assert!(body.get("param").is_none());
     expect_enveloped(
         || {
             raw_agent()
@@ -1904,7 +1909,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "actor":{"kind":"service","id":"test-service"},
         "operations":[{"kind":"create_directory","path":"relative"}]
     }"#;
-    expect_enveloped(
+    let body = expect_enveloped(
         || {
             raw_agent()
                 .post(&commits_url)
@@ -1916,6 +1921,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         400,
         "invalid_request",
     );
+    assert_eq!(body["param"], "/operations/0/path");
     expect_enveloped(
         || {
             raw_agent()
@@ -1966,7 +1972,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     // Invalid grep path prefixes return invalid_request after authentication.
     let grep_url = format!("http://{addr}/v0/namespaces/demo/query/grep");
     let invalid_grep = r#"{"pattern":"needle","path_prefix":"relative"}"#;
-    expect_enveloped(
+    let body = expect_enveloped(
         || {
             raw_agent()
                 .post(&grep_url)
@@ -1978,6 +1984,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         400,
         "invalid_request",
     );
+    assert_eq!(body["param"], "/path_prefix");
     expect_enveloped(
         || {
             raw_agent()

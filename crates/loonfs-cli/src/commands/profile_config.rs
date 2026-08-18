@@ -289,6 +289,7 @@ fn inapplicable_flag(flag: &str, profile_label: &str) -> CliError {
     CliError::invalid_input(format!(
         "`--{flag}` does not apply to {profile_label} profiles"
     ))
+    .with_param(format!("--{flag}"))
 }
 
 // --- create/update helpers ---
@@ -386,7 +387,8 @@ pub(super) fn build_profile_from_create_spec(
         Some(other) => {
             return Err(CliError::invalid_input(format!(
                 "unknown mode: `{other}` (expected embedded or remote)"
-            )))
+            ))
+            .with_param("--mode"))
         }
         None if runtime.interactive => {
             match prompt::prompt_choice("mode", &["embedded", "remote"])?.as_str() {
@@ -422,7 +424,8 @@ fn build_embedded_profile(
         Some(other) => {
             return Err(CliError::invalid_input(format!(
             "unknown store kind: `{other}` (expected local-fs, aws-s3, cloudflare-r2, gcp-gcs, or azure-abs)"
-        )))
+        ))
+            .with_param("--store-kind"))
         }
         None if runtime.interactive => {
             return prompt::prompt_choice(
@@ -569,10 +572,17 @@ fn profile_actor_config(
             actor_kind: Some(ActorKind::from(kind)),
             actor_id: Some(ActorId::parse(id).map_err(|error| {
                 CliError::invalid_input(format!("invalid --actor-id: {error}"))
+                    .with_param("--actor-id")
             })?),
         }),
-        (None, Some(_)) => Err(CliError::invalid_input("--actor-id requires --actor-kind")),
-        (Some(_), None) => Err(CliError::invalid_input("--actor-kind requires --actor-id")),
+        (None, Some(_)) => {
+            Err(CliError::invalid_input("--actor-id requires --actor-kind")
+                .with_param("--actor-id"))
+        }
+        (Some(_), None) => {
+            Err(CliError::invalid_input("--actor-kind requires --actor-id")
+                .with_param("--actor-kind"))
+        }
     }
 }
 

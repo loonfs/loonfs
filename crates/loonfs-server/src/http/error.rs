@@ -11,7 +11,7 @@ use loonfs_api::{
 
 pub(super) struct ApiResponseError {
     status: StatusCode,
-    body: ApiError,
+    body: Box<ApiError>,
     /// Emitted as a `Retry-After` header, for retryable capacity errors.
     retry_after_seconds: Option<u32>,
 }
@@ -20,13 +20,14 @@ impl ApiResponseError {
     pub(super) fn new(status: StatusCode, code: ErrorCode, message: &str) -> Self {
         let response = Self {
             status,
-            body: ApiError {
+            body: Box::new(ApiError {
                 code: code.as_str().to_owned(),
                 feature: None,
                 message: message.to_owned(),
+                param: None,
                 request_id: None,
                 details: None,
-            },
+            }),
             retry_after_seconds: None,
         };
         if code.retryable_without_operator_action() {
@@ -39,13 +40,14 @@ impl ApiResponseError {
     pub(super) fn not_supported(feature: &str, message: &str) -> Self {
         Self {
             status: StatusCode::NOT_IMPLEMENTED,
-            body: ApiError {
+            body: Box::new(ApiError {
                 code: ErrorCode::NotSupported.as_str().to_owned(),
                 feature: Some(feature.to_owned()),
                 message: message.to_owned(),
+                param: None,
                 request_id: None,
                 details: None,
-            },
+            }),
             retry_after_seconds: None,
         }
     }
@@ -56,6 +58,26 @@ impl ApiResponseError {
     pub(super) fn with_retry_after(mut self, seconds: u32) -> Self {
         self.retry_after_seconds = Some(seconds);
         self
+    }
+
+    /// Identifies the request input that caused the error.
+    pub(super) fn with_param(mut self, param: impl Into<String>) -> Self {
+        self.body.param = Some(param.into());
+        self
+    }
+
+    /// Sets `param` only for an `invalid_request` error.
+    pub(super) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
+        if self.body.code == ErrorCode::InvalidRequest.as_str() {
+            self.with_param(param)
+        } else {
+            self
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn param(&self) -> Option<&str> {
+        self.body.param.as_deref()
     }
 
     /// Stamps the mutation's idempotency key into the error details, so a
@@ -77,6 +99,7 @@ impl ApiResponseError {
             ErrorCode::InvalidRequest,
             &error.to_string(),
         )
+        .with_param("namespace_id")
     }
 
     pub(super) fn runtime(error: RuntimeError) -> Self {

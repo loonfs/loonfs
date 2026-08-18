@@ -48,6 +48,7 @@ pub(crate) fn parse_public_ordinal_arg<T>(
             ErrorCode::InvalidRequest.as_str(),
             format!("invalid {argument} `{value}`: {error}"),
         )
+        .with_param(argument)
     })
 }
 

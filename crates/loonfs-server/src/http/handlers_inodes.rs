@@ -35,6 +35,7 @@ pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
             ErrorCode::InvalidRequest,
             &format!("path.inode_id {}", error.reason()),
         )
+        .with_param("inode_id")
     })
 }
 

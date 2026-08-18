@@ -11,7 +11,7 @@ use axum::Json;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
-use loonfs_api::NamespaceId;
+use loonfs_api::{AbsolutePath, NamespaceId};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
@@ -182,17 +182,98 @@ where
     T: serde::de::DeserializeOwned,
     S: Send + Sync,
 {
-    match Json::<T>::from_request(req, state).await {
-        Ok(Json(value)) => Ok(value),
+    let body = match Json::<Box<serde_json::value::RawValue>>::from_request(req, state).await {
+        Ok(Json(body)) => body,
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-            Err(body_too_large)
+            return Err(body_too_large);
         }
-        Err(rejection) => Err(ApiResponseError::new(
+        Err(rejection) => {
+            return Err(ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &rejection.body_text(),
+            ));
+        }
+    };
+    decode_json(body.get().as_bytes())
+}
+
+fn decode_json<T>(body: &[u8]) -> Result<T, ApiResponseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let decoded = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        let param = json_pointer(error.path())
+            .and_then(|pointer| refine_internally_tagged_path(body, pointer));
+        let response = ApiResponseError::new(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
-            &rejection.body_text(),
-        )),
+            &format!("invalid JSON request body: {}", error.inner()),
+        );
+        match param {
+            Some(param) => response.with_param(param),
+            None => response,
+        }
+    })?;
+    // One value is the whole body: `end` rejects trailing data, which no
+    // single field can be blamed for, so this arm carries no param.
+    deserializer.end().map_err(|error| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!("invalid JSON request body: {error}"),
+        )
+    })?;
+    Ok(decoded)
+}
+
+fn refine_internally_tagged_path(body: &[u8], pointer: String) -> Option<String> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Some(pointer);
+    };
+    let Some(object) = value
+        .pointer(&pointer)
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Some(pointer);
+    };
+    if !object.contains_key("kind") {
+        return Some(pointer);
     }
+    let invalid_path_fields = object
+        .iter()
+        .filter(|(name, value)| {
+            matches!(name.as_str(), "path" | "from_path" | "to_path")
+                && serde_json::from_value::<AbsolutePath>((*value).clone()).is_err()
+        })
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    if let [field] = invalid_path_fields.as_slice() {
+        return Some(format!("{pointer}/{}", escape_json_pointer_segment(field)));
+    }
+    None
+}
+
+fn escape_json_pointer_segment(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+fn json_pointer(path: &serde_path_to_error::Path) -> Option<String> {
+    let mut pointer = String::new();
+    for segment in path {
+        pointer.push('/');
+        match segment {
+            serde_path_to_error::Segment::Seq { index } => pointer.push_str(&index.to_string()),
+            serde_path_to_error::Segment::Map { key } => {
+                pointer.push_str(&escape_json_pointer_segment(key));
+            }
+            serde_path_to_error::Segment::Enum { .. } | serde_path_to_error::Segment::Unknown => {
+                return None
+            }
+        }
+    }
+    (!pointer.is_empty()).then_some(pointer)
 }
 
 impl<T> FromRequest<AppState> for AppJson<T>
@@ -537,13 +618,94 @@ where
         if body.is_empty() {
             return Ok(OptionalAppJson(None));
         }
-        let value = serde_json::from_slice(&body).map_err(|error| {
-            ApiResponseError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                &format!("request body is not valid JSON for this operation: {error}"),
-            )
-        })?;
+        let value = decode_json(&body)?;
         Ok(OptionalAppJson(Some(value)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(dead_code)]
+    #[derive(Debug, serde::Deserialize)]
+    struct Request {
+        operations: Vec<Operation>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Debug, serde::Deserialize)]
+    struct Operation {
+        path: u64,
+    }
+
+    #[test]
+    fn typed_json_decode_reports_json_pointer() {
+        let error = decode_json::<Request>(
+            br#"{
+            "operations": [{ "path": "relative" }]
+        }"#,
+        )
+        .expect_err("path has the wrong type");
+        assert_eq!(error.param(), Some("/operations/0/path"));
+    }
+
+    #[test]
+    fn json_decode_rejects_trailing_data_after_the_value() {
+        let error = decode_json::<Request>(br#"{"operations": []}{"operations": []}"#)
+            .expect_err("trailing data is not part of the request");
+        assert_eq!(error.param(), None);
+
+        assert!(
+            decode_json::<Request>(br#"{"operations": []}  "#).is_ok(),
+            "trailing whitespace is not data"
+        );
+    }
+
+    #[test]
+    fn api_commit_decode_reports_operation_field_pointer() {
+        let error = decode_json::<loonfs_api::CommitRequest>(
+            br#"{
+                "commit_id": "invalid-path",
+                "actor": { "kind": "service", "id": "test-service" },
+                "operations": [{ "kind": "create_directory", "path": "relative" }]
+            }"#,
+        )
+        .expect_err("relative operation path is invalid");
+        assert_eq!(error.param(), Some("/operations/0/path"));
+    }
+
+    #[test]
+    fn ambiguous_operation_fields_do_not_report_a_param() {
+        let error = decode_json::<loonfs_api::CommitRequest>(
+            br#"{
+                "commit_id": "invalid-paths",
+                "actor": { "kind": "service", "id": "test-service" },
+                "operations": [{
+                    "kind": "move_path",
+                    "from_path": "relative",
+                    "to_path": "also-relative"
+                }]
+            }"#,
+        )
+        .expect_err("two relative operation paths are ambiguous");
+        assert_eq!(error.param(), None);
+    }
+
+    #[test]
+    fn json_pointer_escapes_object_keys() {
+        #[allow(dead_code)]
+        #[derive(Debug, serde::Deserialize)]
+        struct MapRequest {
+            values: std::collections::BTreeMap<String, u64>,
+        }
+
+        let error = decode_json::<MapRequest>(
+            br#"{
+            "values": { "a/b~c": false }
+        }"#,
+        )
+        .expect_err("value has the wrong type");
+        assert_eq!(error.param(), Some("/values/a~1b~0c"));
     }
 }

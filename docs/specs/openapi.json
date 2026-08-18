@@ -3409,6 +3409,13 @@
             "type": "string",
             "description": "Human-readable error message."
           },
+          "param": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
+          },
           "request_id": {
             "type": [
               "string",
@@ -6928,6 +6935,13 @@
                 "message": {
                   "type": "string",
                   "description": "Human-readable error message."
+                },
+                "param": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
                 },
                 "request_id": {
                   "type": [

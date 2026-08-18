@@ -115,15 +115,20 @@ fn actor_from_pair(
     id_name: &str,
     id: Option<&str>,
 ) -> Result<ActorRef, CliError> {
-    let together = || {
-        CliError::invalid_input(format!(
-            "{kind_name} and {id_name} must be supplied together"
-        ))
-    };
-    let kind = kind.ok_or_else(&together)?;
-    let id = id.ok_or_else(together)?;
+    let kind = kind.ok_or_else(|| {
+        named_cli_input_error(
+            kind_name,
+            format!("{kind_name} and {id_name} must be supplied together"),
+        )
+    })?;
+    let id = id.ok_or_else(|| {
+        named_cli_input_error(
+            id_name,
+            format!("{kind_name} and {id_name} must be supplied together"),
+        )
+    })?;
     let id = ActorId::parse(id)
-        .map_err(|error| CliError::invalid_input(format!("invalid {id_name}: {error}")))?;
+        .map_err(|error| named_cli_input_error(id_name, format!("invalid {id_name}: {error}")))?;
     Ok(ActorRef { kind, id })
 }
 
@@ -132,9 +137,19 @@ fn parse_actor_kind(name: &str, value: &str) -> Result<ActorKind, CliError> {
         "user" => Ok(ActorKind::User),
         "service" => Ok(ActorKind::Service),
         "system" => Ok(ActorKind::System),
-        _ => Err(CliError::invalid_input(format!(
-            "invalid {name}: expected user, service, or system"
-        ))),
+        _ => Err(named_cli_input_error(
+            name,
+            format!("invalid {name}: expected user, service, or system"),
+        )),
+    }
+}
+
+fn named_cli_input_error(name: &str, message: String) -> CliError {
+    let error = CliError::invalid_input(message);
+    if name.starts_with('-') {
+        error.with_param(name)
+    } else {
+        error
     }
 }
 

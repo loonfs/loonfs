@@ -200,6 +200,16 @@ Every error response is a JSON body:
 }
 ```
 
+`param` is present when the error identifies one invalid input. Its format
+depends on where the input came from:
+
+| Input source | `param` value |
+| --- | --- |
+| JSON request body | JSON Pointer |
+| Query parameter | Parameter name |
+| Path parameter | Parameter name |
+| CLI-local input | Flag or argument spelling |
+
 `code` is the stable machine contract; `message` is human-readable and may
 change between releases; `feature` is present only on `not_supported` errors
 and names the capability-document key the client should reconcile against.

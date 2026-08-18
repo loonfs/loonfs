@@ -1,4 +1,4 @@
-//! [`BackendError`] and the runtime-error shaping the CLI's backends share.
+//! Shared backend errors and runtime error conversion.
 
 use loonfs::RuntimeError;
 use loonfs_api::{ErrorCode, ErrorDetails, NamespaceId};
@@ -6,7 +6,7 @@ use loonfs_client::ClientError;
 use loonfs_grep::GrepError;
 use thiserror::Error;
 
-/// Normalized error returned by either CLI backend.
+/// Error returned by either CLI backend.
 ///
 /// `code` is either a shared [`loonfs_api::ErrorCode`] string or one of the
 /// local codes created below: `invalid_config`, `invalid_input`,
@@ -18,8 +18,14 @@ use thiserror::Error;
 pub(crate) struct BackendError {
     /// Registry or backend-local error code.
     pub code: String,
+    /// Feature key for `not_supported` errors.
+    pub feature: Option<String>,
     /// Human-readable description of the failure.
     pub message: String,
+    /// Identifies the invalid input. Body fields use JSON Pointer paths;
+    /// query and path parameters use their names; CLI errors use the flag or
+    /// argument as written.
+    pub param: Option<String>,
     /// Correlation id the server assigned to the failed request. Always
     /// `None` for embedded and local failures, which have no server hop.
     pub request_id: Option<String>,
@@ -32,7 +38,9 @@ impl BackendError {
     pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
+            feature: None,
             message: message.into(),
+            param: None,
             request_id: None,
             details: None,
         }
@@ -62,6 +70,19 @@ impl BackendError {
     pub(crate) fn runtime_error(message: impl Into<String>) -> Self {
         Self::new("runtime_error", message)
     }
+
+    pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
+        self.param = Some(param.into());
+        self
+    }
+
+    pub(crate) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
+        if self.code == ErrorCode::InvalidRequest.as_str() {
+            self.with_param(param)
+        } else {
+            self
+        }
+    }
 }
 
 impl From<ClientError> for BackendError {
@@ -87,14 +108,18 @@ impl From<ClientError> for BackendError {
             | ClientError::Json(message)
             | ClientError::Protocol(message) => Self::client_error(message),
             ClientError::Api {
+                status: _,
                 code,
+                feature,
                 message,
+                param,
                 request_id,
                 details,
-                ..
             } => Self {
                 code,
+                feature,
                 message,
+                param,
                 request_id,
                 details,
             },
@@ -116,7 +141,9 @@ pub(crate) fn map_runtime_error(error: RuntimeError) -> BackendError {
         // consumers read one contract from both backends.
         error => BackendError {
             code: error.code().as_str().to_owned(),
+            feature: None,
             message: error.to_string(),
+            param: None,
             request_id: None,
             details: error.details().map(Box::new),
         },
@@ -145,7 +172,18 @@ pub(crate) fn map_namespace_scoped_grep_error(
     error: GrepError,
 ) -> BackendError {
     match error {
-        GrepError::Runtime(error) => map_namespace_scoped_runtime_error(namespace_id, error),
+        GrepError::Runtime(error) => {
+            let cursor_is_invalid = matches!(
+                &error,
+                RuntimeError::Core(loonfs::CoreError::InvalidCursor(_))
+            );
+            let response = map_namespace_scoped_runtime_error(namespace_id, error);
+            if cursor_is_invalid {
+                response.with_param("/cursor")
+            } else {
+                response
+            }
+        }
         error => BackendError::new(error.code().as_str(), error.to_string()),
     }
 }
@@ -166,7 +204,7 @@ mod tests {
         ));
 
         assert_eq!(error.code, "stale_head");
-        let details = error.details.expect("core details survive the seam");
+        let details = error.details.expect("runtime error includes details");
         assert_eq!(details.expected_head_seq, Some(ChangeSeq(41)));
         assert_eq!(details.actual_head_seq, Some(ChangeSeq(45)));
     }
@@ -178,6 +216,7 @@ mod tests {
             code: "namespace_not_found".to_owned(),
             feature: None,
             message: "namespace `demo` does not exist".to_owned(),
+            param: None,
             request_id: None,
             details: None,
         });

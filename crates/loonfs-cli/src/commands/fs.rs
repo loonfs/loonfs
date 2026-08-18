@@ -45,8 +45,10 @@ use std::sync::Arc;
 fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliError> {
     commit_id
         .map(|value| {
-            CommitId::parse(value)
-                .map_err(|error| CliError::invalid_input(format!("invalid --commit-id: {error}")))
+            CommitId::parse(value).map_err(|error| {
+                CliError::invalid_input(format!("invalid --commit-id: {error}"))
+                    .with_param("--commit-id")
+            })
         })
         .transpose()
 }
@@ -247,18 +249,21 @@ fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, Attribute
     let Some((key, value)) = argument.split_once('=') else {
         return Err(CliError::invalid_input(format!(
             "invalid --set `{argument}`: expected key=value"
-        )));
+        ))
+        .with_param("--set"));
     };
     Ok((
         parse_attribute_key_arg("--set", key)?,
-        AttributeValue::parse(value)
-            .map_err(|error| CliError::invalid_input(format!("invalid --set value: {error}")))?,
+        AttributeValue::parse(value).map_err(|error| {
+            CliError::invalid_input(format!("invalid --set value: {error}")).with_param("--set")
+        })?,
     ))
 }
 
 fn parse_attribute_key_arg(flag: &str, key: &str) -> Result<AttributeKey, CliError> {
-    AttributeKey::parse(key)
-        .map_err(|error| CliError::invalid_input(format!("invalid {flag} key: {error}")))
+    AttributeKey::parse(key).map_err(|error| {
+        CliError::invalid_input(format!("invalid {flag} key: {error}")).with_param(flag)
+    })
 }
 
 /// The `--attributes-json` form of the update: one object carrying the same
@@ -283,6 +288,7 @@ fn update_attributes_options(
                 CliError::invalid_input(format!(
                     "invalid --attributes-json attribute update: {error}"
                 ))
+                .with_param("--attributes-json")
             })?;
             (update.set, update.remove)
         }
@@ -488,13 +494,15 @@ pub(crate) async fn run_filesystem_get(
                 CliError::invalid_input(format!(
                     "`{}` is not a directory; drop -r to download one file",
                     spec.absolute_path()
-                )),
+                ))
+                .with_param("-r"),
             ));
         }
         if args.revision.is_some() {
             return Err(context.fail(
                 kind,
-                CliError::invalid_input("--revision applies to one file, not a tree"),
+                CliError::invalid_input("--revision applies to one file, not a tree")
+                    .with_param("--revision"),
             ));
         }
         let local_root = match args.local_destination.as_deref() {
@@ -824,7 +832,8 @@ pub(crate) async fn run_filesystem_put(
                 CliError::invalid_input(format!(
                     "`{}` is not a directory; drop -r to upload one file",
                     local_path.display()
-                )),
+                ))
+                .with_param("-r"),
             ));
         }
         if args.commit_id.is_some() {
@@ -832,7 +841,8 @@ pub(crate) async fn run_filesystem_put(
                 kind,
                 CliError::invalid_input(
                     "--commit-id names one commit; a recursive upload makes one commit per file",
-                ),
+                )
+                .with_param("--commit-id"),
             ));
         }
         let remote_root = match args.remote_path {
@@ -1401,7 +1411,8 @@ async fn run_filesystem_transfer(
     if args.recursive && transfer_kind == TransferKind::Move {
         return Err(context.fail(
             kind,
-            CliError::invalid_input("mv moves a directory in one commit; -r is not needed"),
+            CliError::invalid_input("mv moves a directory in one commit; -r is not needed")
+                .with_param("-r"),
         ));
     }
     let allow_root = false;
@@ -1451,7 +1462,8 @@ async fn run_filesystem_transfer(
                     CliError::invalid_input(format!(
                         "`{}` is not a directory; drop -r to copy one file",
                         from.absolute_path()
-                    )),
+                    ))
+                    .with_param("-r"),
                 ));
             }
             if args.commit_id.is_some() {
@@ -1459,7 +1471,8 @@ async fn run_filesystem_transfer(
                     kind,
                     CliError::invalid_input(
                         "--commit-id names one commit; a recursive copy makes one commit per item",
-                    ),
+                    )
+                    .with_param("--commit-id"),
                 ));
             }
             return recursive::run_copy_tree(

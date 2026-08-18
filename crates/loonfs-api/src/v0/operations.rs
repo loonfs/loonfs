@@ -29,6 +29,11 @@ pub struct ApiError {
     pub feature: Option<String>,
     /// Human-readable error message.
     pub message: String,
+    /// Identifies the invalid input. Body fields use JSON Pointer paths;
+    /// query and path parameters use their names; CLI errors use the flag or
+    /// argument as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
     /// Correlation id the server assigned to the failed request; the same
     /// value is sent as the `x-request-id` response header.
     #[serde(default, skip_serializing_if = "Option::is_none")]

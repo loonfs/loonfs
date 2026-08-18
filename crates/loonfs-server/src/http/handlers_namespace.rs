@@ -367,7 +367,10 @@ pub(super) async fn create_checkpoint(
             loonfs::CreateCheckpointOptions::from_request(request),
         )
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("/name")
+        })?;
     Ok(Json(response))
 }
 
@@ -413,6 +416,7 @@ pub(super) async fn list_checkpoints(
                 ErrorCode::InvalidRequest,
                 &error.to_string(),
             )
+            .with_param("cursor")
         })?;
     let response = state
         .admin
@@ -479,6 +483,7 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
             ErrorCode::InvalidRequest,
             &format!("invalid checkpoint_id `{value}`: {error}"),
         )
+        .with_param("checkpoint_id")
     })
 }
 
@@ -507,8 +512,11 @@ pub(super) async fn maintenance_step(
     OptionalAppJson(request): OptionalAppJson<MaintenanceStepRequest>,
 ) -> Result<Json<MaintenanceStepResponse>, ApiResponseError> {
     let namespace_id = namespace_id_path.into_id()?;
-    let plan = loonfs::MaintenancePlan::from_request(request.unwrap_or_default())
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let plan =
+        loonfs::MaintenancePlan::from_request(request.unwrap_or_default()).map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_invalid_request_param("/metadata/max_wal_tail_segments")
+        })?;
     let result = state
         .admin
         .maintenance_step_namespace(&namespace_id, plan)

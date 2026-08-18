@@ -28,7 +28,15 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CliError {
     pub code: String,
+    /// Feature key for `not_supported` errors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feature: Option<String>,
     pub message: String,
+    /// Identifies the invalid input. Body fields use JSON Pointer paths;
+    /// query and path parameters use their names; CLI errors use the flag or
+    /// argument as written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
     /// Correlation id the server assigned to the failed request; absent for
     /// embedded and local failures, which have no server hop.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,7 +53,9 @@ impl From<crate::backend_error::BackendError> for CliError {
     fn from(error: crate::backend_error::BackendError) -> Self {
         Self {
             code: error.code,
+            feature: error.feature,
             message: error.message,
+            param: error.param,
             request_id: error.request_id,
             details: error.details,
         }
@@ -65,7 +75,9 @@ impl CliError {
     pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
+            feature: None,
             message: message.into(),
+            param: None,
             request_id: None,
             details: None,
         }
@@ -77,6 +89,11 @@ impl CliError {
 
     pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
         Self::new("invalid_input", message)
+    }
+
+    pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
+        self.param = Some(param.into());
+        self
     }
 
     pub(crate) fn profile_not_found(name: &str) -> Self {
@@ -130,6 +147,7 @@ impl CliError {
         Self::non_interactive_input_required(format!(
             "missing required `{field}` while `--no-input` is active"
         ))
+        .with_param(format!("--{field}"))
     }
 
     pub(crate) fn destination_exists(path: &std::path::Path) -> Self {

@@ -544,6 +544,7 @@ mod tests {
             code: code.to_owned(),
             feature: None,
             message: String::new(),
+            param: None,
             request_id: None,
             details: None,
         };
@@ -881,6 +882,7 @@ mod tests {
             code: code.to_owned(),
             feature: None,
             message: "test".to_owned(),
+            param: None,
             request_id: None,
             details: None,
         }
