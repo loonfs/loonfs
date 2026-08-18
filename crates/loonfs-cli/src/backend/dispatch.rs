@@ -13,16 +13,17 @@ use loonfs_api::{
         ChangesResponse, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse, StoreProbeRequest,
         StoreProbeResponse, UploadSessionResponse,
     },
-    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, ContentRef,
-    CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
-    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    Namespace, NamespaceId, ReleaseCheckpointResponse, RevisionNo, UploadId,
+    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
+    CommitResponse, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
+    DeleteNamespaceResponse, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, Namespace, NamespaceId, ReleaseCheckpointResponse, RevisionNo,
+    UploadId,
 };
 use loonfs_client::{
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions, MoveOptions,
-    NamespacePath, PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, ListPathEntriesOptions,
+    MoveOptions, NamespacePath, PutFileOptions, RestoreRevisionOptions, StatPathOptions,
+    UndeleteOptions, UpdateAttributesOptions,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
@@ -54,6 +55,37 @@ fn maintenance_host_needs_an_embedded_profile() -> BackendError {
 /// target requires handling both transports. Both paths normalize failures to
 /// the same error-code registry, which keeps command output consistent.
 impl ResolvedTarget {
+    /// Returns the selected deployment's canonical capability document.
+    pub(crate) async fn capabilities(&self) -> Result<CapabilityDocument, BackendError> {
+        match self {
+            Self::Embedded(target) => Ok(target.backend.reader.capabilities()),
+            Self::Remote(target) => Ok(target.client.capabilities().await?),
+        }
+    }
+
+    /// Establishes the remote transport through the public health endpoint.
+    ///
+    /// Any served API response proves DNS, TCP, and TLS (when applicable)
+    /// completed. The health check itself runs separately and judges the
+    /// response status.
+    pub(crate) async fn remote_connectivity(&self) -> Result<(), BackendError> {
+        match self {
+            Self::Embedded(_) => Ok(()),
+            Self::Remote(target) => match target.client.health().await {
+                Ok(()) | Err(ClientError::Api { .. }) => Ok(()),
+                Err(error) => Err(error.into()),
+            },
+        }
+    }
+
+    /// Checks the remote server's public liveness endpoint.
+    pub(crate) async fn remote_health(&self) -> Result<(), BackendError> {
+        match self {
+            Self::Embedded(_) => Ok(()),
+            Self::Remote(target) => Ok(target.client.health().await?),
+        }
+    }
+
     /// Creates a new empty namespace.
     pub(crate) async fn create_namespace(
         &self,

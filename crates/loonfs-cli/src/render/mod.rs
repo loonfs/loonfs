@@ -6,7 +6,8 @@ mod summaries;
 
 use crate::args::CommandKind;
 use crate::commands::{
-    CommandData, CommandFailure, CommandOutput, ListingHeadDrift, MaintenanceKeyReport,
+    CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus, ListingHeadDrift,
+    MaintenanceKeyReport,
 };
 use crate::config::ConfigSource;
 use crate::error::CliError;
@@ -109,7 +110,7 @@ mod tests {
         AttributeValue, ListingHeadDrift,
     };
     use crate::args::CommandKind;
-    use crate::commands::{CommandData, CommandFailure, CommandOutput};
+    use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
     use crate::config::{ProfileConfig, StoreConfig};
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
@@ -505,6 +506,29 @@ mod tests {
         assert_eq!(
             human_error(&error),
             "grep is not served (request id: req_human)\nfeature: query.grep\nparam: /pattern"
+        );
+    }
+
+    #[test]
+    fn human_doctor_failure_has_one_detail_line_with_the_request_id() {
+        let output = CommandOutput {
+            kind: CommandKind::Doctor,
+            profile: Some("remote".to_owned()),
+            mode: Some("remote".to_owned()),
+            data: CommandData::Doctor {
+                checks: vec![DoctorCheck {
+                    name: "auth".to_owned(),
+                    status: DoctorStatus::Failed,
+                    message: "token rejected\ncheck the profile".to_owned(),
+                    request_id: Some("req_doctor".to_owned()),
+                    store_probe: None,
+                }],
+            },
+        };
+
+        assert_eq!(
+            human_success(&output),
+            "auth: failed\n  detail: token rejected | check the profile (request id: req_doctor)"
         );
     }
 

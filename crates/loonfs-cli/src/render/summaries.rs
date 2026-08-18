@@ -18,6 +18,33 @@ pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
     }
 }
 
+/// The complete existing store-probe rendering, shared by `admin store
+/// probe` and doctor's explicit write check.
+pub(super) fn store_probe_report_lines(
+    response: &loonfs_api::v0::StoreProbeResponse,
+) -> Vec<String> {
+    let failed = response
+        .checks
+        .iter()
+        .filter(|check| check.outcome == StoreProbeCheckOutcome::Failed)
+        .count();
+    let mut lines: Vec<String> = response.checks.iter().map(store_probe_check_line).collect();
+    lines.push(if failed == 0 {
+        format!(
+            "store probe {}: {} checks passed",
+            response.run_id,
+            response.checks.len()
+        )
+    } else {
+        format!(
+            "store probe {}: {failed} of {} checks failed",
+            response.run_id,
+            response.checks.len()
+        )
+    });
+    lines
+}
+
 /// Formats the result of one WAL flush step.
 pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome, tail_segments: u64) -> String {
     match outcome {

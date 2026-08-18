@@ -9,9 +9,10 @@ use loonfs_api::v0::{
     StoreProbeResponse,
 };
 use loonfs_api::{
-    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, CreateCheckpointResponse,
-    DeleteNamespaceResponse, FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse,
-    MaintenanceStepResponse, Namespace, NamespaceId, ReleaseCheckpointResponse,
+    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId,
+    CreateCheckpointResponse, DeleteNamespaceResponse, FileRevision, GcResponse, GrepMatch,
+    InodeId, ListCheckpointsResponse, MaintenanceStepResponse, Namespace, NamespaceId,
+    ReleaseCheckpointResponse,
 };
 use serde::Serialize;
 
@@ -87,6 +88,41 @@ pub(crate) struct MaintenanceKeyReport {
     pub settled: bool,
 }
 
+/// Stable result vocabulary for one `doctor` check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DoctorStatus {
+    Ok,
+    Warning,
+    Failed,
+    Skipped,
+}
+
+impl DoctorStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warning => "warning",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// One named `doctor` check, in the order the command performed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DoctorCheck {
+    pub name: String,
+    pub status: DoctorStatus,
+    pub message: String,
+    /// Correlation id from a failed remote request, when one was returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The existing store-probe response, present only for `--write-check`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_probe: Option<StoreProbeResponse>,
+}
+
 pub(crate) struct CommandOutput {
     pub kind: CommandKind,
     pub profile: Option<String>,
@@ -106,6 +142,10 @@ pub(crate) struct CommandFailure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CommandData {
+    Capabilities(CapabilityDocument),
+    Doctor {
+        checks: Vec<DoctorCheck>,
+    },
     Profile(ProfileConfig),
     ProfileSummary(ProfileSummary),
     ProfileList {
@@ -293,6 +333,9 @@ impl CommandData {
     pub(crate) fn reports_failures(&self) -> bool {
         match self {
             CommandData::TreeTransfer { failures, .. } => !failures.is_empty(),
+            CommandData::Doctor { checks } => checks
+                .iter()
+                .any(|check| check.status == DoctorStatus::Failed),
             // A wait that ran out of budget renders where the index got to
             // — real data, not an error — and still exits nonzero, because
             // the caller asked for a target that was not reached.
@@ -320,6 +363,7 @@ impl CommandData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn path_entries(head_drift: Option<ListingHeadDrift>) -> CommandData {
         CommandData::PathEntries {
@@ -350,6 +394,26 @@ mod tests {
                 "first_head_seq": 5,
                 "last_head_seq": 8,
             })
+        );
+    }
+
+    #[test]
+    fn inspection_data_kinds_are_additive_and_pinned() {
+        let capabilities = CommandData::Capabilities(CapabilityDocument {
+            protocol_version: loonfs_api::PROTOCOL_VERSION.to_owned(),
+            profiles: Vec::new(),
+            features: BTreeMap::new(),
+            limits: BTreeMap::new(),
+        });
+        let doctor = CommandData::Doctor { checks: Vec::new() };
+
+        assert_eq!(
+            serde_json::to_value(capabilities).expect("serialize capabilities")["kind"],
+            "capabilities"
+        );
+        assert_eq!(
+            serde_json::to_value(doctor).expect("serialize doctor")["kind"],
+            "doctor"
         );
     }
 }

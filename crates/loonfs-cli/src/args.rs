@@ -41,6 +41,8 @@ Inspection:
   revisions   List a file's revision history
   trash       List recoverable deletions
   changes     List committed changes
+  capabilities  Show the selected profile's protocol capabilities
+  doctor      Diagnose the selected profile with read-only checks
   completion  Print a shell completion script
   version     Print version and build metadata
 
@@ -148,6 +150,10 @@ pub(crate) enum Command {
     Trash(TrashArgs),
     /// List committed changes after a sequence number.
     Changes(ChangesArgs),
+    /// Show the selected profile's protocol capabilities.
+    Capabilities(CapabilitiesArgs),
+    /// Diagnose configuration and the selected profile without writing.
+    Doctor(DoctorArgs),
     /// Maintenance operations: checkpoints, steps, retention, GC, indexes.
     Admin {
         #[command(subcommand)]
@@ -494,6 +500,24 @@ pub(crate) struct NamespaceUseArgs {
 pub(crate) struct CurrentArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CapabilitiesArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DoctorArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Run the existing write-producing object-store contract probe as a
+    /// tenth check.
+    #[arg(long)]
+    pub write_check: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1214,6 +1238,8 @@ pub(crate) enum CommandKind {
     FilesystemMv,
     FilesystemCp,
     Changes,
+    Capabilities,
+    Doctor,
     AdminCheckpointCreate,
     AdminCheckpointList,
     AdminCheckpointRelease,
@@ -1265,6 +1291,8 @@ impl CommandKind {
             CommandKind::FilesystemMv => "filesystem_mv",
             CommandKind::FilesystemCp => "filesystem_cp",
             CommandKind::Changes => "changes",
+            CommandKind::Capabilities => "capabilities",
+            CommandKind::Doctor => "doctor",
             CommandKind::AdminCheckpointCreate => "admin_checkpoint_create",
             CommandKind::AdminCheckpointList => "admin_checkpoint_list",
             CommandKind::AdminCheckpointRelease => "admin_checkpoint_release",
@@ -1326,6 +1354,8 @@ impl Cli {
             Command::Mv(_) => CommandKind::FilesystemMv,
             Command::Cp(_) => CommandKind::FilesystemCp,
             Command::Changes(_) => CommandKind::Changes,
+            Command::Capabilities(_) => CommandKind::Capabilities,
+            Command::Doctor(_) => CommandKind::Doctor,
             Command::Admin { command } => match command {
                 AdminCommand::Checkpoint { command } => match command {
                     AdminCheckpointCommand::Create(_) => CommandKind::AdminCheckpointCreate,
@@ -1397,6 +1427,8 @@ mod tests {
             (CommandKind::FilesystemMv, "filesystem_mv"),
             (CommandKind::FilesystemCp, "filesystem_cp"),
             (CommandKind::Changes, "changes"),
+            (CommandKind::Capabilities, "capabilities"),
+            (CommandKind::Doctor, "doctor"),
             (
                 CommandKind::AdminCheckpointCreate,
                 "admin_checkpoint_create",
@@ -1525,6 +1557,13 @@ mod tests {
         assert_hint(gcs, "service_account_key_path", ValueHint::FilePath);
         let namespace_show = subcommand(subcommand(&command, "namespace"), "show");
         assert_hint(namespace_show, "namespace_id", ValueHint::Other);
+
+        let capabilities = subcommand(&command, "capabilities");
+        assert_hint(capabilities, "profile", ValueHint::Other);
+
+        let doctor = subcommand(&command, "doctor");
+        assert_hint(doctor, "profile", ValueHint::Other);
+        assert_hint(doctor, "namespace", ValueHint::Other);
     }
 
     fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {

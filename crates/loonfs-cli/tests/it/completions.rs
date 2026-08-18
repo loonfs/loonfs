@@ -15,6 +15,26 @@ fn completion_generates_for_zsh_and_bash() {
 }
 
 #[test]
+fn completion_covers_capabilities_and_doctor_selectors() {
+    let output = loonfs()
+        .args(["completion", "--shell", "zsh"])
+        .output()
+        .expect("run completion generation");
+
+    assert!(output.status.success(), "{output:?}");
+    let script = stdout(&output);
+    for surface in [
+        "(capabilities)",
+        "(doctor)",
+        "--profile=",
+        "--namespace=",
+        "--write-check",
+    ] {
+        assert!(script.contains(surface), "missing {surface} in completion");
+    }
+}
+
+#[test]
 fn completion_detects_the_shell_from_the_environment() {
     let output = loonfs()
         .arg("completion")
