@@ -882,7 +882,7 @@ where
     let mode = upload_mode(&loaded.transport);
     let completion = resolve(mode).map_err(CoreError::InvalidUploadContent)?;
     let plan = completion_plan(&loaded, &completion)?;
-    if let Some(completed) = completed_outcome(
+    if let Some(completed) = already_completed_outcome(
         &loaded.state,
         namespace_id,
         content_store_id,
@@ -953,7 +953,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
                 // A racing abort or a peer's completion may have landed
                 // between the read above and this swap. Whatever the durable
                 // record says now is what happened.
-                if let Some(completed) = completed_outcome(
+                if let Some(completed) = already_completed_outcome(
                     &state.state,
                     &namespace_id,
                     &content_store_id,
@@ -1336,7 +1336,7 @@ fn receipt_within_window(
 /// Answers a completion against a session that has already reached a
 /// terminal state: a replay of the same content succeeds idempotently,
 /// anything else is the terminal error for that state.
-fn completed_outcome(
+fn already_completed_outcome(
     state: &UploadSessionLifecycle,
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
