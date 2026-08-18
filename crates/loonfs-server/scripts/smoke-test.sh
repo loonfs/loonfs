@@ -233,15 +233,15 @@ pass "GET /readiness answered 200"
 #    and never written. The token reaches the profile through the
 #    environment, and this run's copy of it goes with the directory.
 export LOONFS_CONFIG="$WORK_DIR/loonfs-config.toml"
-loonfs init smoke --no-input --mode remote --server-url "$BASE_URL" >/dev/null \
-  || fail "loonfs init could not build a profile for $BASE_URL"
+loonfs --no-input profile create remote smoke --server-url "$BASE_URL" >/dev/null \
+  || fail "loonfs profile create remote could not build a profile for $BASE_URL"
 pass "built a throwaway CLI profile for $BASE_URL"
 
 # 6. The object store. Readiness never touches it, so this is the check that
 #    catches a wrong bucket, a wrong region, or an expired credential.
-loonfs admin store-probe \
-  || fail "loonfs admin store-probe found the object store wanting"
-pass "loonfs admin store-probe passed every check"
+loonfs admin store probe \
+  || fail "loonfs admin store probe found the object store wanting"
+pass "loonfs admin store probe passed every check"
 
 # 7. A file through a namespace of this run's own, and the same bytes back.
 NAMESPACE="smoke-$(random_hex 4)"

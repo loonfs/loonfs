@@ -531,7 +531,7 @@ fn tls_server_config(
 /// address, because a check that held the port could not run beside the
 /// server it is checking, and it performs no object-store operation, because
 /// a reachability check belongs to `loonfs-server --probe-store` or
-/// `loonfs admin store-probe`. Constructing the store still creates a
+/// `loonfs admin store probe`. Constructing the store still creates a
 /// `local-fs` root, as a start does.
 pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     config.validate()?;

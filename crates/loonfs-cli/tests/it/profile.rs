@@ -10,11 +10,8 @@ fn profile_create_list_show_delete_work() {
         "--json",
         "profile",
         "create",
+        "local",
         "default",
-        "--mode",
-        "embedded",
-        "--store-kind",
-        "local-fs",
         "--root",
         harness.store_root("default").to_str().expect("utf-8 path"),
     ]);
@@ -27,9 +24,8 @@ fn profile_create_list_show_delete_work() {
         "--json",
         "profile",
         "create",
-        "prod",
-        "--mode",
         "remote",
+        "prod",
         "--server-url",
         &external.server_url,
         "--auth-token",
@@ -327,31 +323,29 @@ fn config_path_answers_while_the_config_file_is_unreadable() {
 /// The recovery path: an override reaches a config file of its own while
 /// the default file is one this build refuses to read.
 #[test]
-fn init_runs_through_an_override_while_the_default_config_is_unreadable() {
+fn profile_create_runs_through_an_override_while_the_default_config_is_unreadable() {
     let harness = Harness::new();
     harness.write_cli_config("config_version = 1\nunknown_knob = true\n");
     let broken = fs::read_to_string(&harness.config_path).expect("read broken config");
 
     let flagged_path = harness.temp_dir.path().join("recovery").join("config.toml");
     let flagged = flagged_path.to_str().expect("utf-8 path");
-    let init = harness.run(&[
+    let create = harness.run(&[
         "--json",
         "--config",
         flagged,
-        "init",
+        "profile",
+        "create",
+        "local",
         "rescue",
-        "--mode",
-        "embedded",
-        "--store-kind",
-        "local-fs",
         "--root",
         harness.store_root("rescue").to_str().expect("utf-8 path"),
     ]);
-    assert_success(&init);
-    assert_eq!(json_data(&init)["mode"], "embedded");
+    assert_success(&create);
+    assert_eq!(json_data(&create)["mode"], "embedded");
     assert!(
         flagged_path.exists(),
-        "init creates the directories it needs"
+        "profile create creates the directories it needs"
     );
 
     let list = harness.run(&["--json", "--config", flagged, "profile", "list"]);
@@ -360,21 +354,19 @@ fn init_runs_through_an_override_while_the_default_config_is_unreadable() {
 
     // The environment is the same way out.
     let env_path = harness.temp_dir.path().join("by-env").join("config.toml");
-    let env_init = harness.run_with_env(
+    let env_create = harness.run_with_env(
         &[("LOONFS_CONFIG", &env_path)],
         &[
             "--json",
-            "init",
+            "profile",
+            "create",
+            "local",
             "byenv",
-            "--mode",
-            "embedded",
-            "--store-kind",
-            "local-fs",
             "--root",
             harness.store_root("byenv").to_str().expect("utf-8 path"),
         ],
     );
-    assert_success(&env_init);
+    assert_success(&env_create);
     let env_list = harness.run_with_env(
         &[("LOONFS_CONFIG", &env_path)],
         &["--json", "profile", "list"],
@@ -436,9 +428,8 @@ fn unreachable_servers_are_named_with_their_url() {
         "--json",
         "profile",
         "create",
-        "dead",
-        "--mode",
         "remote",
+        "dead",
         "--server-url",
         &dead_url,
     ]);
@@ -453,22 +444,20 @@ fn unreachable_servers_are_named_with_their_url() {
 }
 
 #[test]
-fn init_creates_embedded_profile_and_current_reports_namespace_unset() {
+fn profile_create_embedded_and_current_reports_namespace_unset() {
     let harness = Harness::new();
 
-    let init = harness.run(&[
+    let create = harness.run(&[
         "--json",
-        "init",
+        "profile",
+        "create",
+        "local",
         "mystore",
-        "--mode",
-        "embedded",
-        "--store-kind",
-        "local-fs",
         "--root",
         harness.store_root("mystore").to_str().expect("utf-8 path"),
     ]);
-    assert_success(&init);
-    assert_eq!(json_data(&init)["mode"], "embedded");
+    assert_success(&create);
+    assert_eq!(json_data(&create)["mode"], "embedded");
 
     let show = harness.run(&["--json", "profile", "show"]);
     assert_success(&show);
@@ -486,27 +475,18 @@ fn init_creates_embedded_profile_and_current_reports_namespace_unset() {
 }
 
 #[test]
-fn invalid_profile_mode_is_rejected() {
+fn init_is_interactive_only() {
     let harness = Harness::new();
 
-    let result = harness.run(&[
-        "--json",
-        "profile",
-        "create",
-        "default",
-        "--mode",
-        "not-a-mode",
-        "--store-kind",
-        "local-fs",
-        "--root",
-        harness.store_root("default").to_str().expect("utf-8 path"),
-    ]);
+    let result = harness.run(&["--json", "init"]);
 
     assert_failure(&result);
     let error = json_error(&result);
-    assert_eq!(error["code"], "invalid_input");
+    assert_eq!(error["code"], "non_interactive_input_required");
     let message = error["message"].as_str().expect("json string");
-    assert!(message.contains("expected embedded or remote"));
+    assert!(message.contains("interactive"));
+    assert!(message.contains("profile create <provider>"));
+    assert!(!harness.config_path.exists());
 }
 
 #[test]
@@ -596,11 +576,8 @@ fn profile_update_with_only_service_account_key_path_applies() {
         "--json",
         "profile",
         "create",
+        "gcs",
         "gcp",
-        "--mode",
-        "embedded",
-        "--store-kind",
-        "gcp-gcs",
         "--bucket",
         "documents",
         "--service-account-key-path",
@@ -643,6 +620,30 @@ fn profile_use_switches_default() {
 }
 
 #[test]
+fn profile_resolution_is_flag_then_environment_then_config_default() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("configured");
+    harness.add_embedded_profile("environment");
+    harness.add_embedded_profile("flagged");
+
+    let from_environment =
+        harness.run_with_env(&[("LOONFS_PROFILE", "environment")], &["--json", "current"]);
+    assert_success(&from_environment);
+    assert_eq!(json_data(&from_environment)["profile"], "environment");
+
+    let from_flag = harness.run_with_env(
+        &[("LOONFS_PROFILE", "environment")],
+        &["--json", "current", "--profile", "flagged"],
+    );
+    assert_success(&from_flag);
+    assert_eq!(json_data(&from_flag)["profile"], "flagged");
+
+    let from_default = harness.run_with_env(&[("LOONFS_PROFILE", "")], &["--json", "current"]);
+    assert_success(&from_default);
+    assert_eq!(json_data(&from_default)["profile"], "configured");
+}
+
+#[test]
 fn profile_use_rejects_missing_profile() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
@@ -660,12 +661,10 @@ fn profile_names_matching_top_level_config_keys_are_allowed() {
 
     let init = harness.run(&[
         "--json",
-        "init",
+        "profile",
+        "create",
+        "local",
         "default_profile",
-        "--mode",
-        "embedded",
-        "--store-kind",
-        "local-fs",
         "--root",
         harness
             .store_root("default_profile")
@@ -678,11 +677,8 @@ fn profile_names_matching_top_level_config_keys_are_allowed() {
         "--json",
         "profile",
         "create",
+        "local",
         "config_version",
-        "--mode",
-        "embedded",
-        "--store-kind",
-        "local-fs",
         "--root",
         harness
             .store_root("config_version")
@@ -722,10 +718,7 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
             "profile",
             "create",
             "gcs",
-            "--mode",
-            "embedded",
-            "--store-kind",
-            "gcp-gcs",
+            "gcs",
             "--bucket",
             "bucket",
             "--service-account-key-path",
@@ -742,10 +735,7 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
             "profile",
             "create",
             "local",
-            "--mode",
-            "embedded",
-            "--store-kind",
-            "local-fs",
+            "local",
             "--root",
             harness.store_root("local").to_str().expect("utf-8 path"),
         ],
@@ -760,10 +750,7 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
             "profile",
             "create",
             "s3",
-            "--mode",
-            "embedded",
-            "--store-kind",
-            "aws-s3",
+            "s3",
             "--bucket",
             "bucket",
             "--region",
@@ -778,18 +765,15 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
     assert!(!persisted.contains("ambient-session"), "{persisted}");
     assert!(!persisted.contains("ambient-token"), "{persisted}");
 
-    // And a typed flag that does not apply is still rejected.
+    // A typed flag that does not apply is absent from this provider's grammar.
     let typed = harness.run_with_env(
         ambient,
         &[
             "--json",
             "profile",
             "create",
+            "gcs",
             "gcs-typed",
-            "--mode",
-            "embedded",
-            "--store-kind",
-            "gcp-gcs",
             "--bucket",
             "bucket",
             "--service-account-key-path",
@@ -799,12 +783,8 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
         ],
     );
     assert_failure(&typed);
-    let error = json_error(&typed);
-    assert_eq!(error["code"], "invalid_input");
-    assert!(error["message"]
-        .as_str()
-        .expect("json string")
-        .contains("`--access-key-id` does not apply"));
+    let error = stderr_string(&typed);
+    assert!(error.contains("unexpected argument '--access-key-id'"));
 }
 
 #[test]
@@ -817,7 +797,6 @@ fn remote_profile_creation_does_not_capture_the_environment_token() {
             "profile",
             "create",
             "remote",
-            "--mode",
             "remote",
             "--server-url",
             "https://loonfs.example.com",
@@ -839,10 +818,7 @@ fn profile_update_switches_credential_source_atomically() {
         "profile",
         "create",
         "s3",
-        "--mode",
-        "embedded",
-        "--store-kind",
-        "aws-s3",
+        "s3",
         "--bucket",
         "bucket",
         "--region",
@@ -933,17 +909,7 @@ root = "{}"
     ));
     let existing = fs::read_to_string(&harness.config_path).expect("read existing config");
 
-    let init = harness.run(&[
-        "--json",
-        "init",
-        "mystore",
-        "--mode",
-        "embedded",
-        "--store-kind",
-        "local-fs",
-        "--root",
-        harness.store_root("mystore").to_str().expect("utf-8 path"),
-    ]);
+    let init = harness.run(&["--json", "init"]);
     assert_failure(&init);
     let error = json_error(&init);
     assert_eq!(error["code"], "config_already_exists");
@@ -1083,9 +1049,8 @@ fn invalid_remote_urls_are_rejected() {
         "--json",
         "profile",
         "create",
-        "default",
-        "--mode",
         "remote",
+        "default",
         "--server-url",
         "http://",
     ]);
@@ -1100,9 +1065,8 @@ fn invalid_remote_urls_are_rejected() {
         "--json",
         "profile",
         "create",
-        "default",
-        "--mode",
         "remote",
+        "default",
         "--server-url",
         "https://",
     ]);
@@ -1119,9 +1083,8 @@ fn external_remote_profile_executes_through_http() {
         "--json",
         "profile",
         "create",
-        "default",
-        "--mode",
         "remote",
+        "default",
         "--server-url",
         &remote_server.server_url,
         "--auth-token",
@@ -1169,6 +1132,23 @@ fn filesystem_requires_default_namespace_when_omitted() {
     assert_failure(&output);
     let error = json_error(&output);
     assert_eq!(error["code"], "no_default_namespace");
+}
+
+#[test]
+fn namespace_show_reads_positional_and_default_namespaces() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+
+    let positional = harness.run(&["--json", "namespace", "show", "demo"]);
+    assert_success(&positional);
+    assert_eq!(json_data(&positional)["kind"], "namespace_status");
+    assert_eq!(json_data(&positional)["namespace_id"], "demo");
+
+    assert_success(&harness.run(&["use", "demo"]));
+    let selected = harness.run(&["--json", "namespace", "show"]);
+    assert_success(&selected);
+    assert_eq!(json_data(&selected), json_data(&positional));
 }
 
 #[test]
@@ -1255,9 +1235,8 @@ fn remote_profile_missing_namespace_reports_user_facing_message() {
         "--json",
         "profile",
         "create",
-        "default",
-        "--mode",
         "remote",
+        "default",
         "--server-url",
         &remote_server.server_url,
         "--auth-token",

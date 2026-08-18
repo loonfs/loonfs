@@ -319,7 +319,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         }
         CommandData::GrepIndexCollected(response) => {
             let mut summary = format!(
-                "index-gc for {}: {} segments, {} other objects deleted, {} retained",
+                "index gc for {}: {} segments, {} other objects deleted, {} retained",
                 response.namespace_id,
                 response.deleted_segments,
                 response.deleted_other_objects,

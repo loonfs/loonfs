@@ -66,7 +66,7 @@ pub(crate) struct EmbeddedBackend {
 /// step that raced another writer's debt. Past that the error surfaces.
 const MAX_MAINTENANCE_RECOVERIES: usize = 2;
 
-/// One job `admin run` was asked to host, and the executor registered under
+/// One job `admin maintenance run` was asked to host, and the executor registered under
 /// it.
 type HostedJob = (MaintenanceJobId, Arc<dyn MaintenanceJob>);
 
@@ -970,7 +970,7 @@ mod tests {
             .get()
     }
 
-    /// The four jobs `admin run` hosts by default, in the order it drives
+    /// The four jobs `admin maintenance run` hosts by default, in the order it drives
     /// them.
     fn every_job() -> [MaintenanceJobId; 4] {
         [
@@ -1401,7 +1401,7 @@ mod tests {
         // More publishes than the WAL backpressure cap: the Enabled policy
         // must keep stepping the tail down so no write ever stalls on
         // `maintenance_required` (each stall used to require a manual
-        // `loonfs admin step`).
+        // `loonfs admin maintenance step`).
         for index in 0..140 {
             target
                 .backend

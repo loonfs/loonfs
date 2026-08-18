@@ -94,7 +94,7 @@ async fn resolve_command_context_with_actor(
     let resolved = resolve_target_profile_from_config(
         &loaded.config,
         explicit_profile,
-        target.profile.no_retry,
+        target.request.no_retry,
     )
     .await
     .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;

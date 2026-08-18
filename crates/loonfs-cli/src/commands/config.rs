@@ -2,8 +2,8 @@
 
 use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use super::profile_config::{build_profile_from_create_spec, create_profile_spec_from_init};
-use crate::args::{CommandKind, ConfigCommand, InitArgs, RuntimeBehavior};
+use super::profile_config::build_profile_interactive;
+use crate::args::{CommandKind, ConfigCommand, RuntimeBehavior};
 use crate::config::{
     load_config_for_repair, mutate_config, redacted_config_table, ConfigLoad, ConfigLocation,
     ProfileConfig,
@@ -22,7 +22,6 @@ use std::path::Path;
 pub(crate) fn run_config_init(
     kind: CommandKind,
     config_path: &Path,
-    args: InitArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let result = (|| -> Result<(String, ProfileConfig), CliError> {
@@ -32,12 +31,13 @@ pub(crate) fn run_config_init(
             ));
         }
 
-        let name = match &args.name {
-            Some(name) => name.clone(),
-            None if runtime.interactive => prompt::prompt_line_default("profile name", "default")?,
-            None => "default".to_owned(),
-        };
-        let profile = build_profile_from_create_spec(create_profile_spec_from_init(args), runtime)?;
+        if !runtime.interactive {
+            return Err(CliError::non_interactive_input_required(
+                "`loonfs init` is interactive; use `loonfs profile create <provider>` for scripted setup",
+            ));
+        }
+        let name = prompt::prompt_line_default("profile name", "default")?;
+        let profile = build_profile_interactive(runtime)?;
 
         mutate_config(config_path, |config| {
             let (profile_name, redacted) = add_profile(config, &name, profile)?;

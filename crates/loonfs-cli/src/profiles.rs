@@ -144,13 +144,24 @@ pub(crate) fn resolve_profile<'a>(
     config: &'a CliConfig,
     explicit_name: Option<&'a str>,
 ) -> Result<(&'a str, &'a ProfileConfig), CliError> {
-    let name = match explicit_name {
-        Some(name) => name,
-        None => config
-            .default_profile
-            .as_deref()
-            .ok_or_else(CliError::no_default_profile)?,
-    };
+    if let Some(name) = explicit_name {
+        let profile = config
+            .profiles
+            .get(name)
+            .ok_or_else(|| CliError::profile_not_found(name))?;
+        return Ok((name, profile));
+    }
+    if let Some(name) = crate::config::non_empty_env(crate::config::PROFILE_ENV) {
+        let (stored_name, profile) = config
+            .profiles
+            .get_key_value(&name)
+            .ok_or_else(|| CliError::profile_not_found(&name))?;
+        return Ok((stored_name, profile));
+    }
+    let name = config
+        .default_profile
+        .as_deref()
+        .ok_or_else(CliError::no_default_profile)?;
     let profile = config
         .profiles
         .get(name)

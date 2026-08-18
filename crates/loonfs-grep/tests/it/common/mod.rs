@@ -77,7 +77,7 @@ impl GrepHost {
     ///
     /// The target is captured once, before any stepping, so this returns
     /// even while another writer keeps committing — the same captured-target
-    /// wait `loonfs admin index-enable` performs, minus its budgets, so a
+    /// wait `loonfs admin index enable` performs, minus its budgets, so a
     /// test surfaces the first failure instead of retrying it.
     pub(crate) async fn enable_grep_index(
         &self,

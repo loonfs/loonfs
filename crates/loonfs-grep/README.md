@@ -10,10 +10,10 @@ the runner schedules it beside metadata upkeep and collection. A detached host n
 namespaces on the command line:
 
 ```console
-loonfs admin run --namespace docs --namespace source --job grep-index
-loonfs admin run --namespace docs --job grep-index --drain
-loonfs admin run --namespace docs --job grep-gc --drain
-loonfs admin index-gc docs
+loonfs admin maintenance run --namespaces docs --namespaces source --job grep-index
+loonfs admin maintenance run --namespaces docs --job grep-index --drain
+loonfs admin maintenance run --namespaces docs --job grep-gc --drain
+loonfs admin index gc --namespace docs
 ```
 
 Without `--drain` the command hosts the runner until a signal, asserting its assignment on an
@@ -22,7 +22,7 @@ and exits, which suits cron; `--max-steps` and `--deadline-ms` bound it and it r
 namespace stopped. Omitting `--job` hosts metadata and collection too, so one process can own
 everything a namespace nobody is writing to needs. Collection is its own job, `grep-gc`: it shares
 the runner's admission and permits and resumes where the last pass stopped, but nothing schedules
-it on grep's behalf. `loonfs admin index-gc` runs the same passes directly against one namespace's
+it on grep's behalf. `loonfs admin index gc` runs the same passes directly against one namespace's
 grep-owned keyspace, including reaping aged extension state for an absent or tombstoned namespace.
 
 Bounded-step budgets are `GrepWorkerConfig`, which a server reads from its `[grep]` table:

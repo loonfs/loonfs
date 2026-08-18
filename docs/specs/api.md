@@ -983,7 +983,7 @@ below it, the WAL history a client could have replayed is surrendered, and
 the segments holding it become collectable. Nothing advances it on its own —
 no maintenance job exists for it — so it moves only when an operator asks
 (`POST .../maintenance/step` with `advance_retention: true`, or `loonfs
-admin retention-advance`). File revision history is never affected, however far
+admin retention advance`). File revision history is never affected, however far
 the floor has moved.
 
 The second is the **content reclamation grace**, a little over seven days.
@@ -1011,7 +1011,7 @@ staged content without a cron entry.
 
 What that leaves is namespaces nobody is writing to. LoonFS has no operation
 that enumerates namespaces, so nothing can discover them: coverage is an
-assignment. `loonfs admin run --namespace <id>` hosts maintenance for exactly
+assignment. `loonfs admin maintenance run --namespaces <id>` hosts maintenance for exactly
 the namespaces named on the command line, continuously until a signal, or as
 one bounded catch-up with `--drain` for a cron entry. A cold namespace gets
 collected because it is on somebody's assignment list, and not otherwise.

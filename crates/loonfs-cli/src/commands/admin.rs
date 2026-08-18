@@ -4,10 +4,11 @@
 use super::context::{fail, fail_for, parse_public_ordinal_arg, resolve_command_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::args::{
-    AdminCheckpointArgs, AdminCheckpointListArgs, AdminCheckpointReleaseArgs, AdminCommand,
-    AdminGcArgs, AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminRunArgs,
-    AdminStepArgs, AdminStoreProbeArgs, ChangesArgs, CommandKind, MaintenanceJobArg,
-    RuntimeBehavior,
+    AdminCheckpointArgs, AdminCheckpointCommand, AdminCheckpointListArgs,
+    AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminIndexCommand, AdminIndexEnableArgs,
+    AdminIndexGcArgs, AdminMaintenanceCommand, AdminNamespaceArgs, AdminRetentionCommand,
+    AdminRunArgs, AdminStepArgs, AdminStoreCommand, AdminStoreProbeArgs, ChangesArgs, CommandKind,
+    MaintenanceJobArg, RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::render::{format_utc_ms, write_stderr_progress};
@@ -32,25 +33,45 @@ pub(crate) async fn run_admin_command(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        AdminCommand::Checkpoint(args) => run_admin_checkpoint(kind, config_path, args).await,
-        AdminCommand::CheckpointList(args) => {
-            run_admin_checkpoint_list(kind, config_path, args).await
-        }
-        AdminCommand::CheckpointRelease(args) => {
-            run_admin_checkpoint_release(kind, config_path, args).await
-        }
-        AdminCommand::Flush(args) => run_admin_flush(kind, config_path, args).await,
-        AdminCommand::RetentionAdvance(args) => {
-            run_admin_retention_advance(kind, config_path, args).await
-        }
-        AdminCommand::Run(args) => run_admin_run(kind, config_path, args).await,
-        AdminCommand::Step(args) => run_admin_step(kind, config_path, args).await,
+        AdminCommand::Checkpoint { command } => match command {
+            AdminCheckpointCommand::Create(args) => {
+                run_admin_checkpoint(kind, config_path, args).await
+            }
+            AdminCheckpointCommand::List(args) => {
+                run_admin_checkpoint_list(kind, config_path, args).await
+            }
+            AdminCheckpointCommand::Release(args) => {
+                run_admin_checkpoint_release(kind, config_path, args).await
+            }
+        },
+        AdminCommand::Index { command } => match command {
+            AdminIndexCommand::Enable(args) => {
+                run_admin_index_enable(kind, config_path, args).await
+            }
+            AdminIndexCommand::Disable(args) => {
+                run_admin_index_disable(kind, config_path, args).await
+            }
+            AdminIndexCommand::Status(args) => {
+                run_admin_index_status(kind, config_path, args).await
+            }
+            AdminIndexCommand::Gc(args) => {
+                run_admin_index_gc(kind, config_path, args, runtime).await
+            }
+        },
+        AdminCommand::Maintenance { command } => match command {
+            AdminMaintenanceCommand::Run(args) => run_admin_run(kind, config_path, args).await,
+            AdminMaintenanceCommand::Step(args) => run_admin_step(kind, config_path, args).await,
+            AdminMaintenanceCommand::Flush(args) => run_admin_flush(kind, config_path, args).await,
+        },
+        AdminCommand::Retention { command } => match command {
+            AdminRetentionCommand::Advance(args) => {
+                run_admin_retention_advance(kind, config_path, args).await
+            }
+        },
         AdminCommand::Gc(args) => run_admin_gc(kind, config_path, args, runtime).await,
-        AdminCommand::StoreProbe(args) => run_admin_store_probe(kind, config_path, args).await,
-        AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, config_path, args).await,
-        AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, config_path, args).await,
-        AdminCommand::IndexStatus(args) => run_admin_index_status(kind, config_path, args).await,
-        AdminCommand::IndexGc(args) => run_admin_index_gc(kind, config_path, args, runtime).await,
+        AdminCommand::Store { command } => match command {
+            AdminStoreCommand::Probe(args) => run_admin_store_probe(kind, config_path, args).await,
+        },
     }
 }
 
@@ -391,7 +412,7 @@ async fn run_admin_run(
     args: AdminRunArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -399,7 +420,7 @@ async fn run_admin_run(
         .namespaces
         .iter()
         .map(|namespace| {
-            parse_namespace_id(namespace).map_err(|error| error.with_param("--namespace"))
+            parse_namespace_id(namespace).map_err(|error| error.with_param("--namespaces"))
         })
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
@@ -449,7 +470,7 @@ async fn run_admin_run(
 }
 
 /// Proves the profile's object store honours the contract LoonFS depends
-/// on. Store-scoped like `admin run`: it names no namespace, because the
+/// on. Store-scoped like `admin maintenance run`: it names no namespace, because the
 /// store is the subject.
 async fn run_admin_store_probe(
     kind: CommandKind,
@@ -457,7 +478,7 @@ async fn run_admin_store_probe(
     args: AdminStoreProbeArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();

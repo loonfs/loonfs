@@ -240,7 +240,7 @@ pub struct RuntimeCacheConfigOverrides {
 /// floor is never advanced automatically under either.
 ///
 /// Set `manual` on a write-serving node when a dedicated maintenance
-/// process — `loonfs admin run --namespace ...`, or another server — owns
+/// process — `loonfs admin maintenance run --namespaces ...`, or another server — owns
 /// upkeep for these namespaces. Automatic maintenance covers namespaces
 /// touched by the running process and namespaces explicitly assigned to a
 /// maintenance host, so a deployment that switches this off has to assign

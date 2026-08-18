@@ -191,7 +191,7 @@ namespace. A server that only serves queries registers no job and refuses
 the routes that would mutate a grep root.
 
 A library-embedded host (the CLI's embedded mode) schedules nothing, so
-enabling the index is the schedule: `loonfs admin index-enable` captures one
+enabling the index is the schedule: `loonfs admin index enable` captures one
 namespace sequence before it starts — the target a fresh backfill's
 checkpoint pinned, or the namespace's current head for an index that is
 already active — and then runs the same job's bounded steps itself until the
@@ -204,7 +204,7 @@ an embedded operator advances a lagging index. Between enables, small write
 tails are served by the query-time exhaustive tail scan within its budget.
 
 Automatic maintenance covers the namespaces a process touches and the ones a
-host is explicitly assigned, and `loonfs admin run --namespace <id>` is how a
+host is explicitly assigned, and `loonfs admin maintenance run --namespaces <id>` is how a
 namespace nobody is writing to gets assigned. It opens an embedded runtime,
 hosts that runtime's runner, registers this job beside the runtime's own, and
 tells the runner about every assigned key at start-up and again on an
@@ -216,7 +216,7 @@ assignment up and exits instead of hosting until a signal, bounded by
 namespace with no grep root settles `not_enabled`, so assigning one costs a
 read and nothing else. That command is also the whole detached deployment
 story: the index needs no host of its own, because a process that serves
-nothing and maintains assigned namespaces is what `admin run` already is.
+nothing and maintains assigned namespaces is what `admin maintenance run` already is.
 Grep has no private poller, no private timer, and no private configuration
 file; it never lists a namespace prefix.
 
@@ -317,7 +317,7 @@ the watermark below the retention floor — and both discard the incomplete
 projection and start again from a fresh checkpoint.
 
 Grep garbage collection is also explicit and per namespace. It is never an
-automatic job: `loonfs admin index-gc` asks for one namespace's pass and
+automatic job: `loonfs admin index gc` asks for one namespace's pass and
 loops its cursor, and the server exposes
 `POST /v0/admin/namespaces/{ns}/grep/index/gc`, a sibling of core's explicit
 per-namespace GC endpoint. Pointing that operation at an absent or tombstoned

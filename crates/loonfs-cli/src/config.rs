@@ -17,6 +17,7 @@ pub(crate) const CONFIG_VERSION: u32 = 1;
 /// Environment override for the config file, and the escape hatch a shell
 /// session reaches for when the default file is one the CLI will not read.
 pub(crate) const CONFIG_PATH_ENV: &str = "LOONFS_CONFIG";
+pub(crate) const PROFILE_ENV: &str = "LOONFS_PROFILE";
 pub(crate) const NAMESPACE_ENV: &str = "LOONFS_NAMESPACE";
 pub(crate) const ACTOR_KIND_ENV: &str = "LOONFS_ACTOR_KIND";
 pub(crate) const ACTOR_ID_ENV: &str = "LOONFS_ACTOR_ID";

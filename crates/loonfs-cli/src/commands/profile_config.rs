@@ -1,14 +1,16 @@
-//! Builds and updates profile configurations from provider flags, with a
-//! table-driven check that each flag applies to the chosen store kind.
+//! Builds provider-specific profile configurations and applies validated updates.
 
-use crate::args::{ActorKindArg, InitArgs, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior};
+use crate::args::{
+    ActorKindArg, ProfileCreateActorArgs, ProfileCreateAzureArgs, ProfileCreateCommand,
+    ProfileCreateGcsArgs, ProfileCreateLocalArgs, ProfileCreateR2Args, ProfileCreateRemoteArgs,
+    ProfileCreateS3Args, ProfileUpdateArgs, RuntimeBehavior,
+};
 use crate::config::{ProfileActorConfig, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
 use loonfs_api::{ActorId, ActorKind, SecretString};
 use loonfs_objectstore::{
-    AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, ConfiguredObjectStoreKind,
-    GcpGcsCredentials,
+    AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials,
 };
 
 const AWS_REGIONS: &[&str] = &[
@@ -42,234 +44,63 @@ const AWS_REGIONS: &[&str] = &[
     "il-central-1",
 ];
 
-// --- provider flag matrix ---
-
-/// A target a provider flag can apply to: one of the embedded store kinds or
-/// a remote profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FlagTarget {
-    LocalFs,
-    AwsS3,
-    CloudflareR2,
-    GcpGcs,
-    AzureAbs,
-    Remote,
-}
-
-impl From<ConfiguredObjectStoreKind> for FlagTarget {
-    fn from(kind: ConfiguredObjectStoreKind) -> Self {
-        match kind {
-            ConfiguredObjectStoreKind::LocalFs => Self::LocalFs,
-            ConfiguredObjectStoreKind::AwsS3 => Self::AwsS3,
-            ConfiguredObjectStoreKind::CloudflareR2 => Self::CloudflareR2,
-            ConfiguredObjectStoreKind::GcpGcs => Self::GcpGcs,
-            ConfiguredObjectStoreKind::AzureAbs => Self::AzureAbs,
-        }
-    }
-}
-
-/// Every embedded store kind; used to reject remote-only flags before the
-/// store kind is known.
-const EMBEDDED_TARGETS: &[FlagTarget] = &[
-    FlagTarget::LocalFs,
-    FlagTarget::AwsS3,
-    FlagTarget::CloudflareR2,
-    FlagTarget::GcpGcs,
-    FlagTarget::AzureAbs,
-];
-
-/// One provider flag and the targets it applies to.
-///
-/// Adding a provider flag means adding one row here (plus its arg field and
-/// the point where the value is consumed); both the create and update paths
-/// walk this table to reject flags that do not apply.
-struct ProviderFlag {
-    /// The user-facing `--flag` name.
-    flag: &'static str,
-    /// Targets where the flag is accepted.
-    allowed: &'static [FlagTarget],
-    /// Whether the flag is set on the create/init spec.
-    create_set: fn(&CreateProfileSpec) -> bool,
-    /// Whether the flag is set on the update args; `None` when `profile
-    /// update` has no such flag.
-    update_set: Option<fn(&ProfileUpdateArgs) -> bool>,
-}
-
-use FlagTarget::{AwsS3, AzureAbs, CloudflareR2, GcpGcs, LocalFs, Remote};
-
-const PROVIDER_FLAGS: &[ProviderFlag] = &[
-    ProviderFlag {
-        flag: "server-url",
-        allowed: &[Remote],
-        create_set: |spec| spec.server_url.is_some(),
-        update_set: Some(|args| args.server_url.is_some()),
-    },
-    ProviderFlag {
-        flag: "auth-token",
-        allowed: &[Remote],
-        create_set: |spec| spec.auth_token.is_some(),
-        update_set: Some(|args| args.auth_token.is_some()),
-    },
-    ProviderFlag {
-        flag: "ca-cert-path",
-        allowed: &[Remote],
-        create_set: |spec| spec.ca_cert_path.is_some(),
-        update_set: Some(|args| args.ca_cert_path.is_some()),
-    },
-    ProviderFlag {
-        flag: "store-kind",
-        allowed: EMBEDDED_TARGETS,
-        create_set: |spec| spec.store_kind.is_some(),
-        update_set: None,
-    },
-    ProviderFlag {
-        flag: "root",
-        allowed: &[LocalFs],
-        create_set: |spec| spec.root.is_some(),
-        update_set: Some(|args| args.root.is_some()),
-    },
-    ProviderFlag {
-        flag: "key-prefix",
-        allowed: EMBEDDED_TARGETS,
-        create_set: |spec| spec.key_prefix.is_some(),
-        update_set: Some(|args| args.key_prefix.is_some()),
-    },
-    ProviderFlag {
-        flag: "bucket",
-        allowed: &[AwsS3, CloudflareR2, GcpGcs],
-        create_set: |spec| spec.bucket.is_some(),
-        update_set: Some(|args| args.bucket.is_some()),
-    },
-    ProviderFlag {
-        flag: "region",
-        allowed: &[AwsS3],
-        create_set: |spec| spec.region.is_some(),
-        update_set: Some(|args| args.region.is_some()),
-    },
-    ProviderFlag {
-        flag: "credential-source",
-        allowed: &[AwsS3, CloudflareR2],
-        create_set: |spec| spec.credential_source.is_some(),
-        update_set: Some(|args| args.credential_source.is_some()),
-    },
-    ProviderFlag {
-        flag: "access-key-id",
-        allowed: &[AwsS3, CloudflareR2],
-        create_set: |spec| spec.access_key_id.is_some(),
-        update_set: Some(|args| args.access_key_id.is_some()),
-    },
-    ProviderFlag {
-        flag: "secret-access-key",
-        allowed: &[AwsS3, CloudflareR2],
-        create_set: |spec| spec.secret_access_key.is_some(),
-        update_set: Some(|args| args.secret_access_key.is_some()),
-    },
-    ProviderFlag {
-        flag: "endpoint-url",
-        allowed: &[AwsS3, CloudflareR2, AzureAbs],
-        create_set: |spec| spec.endpoint_url.is_some(),
-        update_set: Some(|args| args.endpoint_url.is_some()),
-    },
-    ProviderFlag {
-        flag: "session-token",
-        allowed: &[AwsS3],
-        create_set: |spec| spec.session_token.is_some(),
-        update_set: Some(|args| args.session_token.is_some()),
-    },
-    ProviderFlag {
-        flag: "force-path-style",
-        allowed: &[AwsS3],
-        create_set: |spec| spec.force_path_style,
-        update_set: None,
-    },
-    ProviderFlag {
-        flag: "account-id",
-        allowed: &[CloudflareR2],
-        create_set: |spec| spec.account_id.is_some(),
-        update_set: Some(|args| args.account_id.is_some()),
-    },
-    ProviderFlag {
-        flag: "account-name",
-        allowed: &[AzureAbs],
-        create_set: |spec| spec.account_name.is_some(),
-        update_set: Some(|args| args.account_name.is_some()),
-    },
-    ProviderFlag {
-        flag: "container-name",
-        allowed: &[AzureAbs],
-        create_set: |spec| spec.container_name.is_some(),
-        update_set: Some(|args| args.container_name.is_some()),
-    },
-    ProviderFlag {
-        flag: "access-key",
-        allowed: &[AzureAbs],
-        create_set: |spec| spec.access_key.is_some(),
-        update_set: Some(|args| args.access_key.is_some()),
-    },
-    ProviderFlag {
-        flag: "service-account-key-path",
-        allowed: &[GcpGcs],
-        create_set: |spec| spec.service_account_key_path.is_some(),
-        update_set: Some(|args| args.service_account_key_path.is_some()),
-    },
-];
-
 pub(super) fn has_update_flags(args: &ProfileUpdateArgs) -> bool {
     args.actor_kind.is_some()
         || args.actor_id.is_some()
-        || PROVIDER_FLAGS
-            .iter()
-            .any(|row| row.update_set.is_some_and(|is_set| is_set(args)))
-}
-
-/// Rejects every set create flag whose allowed targets do not intersect
-/// `targets`, reporting `profile_label` in the error.
-fn reject_inapplicable_create_flags(
-    spec: &CreateProfileSpec,
-    targets: &[FlagTarget],
-    profile_label: &str,
-) -> Result<(), CliError> {
-    for row in PROVIDER_FLAGS {
-        if (row.create_set)(spec) && !row.allowed.iter().any(|target| targets.contains(target)) {
-            return Err(inapplicable_flag(row.flag, profile_label));
-        }
-    }
-    Ok(())
-}
-
-/// Rejects every set update flag whose allowed targets do not intersect
-/// `targets`, reporting `profile_label` in the error.
-fn reject_inapplicable_update_flags(
-    args: &ProfileUpdateArgs,
-    targets: &[FlagTarget],
-    profile_label: &str,
-) -> Result<(), CliError> {
-    for row in PROVIDER_FLAGS {
-        let Some(update_set) = row.update_set else {
-            continue;
-        };
-        if update_set(args) && !row.allowed.iter().any(|target| targets.contains(target)) {
-            return Err(inapplicable_flag(row.flag, profile_label));
-        }
-    }
-    Ok(())
-}
-
-fn inapplicable_flag(flag: &str, profile_label: &str) -> CliError {
-    CliError::invalid_input(format!(
-        "`--{flag}` does not apply to {profile_label} profiles"
-    ))
-    .with_param(format!("--{flag}"))
+        || args.root.is_some()
+        || args.key_prefix.is_some()
+        || args.bucket.is_some()
+        || args.region.is_some()
+        || args.credential_source.is_some()
+        || args.access_key_id.is_some()
+        || args.secret_access_key.is_some()
+        || args.endpoint_url.is_some()
+        || args.session_token.is_some()
+        || args.account_id.is_some()
+        || args.account_name.is_some()
+        || args.container_name.is_some()
+        || args.access_key.is_some()
+        || args.service_account_key_path.is_some()
+        || args.server_url.is_some()
+        || args.auth_token.is_some()
+        || args.ca_cert_path.is_some()
 }
 
 // --- create/update helpers ---
 
 #[derive(Debug, Clone)]
 pub(super) struct CreateProfileSpec {
-    mode: Option<String>,
-    store_kind: Option<String>,
-    root: Option<String>,
-    key_prefix: Option<String>,
+    provider: CreateProviderSpec,
+    actor: CreateActorSpec,
+}
+
+#[derive(Debug, Clone)]
+struct CreateActorSpec {
+    kind: Option<ActorKindArg>,
+    id: Option<String>,
+}
+
+impl From<ProfileCreateActorArgs> for CreateActorSpec {
+    fn from(value: ProfileCreateActorArgs) -> Self {
+        Self {
+            kind: value.actor_kind,
+            id: value.actor_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CreateProviderSpec {
+    S3(ProfileCreateS3Spec),
+    R2(ProfileCreateR2Spec),
+    Gcs(ProfileCreateGcsSpec),
+    Azure(ProfileCreateAzureSpec),
+    Local(ProfileCreateLocalSpec),
+    Remote(ProfileCreateRemoteSpec),
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProfileCreateS3Spec {
     bucket: Option<String>,
     region: Option<String>,
     credential_source: Option<String>,
@@ -278,24 +109,64 @@ pub(super) struct CreateProfileSpec {
     endpoint_url: Option<String>,
     session_token: Option<String>,
     force_path_style: bool,
+    key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProfileCreateR2Spec {
+    bucket: Option<String>,
     account_id: Option<String>,
+    endpoint_url: Option<String>,
+    credential_source: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProfileCreateGcsSpec {
+    bucket: Option<String>,
+    service_account_key_path: Option<String>,
+    key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProfileCreateAzureSpec {
     account_name: Option<String>,
     container_name: Option<String>,
     access_key: Option<String>,
-    service_account_key_path: Option<String>,
+    endpoint_url: Option<String>,
+    key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProfileCreateLocalSpec {
+    root: Option<String>,
+    key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProfileCreateRemoteSpec {
     server_url: Option<String>,
     auth_token: Option<String>,
     ca_cert_path: Option<String>,
-    actor_kind: Option<ActorKindArg>,
-    actor_id: Option<String>,
 }
 
-pub(super) fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec {
-    CreateProfileSpec {
-        mode: args.mode,
-        store_kind: args.store_kind,
-        root: args.root,
-        key_prefix: args.key_prefix,
+pub(super) fn create_profile_spec_from_create(
+    command: ProfileCreateCommand,
+) -> (String, CreateProfileSpec) {
+    match command {
+        ProfileCreateCommand::S3(args) => create_s3_spec(args),
+        ProfileCreateCommand::R2(args) => create_r2_spec(args),
+        ProfileCreateCommand::Gcs(args) => create_gcs_spec(args),
+        ProfileCreateCommand::Azure(args) => create_azure_spec(args),
+        ProfileCreateCommand::Local(args) => create_local_spec(args),
+        ProfileCreateCommand::Remote(args) => create_remote_spec(args),
+    }
+}
+
+fn create_s3_spec(args: ProfileCreateS3Args) -> (String, CreateProfileSpec) {
+    let spec = ProfileCreateS3Spec {
         bucket: args.bucket,
         region: args.region,
         credential_source: args.credential_source,
@@ -304,204 +175,247 @@ pub(super) fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec
         endpoint_url: args.endpoint_url,
         session_token: args.session_token,
         force_path_style: args.force_path_style,
-        account_id: args.account_id,
-        account_name: args.account_name,
-        container_name: args.container_name,
-        access_key: args.access_key,
-        service_account_key_path: args.service_account_key_path,
-        server_url: args.server_url,
-        auth_token: args.auth_token,
-        ca_cert_path: args.ca_cert_path,
-        actor_kind: args.actor_kind,
-        actor_id: args.actor_id,
-    }
+        key_prefix: args.key_prefix,
+    };
+    (
+        args.name,
+        CreateProfileSpec {
+            provider: CreateProviderSpec::S3(spec),
+            actor: args.actor.into(),
+        },
+    )
 }
 
-pub(super) fn create_profile_spec_from_create(args: ProfileCreateArgs) -> CreateProfileSpec {
-    CreateProfileSpec {
-        mode: args.mode,
-        store_kind: args.store_kind,
-        root: args.root,
-        key_prefix: args.key_prefix,
+fn create_r2_spec(args: ProfileCreateR2Args) -> (String, CreateProfileSpec) {
+    let spec = ProfileCreateR2Spec {
         bucket: args.bucket,
-        region: args.region,
+        account_id: args.account_id,
+        endpoint_url: args.endpoint_url,
         credential_source: args.credential_source,
         access_key_id: args.access_key_id,
         secret_access_key: args.secret_access_key,
-        endpoint_url: args.endpoint_url,
-        session_token: args.session_token,
-        force_path_style: args.force_path_style,
-        account_id: args.account_id,
+        key_prefix: args.key_prefix,
+    };
+    (
+        args.name,
+        CreateProfileSpec {
+            provider: CreateProviderSpec::R2(spec),
+            actor: args.actor.into(),
+        },
+    )
+}
+
+fn create_gcs_spec(args: ProfileCreateGcsArgs) -> (String, CreateProfileSpec) {
+    let spec = ProfileCreateGcsSpec {
+        bucket: args.bucket,
+        service_account_key_path: args.service_account_key_path,
+        key_prefix: args.key_prefix,
+    };
+    (
+        args.name,
+        CreateProfileSpec {
+            provider: CreateProviderSpec::Gcs(spec),
+            actor: args.actor.into(),
+        },
+    )
+}
+
+fn create_azure_spec(args: ProfileCreateAzureArgs) -> (String, CreateProfileSpec) {
+    let spec = ProfileCreateAzureSpec {
         account_name: args.account_name,
         container_name: args.container_name,
         access_key: args.access_key,
-        service_account_key_path: args.service_account_key_path,
+        endpoint_url: args.endpoint_url,
+        key_prefix: args.key_prefix,
+    };
+    (
+        args.name,
+        CreateProfileSpec {
+            provider: CreateProviderSpec::Azure(spec),
+            actor: args.actor.into(),
+        },
+    )
+}
+
+fn create_local_spec(args: ProfileCreateLocalArgs) -> (String, CreateProfileSpec) {
+    let spec = ProfileCreateLocalSpec {
+        root: args.root,
+        key_prefix: args.key_prefix,
+    };
+    (
+        args.name,
+        CreateProfileSpec {
+            provider: CreateProviderSpec::Local(spec),
+            actor: args.actor.into(),
+        },
+    )
+}
+
+fn create_remote_spec(args: ProfileCreateRemoteArgs) -> (String, CreateProfileSpec) {
+    let spec = ProfileCreateRemoteSpec {
         server_url: args.server_url,
         auth_token: args.auth_token,
         ca_cert_path: args.ca_cert_path,
-        actor_kind: args.actor_kind,
-        actor_id: args.actor_id,
+    };
+    (
+        args.name,
+        CreateProfileSpec {
+            provider: CreateProviderSpec::Remote(spec),
+            actor: args.actor.into(),
+        },
+    )
+}
+
+pub(super) fn build_profile_interactive(
+    runtime: RuntimeBehavior,
+) -> Result<ProfileConfig, CliError> {
+    if !runtime.interactive {
+        return Err(CliError::non_interactive_input_required(
+            "`loonfs init` is interactive; use `loonfs profile create <provider>` for scripted setup",
+        ));
     }
+    let provider =
+        match prompt::prompt_choice("provider", &["s3", "r2", "gcs", "azure", "local", "remote"])?
+            .as_str()
+        {
+            "s3" => CreateProviderSpec::S3(ProfileCreateS3Spec::default()),
+            "r2" => CreateProviderSpec::R2(ProfileCreateR2Spec::default()),
+            "gcs" => CreateProviderSpec::Gcs(ProfileCreateGcsSpec::default()),
+            "azure" => CreateProviderSpec::Azure(ProfileCreateAzureSpec::default()),
+            "local" => CreateProviderSpec::Local(ProfileCreateLocalSpec::default()),
+            _ => CreateProviderSpec::Remote(ProfileCreateRemoteSpec::default()),
+        };
+    build_profile_from_create_spec(
+        CreateProfileSpec {
+            provider,
+            actor: CreateActorSpec {
+                kind: None,
+                id: None,
+            },
+        },
+        runtime,
+    )
 }
 
 pub(super) fn build_profile_from_create_spec(
     spec: CreateProfileSpec,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
-    enum ProfileMode {
-        Embedded,
-        Remote,
-    }
-
-    let mode = match spec.mode.as_deref() {
-        Some("embedded") => ProfileMode::Embedded,
-        Some("remote") => ProfileMode::Remote,
-        Some(other) => {
-            return Err(CliError::invalid_input(format!(
-                "unknown mode: `{other}` (expected embedded or remote)"
-            ))
-            .with_param("--mode"))
+    let actor = profile_actor_config(spec.actor.kind, spec.actor.id.as_deref())?;
+    match spec.provider {
+        CreateProviderSpec::Local(spec) => embedded_profile(
+            StoreConfig::LocalFs {
+                root: require_or_prompt(spec.root.as_ref(), "root", runtime)?,
+                key_prefix: spec.key_prefix,
+            },
+            actor,
+        ),
+        CreateProviderSpec::S3(spec) => {
+            let credentials = build_aws_credentials(
+                spec.credential_source.as_deref(),
+                spec.access_key_id.as_ref(),
+                spec.secret_access_key.as_ref(),
+                spec.session_token.as_ref(),
+                runtime,
+            )?;
+            embedded_profile(
+                StoreConfig::AwsS3 {
+                    bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
+                    region: require_or_prompt_region(spec.region.as_ref(), runtime)?,
+                    endpoint_url: spec.endpoint_url,
+                    credentials,
+                    key_prefix: spec.key_prefix,
+                    force_path_style: spec.force_path_style,
+                },
+                actor,
+            )
         }
-        None if runtime.interactive => {
-            match prompt::prompt_choice("mode", &["embedded", "remote"])?.as_str() {
-                "embedded" => ProfileMode::Embedded,
-                // `prompt_choice` returns one of the two supplied values.
-                _ => ProfileMode::Remote,
-            }
+        CreateProviderSpec::R2(spec) => {
+            let credentials = build_r2_credentials(
+                spec.credential_source.as_deref(),
+                spec.access_key_id.as_ref(),
+                spec.secret_access_key.as_ref(),
+                runtime,
+            )?;
+            embedded_profile(
+                StoreConfig::CloudflareR2 {
+                    bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
+                    account_id: require_or_prompt(spec.account_id.as_ref(), "account-id", runtime)?,
+                    endpoint_url: require_or_prompt(
+                        spec.endpoint_url.as_ref(),
+                        "endpoint-url",
+                        runtime,
+                    )?,
+                    credentials,
+                    key_prefix: spec.key_prefix,
+                },
+                actor,
+            )
         }
-        None => {
-            return Err(CliError::non_interactive_field_required("mode"));
+        CreateProviderSpec::Gcs(spec) => embedded_profile(
+            StoreConfig::GcpGcs {
+                bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
+                credentials: GcpGcsCredentials::ServiceAccountFile {
+                    path: require_or_prompt(
+                        spec.service_account_key_path.as_ref(),
+                        "service-account-key-path",
+                        runtime,
+                    )?,
+                },
+                key_prefix: spec.key_prefix,
+            },
+            actor,
+        ),
+        CreateProviderSpec::Azure(spec) => embedded_profile(
+            StoreConfig::AzureAbs {
+                account_name: require_or_prompt(
+                    spec.account_name.as_ref(),
+                    "account-name",
+                    runtime,
+                )?,
+                container_name: require_or_prompt(
+                    spec.container_name.as_ref(),
+                    "container-name",
+                    runtime,
+                )?,
+                credentials: AzureAbsCredentials::AccessKey {
+                    access_key: require_or_prompt_secret(
+                        spec.access_key.as_ref(),
+                        "access-key",
+                        runtime,
+                    )?,
+                },
+                endpoint_url: spec.endpoint_url,
+                key_prefix: spec.key_prefix,
+            },
+            actor,
+        ),
+        CreateProviderSpec::Remote(spec) => {
+            let auth_token = match spec.auth_token {
+                Some(token) => blank_to_none(Some(token)),
+                None if runtime.interactive => prompt::prompt_secret_optional("auth token", None)?,
+                None => None,
+            };
+            Ok(ProfileConfig::Remote {
+                server_url: require_or_prompt(spec.server_url.as_ref(), "server-url", runtime)?,
+                actor,
+                default_namespace: None,
+                auth_token: auth_token.map(SecretString::from),
+                ca_cert_path: blank_to_none(spec.ca_cert_path),
+            })
         }
-    };
-
-    match mode {
-        ProfileMode::Embedded => build_embedded_profile(spec, runtime),
-        ProfileMode::Remote => build_remote_profile(spec, runtime),
     }
 }
 
-fn build_embedded_profile(
-    spec: CreateProfileSpec,
-    runtime: RuntimeBehavior,
+fn embedded_profile(
+    store: StoreConfig,
+    actor: ProfileActorConfig,
 ) -> Result<ProfileConfig, CliError> {
-    reject_inapplicable_create_flags(&spec, EMBEDDED_TARGETS, "embedded")?;
-
-    let store_kind = match spec.store_kind.as_deref() {
-        Some("local-fs") => ConfiguredObjectStoreKind::LocalFs,
-        Some("aws-s3") => ConfiguredObjectStoreKind::AwsS3,
-        Some("cloudflare-r2") => ConfiguredObjectStoreKind::CloudflareR2,
-        Some("gcp-gcs") => ConfiguredObjectStoreKind::GcpGcs,
-        Some("azure-abs") => ConfiguredObjectStoreKind::AzureAbs,
-        Some(other) => {
-            return Err(CliError::invalid_input(format!(
-            "unknown store kind: `{other}` (expected local-fs, aws-s3, cloudflare-r2, gcp-gcs, or azure-abs)"
-        ))
-            .with_param("--store-kind"))
-        }
-        None if runtime.interactive => {
-            return prompt::prompt_choice(
-                "store kind",
-                &["aws-s3", "cloudflare-r2", "gcp-gcs", "azure-abs", "local-fs"],
-            )
-            .and_then(|choice| {
-                build_embedded_profile(
-                    CreateProfileSpec {
-                        store_kind: Some(choice),
-                        ..spec
-                    },
-                    runtime,
-                )
-            });
-        }
-        None => return Err(CliError::non_interactive_field_required("store-kind")),
-    };
-
-    reject_inapplicable_create_flags(&spec, &[store_kind.into()], store_kind.as_str())?;
-
-    let aws_credentials = (store_kind == ConfiguredObjectStoreKind::AwsS3)
-        .then(|| build_aws_credentials(&spec, runtime))
-        .transpose()?;
-    let r2_credentials = (store_kind == ConfiguredObjectStoreKind::CloudflareR2)
-        .then(|| build_r2_credentials(&spec, runtime))
-        .transpose()?;
-
-    let store = match store_kind {
-        ConfiguredObjectStoreKind::LocalFs => StoreConfig::LocalFs {
-            root: require_or_prompt(spec.root.as_ref(), "root", runtime)?,
-            key_prefix: spec.key_prefix,
-        },
-        ConfiguredObjectStoreKind::AwsS3 => StoreConfig::AwsS3 {
-            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
-            region: require_or_prompt_region(spec.region.as_ref(), runtime)?,
-            endpoint_url: spec.endpoint_url,
-            credentials: aws_credentials.expect("aws credentials were built for aws-s3"),
-            key_prefix: spec.key_prefix,
-            force_path_style: spec.force_path_style,
-        },
-        ConfiguredObjectStoreKind::CloudflareR2 => StoreConfig::CloudflareR2 {
-            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
-            account_id: require_or_prompt(spec.account_id.as_ref(), "account-id", runtime)?,
-            endpoint_url: require_or_prompt(spec.endpoint_url.as_ref(), "endpoint-url", runtime)?,
-            credentials: r2_credentials.expect("r2 credentials were built for cloudflare-r2"),
-            key_prefix: spec.key_prefix,
-        },
-        ConfiguredObjectStoreKind::GcpGcs => StoreConfig::GcpGcs {
-            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
-            credentials: GcpGcsCredentials::ServiceAccountFile {
-                path: require_or_prompt(
-                    spec.service_account_key_path.as_ref(),
-                    "service-account-key-path",
-                    runtime,
-                )?,
-            },
-            key_prefix: spec.key_prefix,
-        },
-        ConfiguredObjectStoreKind::AzureAbs => StoreConfig::AzureAbs {
-            account_name: require_or_prompt(spec.account_name.as_ref(), "account-name", runtime)?,
-            container_name: require_or_prompt(
-                spec.container_name.as_ref(),
-                "container-name",
-                runtime,
-            )?,
-            credentials: AzureAbsCredentials::AccessKey {
-                access_key: require_or_prompt_secret(
-                    spec.access_key.as_ref(),
-                    "access-key",
-                    runtime,
-                )?,
-            },
-            endpoint_url: spec.endpoint_url,
-            key_prefix: spec.key_prefix,
-        },
-    };
-
-    let actor = profile_actor_config(spec.actor_kind, spec.actor_id.as_deref())?;
     Ok(ProfileConfig::Embedded {
         store,
         actor,
         default_namespace: None,
         writer_id: None,
-    })
-}
-
-fn build_remote_profile(
-    spec: CreateProfileSpec,
-    runtime: RuntimeBehavior,
-) -> Result<ProfileConfig, CliError> {
-    reject_inapplicable_create_flags(&spec, &[FlagTarget::Remote], "remote")?;
-
-    let actor = profile_actor_config(spec.actor_kind, spec.actor_id.as_deref())?;
-    let auth_token = match spec.auth_token {
-        Some(token) => blank_to_none(Some(token)),
-        None if runtime.interactive => prompt::prompt_secret_optional("auth token", None)?,
-        None => None,
-    };
-    Ok(ProfileConfig::Remote {
-        server_url: require_or_prompt(spec.server_url.as_ref(), "server-url", runtime)?,
-        actor,
-        default_namespace: None,
-        auth_token: auth_token.map(SecretString::from),
-        ca_cert_path: blank_to_none(spec.ca_cert_path),
     })
 }
 
@@ -538,45 +452,41 @@ fn selected_credential_source(
 }
 
 fn build_aws_credentials(
-    spec: &CreateProfileSpec,
+    credential_source: Option<&str>,
+    access_key_id: Option<&String>,
+    secret_access_key: Option<&String>,
+    session_token: Option<&String>,
     runtime: RuntimeBehavior,
 ) -> Result<AwsS3Credentials, CliError> {
-    let has_static_flags = spec.access_key_id.is_some()
-        || spec.secret_access_key.is_some()
-        || spec.session_token.is_some();
-    match selected_credential_source(spec.credential_source.as_deref(), has_static_flags)? {
+    let has_static_flags =
+        access_key_id.is_some() || secret_access_key.is_some() || session_token.is_some();
+    match selected_credential_source(credential_source, has_static_flags)? {
         CredentialSource::Ambient => Ok(AwsS3Credentials::Ambient {}),
         CredentialSource::Static => Ok(AwsS3Credentials::Static {
-            access_key_id: require_or_prompt_secret(
-                spec.access_key_id.as_ref(),
-                "access-key-id",
-                runtime,
-            )?,
+            access_key_id: require_or_prompt_secret(access_key_id, "access-key-id", runtime)?,
             secret_access_key: require_or_prompt_secret(
-                spec.secret_access_key.as_ref(),
+                secret_access_key,
                 "secret-access-key",
                 runtime,
             )?,
-            session_token: blank_to_none(spec.session_token.clone()).map(SecretString::from),
+            session_token: blank_to_none(session_token.cloned()).map(SecretString::from),
         }),
     }
 }
 
 fn build_r2_credentials(
-    spec: &CreateProfileSpec,
+    credential_source: Option<&str>,
+    access_key_id: Option<&String>,
+    secret_access_key: Option<&String>,
     runtime: RuntimeBehavior,
 ) -> Result<CloudflareR2Credentials, CliError> {
-    let has_static_flags = spec.access_key_id.is_some() || spec.secret_access_key.is_some();
-    match selected_credential_source(spec.credential_source.as_deref(), has_static_flags)? {
+    let has_static_flags = access_key_id.is_some() || secret_access_key.is_some();
+    match selected_credential_source(credential_source, has_static_flags)? {
         CredentialSource::Ambient => Ok(CloudflareR2Credentials::Ambient {}),
         CredentialSource::Static => Ok(CloudflareR2Credentials::Static {
-            access_key_id: require_or_prompt_secret(
-                spec.access_key_id.as_ref(),
-                "access-key-id",
-                runtime,
-            )?,
+            access_key_id: require_or_prompt_secret(access_key_id, "access-key-id", runtime)?,
             secret_access_key: require_or_prompt_secret(
-                spec.secret_access_key.as_ref(),
+                secret_access_key,
                 "secret-access-key",
                 runtime,
             )?,
@@ -657,19 +567,163 @@ fn require_or_prompt_region(
     }
 }
 
+fn reject_inapplicable_update_flag(
+    is_set: bool,
+    flag: &str,
+    profile_label: &str,
+) -> Result<(), CliError> {
+    if is_set {
+        return Err(CliError::invalid_input(format!(
+            "`--{flag}` does not apply to {profile_label} profiles"
+        ))
+        .with_param(format!("--{flag}")));
+    }
+    Ok(())
+}
+
+fn reject_remote_flags_for_embedded(
+    args: &ProfileUpdateArgs,
+    profile_label: &str,
+) -> Result<(), CliError> {
+    reject_inapplicable_update_flag(args.server_url.is_some(), "server-url", profile_label)?;
+    reject_inapplicable_update_flag(args.auth_token.is_some(), "auth-token", profile_label)?;
+    reject_inapplicable_update_flag(args.ca_cert_path.is_some(), "ca-cert-path", profile_label)
+}
+
+fn validate_local_update_flags(args: &ProfileUpdateArgs) -> Result<(), CliError> {
+    let label = "local-fs";
+    reject_remote_flags_for_embedded(args, label)?;
+    reject_inapplicable_update_flag(args.bucket.is_some(), "bucket", label)?;
+    reject_inapplicable_update_flag(args.region.is_some(), "region", label)?;
+    reject_inapplicable_update_flag(args.credential_source.is_some(), "credential-source", label)?;
+    reject_inapplicable_update_flag(args.access_key_id.is_some(), "access-key-id", label)?;
+    reject_inapplicable_update_flag(args.secret_access_key.is_some(), "secret-access-key", label)?;
+    reject_inapplicable_update_flag(args.endpoint_url.is_some(), "endpoint-url", label)?;
+    reject_inapplicable_update_flag(args.session_token.is_some(), "session-token", label)?;
+    reject_inapplicable_update_flag(args.account_id.is_some(), "account-id", label)?;
+    reject_inapplicable_update_flag(args.account_name.is_some(), "account-name", label)?;
+    reject_inapplicable_update_flag(args.container_name.is_some(), "container-name", label)?;
+    reject_inapplicable_update_flag(args.access_key.is_some(), "access-key", label)?;
+    reject_inapplicable_update_flag(
+        args.service_account_key_path.is_some(),
+        "service-account-key-path",
+        label,
+    )
+}
+
+fn validate_s3_update_flags(args: &ProfileUpdateArgs) -> Result<(), CliError> {
+    let label = "aws-s3";
+    reject_remote_flags_for_embedded(args, label)?;
+    reject_inapplicable_update_flag(args.root.is_some(), "root", label)?;
+    reject_inapplicable_update_flag(args.account_id.is_some(), "account-id", label)?;
+    reject_inapplicable_update_flag(args.account_name.is_some(), "account-name", label)?;
+    reject_inapplicable_update_flag(args.container_name.is_some(), "container-name", label)?;
+    reject_inapplicable_update_flag(args.access_key.is_some(), "access-key", label)?;
+    reject_inapplicable_update_flag(
+        args.service_account_key_path.is_some(),
+        "service-account-key-path",
+        label,
+    )
+}
+
+fn validate_r2_update_flags(args: &ProfileUpdateArgs) -> Result<(), CliError> {
+    let label = "cloudflare-r2";
+    reject_remote_flags_for_embedded(args, label)?;
+    reject_inapplicable_update_flag(args.root.is_some(), "root", label)?;
+    reject_inapplicable_update_flag(args.region.is_some(), "region", label)?;
+    reject_inapplicable_update_flag(args.session_token.is_some(), "session-token", label)?;
+    reject_inapplicable_update_flag(args.account_name.is_some(), "account-name", label)?;
+    reject_inapplicable_update_flag(args.container_name.is_some(), "container-name", label)?;
+    reject_inapplicable_update_flag(args.access_key.is_some(), "access-key", label)?;
+    reject_inapplicable_update_flag(
+        args.service_account_key_path.is_some(),
+        "service-account-key-path",
+        label,
+    )
+}
+
+fn validate_gcs_update_flags(args: &ProfileUpdateArgs) -> Result<(), CliError> {
+    let label = "gcp-gcs";
+    reject_remote_flags_for_embedded(args, label)?;
+    reject_inapplicable_update_flag(args.root.is_some(), "root", label)?;
+    reject_inapplicable_update_flag(args.region.is_some(), "region", label)?;
+    reject_inapplicable_update_flag(args.credential_source.is_some(), "credential-source", label)?;
+    reject_inapplicable_update_flag(args.access_key_id.is_some(), "access-key-id", label)?;
+    reject_inapplicable_update_flag(args.secret_access_key.is_some(), "secret-access-key", label)?;
+    reject_inapplicable_update_flag(args.endpoint_url.is_some(), "endpoint-url", label)?;
+    reject_inapplicable_update_flag(args.session_token.is_some(), "session-token", label)?;
+    reject_inapplicable_update_flag(args.account_id.is_some(), "account-id", label)?;
+    reject_inapplicable_update_flag(args.account_name.is_some(), "account-name", label)?;
+    reject_inapplicable_update_flag(args.container_name.is_some(), "container-name", label)?;
+    reject_inapplicable_update_flag(args.access_key.is_some(), "access-key", label)
+}
+
+fn validate_azure_update_flags(args: &ProfileUpdateArgs) -> Result<(), CliError> {
+    let label = "azure-abs";
+    reject_remote_flags_for_embedded(args, label)?;
+    reject_inapplicable_update_flag(args.root.is_some(), "root", label)?;
+    reject_inapplicable_update_flag(args.bucket.is_some(), "bucket", label)?;
+    reject_inapplicable_update_flag(args.region.is_some(), "region", label)?;
+    reject_inapplicable_update_flag(args.credential_source.is_some(), "credential-source", label)?;
+    reject_inapplicable_update_flag(args.access_key_id.is_some(), "access-key-id", label)?;
+    reject_inapplicable_update_flag(args.secret_access_key.is_some(), "secret-access-key", label)?;
+    reject_inapplicable_update_flag(args.session_token.is_some(), "session-token", label)?;
+    reject_inapplicable_update_flag(args.account_id.is_some(), "account-id", label)?;
+    reject_inapplicable_update_flag(
+        args.service_account_key_path.is_some(),
+        "service-account-key-path",
+        label,
+    )
+}
+
+fn validate_remote_update_flags(args: &ProfileUpdateArgs) -> Result<(), CliError> {
+    let label = "remote";
+    reject_inapplicable_update_flag(args.root.is_some(), "root", label)?;
+    reject_inapplicable_update_flag(args.key_prefix.is_some(), "key-prefix", label)?;
+    reject_inapplicable_update_flag(args.bucket.is_some(), "bucket", label)?;
+    reject_inapplicable_update_flag(args.region.is_some(), "region", label)?;
+    reject_inapplicable_update_flag(args.credential_source.is_some(), "credential-source", label)?;
+    reject_inapplicable_update_flag(args.access_key_id.is_some(), "access-key-id", label)?;
+    reject_inapplicable_update_flag(args.secret_access_key.is_some(), "secret-access-key", label)?;
+    reject_inapplicable_update_flag(args.endpoint_url.is_some(), "endpoint-url", label)?;
+    reject_inapplicable_update_flag(args.session_token.is_some(), "session-token", label)?;
+    reject_inapplicable_update_flag(args.account_id.is_some(), "account-id", label)?;
+    reject_inapplicable_update_flag(args.account_name.is_some(), "account-name", label)?;
+    reject_inapplicable_update_flag(args.container_name.is_some(), "container-name", label)?;
+    reject_inapplicable_update_flag(args.access_key.is_some(), "access-key", label)?;
+    reject_inapplicable_update_flag(
+        args.service_account_key_path.is_some(),
+        "service-account-key-path",
+        label,
+    )
+}
+
 pub(super) fn apply_update_flags(
     existing: ProfileConfig,
     args: &ProfileUpdateArgs,
 ) -> Result<ProfileConfig, CliError> {
     match &existing {
-        ProfileConfig::Embedded { store, .. } => {
-            reject_inapplicable_update_flags(args, EMBEDDED_TARGETS, "embedded")?;
-            let store_kind = store.kind();
-            reject_inapplicable_update_flags(args, &[store_kind.into()], store_kind.as_str())?;
-        }
-        ProfileConfig::Remote { .. } => {
-            reject_inapplicable_update_flags(args, &[FlagTarget::Remote], "remote")?;
-        }
+        ProfileConfig::Embedded {
+            store: StoreConfig::LocalFs { .. },
+            ..
+        } => validate_local_update_flags(args)?,
+        ProfileConfig::Embedded {
+            store: StoreConfig::AwsS3 { .. },
+            ..
+        } => validate_s3_update_flags(args)?,
+        ProfileConfig::Embedded {
+            store: StoreConfig::CloudflareR2 { .. },
+            ..
+        } => validate_r2_update_flags(args)?,
+        ProfileConfig::Embedded {
+            store: StoreConfig::GcpGcs { .. },
+            ..
+        } => validate_gcs_update_flags(args)?,
+        ProfileConfig::Embedded {
+            store: StoreConfig::AzureAbs { .. },
+            ..
+        } => validate_azure_update_flags(args)?,
+        ProfileConfig::Remote { .. } => validate_remote_update_flags(args)?,
     }
 
     match existing {
@@ -1032,7 +1086,10 @@ mod tests {
     #![allow(clippy::panic)]
     // Profile tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{apply_update_flags, build_profile_from_create_spec, CreateProfileSpec};
+    use super::{
+        apply_update_flags, build_profile_from_create_spec, CreateActorSpec, CreateProfileSpec,
+        CreateProviderSpec, ProfileCreateAzureSpec, ProfileCreateRemoteSpec, ProfileCreateS3Spec,
+    };
     use crate::args::{ProfileUpdateArgs, RuntimeBehavior};
     use crate::config::{ProfileConfig, StoreConfig};
     use loonfs_objectstore::{AwsS3Credentials, AzureAbsCredentials};
@@ -1041,14 +1098,14 @@ mod tests {
     fn create_profile_supports_azure_abs() {
         let profile = build_profile_from_create_spec(
             CreateProfileSpec {
-                mode: Some("embedded".to_owned()),
-                store_kind: Some("azure-abs".to_owned()),
-                account_name: Some("devstoreaccount1".to_owned()),
-                container_name: Some("container".to_owned()),
-                access_key: Some("account-key".to_owned()),
-                endpoint_url: Some("https://devstoreaccount1.blob.core.windows.net".to_owned()),
-                key_prefix: Some("tenant-a".to_owned()),
-                ..empty_spec()
+                provider: CreateProviderSpec::Azure(ProfileCreateAzureSpec {
+                    account_name: Some("devstoreaccount1".to_owned()),
+                    container_name: Some("container".to_owned()),
+                    access_key: Some("account-key".to_owned()),
+                    endpoint_url: Some("https://devstoreaccount1.blob.core.windows.net".to_owned()),
+                    key_prefix: Some("tenant-a".to_owned()),
+                }),
+                actor: empty_actor(),
             },
             non_interactive_runtime(),
         )
@@ -1086,84 +1143,15 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_flags_outside_their_provider() {
-        let remote_with_bucket = build_profile_from_create_spec(
-            CreateProfileSpec {
-                mode: Some("remote".to_owned()),
-                server_url: Some("http://127.0.0.1:9400".to_owned()),
-                bucket: Some("bucket".to_owned()),
-                ..empty_spec()
-            },
-            non_interactive_runtime(),
-        )
-        .expect_err("bucket must not apply to remote");
-        assert_eq!(
-            remote_with_bucket.message,
-            "`--bucket` does not apply to remote profiles"
-        );
-
-        let embedded_with_server_url = build_profile_from_create_spec(
-            CreateProfileSpec {
-                mode: Some("embedded".to_owned()),
-                store_kind: Some("local-fs".to_owned()),
-                root: Some("/tmp/store".to_owned()),
-                server_url: Some("http://127.0.0.1:9400".to_owned()),
-                ..empty_spec()
-            },
-            non_interactive_runtime(),
-        )
-        .expect_err("server-url must not apply to embedded");
-        assert_eq!(
-            embedded_with_server_url.message,
-            "`--server-url` does not apply to embedded profiles"
-        );
-
-        let local_fs_with_bucket = build_profile_from_create_spec(
-            CreateProfileSpec {
-                mode: Some("embedded".to_owned()),
-                store_kind: Some("local-fs".to_owned()),
-                root: Some("/tmp/store".to_owned()),
-                bucket: Some("bucket".to_owned()),
-                ..empty_spec()
-            },
-            non_interactive_runtime(),
-        )
-        .expect_err("bucket must not apply to local-fs");
-        assert_eq!(
-            local_fs_with_bucket.message,
-            "`--bucket` does not apply to local-fs profiles"
-        );
-    }
-
-    #[test]
-    fn credential_source_is_rejected_outside_its_provider() {
-        let gcs = build_profile_from_create_spec(
-            CreateProfileSpec {
-                mode: Some("embedded".to_owned()),
-                store_kind: Some("gcp-gcs".to_owned()),
-                bucket: Some("bucket".to_owned()),
-                service_account_key_path: Some("/tmp/service-account.json".to_owned()),
-                credential_source: Some("ambient".to_owned()),
-                ..empty_spec()
-            },
-            non_interactive_runtime(),
-        )
-        .expect_err("credential source must not apply to gcs");
-        assert_eq!(
-            gcs.message,
-            "`--credential-source` does not apply to gcp-gcs profiles"
-        );
-    }
-
-    #[test]
     fn no_static_flags_select_ambient_without_storing_secrets() {
         let s3 = build_profile_from_create_spec(
             CreateProfileSpec {
-                mode: Some("embedded".to_owned()),
-                store_kind: Some("aws-s3".to_owned()),
-                bucket: Some("bucket".to_owned()),
-                region: Some("us-east-1".to_owned()),
-                ..empty_spec()
+                provider: CreateProviderSpec::S3(ProfileCreateS3Spec {
+                    bucket: Some("bucket".to_owned()),
+                    region: Some("us-east-1".to_owned()),
+                    ..ProfileCreateS3Spec::default()
+                }),
+                actor: empty_actor(),
             },
             non_interactive_runtime(),
         )
@@ -1182,9 +1170,11 @@ mod tests {
     fn remote_creation_never_captures_an_environment_token() {
         let remote = build_profile_from_create_spec(
             CreateProfileSpec {
-                mode: Some("remote".to_owned()),
-                server_url: Some("http://127.0.0.1:9400".to_owned()),
-                ..empty_spec()
+                provider: CreateProviderSpec::Remote(ProfileCreateRemoteSpec {
+                    server_url: Some("http://127.0.0.1:9400".to_owned()),
+                    ..ProfileCreateRemoteSpec::default()
+                }),
+                actor: empty_actor(),
             },
             non_interactive_runtime(),
         )
@@ -1199,12 +1189,13 @@ mod tests {
     fn static_flags_imply_static_and_require_the_complete_set() {
         let incomplete = build_profile_from_create_spec(
             CreateProfileSpec {
-                mode: Some("embedded".to_owned()),
-                store_kind: Some("aws-s3".to_owned()),
-                bucket: Some("bucket".to_owned()),
-                region: Some("us-east-1".to_owned()),
-                access_key_id: Some("access".to_owned()),
-                ..empty_spec()
+                provider: CreateProviderSpec::S3(ProfileCreateS3Spec {
+                    bucket: Some("bucket".to_owned()),
+                    region: Some("us-east-1".to_owned()),
+                    access_key_id: Some("access".to_owned()),
+                    ..ProfileCreateS3Spec::default()
+                }),
+                actor: empty_actor(),
             },
             non_interactive_runtime(),
         )
@@ -1213,14 +1204,15 @@ mod tests {
 
         let complete = build_profile_from_create_spec(
             CreateProfileSpec {
-                mode: Some("embedded".to_owned()),
-                store_kind: Some("aws-s3".to_owned()),
-                bucket: Some("bucket".to_owned()),
-                region: Some("us-east-1".to_owned()),
-                access_key_id: Some("access".to_owned()),
-                secret_access_key: Some("secret".to_owned()),
-                session_token: Some("session".to_owned()),
-                ..empty_spec()
+                provider: CreateProviderSpec::S3(ProfileCreateS3Spec {
+                    bucket: Some("bucket".to_owned()),
+                    region: Some("us-east-1".to_owned()),
+                    access_key_id: Some("access".to_owned()),
+                    secret_access_key: Some("secret".to_owned()),
+                    session_token: Some("session".to_owned()),
+                    ..ProfileCreateS3Spec::default()
+                }),
+                actor: empty_actor(),
             },
             non_interactive_runtime(),
         )
@@ -1272,7 +1264,7 @@ mod tests {
         .expect_err("auth-token must not apply to embedded");
         assert_eq!(
             error.message,
-            "`--auth-token` does not apply to embedded profiles"
+            "`--auth-token` does not apply to local-fs profiles"
         );
     }
 
@@ -1365,30 +1357,10 @@ mod tests {
         ));
     }
 
-    fn empty_spec() -> CreateProfileSpec {
-        CreateProfileSpec {
-            mode: None,
-            store_kind: None,
-            root: None,
-            key_prefix: None,
-            bucket: None,
-            region: None,
-            credential_source: None,
-            access_key_id: None,
-            secret_access_key: None,
-            endpoint_url: None,
-            session_token: None,
-            force_path_style: false,
-            account_id: None,
-            account_name: None,
-            container_name: None,
-            access_key: None,
-            service_account_key_path: None,
-            server_url: None,
-            auth_token: None,
-            ca_cert_path: None,
-            actor_kind: None,
-            actor_id: None,
+    fn empty_actor() -> CreateActorSpec {
+        CreateActorSpec {
+            kind: None,
+            id: None,
         }
     }
 

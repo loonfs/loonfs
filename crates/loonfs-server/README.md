@@ -18,8 +18,7 @@ The example listens on `127.0.0.1:9400`, uses `dev-token`, and writes its
 objects under `./.loonfs-store`. Point a remote CLI profile at it:
 
 ```bash
-LOONFS_AUTH_TOKEN=dev-token loonfs init default --no-input \
-  --mode remote \
+LOONFS_AUTH_TOKEN=dev-token loonfs --no-input profile create remote default \
   --server-url http://127.0.0.1:9400
 ```
 

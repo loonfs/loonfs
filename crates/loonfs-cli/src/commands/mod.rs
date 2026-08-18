@@ -61,7 +61,7 @@ pub(crate) async fn run(
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
         }),
-        Command::Init(args) => config::run_config_init(kind, config_path, args, runtime),
+        Command::Init => config::run_config_init(kind, config_path, runtime),
         Command::Config { command } => config::run_config_command(kind, &location, command),
         Command::Profile { command } => {
             profile::run_profile_command(kind, config_path, command, runtime)

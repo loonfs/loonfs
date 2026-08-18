@@ -42,9 +42,9 @@
 //! **Three hosting modes, one protocol.** The reference server composes
 //! grep in-process and registers [`GrepMaintenanceJob`] with the writer's
 //! maintenance runner, nudged by the publish observer; a query-serving
-//! deployment answers searches while a detached `loonfs admin run` host
+//! deployment answers searches while a detached `loonfs admin maintenance run` host
 //! registers that same job for the namespaces it was assigned; a one-shot
-//! host (the CLI's `index-enable`) runs the job's steps itself, until the
+//! host (the CLI's `index enable`) runs the job's steps itself, until the
 //! index reaches a sequence it captured before it started. All three run
 //! the identical durable protocol, so which one is running is a deployment
 //! choice, not a format.
