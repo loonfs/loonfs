@@ -5,6 +5,8 @@ use super::*;
 
 pub(crate) fn human_success(output: &CommandOutput) -> String {
     match &output.data {
+        CommandData::Capabilities(document) => human_capabilities(document),
+        CommandData::Doctor { checks } => human_doctor(checks),
         CommandData::Profile(profile) => {
             let rendered = toml::to_string_pretty(profile)
                 .unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode_str()));
@@ -280,29 +282,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             });
             lines.join("\n")
         }
-        CommandData::StoreProbed(response) => {
-            let failed = response
-                .checks
-                .iter()
-                .filter(|check| check.outcome == StoreProbeCheckOutcome::Failed)
-                .count();
-            let mut lines: Vec<String> =
-                response.checks.iter().map(store_probe_check_line).collect();
-            lines.push(if failed == 0 {
-                format!(
-                    "store probe {}: {} checks passed",
-                    response.run_id,
-                    response.checks.len()
-                )
-            } else {
-                format!(
-                    "store probe {}: {failed} of {} checks failed",
-                    response.run_id,
-                    response.checks.len()
-                )
-            });
-            lines.join("\n")
-        }
+        CommandData::StoreProbed(response) => store_probe_report_lines(response).join("\n"),
         CommandData::GrepIndexDisabled(response) => {
             format!("grep index disabled on {}", response.namespace_id)
         }
@@ -550,6 +530,84 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         | CommandData::StreamBytes(_)
         | CommandData::StreamedToStdout => String::new(),
     }
+}
+
+fn human_capabilities(document: &loonfs_api::CapabilityDocument) -> String {
+    let mut profiles = document.profiles.clone();
+    profiles.sort();
+
+    let enabled = document
+        .features
+        .iter()
+        .filter(|(_, enabled)| **enabled)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let disabled = document
+        .features
+        .iter()
+        .filter(|(_, enabled)| !**enabled)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let limits = document
+        .limits
+        .iter()
+        .map(|(name, value)| format!("{name}\t{value}"))
+        .collect::<Vec<_>>();
+
+    [
+        capability_group(
+            "protocol version",
+            std::slice::from_ref(&document.protocol_version),
+        ),
+        capability_group("profiles", &profiles),
+        capability_group("enabled features", &enabled),
+        capability_group("disabled features", &disabled),
+        capability_group("limits", &limits),
+    ]
+    .join("\n\n")
+}
+
+fn capability_group(heading: &str, rows: &[String]) -> String {
+    let mut lines = vec![heading.to_owned()];
+    if rows.is_empty() {
+        lines.push("(none)".to_owned());
+    } else {
+        lines.extend_from_slice(rows);
+    }
+    lines.join("\n")
+}
+
+fn human_doctor(checks: &[DoctorCheck]) -> String {
+    let mut lines = Vec::new();
+    for check in checks {
+        if check.status == DoctorStatus::Failed {
+            lines.push(format!("{}: failed", check.name));
+            let mut detail = format!("  detail: {}", single_line(&check.message));
+            if let Some(request_id) = &check.request_id {
+                detail.push_str(&format!(" (request id: {request_id})"));
+            }
+            lines.push(detail);
+        } else {
+            lines.push(format!(
+                "{}: {}: {}",
+                check.name,
+                check.status.as_str(),
+                single_line(&check.message)
+            ));
+        }
+        if let Some(response) = &check.store_probe {
+            lines.extend(
+                store_probe_report_lines(response)
+                    .into_iter()
+                    .map(|line| format!("  {line}")),
+            );
+        }
+    }
+    lines.join("\n")
+}
+
+fn single_line(message: &str) -> String {
+    message.lines().collect::<Vec<_>>().join(" | ")
 }
 
 pub(crate) fn human_path_entry(entry: &loonfs_api::AuthoritativePathEntry) -> String {

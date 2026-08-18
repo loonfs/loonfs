@@ -269,6 +269,18 @@ History and recovery
     List committed changes after a sequence number, from the start of
     retained history when --after is omitted
 
+Inspection and diagnostics
+  loonfs capabilities [--profile <name>]
+    Show the protocol version, profiles, features, and limits supported by
+    the selected deployment
+
+  loonfs doctor [--profile <name>] [--namespace <name>] [--write-check]
+    Check the configuration, provider, connection, authentication, server
+    health, capabilities, and selected namespace. The command is read-only
+    unless --write-check is set. That option also tests the object store by
+    writing and deleting temporary objects. The command prints every result
+    and exits nonzero if a check fails
+
 Maintenance
   loonfs admin maintenance run --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]
     Run maintenance for explicitly named namespaces in embedded mode. The

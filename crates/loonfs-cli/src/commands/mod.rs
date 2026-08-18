@@ -4,6 +4,7 @@ mod admin;
 mod config;
 mod context;
 mod fs;
+mod inspection;
 mod namespace;
 mod output;
 mod partial;
@@ -12,7 +13,8 @@ mod profile_config;
 mod recursive;
 
 pub(crate) use self::output::{
-    CommandData, CommandFailure, CommandOutput, ListingHeadDrift, MaintenanceKeyReport,
+    CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus, ListingHeadDrift,
+    MaintenanceKeyReport,
 };
 
 use crate::args::{Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior};
@@ -41,6 +43,12 @@ pub(crate) async fn run(
 
     if let Command::Completion(args) = &cli.command {
         return run_completion(kind, args);
+    }
+
+    // `doctor` reports config resolution as its first result, so run it before
+    // the config used by other commands is resolved.
+    if let Command::Doctor(args) = &cli.command {
+        return inspection::run_doctor(kind, cli.config.as_deref(), args).await;
     }
 
     // One resolution for the whole invocation: every command below reads
@@ -87,6 +95,9 @@ pub(crate) async fn run(
         Command::Cp(args) => fs::run_filesystem_cp(kind, config_path, args, runtime).await,
         Command::Trash(args) => fs::run_filesystem_trash(kind, &location, args).await,
         Command::Changes(args) => admin::run_admin_changes(kind, config_path, args).await,
+        Command::Capabilities(args) => inspection::run_capabilities(kind, config_path, args).await,
+        // This arm is unreachable because `doctor` returns above.
+        Command::Doctor(args) => inspection::run_doctor(kind, cli.config.as_deref(), &args).await,
         Command::Admin { command } => {
             admin::run_admin_command(kind, config_path, command, runtime).await
         }
