@@ -84,3 +84,9 @@ Update the API reference website through its private release process.
   `X.Y.Z`.
 - `docker pull ghcr.io/loonfs/loonfs-server:vX.Y.Z` downloads the digest
   recorded in `ARTIFACTS.txt`.
+
+A package published for the first time starts private, and the organization
+blocks public packages by default. Before anonymous pulls can work, enable
+public packages once in the organization's package settings, then make the new
+package public in its own package settings. This applies to the server image
+and the chart package separately.
