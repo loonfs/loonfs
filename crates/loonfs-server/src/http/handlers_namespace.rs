@@ -245,7 +245,7 @@ pub(super) async fn namespace_status(
         path = "/v0/admin/namespaces/{namespace_id}/diagnostics",
         tag = "admin",
         summary = "Get namespace diagnostics",
-        description = "Returns namespace core state together with the current manifest and visible WAL tail.",
+        description = "Returns namespace state together with the current manifest and visible WAL tail.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Namespace diagnostics", body = loonfs_api::NamespaceDiagnostics),

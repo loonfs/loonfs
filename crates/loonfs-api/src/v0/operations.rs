@@ -153,14 +153,11 @@ pub struct ForkNamespaceRequest {
     pub new_namespace_id: NamespaceId,
 }
 
-/// Core state for one namespace.
-///
-/// This is the point-lookup answer to "does this namespace exist, and where
-/// is its head?" — cheaper than listing all namespaces when only one matters.
+/// Current state for one namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Namespace {
-    /// Namespace being inspected.
+    /// Namespace ID.
     pub namespace_id: NamespaceId,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
@@ -168,14 +165,11 @@ pub struct Namespace {
     pub retention_floor_seq: ChangeSeq,
 }
 
-/// Storage-engine diagnostics for one namespace.
-///
-/// This admin-plane shape carries the core namespace state together with the
-/// manifest and WAL details that drive maintenance decisions.
+/// Namespace state and storage details used by maintenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NamespaceDiagnostics {
-    /// Namespace being inspected.
+    /// Namespace ID.
     pub namespace_id: NamespaceId,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,

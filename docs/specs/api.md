@@ -1301,7 +1301,7 @@ or separate display names. Representative request:
 }
 ```
 
-The response contains the new namespace's initial core state. A new namespace
+The response contains the new namespace's initial state. A new namespace
 starts at sequence 0 with a retention floor of 0:
 
 ```json
@@ -1345,11 +1345,9 @@ The capability document of section 2.1.
 
 ### 6.2 `GET /v0/namespaces/{ns}`
 
-The namespace read answers "does this namespace exist, and where is
-its head?" without listing every namespace. Existence is exactly the head
-object: a namespace with no head is `404` with code `namespace_not_found`,
-and a namespace whose head records the terminal deleted state is `410` with
-code `namespace_deleted`.
+This operation returns one namespace without listing every namespace. A
+missing namespace returns `404` with `namespace_not_found`. A deleted
+namespace returns `410` with `namespace_deleted`.
 
 ```json
 {
@@ -1367,15 +1365,15 @@ The `Namespace` object has exactly these fields:
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 
-The admin-plane `GET /v0/admin/namespaces/{ns}/diagnostics` operation returns
-`NamespaceDiagnostics`:
+The admin endpoint `GET /v0/admin/namespaces/{ns}/diagnostics` returns the
+namespace state plus storage details used by maintenance:
 
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
-| `current_manifest_id` | Current manifest pointer recorded by the head; omitted before the namespace owns a manifest. |
+| `current_manifest_id` | Current manifest ID; omitted until the namespace has a manifest. |
 | `wal_tail_segments` | Number of visible WAL segments after the current manifest. |
 
 ```json
@@ -2342,7 +2340,7 @@ target may still read them, then installs the target namespace's head in one
 conditional write, then checks that the source checkpoint still holds. That
 head carries the fork provenance for the target's whole life.
 
-The response contains the new namespace's initial core state. Its head
+The response contains the new namespace's initial state. Its head
 sequence and retention floor are set to the source namespace's sequence at
 the fork point.
 

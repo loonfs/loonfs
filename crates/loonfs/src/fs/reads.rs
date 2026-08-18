@@ -1,6 +1,4 @@
-//! [`FsReader`]'s read operations: stat, list, content, revision reads, the
-//! change feed, and the whole-namespace reads a consumer that derives its
-//! own data from the filesystem walks.
+//! Read-only namespace and filesystem operations for [`FsReader`].
 
 use super::core::{default_page_limit, encode_next_cursor, file_revisions_page_response};
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
@@ -18,7 +16,7 @@ use loonfs_api::{
 };
 
 impl FsReader {
-    /// Returns a namespace's current core state.
+    /// Returns a namespace's current state.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.namespace_status",

@@ -1,4 +1,4 @@
-//! Read-only namespace state and storage diagnostics for live and deleted namespaces.
+//! Reads namespace state and storage diagnostics.
 
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
@@ -17,8 +17,7 @@ pub struct NamespaceFlushBasis {
     pub has_unflushed_wal_tail: bool,
 }
 
-/// The head-derived half of a status: everything it reports except the WAL
-/// tail count.
+/// Namespace diagnostics before the WAL tail is counted.
 struct LoadedHeadBasis {
     head: HeadState,
     current_manifest_id: Option<ManifestId>,
@@ -81,7 +80,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Loads a live namespace's core state.
+/// Loads the current state of a live namespace.
 pub async fn load_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
@@ -105,14 +104,11 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Loads storage diagnostics for a live namespace head.
+/// Loads storage diagnostics for a live namespace.
 ///
-/// The WAL tail is counted from the head's tip and predecessor hints
-/// (`recent_segments`, published under the same CAS and long enough to name
-/// every predecessor a legal unflushed tail can hold); no segment body is
-/// read. A head that under-describes its own tail fails the summary rather
-/// than being walked. The count is for inspection and maintenance gating —
-/// replay consumers load the validated chain instead.
+/// The head stores enough recent segment IDs to count the visible WAL tail
+/// without reading segment bodies. This returns an error if those IDs do not
+/// cover the full tail. WAL readers validate the full chain separately.
 pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
@@ -153,13 +149,11 @@ pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Summarizes a namespace whose head is a deletion tombstone.
+/// Loads diagnostics for a deleted namespace.
 ///
-/// Reads only the two control objects that outlive reclamation — the head
-/// and the WAL floor — because garbage collection may already have reaped
-/// the manifest and chain a live summary would consult. Callers reach for
-/// this only after [`load_namespace_diagnostics`] reported the deletion;
-/// a live head here is an invariant breach, not a state to serve.
+/// Garbage collection may already have removed the manifest and WAL, so this
+/// reads only the head and WAL floor. Call this only after
+/// [`load_namespace_diagnostics`] reports that the namespace is deleted.
 pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
@@ -172,7 +166,7 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
         .state;
     if head.state != NamespaceState::Deleted {
         return Err(CoreError::Internal(format!(
-            "namespace `{expected_namespace_id}` is not deleted; the live head summary serves it"
+            "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"
         )));
     }
     let retention_floor_seq = resolve_retention_floor_seq(store, &head)

@@ -375,7 +375,7 @@
           "admin"
         ],
         "summary": "Get namespace diagnostics",
-        "description": "Returns namespace core state together with the current manifest and visible WAL tail.",
+        "description": "Returns namespace state together with the current manifest and visible WAL tail.",
         "operationId": "namespace_diagnostics",
         "parameters": [
           {
@@ -6195,7 +6195,7 @@
       },
       "Namespace": {
         "type": "object",
-        "description": "Core state for one namespace.\n\nThis is the point-lookup answer to \"does this namespace exist, and where\nis its head?\" — cheaper than listing all namespaces when only one matters.",
+        "description": "Current state for one namespace.",
         "required": [
           "namespace_id",
           "head_seq",
@@ -6208,7 +6208,7 @@
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace being inspected."
+            "description": "Namespace ID."
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -6218,7 +6218,7 @@
       },
       "NamespaceDiagnostics": {
         "type": "object",
-        "description": "Storage-engine diagnostics for one namespace.\n\nThis admin-plane shape carries the core namespace state together with the\nmanifest and WAL details that drive maintenance decisions.",
+        "description": "Namespace state and storage details used by maintenance.",
         "required": [
           "namespace_id",
           "head_seq",
@@ -6243,7 +6243,7 @@
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace being inspected."
+            "description": "Namespace ID."
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",

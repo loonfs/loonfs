@@ -91,7 +91,7 @@ impl FsAdmin {
         result
     }
 
-    /// Returns a namespace's core state and storage-engine diagnostics.
+    /// Returns namespace state and storage details used by maintenance.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.namespace_diagnostics",

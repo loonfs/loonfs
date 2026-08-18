@@ -4,7 +4,7 @@ use super::*;
 use crate::transport::append_optional_pagination_query;
 
 impl Client {
-    /// Returns namespace core state and storage-engine diagnostics (admin plane).
+    /// Returns namespace state and storage details used by maintenance.
     pub async fn namespace_diagnostics(
         &self,
         namespace_id: &NamespaceId,

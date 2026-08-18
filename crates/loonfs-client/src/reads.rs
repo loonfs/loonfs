@@ -17,7 +17,7 @@ impl Client {
         .await
     }
 
-    /// Returns the namespace's current core state.
+    /// Returns the namespace's current state.
     pub async fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
         // Validated namespace ids are URL-safe by construction, like the
         // other parsed id segments interpolated into paths here and below.
@@ -46,7 +46,7 @@ impl Client {
     }
 
     /// Creates a new namespace from the source namespace's current state and
-    /// returns the target's core state at the fork point.
+    /// returns the target's state at the fork point.
     pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
