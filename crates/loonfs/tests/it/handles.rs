@@ -6,6 +6,7 @@
 //! handle from one runtime fixture, matching the runtime-ownership contract
 //! the handles document.
 
+use crate::common::collect_path_entries;
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsAdmin,
     FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, MaintenancePlan, ManifestId,
@@ -438,8 +439,7 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
             .await
             .expect("read through standalone reader");
         assert_eq!(read.bytes, b"hello");
-        let entries = standalone
-            .list_path_entries_all(&namespace_id, "/docs")
+        let entries = collect_path_entries(&standalone, &namespace_id, "/docs")
             .await
             .expect("list through standalone reader")
             .entries;
@@ -502,8 +502,7 @@ fn standalone_reader_builds_without_writer_identity() {
             .await
             .expect("stat through standalone reader");
         assert_eq!(stat.size_bytes(), Some(5));
-        let entries = reader
-            .list_path_entries_all(&namespace_id, "/docs")
+        let entries = collect_path_entries(&reader, &namespace_id, "/docs")
             .await
             .expect("list through standalone reader")
             .entries;

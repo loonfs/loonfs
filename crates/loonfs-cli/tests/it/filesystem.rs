@@ -3,6 +3,75 @@
 use super::common::*;
 
 #[test]
+fn revisions_and_trash_share_total_page_and_jsonl_behavior() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"one\n").expect("payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/report.txt"]));
+    fs::write(&payload, b"two\n").expect("replacement payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/report.txt",
+        "--force",
+    ]));
+
+    let first_revision = harness.run(&["--json", "revisions", "/report.txt", "--page-size", "1"]);
+    assert_success(&first_revision);
+    assert_eq!(
+        json_data(&first_revision)["revisions"]
+            .as_array()
+            .expect("revision array")
+            .len(),
+        1
+    );
+    let revision_cursor = json_data(&first_revision)["next_cursor"]
+        .as_str()
+        .expect("revision cursor")
+        .to_owned();
+    let resumed_revision = harness.run(&[
+        "--json",
+        "revisions",
+        "/report.txt",
+        "--cursor",
+        &revision_cursor,
+    ]);
+    assert_success(&resumed_revision);
+    assert_eq!(
+        json_data(&resumed_revision)["revisions"]
+            .as_array()
+            .expect("revision array")
+            .len(),
+        1
+    );
+    let revisions = harness.run(&["revisions", "/report.txt", "--page-size", "1", "--jsonl"]);
+    assert_success(&revisions);
+    assert_eq!(stdout_string(&revisions).lines().count(), 2);
+
+    for index in 0..2 {
+        let path = format!("/trash-{index}.txt");
+        assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), &path]));
+        assert_success(&harness.run(&["rm", &path]));
+    }
+    let bounded_trash = harness.run(&["--json", "trash", "--limit", "2", "--page-size", "1"]);
+    assert_success(&bounded_trash);
+    assert_eq!(
+        json_data(&bounded_trash)["entries"]
+            .as_array()
+            .expect("trash array")
+            .len(),
+        2
+    );
+    let trash = harness.run(&["trash", "--page-size", "1", "--jsonl"]);
+    assert_success(&trash);
+    assert_eq!(stdout_string(&trash).lines().count(), 2);
+}
+
+#[test]
 fn embedded_profile_filesystem_flow_works_end_to_end() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

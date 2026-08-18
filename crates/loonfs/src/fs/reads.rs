@@ -1,19 +1,276 @@
 //! Read-only namespace and filesystem operations for [`FsReader`].
 
-use super::core::{default_page_limit, encode_next_cursor, file_revisions_page_response};
+use super::core::{encode_next_cursor, file_revisions_page_response};
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::FsReader;
 use crate::Result;
 use crate::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse,
-    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, ContentRef, CoreError,
-    CurrentFileState, FileContentStream, InodeId, ListChangesOptions, ListFileRevisionsResponse,
-    ListPathEntriesOptions, ListPathEntriesResponse, Namespace, NamespaceId, ReadFileStreamOptions,
-    RevisionNo, RuntimeError, SharedObjectStore, StatPathOptions,
+    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, CommittedChange, ContentRef,
+    CoreError, CurrentFileState, FileContentStream, FileRevision, InodeId, ListChangesOptions,
+    ListFileRevisionsResponse, ListPathEntriesOptions, ListPathEntriesResponse, Namespace,
+    NamespaceId, ReadFileStreamOptions, RevisionNo, RuntimeError, SharedObjectStore,
+    StatPathOptions, TrashEntry,
 };
 use loonfs_api::{
-    AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageRequest, PaginationPolicy,
+    AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
+    PaginationPolicy, TrashPageCursor,
 };
+
+/// Lazy directory-page reader.
+///
+/// Each call to [`Self::next`] returns one original response envelope, so a
+/// caller can observe head changes between pages. [`Self::collect_up_to`]
+/// collects only entries and keeps any unconsumed part of the final page for
+/// the next call to [`Self::next`].
+#[must_use]
+pub struct PathEntriesPager {
+    reader: FsReader,
+    namespace_id: NamespaceId,
+    absolute_path: String,
+    request: PageRequest<DirectoryPageCursor>,
+    options: ListPathEntriesOptions,
+    pending: Option<ListPathEntriesResponse>,
+    exhausted: bool,
+}
+
+impl PathEntriesPager {
+    /// Returns the next directory page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListPathEntriesResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .reader
+            .list_path_entries_page(
+                &self.namespace_id,
+                &self.absolute_path,
+                self.request.clone(),
+                self.options.clone(),
+            )
+            .await;
+        Some(page.and_then(|page| {
+            advance_typed_cursor(&mut self.request, page.next_cursor.as_deref())?;
+            self.exhausted = self.request.cursor.is_none();
+            Ok(page)
+        }))
+    }
+
+    /// Collects at most `max_items` entries without losing a partially read page.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<AuthoritativePathEntry>> {
+        let mut entries = Vec::new();
+        while entries.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - entries.len()).min(page.entries.len());
+            if take < page.entries.len() {
+                let remaining = page.entries.split_off(take);
+                entries.extend(page.entries);
+                page.entries = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            entries.extend(page.entries);
+        }
+        Ok(entries)
+    }
+}
+
+enum FileRevisionsTarget {
+    Path(String),
+    Inode(InodeId),
+}
+
+/// Lazy file-revision page reader for either a path or an inode.
+#[must_use]
+pub struct FileRevisionsPager {
+    reader: FsReader,
+    namespace_id: NamespaceId,
+    target: FileRevisionsTarget,
+    request: PageRequest<FileRevisionsPageCursor>,
+    pending: Option<ListFileRevisionsResponse>,
+    exhausted: bool,
+}
+
+impl FileRevisionsPager {
+    /// Returns the next revision page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ListFileRevisionsResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = match &self.target {
+            FileRevisionsTarget::Path(absolute_path) => {
+                self.reader
+                    .list_file_revisions_page(
+                        &self.namespace_id,
+                        absolute_path,
+                        self.request.clone(),
+                    )
+                    .await
+            }
+            FileRevisionsTarget::Inode(inode_id) => {
+                self.reader
+                    .list_file_revisions_by_inode_page(
+                        &self.namespace_id,
+                        *inode_id,
+                        self.request.clone(),
+                    )
+                    .await
+            }
+        };
+        Some(page.and_then(|page| {
+            advance_typed_cursor(&mut self.request, page.next_cursor.as_deref())?;
+            self.exhausted = self.request.cursor.is_none();
+            Ok(page)
+        }))
+    }
+
+    /// Collects at most `max_items` revisions without losing a partially read page.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<FileRevision>> {
+        let mut revisions = Vec::new();
+        while revisions.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - revisions.len()).min(page.revisions.len());
+            if take < page.revisions.len() {
+                let remaining = page.revisions.split_off(take);
+                revisions.extend(page.revisions);
+                page.revisions = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            revisions.extend(page.revisions);
+        }
+        Ok(revisions)
+    }
+}
+
+/// Lazy recoverable-deletion page reader.
+#[must_use]
+pub struct TrashPager {
+    reader: FsReader,
+    namespace_id: NamespaceId,
+    request: PageRequest<TrashPageCursor>,
+    pending: Option<loonfs_api::ListTrashResponse>,
+    exhausted: bool,
+}
+
+impl TrashPager {
+    /// Returns the next trash page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<loonfs_api::ListTrashResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .reader
+            .list_trash_page(&self.namespace_id, self.request.clone())
+            .await;
+        Some(page.and_then(|page| {
+            advance_typed_cursor(&mut self.request, page.next_cursor.as_deref())?;
+            self.exhausted = self.request.cursor.is_none();
+            Ok(page)
+        }))
+    }
+
+    /// Collects at most `max_items` deletions without losing a partially read page.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<TrashEntry>> {
+        let mut entries = Vec::new();
+        while entries.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - entries.len()).min(page.entries.len());
+            if take < page.entries.len() {
+                let remaining = page.entries.split_off(take);
+                entries.extend(page.entries);
+                page.entries = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            entries.extend(page.entries);
+        }
+        Ok(entries)
+    }
+}
+
+/// Lazy change-feed page reader using sequence positions rather than opaque cursors.
+#[must_use]
+pub struct ChangesPager {
+    reader: FsReader,
+    namespace_id: NamespaceId,
+    after_seq: ChangeSeq,
+    options: ListChangesOptions,
+    pending: Option<ChangesResponse>,
+    exhausted: bool,
+}
+
+impl ChangesPager {
+    /// Returns the next change page, or `None` after exhaustion.
+    pub async fn next(&mut self) -> Option<Result<ChangesResponse>> {
+        if let Some(page) = self.pending.take() {
+            return Some(Ok(page));
+        }
+        if self.exhausted {
+            return None;
+        }
+        let page = self
+            .reader
+            .list_changes(&self.namespace_id, self.after_seq, self.options.clone())
+            .await;
+        Some(page.inspect(|page| {
+            self.exhausted = page.next_after_seq.is_none();
+            if let Some(next_after_seq) = page.next_after_seq {
+                self.after_seq = next_after_seq;
+            }
+        }))
+    }
+
+    /// Collects at most `max_items` changes without losing a partially read page.
+    pub async fn collect_up_to(&mut self, max_items: usize) -> Result<Vec<CommittedChange>> {
+        let mut changes = Vec::new();
+        while changes.len() < max_items {
+            let Some(page) = self.next().await else {
+                break;
+            };
+            let mut page = page?;
+            let take = (max_items - changes.len()).min(page.changes.len());
+            if take < page.changes.len() {
+                let remaining = page.changes.split_off(take);
+                changes.extend(page.changes);
+                page.changes = remaining;
+                self.pending = Some(page);
+                break;
+            }
+            changes.extend(page.changes);
+        }
+        Ok(changes)
+    }
+}
+
+fn advance_typed_cursor<C: PageCursor>(
+    request: &mut PageRequest<C>,
+    next_cursor: Option<&str>,
+) -> Result<()> {
+    request.cursor = next_cursor
+        .map(loonfs_api::decode_cursor)
+        .transpose()
+        .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+    Ok(())
+}
 
 impl FsReader {
     /// Returns a namespace's current state.
@@ -93,63 +350,23 @@ impl FsReader {
         Ok(entry)
     }
 
-    /// Lists a directory by aggregating every page into one response.
-    ///
-    /// Listing cursors tolerate commits landing mid-listing — each page
-    /// resumes in name-key order against the current head — so the
-    /// envelope's `head_seq` reports the newest head that served a page (an
-    /// empty directory still reports which state answered the question).
-    /// Entries are returned in canonical name-key order, matching paged
-    /// listings.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.list_path_entries",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "list_path_entries",
-            method = "list_path_entries_all",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn list_path_entries_all(
+    /// Creates a lazy directory pager beginning at `request.cursor`.
+    pub fn list_path_entries_pager(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> Result<ListPathEntriesResponse> {
-        self.core.record_trace_context(&tracing::Span::current());
-        let limit = default_page_limit();
-        let (first_page, mut next_cursor) = self
-            .list_path_entries_page_typed(
-                namespace_id,
-                absolute_path,
-                PageRequest {
-                    limit,
-                    cursor: None,
-                },
-                ListPathEntriesOptions::default(),
-            )
-            .await?;
-        let mut envelope = first_page;
-        while let Some(cursor) = next_cursor {
-            let (page, page_next_cursor) = self
-                .list_path_entries_page_typed(
-                    namespace_id,
-                    absolute_path,
-                    PageRequest {
-                        limit,
-                        cursor: Some(cursor),
-                    },
-                    ListPathEntriesOptions::default(),
-                )
-                .await?;
-            envelope.head_seq = envelope.head_seq.max(page.head_seq);
-            envelope.entries.extend(page.entries);
-            next_cursor = page_next_cursor;
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListPathEntriesOptions,
+    ) -> PathEntriesPager {
+        PathEntriesPager {
+            reader: self.clone(),
+            namespace_id: namespace_id.clone(),
+            absolute_path: absolute_path.to_owned(),
+            request,
+            options,
+            pending: None,
+            exhausted: false,
         }
-        Ok(envelope)
     }
 
     /// Lists one page of a directory, projecting what `options` asks for.
@@ -506,6 +723,21 @@ impl FsReader {
         })
     }
 
+    /// Creates a lazy trash pager beginning at `request.cursor`.
+    pub fn list_trash_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        request: PageRequest<TrashPageCursor>,
+    ) -> TrashPager {
+        TrashPager {
+            reader: self.clone(),
+            namespace_id: namespace_id.clone(),
+            request,
+            pending: None,
+            exhausted: false,
+        }
+    }
+
     /// Lists one page of a file path's revision history.
     #[tracing::instrument(
         level = "debug",
@@ -541,6 +773,23 @@ impl FsReader {
         )?)
     }
 
+    /// Creates a lazy path-based revision pager beginning at `request.cursor`.
+    pub fn list_file_revisions_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> FileRevisionsPager {
+        FileRevisionsPager {
+            reader: self.clone(),
+            namespace_id: namespace_id.clone(),
+            target: FileRevisionsTarget::Path(absolute_path.to_owned()),
+            request,
+            pending: None,
+            exhausted: false,
+        }
+    }
+
     /// Lists one page of retained revisions for a file inode.
     #[tracing::instrument(
         level = "debug",
@@ -571,6 +820,23 @@ impl FsReader {
             page,
             Some(inode_id),
         )?)
+    }
+
+    /// Creates a lazy inode-based revision pager beginning at `request.cursor`.
+    pub fn list_file_revisions_by_inode_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> FileRevisionsPager {
+        FileRevisionsPager {
+            reader: self.clone(),
+            namespace_id: namespace_id.clone(),
+            target: FileRevisionsTarget::Inode(inode_id),
+            request,
+            pending: None,
+            exhausted: false,
+        }
     }
 
     /// Reads the content of one historical file revision by path.
@@ -670,5 +936,22 @@ impl FsReader {
             .reader_engine(namespace_id)
             .list_changes_after(after_seq, limit)
             .await?)
+    }
+
+    /// Creates a lazy change-feed pager beginning after `after_seq`.
+    pub fn list_changes_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        options: ListChangesOptions,
+    ) -> ChangesPager {
+        ChangesPager {
+            reader: self.clone(),
+            namespace_id: namespace_id.clone(),
+            after_seq,
+            options,
+            pending: None,
+            exhausted: false,
+        }
     }
 }

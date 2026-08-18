@@ -84,11 +84,8 @@ fn embedded_grep_works_after_index_enable() {
     );
 }
 
-/// `--max-matches` caps the whole search, which `--limit` cannot: `--limit`
-/// sizes one page and the deployment rejects a page larger than its own
-/// maximum.
 #[test]
-fn grep_max_matches_caps_the_search_while_limit_sizes_a_page() {
+fn grep_limit_caps_the_whole_search_while_page_size_sizes_requests() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "code"]));
@@ -105,7 +102,7 @@ fn grep_max_matches_caps_the_search_while_limit_sizes_a_page() {
     assert_eq!(all_data["matches"].as_array().expect("json array").len(), 4);
     assert_eq!(all_data["truncated"], false);
 
-    let capped = harness.run(&["--json", "grep", "TODO", "--max-matches", "2"]);
+    let capped = harness.run(&["--json", "grep", "TODO", "--limit", "2"]);
     assert_success(&capped);
     let capped_data = json_data(&capped);
     assert_eq!(
@@ -115,7 +112,7 @@ fn grep_max_matches_caps_the_search_while_limit_sizes_a_page() {
     assert_eq!(capped_data["truncated"], true);
 
     // A cap the search never reaches is not a truncation.
-    let roomy = harness.run(&["--json", "grep", "TODO", "--max-matches", "99"]);
+    let roomy = harness.run(&["--json", "grep", "TODO", "--limit", "99"]);
     assert_success(&roomy);
     assert_eq!(
         json_data(&roomy)["matches"]
@@ -126,43 +123,92 @@ fn grep_max_matches_caps_the_search_while_limit_sizes_a_page() {
     );
     assert_eq!(json_data(&roomy)["truncated"], false);
 
-    // A small page still returns every match, because it bounds a page and
-    // the command follows the cursor.
-    let paged = harness.run(&["--json", "grep", "TODO", "--limit", "1"]);
+    // A total larger than the page size follows enough pages to satisfy it.
+    let paged = harness.run(&["--json", "grep", "TODO", "--limit", "3", "--page-size", "1"]);
     assert_success(&paged);
     assert_eq!(
         json_data(&paged)["matches"]
             .as_array()
             .expect("json array")
             .len(),
-        4
+        3
     );
-    assert_eq!(json_data(&paged)["truncated"], false);
+    assert_eq!(json_data(&paged)["truncated"], true);
 
-    // The two compose: pages of one, stopped after three.
-    let both = harness.run(&[
+    // A bounded total beyond the deployment page cap is legal and chunked.
+    let over_page_cap = harness.run(&[
         "--json",
         "grep",
         "TODO",
         "--limit",
+        "1001",
+        "--page-size",
         "1",
-        "--max-matches",
-        "3",
     ]);
-    assert_success(&both);
+    assert_success(&over_page_cap);
     assert_eq!(
-        json_data(&both)["matches"]
+        json_data(&over_page_cap)["matches"]
             .as_array()
             .expect("json array")
             .len(),
-        3
+        4
     );
-    assert_eq!(json_data(&both)["truncated"], true);
+    assert_eq!(json_data(&over_page_cap)["truncated"], false);
+
+    let removed = harness.run(&["grep", "TODO", "--max-matches", "2"]);
+    assert_failure(&removed);
+    assert!(stderr_string(&removed).contains("unexpected argument '--max-matches'"));
 
     // The human rendering says it stopped early.
-    let human = harness.run(&["grep", "TODO", "--max-matches", "2"]);
+    let human = harness.run(&["grep", "TODO", "--limit", "2"]);
     assert_success(&human);
-    assert!(stdout_string(&human).contains("--max-matches"));
+    assert!(stdout_string(&human).contains("--limit"));
+}
+
+#[test]
+fn changes_checkpoints_and_grep_jsonl_follow_across_pages() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let empty_changes = harness.run(&["changes", "--page-size", "1", "--jsonl"]);
+    assert_success(&empty_changes);
+    assert!(stdout_string(&empty_changes).is_empty());
+
+    let first = harness.temp_dir.path().join("first.txt");
+    let second = harness.temp_dir.path().join("second.txt");
+    fs::write(&first, b"TODO one\nTODO two\n").expect("first payload");
+    fs::write(&second, b"second\n").expect("second payload");
+    assert_success(&harness.run(&["put", first.to_str().expect("utf-8 path"), "/first.txt"]));
+    assert_success(&harness.run(&["put", second.to_str().expect("utf-8 path"), "/second.txt"]));
+
+    let changes = harness.run(&["changes", "--page-size", "1", "--jsonl"]);
+    assert_success(&changes);
+    assert_eq!(stdout_string(&changes).lines().count(), 2);
+
+    for name in ["first", "second"] {
+        assert_success(&harness.run(&["admin", "checkpoint", "create", "--name", name]));
+    }
+    let one_checkpoint =
+        harness.run(&["--json", "admin", "checkpoint", "list", "--page-size", "1"]);
+    assert_success(&one_checkpoint);
+    assert_eq!(
+        json_data(&one_checkpoint)["checkpoints"]
+            .as_array()
+            .expect("checkpoint array")
+            .len(),
+        1
+    );
+    assert!(json_data(&one_checkpoint)["next_cursor"].is_string());
+    let checkpoints = harness.run(&["admin", "checkpoint", "list", "--page-size", "1", "--jsonl"]);
+    assert_success(&checkpoints);
+    assert_eq!(stdout_string(&checkpoints).lines().count(), 2);
+
+    assert_success(&harness.run(&["admin", "index", "enable"]));
+    let grep = harness.run(&["grep", "TODO", "--page-size", "1", "--jsonl"]);
+    assert_success(&grep);
+    assert_eq!(stdout_string(&grep).lines().count(), 2);
 }
 
 #[test]
@@ -394,6 +440,27 @@ fn index_gc_loops_its_cursor_and_accumulates() {
         json_data(&single)["next_cursor"].is_string(),
         "{}",
         json_data(&single)
+    );
+    let cursor = json_data(&single)["next_cursor"]
+        .as_str()
+        .expect("bounded index collection returns a cursor")
+        .to_owned();
+    let resumed = harness.run(&[
+        "--json",
+        "admin",
+        "index",
+        "gc",
+        "--max-objects",
+        "1",
+        "--cursor",
+        &cursor,
+    ]);
+    assert_success(&resumed);
+    assert_ne!(
+        json_data(&resumed)
+            .get("next_cursor")
+            .and_then(Value::as_str),
+        Some(cursor.as_str())
     );
 }
 

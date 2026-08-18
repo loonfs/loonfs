@@ -12,8 +12,8 @@ use loonfs::{
 };
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
 use loonfs_api::{
-    sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId,
-    MAX_PUBLIC_INTEGER,
+    sha256_digest, AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId, PageRequest,
+    PaginationPolicy, MAX_PUBLIC_INTEGER,
 };
 use loonfs_grep::keyspace::{
     grep_prefix, manifest_key, manifests_prefix, root_key, segment_key, segments_prefix,
@@ -424,10 +424,17 @@ async fn enable_releases_its_checkpoint_when_root_reload_fails_before_publicatio
     assert!(matches!(error, GrepError::StoreUnavailable { .. }));
     assert_eq!(failing_store.attempts(), 1);
 
-    let checkpoints = host
-        .admin
-        .list_checkpoints_all(&namespace_id)
+    let request = PageRequest {
+        limit: PaginationPolicy::default()
+            .resolve_limit(None)
+            .expect("default page limit"),
+        cursor: None,
+    };
+    let mut pager = host.admin.list_checkpoints_pager(&namespace_id, request);
+    let checkpoints = pager
+        .next()
         .await
+        .expect("a fresh pager has one page")
         .expect("list checkpoints after failed enable");
     assert!(
         checkpoints.checkpoints.is_empty(),

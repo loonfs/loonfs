@@ -235,9 +235,11 @@ pub(crate) enum CommandData {
         built_through_seq: ChangeSeq,
         matches: Vec<GrepMatch>,
         tail_scanned: bool,
-        /// True when `--max-matches` stopped the search with matches left
-        /// to find.
+        /// True when a bounded invocation stopped with matches left to find.
         truncated: bool,
+        /// Where a bounded search stopped, and how to resume it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
     },
     FileRevisions {
         target: String,

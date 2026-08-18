@@ -45,8 +45,7 @@ async fn listed_files(
     let mut found = BTreeMap::new();
     let mut directories = vec!["/".to_owned()];
     while let Some(directory) = directories.pop() {
-        let entries = reader
-            .list_path_entries_all(namespace_id, &directory)
+        let entries = collect_path_entries(reader, namespace_id, &directory)
             .await
             .expect("list directory")
             .entries;

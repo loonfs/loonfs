@@ -545,11 +545,11 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
         .as_str()
         .expect("default JSON page carries a cursor");
 
-    let one_page_jsonl = harness.run(&["ls", "/listing", "--jsonl"]);
-    assert_success(&one_page_jsonl);
+    let followed_jsonl = harness.run(&["ls", "/listing", "--jsonl"]);
+    assert_success(&followed_jsonl);
     assert_eq!(
-        stdout_string(&one_page_jsonl).lines().count(),
-        loonfs_api::DEFAULT_PAGE_LIMIT as usize
+        stdout_string(&followed_jsonl).lines().count(),
+        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
     );
 
     let all = harness.run(&["ls", "/listing", "--all"]);
@@ -560,7 +560,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     );
     assert!(!stdout_string(&all).contains("more entries exist"));
 
-    let all_json = harness.run(&["--json", "ls", "/listing", "--all"]);
+    let all_json = harness.run(&["--json", "ls", "/listing", "--all", "--limit", "1001"]);
     assert_success(&all_json);
     let all_json_data = json_data(&all_json);
     assert_eq!(all_json_data["namespace_id"], "demo");
@@ -633,7 +633,7 @@ fn ls_surfaces_head_drift_from_paged_responses() {
         }),
     ]);
     harness.write_remote_listing_config(&server_url);
-    let json = harness.run(&["--json", "ls", "/docs", "--all"]);
+    let json = harness.run(&["--json", "ls", "/docs", "--all", "--limit", "2"]);
     assert_success(&json);
     assert!(json.stderr.is_empty());
     let data = json_data(&json);
@@ -681,10 +681,10 @@ fn ls_surfaces_head_drift_from_paged_responses() {
     server.join().expect("listing server");
 }
 
-/// `ls --limit` bounds the total, and incompatible output bounds fail in
-/// clap before the command runs.
+/// `ls --limit` bounds the total, including when `--all` is also present,
+/// while unbounded buffered JSON fails before the command runs.
 #[test]
-fn ls_limit_bounds_the_whole_listing_and_rejects_all() {
+fn ls_limit_bounds_the_whole_listing_and_rejects_unbounded_json() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -700,12 +700,11 @@ fn ls_limit_bounds_the_whole_listing_and_rejects_all() {
         ]));
     }
 
-    // Explicitly unbounded JSON still prints everything in one document.
+    // Explicitly unbounded JSON must use JSONL or add a bound.
     let all = harness.run(&["--json", "ls", "--all"]);
-    assert_success(&all);
-    let all_data = json_data(&all);
-    assert_eq!(all_data["entries"].as_array().expect("json array").len(), 5);
-    assert!(all_data.get("next_cursor").is_none());
+    assert_failure(&all);
+    assert_eq!(all.status.code(), Some(2));
+    assert!(stderr_string(&all).contains("use '--jsonl' or add '--limit'"));
 
     // A bound stops at exactly that many entries and returns a cursor.
     let first = harness.run(&["--json", "ls", "--limit", "2"]);
@@ -751,8 +750,8 @@ fn ls_limit_bounds_the_whole_listing_and_rejects_all() {
     assert!(stdout_string(&human).contains("continue with --cursor"));
 
     let conflicting_bound = harness.run(&["ls", "--all", "--limit", "2"]);
-    assert_failure(&conflicting_bound);
-    assert_eq!(conflicting_bound.status.code(), Some(2));
+    assert_success(&conflicting_bound);
+    assert_eq!(stdout_string(&conflicting_bound).lines().count(), 2);
 
     let conflicting_json = harness.run(&["--json", "ls", "--jsonl"]);
     assert_failure(&conflicting_json);

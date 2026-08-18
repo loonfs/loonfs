@@ -99,10 +99,10 @@ pub use loonfs_api::{
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, NameKey, Namespace,
     NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy,
     ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
-    RevisionNo, UploadId, WalFlushStepOutcome, FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
-    PROFILE_CORE_V0, PROTOCOL_VERSION,
+    RevisionNo, TrashEntry, UploadId, WalFlushStepOutcome, FEATURE_ATTRIBUTES,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
     MetadataTableCacheConfig, Recency, StoredMetadataBlockCache,
@@ -190,7 +190,10 @@ pub use loonfs_objectstore::{
 
 pub use cache::RuntimeCacheStats;
 pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
-pub use fs::MetadataCompactionOutcome;
+pub use fs::{
+    ChangesPager, CheckpointsPager, FileRevisionsPager, MetadataCompactionOutcome,
+    PathEntriesPager, TrashPager,
+};
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use maintenance_runner::{
     FsBackgroundWork, MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,

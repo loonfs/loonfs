@@ -3,7 +3,8 @@
 #![allow(dead_code)]
 #![allow(clippy::panic)]
 
-use loonfs_client::{Client, ClientConfig};
+use loonfs_api::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
+use loonfs_client::{Client, ClientConfig, ListPathEntriesOptions, NamespacePath};
 use loonfs_server::{
     app, serve_with_shutdown, GrepConfig, MaintenanceMode, RuntimeCacheConfigOverrides, ServeError,
     ServerConfig, StoreConfig, TlsServerConfig,
@@ -14,6 +15,36 @@ use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+
+pub(crate) async fn collect_path_entries(
+    client: &Client,
+    spec: &NamespacePath,
+    options: &ListPathEntriesOptions,
+) -> loonfs_client::Result<ListPathEntriesResponse> {
+    let mut pager = client.list_path_entries_pager(spec, None, None, options);
+    let mut response = pager.next().await.expect("a fresh pager has one page")?;
+    while let Some(page) = pager.next().await {
+        let page = page?;
+        response.head_seq = page.head_seq;
+        response.entries.extend(page.entries);
+        response.next_cursor = page.next_cursor;
+    }
+    Ok(response)
+}
+
+pub(crate) async fn collect_checkpoints(
+    client: &Client,
+    namespace_id: &NamespaceId,
+) -> loonfs_client::Result<ListCheckpointsResponse> {
+    let mut pager = client.list_checkpoints_pager(namespace_id, None, None);
+    let mut response = pager.next().await.expect("a fresh pager has one page")?;
+    while let Some(page) = pager.next().await {
+        let page = page?;
+        response.checkpoints.extend(page.checkpoints);
+        response.next_cursor = page.next_cursor;
+    }
+    Ok(response)
+}
 
 /// The exposition lines of one scrape, keyed by everything left of the
 /// value. Comment lines are dropped; a value that does not parse as a number

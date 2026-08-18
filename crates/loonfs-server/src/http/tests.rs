@@ -1517,11 +1517,12 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
     let target = NamespacePath::parse("missing", "/").expect("target");
-    assert_api_error(
+    let mut pager =
         harness
             .client
-            .list_path_entries_all(&target, &Default::default())
-            .await,
+            .list_path_entries_pager(&target, None, None, &Default::default());
+    assert_api_error(
+        pager.next().await.expect("a fresh pager has one page"),
         404,
         "namespace_not_found",
         Some("namespace `missing` does not exist"),
@@ -1776,8 +1777,9 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
         );
         // The checkpoint inventory names this deployment's garbage-collection
         // roots, so it answers behind the same token as everything else.
+        let mut pager = client.list_checkpoints_pager(&namespace_id("demo"), None, None);
         assert_api_error(
-            client.list_checkpoints_all(&namespace_id("demo")).await,
+            pager.next().await.expect("a fresh pager has one page"),
             401,
             "unauthorized",
             Some("missing or invalid bearer token"),

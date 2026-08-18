@@ -3,7 +3,7 @@
 #![allow(clippy::panic)]
 
 use crate::common::http_split_support::*;
-use crate::common::start_server;
+use crate::common::{collect_checkpoints, start_server};
 use bytes::Bytes;
 use loonfs_api::{
     ApiError, ChangeSeq, CheckpointId, CheckpointOwnerSummary, CreateCheckpointResponse,
@@ -199,8 +199,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     );
     assert_eq!(first.checkpoint.checkpoint_seq, ChangeSeq(1));
     assert_eq!(first.checkpoint.manifest_id, ManifestId(1));
-    let listed = client
-        .list_checkpoints_all(&namespace)
+    let listed = collect_checkpoints(&client, &namespace)
         .await
         .expect("list first checkpoint");
     assert_eq!(listed.checkpoints, vec![first.checkpoint.clone()]);

@@ -3,7 +3,7 @@
 #![allow(clippy::panic)]
 
 use crate::common::http_split_support::*;
-use crate::common::start_server;
+use crate::common::{collect_checkpoints, collect_path_entries, start_server};
 use loonfs_api::{
     v0::FilesystemChange, ApiError, ChangeSeq, CommitId, CreateCheckpointRequest,
     DestinationBehavior, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
@@ -100,9 +100,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     }
     assert_eq!(actual_ids, expected_ids);
 
-    let all = harness
-        .client
-        .list_checkpoints_all(&demo)
+    let all = collect_checkpoints(&harness.client, &demo)
         .await
         .expect("aggregate checkpoint pages");
     assert_eq!(
@@ -258,9 +256,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     assert_eq!(entry_names(&second_page), vec!["c.txt"]);
     assert_eq!(second_page.next_cursor, None);
 
-    let full_listing = harness
-        .client
-        .list_path_entries_all(&docs, &Default::default())
+    let full_listing = collect_path_entries(&harness.client, &docs, &Default::default())
         .await
         .expect("full directory list");
     assert_eq!(entry_names(&full_listing), vec!["a.txt", "b.txt", "c.txt"]);
@@ -340,9 +336,7 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
             .expect("write file");
     }
 
-    let listing = harness
-        .client
-        .list_path_entries_all(&docs, &Default::default())
+    let listing = collect_path_entries(&harness.client, &docs, &Default::default())
         .await
         .expect("directory list");
     assert_eq!(entry_names(&listing), vec!["a.txt", "B.txt", "c.txt"]);

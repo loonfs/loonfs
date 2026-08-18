@@ -35,22 +35,22 @@ use loonfs_api::{
     v0::{
         BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
         BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-        CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
+        CommitResponse as ApiCommitResponse, CommittedChange, CompleteKnownContentUploadRequest,
         CompleteMultipartUploadRequest, CompletedUploadPart, ContentToken,
         DirectMultipartUploadOptions, GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse,
         ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart,
         StoreProbeRequest, StoreProbeResponse, UploadContentClaim, UploadContentResponse,
         UploadPartChecksumClaim, UploadSessionResponse, UploadSessionStatus,
     },
-    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, Checksum,
-    ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
+    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId,
+    Checksum, ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
     CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteNamespaceResponse, ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest,
-    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    DeleteNamespaceResponse, ErrorCode, FileRevision, FilesystemOperation, ForkNamespaceRequest,
+    GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
     Namespace, NamespaceDiagnostics, NamespaceId, PutRetryAttempt, PutRetryErrorClassification,
     PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo, SecretString, StreamingChecksum,
-    UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    TrashEntry, UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
@@ -58,9 +58,11 @@ use payload::PartReader;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+pub use admin::CheckpointsPager;
 pub use config::ClientConfig;
 pub use error::ClientError;
 pub use payload::{PayloadSource, PayloadStream};
+pub use reads::{ChangesPager, FileRevisionsPager, PathEntriesPager, TrashPager};
 use transport::{StdMonotonicTimer, TransportRetryPolicy, WireRequest, IO_INACTIVITY_TIMEOUT};
 pub use ClientError as Error;
 

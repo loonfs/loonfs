@@ -2,7 +2,7 @@
 
 use super::progress::rest_between_status_checks;
 use super::{FileDownload, GrepWaitProgress, MaintenanceDrainProgress, StepBudget};
-use crate::backend_error::BackendError;
+use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
 use crate::payload::LocalPayload;
 use crate::progress::ProgressReporter;
 use crate::resolve::ResolvedTarget;
@@ -47,6 +47,30 @@ fn maintenance_host_needs_an_embedded_profile() -> BackendError {
          own maintenance; use `loonfs admin maintenance step` for one pass or `loonfs admin \
          index status` to inspect the index",
     )
+}
+
+/// One lazy directory pager across either CLI backend.
+pub(crate) enum PathEntriesPager {
+    Embedded {
+        pager: loonfs::PathEntriesPager,
+        namespace_id: NamespaceId,
+    },
+    Remote(loonfs_client::PathEntriesPager),
+}
+
+impl PathEntriesPager {
+    /// Returns the next original page envelope.
+    pub(crate) async fn next(&mut self) -> Option<Result<ListPathEntriesResponse, BackendError>> {
+        match self {
+            Self::Embedded {
+                pager,
+                namespace_id,
+            } => pager.next().await.map(|result| {
+                result.map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            }),
+            Self::Remote(pager) => pager.next().await.map(|result| result.map_err(Into::into)),
+        }
+    }
 }
 
 /// Implements CLI operations for embedded and remote targets.
@@ -148,17 +172,28 @@ impl ResolvedTarget {
         }
     }
 
-    /// Lists the entries of a directory.
-    pub(crate) async fn list_path_entries_all(
+    /// Creates a lazy directory pager.
+    pub(crate) fn list_path_entries_pager(
         &self,
         spec: &NamespacePath,
-    ) -> Result<ListPathEntriesResponse, BackendError> {
+        page_size: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<PathEntriesPager, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.list_path_entries_all(spec).await,
-            Self::Remote(target) => Ok(target
-                .client
-                .list_path_entries_all(spec, &ListPathEntriesOptions::default())
-                .await?),
+            Self::Embedded(target) => Ok(PathEntriesPager::Embedded {
+                pager: target
+                    .backend
+                    .list_path_entries_pager(spec, page_size, cursor)?,
+                namespace_id: spec.namespace().clone(),
+            }),
+            Self::Remote(target) => Ok(PathEntriesPager::Remote(
+                target.client.list_path_entries_pager(
+                    spec,
+                    page_size,
+                    cursor.map(ToOwned::to_owned),
+                    &ListPathEntriesOptions::default(),
+                ),
+            )),
         }
     }
 
