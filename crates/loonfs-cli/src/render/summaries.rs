@@ -18,8 +18,8 @@ pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
     }
 }
 
-/// The complete existing store-probe rendering, shared by `admin store
-/// probe` and doctor's explicit write check.
+/// Formats the object-store probe for both `admin store probe` and
+/// `doctor --write-check`.
 pub(super) fn store_probe_report_lines(
     response: &loonfs_api::v0::StoreProbeResponse,
 ) -> Vec<String> {

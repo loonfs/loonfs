@@ -41,8 +41,8 @@ Inspection:
   revisions   List a file's revision history
   trash       List recoverable deletions
   changes     List committed changes
-  capabilities  Show the selected profile's protocol capabilities
-  doctor      Diagnose the selected profile with read-only checks
+  capabilities  Show the selected deployment's protocol capabilities
+  doctor      Check the selected deployment without writing to it
   completion  Print a shell completion script
   version     Print version and build metadata
 
@@ -150,9 +150,9 @@ pub(crate) enum Command {
     Trash(TrashArgs),
     /// List committed changes after a sequence number.
     Changes(ChangesArgs),
-    /// Show the selected profile's protocol capabilities.
+    /// Show the selected deployment's protocol capabilities.
     Capabilities(CapabilitiesArgs),
-    /// Diagnose configuration and the selected profile without writing.
+    /// Check the selected deployment without writing to it.
     Doctor(DoctorArgs),
     /// Maintenance operations: checkpoints, steps, retention, GC, indexes.
     Admin {
@@ -514,8 +514,7 @@ pub(crate) struct CapabilitiesArgs {
 pub(crate) struct DoctorArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Run the existing write-producing object-store contract probe as a
-    /// tenth check.
+    /// Also test the object store by writing and deleting temporary objects.
     #[arg(long)]
     pub write_check: bool,
 }

@@ -45,8 +45,8 @@ pub(crate) async fn run(
         return run_completion(kind, args);
     }
 
-    // Doctor owns config resolution as its first check, so it must run
-    // before the shared resolution boundary used by normal commands.
+    // `doctor` reports config resolution as its first result, so run it before
+    // the config used by other commands is resolved.
     if let Command::Doctor(args) = &cli.command {
         return inspection::run_doctor(kind, cli.config.as_deref(), args).await;
     }
@@ -96,7 +96,7 @@ pub(crate) async fn run(
         Command::Trash(args) => fs::run_filesystem_trash(kind, &location, args).await,
         Command::Changes(args) => admin::run_admin_changes(kind, config_path, args).await,
         Command::Capabilities(args) => inspection::run_capabilities(kind, config_path, args).await,
-        // Returned before shared config resolution above.
+        // This arm is unreachable because `doctor` returns above.
         Command::Doctor(args) => inspection::run_doctor(kind, cli.config.as_deref(), &args).await,
         Command::Admin { command } => {
             admin::run_admin_command(kind, config_path, command, runtime).await

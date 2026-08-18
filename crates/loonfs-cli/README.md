@@ -271,15 +271,15 @@ History and recovery
 
 Inspection and diagnostics
   loonfs capabilities [--profile <name>]
-    Print the selected profile's canonical capability document: protocol
-    version, profiles, enabled and disabled features, and sorted limits
+    Show the protocol version, profiles, features, and limits supported by
+    the selected deployment
 
   loonfs doctor [--profile <name>] [--namespace <name>] [--write-check]
-    Run the stable configuration, provider, connectivity, authentication,
-    health, capability, and optional namespace checks. The default run is
-    read-only; --write-check appends the existing object-store contract
-    probe, which writes and cleans up scratch objects. Every check is printed,
-    and the command exits nonzero when any check failed
+    Check the configuration, provider, connection, authentication, server
+    health, capabilities, and selected namespace. The command is read-only
+    unless --write-check is set. That option also tests the object store by
+    writing and deleting temporary objects. The command prints every result
+    and exits nonzero if a check fails
 
 Maintenance
   loonfs admin maintenance run --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]

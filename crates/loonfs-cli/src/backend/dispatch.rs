@@ -55,7 +55,7 @@ fn maintenance_host_needs_an_embedded_profile() -> BackendError {
 /// target requires handling both transports. Both paths normalize failures to
 /// the same error-code registry, which keeps command output consistent.
 impl ResolvedTarget {
-    /// Returns the selected deployment's canonical capability document.
+    /// Returns the capabilities reported by the selected deployment.
     pub(crate) async fn capabilities(&self) -> Result<CapabilityDocument, BackendError> {
         match self {
             Self::Embedded(target) => Ok(target.backend.reader.capabilities()),
@@ -63,11 +63,10 @@ impl ResolvedTarget {
         }
     }
 
-    /// Establishes the remote transport through the public health endpoint.
+    /// Checks whether the client can reach the remote health endpoint.
     ///
-    /// Any served API response proves DNS, TCP, and TLS (when applicable)
-    /// completed. The health check itself runs separately and judges the
-    /// response status.
+    /// Any API response means the connection succeeded. A separate check
+    /// determines whether the health endpoint returned a successful status.
     pub(crate) async fn remote_connectivity(&self) -> Result<(), BackendError> {
         match self {
             Self::Embedded(_) => Ok(()),
@@ -78,7 +77,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Checks the remote server's public liveness endpoint.
+    /// Checks the remote server's public health endpoint.
     pub(crate) async fn remote_health(&self) -> Result<(), BackendError> {
         match self {
             Self::Embedded(_) => Ok(()),

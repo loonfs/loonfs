@@ -1,4 +1,4 @@
-//! Profile-scoped capability discovery and read-only diagnostics.
+//! Commands for viewing deployment capabilities and checking configuration.
 
 use super::context::{fail, fail_for};
 use super::output::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
@@ -52,9 +52,8 @@ pub(crate) async fn run_capabilities(
     })
 }
 
-/// Runs every diagnostic it can reach and returns the checks as data even
-/// when one failed. [`CommandData::reports_failures`] turns that data into a
-/// nonzero process status after the renderer has printed all of it.
+/// Runs every available check and returns all results, including failures.
+/// Failed checks produce a nonzero exit status after all results are printed.
 pub(crate) async fn run_doctor(
     kind: CommandKind,
     config_flag: Option<&Path>,
@@ -86,7 +85,7 @@ pub(crate) async fn run_doctor(
         Ok(config) => {
             checks.push(ok(
                 DOCTOR_CHECK_NAMES[1],
-                format!("strictly decoded and validated {}", location.path.display()),
+                format!("decoded and validated {}", location.path.display()),
             ));
             config
         }
@@ -148,7 +147,7 @@ pub(crate) async fn run_doctor(
             .await;
         checks.push(check_from_backend_result(
             DOCTOR_CHECK_NAMES[4],
-            "DNS, TCP, and TLS connectivity succeeded",
+            "connected to the server",
             result,
         ));
     } else {
@@ -168,7 +167,7 @@ pub(crate) async fn run_doctor(
         checks.push(match &result {
             Ok(_) => ok(
                 DOCTOR_CHECK_NAMES[5],
-                "authenticated capabilities request succeeded",
+                "server accepted the capabilities request",
             ),
             Err(error) => failed(DOCTOR_CHECK_NAMES[5], CliError::from(error.clone())),
         });
@@ -194,7 +193,7 @@ pub(crate) async fn run_doctor(
     } else if local_root_is_missing(&profile) && !args.write_check {
         checks.push(skipped(
             DOCTOR_CHECK_NAMES[6],
-            "opening this local store would create its missing root; read-only doctor left it untouched",
+            "local store root is missing; doctor did not create it",
         ));
     } else {
         match ResolvedTarget::resolve(&profile, args.target.request.no_retry).await {
@@ -202,7 +201,7 @@ pub(crate) async fn run_doctor(
                 target = Some(resolved);
                 checks.push(ok(
                     DOCTOR_CHECK_NAMES[6],
-                    "embedded object store opened without an object write",
+                    "opened the embedded object store without writing to it",
                 ));
             }
             Err(error) => checks.push(failed(DOCTOR_CHECK_NAMES[6], error)),
@@ -216,7 +215,7 @@ pub(crate) async fn run_doctor(
     } else {
         checks.push(skipped(
             DOCTOR_CHECK_NAMES[7],
-            "embedded store was not opened read-only",
+            "embedded store was not opened",
         ));
         namespace_check(
             &mut checks,
@@ -338,14 +337,14 @@ fn capability_document_check(result: Result<CapabilityDocument, BackendError>) -
         return failed_message(
             DOCTOR_CHECK_NAMES[7],
             format!(
-                "server protocol `{}` is not supported by this CLI (speaks `{PROTOCOL_VERSION}`)",
+                "server uses protocol `{}`, but this CLI expects `{PROTOCOL_VERSION}`",
                 document.protocol_version
             ),
         );
     }
     ok(
         DOCTOR_CHECK_NAMES[7],
-        format!("well-formed capability document speaks `{PROTOCOL_VERSION}`"),
+        format!("capability document is valid and uses protocol `{PROTOCOL_VERSION}`"),
     )
 }
 
@@ -375,7 +374,7 @@ fn store_probe_check(response: StoreProbeResponse) -> DoctorCheck {
         )
     } else if unsupported_count > 0 {
         format!(
-            "store probe {}: {unsupported_count} of {} checks unsupported",
+            "store probe {}: {unsupported_count} of {} checks are unsupported",
             response.run_id,
             response.checks.len()
         )
@@ -517,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_check_names_are_pinned_in_execution_order() {
+    fn doctor_check_names_have_a_stable_order() {
         assert_eq!(
             DOCTOR_CHECK_NAMES,
             [
@@ -536,18 +535,18 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_check_pins_the_protocol_version() {
+    fn capabilities_check_rejects_a_different_protocol_version() {
         assert_eq!(
             capability_document_check(Ok(capability_document(PROTOCOL_VERSION))).status,
             DoctorStatus::Ok
         );
         let failed = capability_document_check(Ok(capability_document("v-next")));
         assert_eq!(failed.status, DoctorStatus::Failed);
-        assert!(failed.message.contains("not supported"));
+        assert!(failed.message.contains("but this CLI expects"));
     }
 
     #[test]
-    fn store_probe_failure_remains_nested_data_and_fails_doctor() {
+    fn store_probe_failure_is_included_and_fails_doctor() {
         let response = StoreProbeResponse {
             run_id: "probe_test".to_owned(),
             checks: vec![StoreProbeCheckResult {

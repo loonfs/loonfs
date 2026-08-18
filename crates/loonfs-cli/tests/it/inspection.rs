@@ -1,4 +1,4 @@
-//! Capability discovery and the stable doctor check contract.
+//! Integration tests for `capabilities` and `doctor`.
 
 use super::common::*;
 use loonfs_api::{CapabilityDocument, PROTOCOL_VERSION};
@@ -55,10 +55,7 @@ fn doctor_is_read_only_when_a_local_store_root_is_missing() {
 
     let output = harness.run(&["--json", "doctor"]);
     assert_success(&output);
-    assert!(
-        !root.exists(),
-        "read-only doctor must not create the store root"
-    );
+    assert!(!root.exists(), "doctor must not create the store root");
 
     let checks = json_data(&output)["checks"]
         .as_array()
@@ -89,7 +86,7 @@ fn doctor_opens_an_existing_embedded_store_without_writing_it() {
     assert_eq!(
         fs::read_dir(&root).expect("read empty store root").count(),
         0,
-        "read-only doctor must not create store objects"
+        "doctor must not create store objects"
     );
 }
 
@@ -99,7 +96,10 @@ fn doctor_renders_every_check_before_exiting_for_a_bad_config() {
 
     let output = harness.run(&["--json", "doctor"]);
     assert_failure(&output);
-    assert!(output.stderr.is_empty(), "doctor results belong on stdout");
+    assert!(
+        output.stderr.is_empty(),
+        "doctor should write results to stdout"
+    );
     let checks = json_data(&output)["checks"]
         .as_array()
         .expect("doctor checks")

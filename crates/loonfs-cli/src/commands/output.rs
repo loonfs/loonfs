@@ -88,7 +88,7 @@ pub(crate) struct MaintenanceKeyReport {
     pub settled: bool,
 }
 
-/// Stable result vocabulary for one `doctor` check.
+/// Possible results for one `doctor` check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DoctorStatus {
@@ -109,16 +109,16 @@ impl DoctorStatus {
     }
 }
 
-/// One named `doctor` check, in the order the command performed it.
+/// The result of one named `doctor` check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct DoctorCheck {
     pub name: String,
     pub status: DoctorStatus,
     pub message: String,
-    /// Correlation id from a failed remote request, when one was returned.
+    /// Request ID returned with a remote failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// The existing store-probe response, present only for `--write-check`.
+    /// Object-store probe results, present only when `--write-check` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store_probe: Option<StoreProbeResponse>,
 }
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn inspection_data_kinds_are_additive_and_pinned() {
+    fn inspection_data_uses_the_expected_kind_names() {
         let capabilities = CommandData::Capabilities(CapabilityDocument {
             protocol_version: loonfs_api::PROTOCOL_VERSION.to_owned(),
             profiles: Vec::new(),
