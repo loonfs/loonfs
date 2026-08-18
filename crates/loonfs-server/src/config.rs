@@ -636,10 +636,8 @@ mod tests {
         }
     }
 
-    /// The loader must not reinterpret an ambient credential source when the
-    /// environment happens to carry credentials. The CLI loader carries the
-    /// same pin in its own crate, and resolution itself is pinned in
-    /// loonfs-objectstore — together those make the two binaries agree.
+    /// Loading a config preserves its credential source. Environment
+    /// credentials are read only when the object store is constructed.
     #[test]
     fn ambient_credential_sources_survive_loading_with_environment_credentials_set() {
         let path = write_config(

@@ -362,15 +362,11 @@ async fn assert_wrong_direct_put_bytes_rejected(
     );
 }
 
-/// Both signed headers are load-bearing, and neither can be dropped or
-/// rewritten in flight.
+/// Verifies that direct uploads reject missing or changed signed headers.
 ///
-/// The provider recomputes the signature over what it received, so a request
-/// missing a signed header — or carrying a different value for one — is not
-/// the request that was signed. Omission and tampering are checked
-/// separately: a provider could plausibly reject the first as malformed
-/// while quietly accepting the second, and only the second is what an
-/// attacker holding a capability would actually try.
+/// The provider includes these headers when it verifies the request
+/// signature. Test omission and modification separately because providers
+/// may validate them through different paths.
 async fn assert_direct_put_requires_its_signed_headers(
     client: &Client,
     namespace_id: &NamespaceId,

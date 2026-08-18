@@ -601,9 +601,8 @@ fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> 
     Ok(())
 }
 
-/// Key names whose values never leave the file unmasked, whatever shape the
-/// config is in. Mirrors the typed redaction: the `SecretString` store
-/// fields nested under `credentials` plus the remote profile's `auth_token`.
+/// Secret fields that are always redacted, even when the config cannot be
+/// decoded into the current typed format.
 const SECRET_CONFIG_KEYS: &[&str] = &[
     "access_key",
     "access_key_id",
@@ -848,11 +847,8 @@ secret_access_key = "secret"
         );
     }
 
-    /// The loader must not reinterpret an ambient credential source when the
-    /// environment happens to carry credentials. The server loader carries the
-    /// same pin in its own crate, and resolution itself is pinned in
-    /// loonfs-objectstore — together those make the two binaries agree without
-    /// this crate linking the server.
+    /// Loading a config preserves its credential source. Environment
+    /// credentials are read only when the object store is constructed.
     #[test]
     fn the_loader_preserves_the_serialized_credential_source() {
         let store = loonfs_objectstore::StoreConfig::AwsS3 {

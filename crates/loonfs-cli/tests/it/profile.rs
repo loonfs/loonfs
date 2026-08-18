@@ -760,7 +760,7 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
     );
     assert_success(&local_fs);
 
-    // The same environment selects no static fields and is never captured.
+    // Creating an ambient profile must not copy these values into the config.
     let s3 = harness.run_with_env(
         ambient,
         &[

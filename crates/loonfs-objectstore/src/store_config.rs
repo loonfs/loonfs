@@ -65,8 +65,7 @@ pub enum CloudflareR2Credentials {
 pub enum GcpGcsCredentials {
     /// Reads one service-account JSON file for requests and direct-transfer signing.
     ///
-    /// A key that cannot sign direct-transfer URLs fails store construction
-    /// rather than quietly withdrawing direct transfers.
+    /// Store construction fails if the key cannot sign direct-transfer URLs.
     ServiceAccountFile {
         /// Filesystem path to the service-account JSON.
         path: String,
@@ -223,10 +222,9 @@ impl StoreConfig {
 
     /// Builds the configured runtime object store for this provider.
     ///
-    /// Whether the result can authorize direct transfers is settled here, by
-    /// construction: read
+    /// This also determines whether the store supports direct transfers. Read
     /// [`ConfiguredObjectStore::direct_transfers`](crate::ConfiguredObjectStore::direct_transfers)
-    /// rather than asking this configuration a second time.
+    /// from the constructed store instead of checking this config again.
     pub fn configured_object_store(&self) -> crate::object_store::Result<ConfiguredObjectStore> {
         match self {
             StoreConfig::LocalFs { root, key_prefix } => {
