@@ -72,13 +72,12 @@ impl GrepHost {
         .await
     }
 
-    /// Enables grep and drives the index up to the namespace's current
-    /// sequence, the way a host with no maintenance runner does.
+    /// Enables grep and advances the index to the namespace's current
+    /// sequence without a maintenance runner.
     ///
-    /// The target is captured once, before any stepping, so this returns
-    /// even while another writer keeps committing — the same captured-target
-    /// wait `loonfs admin index enable` performs, minus its budgets, so a
-    /// test surfaces the first failure instead of retrying it.
+    /// The target is captured before the first step, so concurrent writes do
+    /// not keep the test running. Unlike the CLI command, this helper has no
+    /// step or time budget and returns the first error.
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,

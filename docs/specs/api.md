@@ -978,13 +978,11 @@ candidate under `no_reference_manifest`.
 Two horizons decide when a namespace actually gets smaller, and they are
 independent.
 
-The first is the **metadata retention floor**. It bounds incremental replay:
-below it, the WAL history a client could have replayed is surrendered, and
-the segments holding it become collectable. Nothing advances it on its own —
-no maintenance job exists for it — so it moves only when an operator asks
-(`POST .../maintenance/step` with `advance_retention: true`, or `loonfs
-admin retention advance`). File revision history is never affected, however far
-the floor has moved.
+The first is the **metadata retention floor**. It limits how far back clients
+can replay the WAL. Advancing the floor makes older WAL segments eligible for
+garbage collection. It advances only through an explicit request:
+`POST .../maintenance/step` with `advance_retention: true`, or
+`loonfs admin retention advance`. It does not remove file revisions.
 
 The second is the **content reclamation grace**, a little over seven days.
 It is derived rather than configured, and it is what separates a file
@@ -1009,12 +1007,11 @@ job hands that straight back as the earliest it will run the namespace
 again. A namespace that is being written to therefore reclaims its own
 staged content without a cron entry.
 
-What that leaves is namespaces nobody is writing to. LoonFS has no operation
-that enumerates namespaces, so nothing can discover them: coverage is an
-assignment. `loonfs admin maintenance run --namespaces <id>` hosts maintenance for exactly
-the namespaces named on the command line, continuously until a signal, or as
-one bounded catch-up with `--drain` for a cron entry. A cold namespace gets
-collected because it is on somebody's assignment list, and not otherwise.
+LoonFS does not enumerate namespaces for maintenance. Use
+`loonfs admin maintenance run --namespaces <id>` to maintain inactive
+namespaces explicitly. The command runs until stopped, or performs one
+bounded pass with `--drain`. An inactive namespace receives no maintenance
+unless a process is assigned to it.
 
 When a pass keeps more than it deletes, `retained` above says why. The one
 answer that is an operator decision rather than a wait is

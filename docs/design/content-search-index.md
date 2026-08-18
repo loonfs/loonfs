@@ -178,47 +178,33 @@ read the grep root, and — only for an active root sitting at a commit
 boundary — ask the change feed for one commit after its watermark. Two small
 reads answer whether the index trails its namespace.
 
-A server that maintains the index registers that job on its writer, and
-registering it is all the wiring there is: the job says on the maintenance
-trait that publications concern it, so the runtime nudges it after every
-publication the writer commits without the host connecting anything to the
-write path. Enable nudges the namespace so the backfill starts at once, and
-a grep query nudges a namespace whose probe says it is behind, which is what
-resumes durable work after a restart without a scan. Disable is one durable
-compare-and-swap and nothing else: a step already running loses its own root
-publication to it, retries, reads a disabled root, and the runner forgets the
-namespace. A server that only serves queries registers no job and refuses
-the routes that would mutate a grep root.
+A server that maintains the index registers the grep maintenance job with its
+writer. The runtime then schedules the job after relevant publications.
+Enabling the index schedules its initial backfill. Queries also schedule work
+when they find an index behind the namespace, which resumes work after a
+restart without scanning every namespace.
 
-A library-embedded host (the CLI's embedded mode) schedules nothing, so
-enabling the index is the schedule: `loonfs admin index enable` captures one
-namespace sequence before it starts — the target a fresh backfill's
-checkpoint pinned, or the namespace's current head for an index that is
-already active — and then runs the same job's bounded steps itself until the
-index has built through that sequence. It stops there even if writes keep
-landing, so a busy namespace cannot keep the command running; `--no-wait`
-skips the waiting entirely, and `--max-steps` and `--deadline-ms` bound it,
-reporting how far the index got and exiting nonzero rather than pretending
-to have finished. Re-running enable on an already-enabled namespace is how
-an embedded operator advances a lagging index. Between enables, small write
-tails are served by the query-time exhaustive tail scan within its budget.
+Disabling the index updates its root with one compare-and-swap. An in-progress
+step that loses that race reads the disabled root and stops. A query-only
+server does not register the maintenance job and rejects index mutations.
 
-Automatic maintenance covers the namespaces a process touches and the ones a
-host is explicitly assigned, and `loonfs admin maintenance run --namespaces <id>` is how a
-namespace nobody is writing to gets assigned. It opens an embedded runtime,
-hosts that runtime's runner, registers this job beside the runtime's own, and
-tells the runner about every assigned key at start-up and again on an
-interval — the runner forgets a key its probe found idle, which is right for
-a namespace merely touched and not enough for one an operator named. Repeat
-`--job grep-index` to narrow the host to this job. `--drain` catches the
-assignment up and exits instead of hosting until a signal, bounded by
-`--max-steps` and `--deadline-ms`, and reports where every key stopped. A
-namespace with no grep root settles `not_enabled`, so assigning one costs a
-read and nothing else. That command is also the whole detached deployment
-story: the index needs no host of its own, because a process that serves
-nothing and maintains assigned namespaces is what `admin maintenance run` already is.
-Grep has no private poller, no private timer, and no private configuration
-file; it never lists a namespace prefix.
+Embedded CLI profiles do not run background maintenance. The
+`loonfs admin index enable` command captures a target sequence and runs
+bounded maintenance steps until the index reaches it. Later writes do not
+move that target, so the command can finish on an active namespace.
+`--no-wait` returns after enabling the index. `--max-steps` and
+`--deadline-ms` limit how long the command works and report incomplete
+progress as an error. Running the command again advances an index that has
+fallen behind. Queries scan a bounded unindexed tail between runs.
+
+Automatic maintenance covers namespaces used by the current process.
+`loonfs admin maintenance run --namespaces <id>` covers explicitly assigned
+namespaces, including inactive ones. It starts an embedded runtime, registers
+the selected jobs, and refreshes the assignments periodically. Use
+`--job grep-index` to run only index maintenance. Use `--drain` to finish the
+current assignments and exit; `--max-steps` and `--deadline-ms` bound that
+work. A namespace without a grep index returns `not_enabled` after one read.
+Grep does not need a separate daemon, timer, or configuration file.
 
 Once active, build steps read the change feed after `built_through_seq` as
 semantic events, collect the file revisions those events published, read
@@ -475,7 +461,6 @@ Following the segment-format convention, two different contracts:
   common substrings and sharpens selectivity; it needs a
   frequency table derived from real corpora, and it is exactly
   the kind of change the feature version exists for.
-- **Richer text queries.** A tokenized full-text index would be a
-  sibling feature, but every seam here — the query profile, the
-  extension keyspace, the derived segment family, the WAL-driven build
-  step — is the seam it would reuse.
+- **Richer text queries.** A tokenized full-text index could reuse the query
+  profile, extension keyspace, derived segment format, and WAL-driven build
+  process.

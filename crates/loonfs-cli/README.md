@@ -59,10 +59,10 @@ Global flags
 Selectors
   Every command that reaches a store accepts:
     --profile <name>
-      Profile to run against; --profile wins, LOONFS_PROFILE follows, and
-      the configured default profile is last
+      Profile to use. If omitted, the CLI uses LOONFS_PROFILE and then the
+      configured default.
     LOONFS_PROFILE=<name>
-      Environment profile; --profile wins, and the configured default follows
+      Default profile for the current environment.
 
   Commands that address one namespace also accept:
     --namespace <name>
@@ -270,28 +270,23 @@ History and recovery
 
 Maintenance
   loonfs admin maintenance run --namespaces <ns>... [--job <job>...] [--drain] [--max-steps <n>] [--deadline-ms <ms>]
-    This command is embedded-only; remote servers host background
-    maintenance themselves
-    Host maintenance for the namespaces named here, continuously until a
-    signal; nothing discovers namespaces, so at least one --namespaces is
-    required. --job selects `metadata`, `core-gc`, `grep-index`, or
-    `grep-gc`, all four when omitted. --drain catches every assigned
-    namespace up and
-    exits instead, which suits cron, and --max-steps or --deadline-ms bound
-    the drain, exit nonzero, and report where every namespace stopped
+    Run maintenance for explicitly named namespaces in embedded mode. The
+    command runs until stopped. With --drain, it finishes the current
+    assignments and exits. --job selects metadata, core-gc, grep-index, or
+    grep-gc; omitting it selects all four. --max-steps and --deadline-ms
+    bound a drain.
 
   loonfs admin maintenance step [--max-wal-tail-segments <n>] [--retention] [--gc]
-    Run one core maintenance step (WAL flush and metadata folds), with
-    --retention and --gc adding that work after the flush;
-    --max-wal-tail-segments sets how many segments the tail needs before the
-    step flushes it, in place of the server's default
+    Run one metadata maintenance step. --retention and --gc add retention
+    advancement and garbage collection. --max-wal-tail-segments overrides
+    the default flush threshold.
 
   loonfs admin maintenance flush
-    Flush the WAL tail into a durable segment, whatever the tail's length
+    Flush the current WAL tail regardless of its length.
 
   loonfs admin retention advance
-    Advance the retention floor, surrendering replay history below the
-    flushed manifest head; file revision history is never affected
+    Advance the retention floor. This removes change-feed replay history
+    below the flushed manifest head but does not remove file revisions.
 
   loonfs admin gc [--grace-window-ms <ms>] [--max-objects <n>] [--cursor <token>]
     Run mark-and-sweep collection, looping bounded passes through
@@ -303,42 +298,37 @@ Maintenance
     what the pass kept and mostly why; --json carries every retention reason
 
   loonfs admin store probe
-    Prove the profile's object store honours the contract LoonFS depends on
-    (create-if-absent, compare-and-swap, visibility, listing, ranged reads)
-    and print one line per check; the run writes and deletes objects under a
-    scratch prefix it empties afterwards, and exits nonzero when any check
-    failed
+    Test the object-store operations LoonFS requires. The command creates
+    and removes temporary objects, prints each result, and exits nonzero if
+    any check fails.
 
   loonfs admin checkpoint create --name <label> [--ttl-ms <ms>]
-    Pin the namespace's current state under a named checkpoint; --ttl-ms
-    expires the pin, and an omitted TTL holds it until release
+    Pin the namespace's current state. --ttl-ms sets an expiry; without it,
+    the checkpoint remains until release.
 
   loonfs admin checkpoint list [--limit <n>] [--cursor <cursor>]
-    List active checkpoint pins in checkpoint-id order. By default the
-    command follows every page. Use --limit or --cursor to request one page;
-    next_cursor is printed when another page is available. Expired pins stay
-    visible until collection releases them
+    List active checkpoints in ID order. By default the command follows all
+    pages. --limit or --cursor requests one page and prints next_cursor when
+    more results are available. Expired checkpoints remain visible until
+    garbage collection removes them.
 
   loonfs admin checkpoint release <checkpoint-id>
     Release a checkpoint pin
 
   loonfs admin index enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
-    Enable the gram content index and wait for its backfill to reach the
-    sequence the namespace was at when the command started; --no-wait
-    returns as soon as the index is enabled, and --max-steps or --deadline-ms
-    give up, exit nonzero, and report how far the index got
+    Enable the gram index and wait until it reaches the namespace sequence
+    captured at startup. --no-wait returns after enabling it. --max-steps
+    and --deadline-ms bound the wait and report incomplete progress.
 
   loonfs admin index status
-    Report where the gram content index is: disabled, backfilling, or active
-    at a watermark
+    Show whether the gram index is disabled, backfilling, or active.
 
   loonfs admin index disable
     Disable the gram content index
 
   loonfs admin index gc [--max-objects <n>]
-    Collect the namespace's unreferenced gram-index objects, looping bounded
-    passes through completion; --max-objects spends at most that many reads
-    and returns after one pass
+    Remove unreferenced gram-index objects. By default the command follows
+    all bounded passes. --max-objects runs one pass with that read limit.
 
 Profile create options
   Used by:
@@ -346,7 +336,10 @@ Profile create options
 
   A field the store requires and the command line omits is asked for on a
   terminal, and is an error under --no-input or --json. Each provider
-  subcommand exposes only the flags that provider accepts.
+  subcommand exposes only the flags that provider accepts. S3 and R2 use
+  ambient credentials by default, reading AWS_ACCESS_KEY_ID and
+  AWS_SECRET_ACCESS_KEY when the store is opened. Passing static credential
+  flags selects a stored static credential set.
 
   Every embedded profile:
     --key-prefix <prefix>              optional
@@ -358,9 +351,9 @@ Profile create options
     --bucket <name>
     --region <region>
     --credential-source <ambient|static>
-    --access-key-id <id>               env AWS_ACCESS_KEY_ID
-    --secret-access-key <secret>       env AWS_SECRET_ACCESS_KEY
-    --session-token <token>            optional, env AWS_SESSION_TOKEN
+    --access-key-id <id>               static credentials only
+    --secret-access-key <secret>       static credentials only
+    --session-token <token>            optional static session token
     --endpoint-url <url>               optional
     --force-path-style                 optional
 
@@ -369,8 +362,8 @@ Profile create options
     --account-id <id>
     --endpoint-url <url>
     --credential-source <ambient|static>
-    --access-key-id <id>               env AWS_ACCESS_KEY_ID
-    --secret-access-key <secret>       env AWS_SECRET_ACCESS_KEY
+    --access-key-id <id>               static credentials only
+    --secret-access-key <secret>       static credentials only
 
   loonfs profile create gcs:
     --bucket <name>
@@ -601,7 +594,7 @@ Behavior notes
   maintenance passes: every write appends, and reads replay what has not
   been folded into the metadata yet, so a namespace that is written to and
   never maintained gets slower. Embedded profiles run maintenance manually
-  — `loonfs admin maintenance run --namespaces <ns>` hosts it, `--drain` catches up and
-  exits, and `loonfs admin maintenance step` runs one pass — while a server runs its
-  own automatically for the namespaces it serves
+  with `loonfs admin maintenance run --namespaces <ns>` or one step with
+  `loonfs admin maintenance step`. Servers maintain the namespaces they
+  serve automatically.
 ```

@@ -400,12 +400,8 @@ async fn run_admin_retention_advance(
     })
 }
 
-/// Hosts maintenance for the namespaces named on the command line.
-///
-/// Nothing here discovers a namespace, because LoonFS has no operation that
-/// enumerates them. The flags are the assignment, and the assignment is what
-/// brings a namespace no process is writing to under automatic maintenance:
-/// continuously until a signal, or as one bounded catch-up with `--drain`.
+/// Runs maintenance for explicitly assigned namespaces. The command runs
+/// until stopped, or completes the current assignments once with `--drain`.
 async fn run_admin_run(
     kind: CommandKind,
     config_path: &Path,
@@ -424,9 +420,7 @@ async fn run_admin_run(
         })
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
-    // Sorted and deduplicated, so the keys are driven in the order the
-    // runner itself keys them and two spellings of one assignment produce
-    // one report.
+    // Sort and deduplicate assignments for stable execution and reporting.
     let namespaces: Vec<NamespaceId> = namespaces.into_iter().collect();
     let jobs = selected_jobs(&args.jobs);
     let fail_here = |error| fail_for(kind, &resolved.profile_name, &mode, error);
@@ -469,9 +463,8 @@ async fn run_admin_run(
     })
 }
 
-/// Proves the profile's object store honours the contract LoonFS depends
-/// on. Store-scoped like `admin maintenance run`: it names no namespace, because the
-/// store is the subject.
+/// Checks that the profile's object store supports the operations LoonFS
+/// requires. This command checks the store, not a namespace.
 async fn run_admin_store_probe(
     kind: CommandKind,
     config_path: &Path,

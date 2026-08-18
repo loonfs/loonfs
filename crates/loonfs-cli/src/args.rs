@@ -996,36 +996,30 @@ pub(crate) struct AdminRunArgs {
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
-    /// Namespace this host maintains. Repeat the flag to assign more; at
-    /// least one is required, because this command never discovers
-    /// namespaces.
+    /// Namespace to maintain. Repeat the flag to select more than one.
     #[arg(long = "namespaces", required = true, value_hint = ValueHint::Other)]
     pub namespaces: Vec<String>,
-    /// Maintenance job to host. Repeat the flag to select more; all four
-    /// when omitted. `core-gc` selects the runtime's collection job, which
-    /// logs and settles under its own name, `gc`.
+    /// Maintenance job to run. Repeat the flag to select more than one.
+    /// Omitting it selects all four jobs. `core-gc` selects the job reported
+    /// internally as `gc`.
     #[arg(long = "job")]
     pub jobs: Vec<MaintenanceJobArg>,
-    /// How often every assigned namespace is re-checked for work, in
-    /// milliseconds. Defaults to 60000, and a drain ignores it because it
-    /// never rests between keys.
+    /// Interval between checks for assigned namespaces, in milliseconds.
+    /// Defaults to 60000. Drains ignore this setting.
     #[arg(long, value_parser = clap::value_parser!(u64).range(MIN_POLL_INTERVAL_MS..))]
     pub poll_interval_ms: Option<u64>,
-    /// Catch every assigned namespace up and exit, instead of hosting until
-    /// a signal.
+    /// Complete the current assignments and exit.
     #[arg(long)]
     pub drain: bool,
-    /// Give up after this many steps across the whole drain. Exits nonzero
-    /// and reports where every key got to. Requires --drain.
+    /// Stop the drain after this many total steps. Requires `--drain`.
     #[arg(long, requires = "drain")]
     pub max_steps: Option<u64>,
-    /// Give up after this many milliseconds across the whole drain. Exits
-    /// nonzero and reports where every key got to. Requires --drain.
+    /// Stop the drain after this many milliseconds. Requires `--drain`.
     #[arg(long, requires = "drain")]
     pub deadline_ms: Option<u64>,
 }
 
-/// The maintenance jobs `admin maintenance run` can host, as an operator names them.
+/// Jobs accepted by `admin maintenance run --job`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum MaintenanceJobArg {
     /// Flush the WAL tail past its threshold and fold one reorganization

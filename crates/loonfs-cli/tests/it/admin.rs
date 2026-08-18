@@ -366,8 +366,7 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
     assert_eq!(json_data(&collected)["namespace_reaped"], false);
 }
 
-/// `index gc` loops the cursor like `admin gc`: one accumulated result out
-/// of however many bounded passes it took.
+/// Verifies that `index gc` follows every page and reports aggregate totals.
 #[test]
 fn index_gc_loops_its_cursor_and_accumulates() {
     let harness = Harness::new();
@@ -398,10 +397,8 @@ fn index_gc_loops_its_cursor_and_accumulates() {
     );
 }
 
-/// `admin maintenance run --drain` is the assigned host's catch-up: every
-/// `{job, namespace}` key it was given reaches a settled conclusion, it
-/// exits zero, and the work it did is in durable state rather than in its
-/// output.
+/// Verifies that `admin maintenance run --drain` completes its assignments
+/// and persists the resulting work.
 #[test]
 fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
     let harness = Harness::new();

@@ -100,6 +100,14 @@ The same runner and the same jobs run in every host; which one is running is a d
 | --- | --- | --- |
 | **Server** | The runtime's jobs, plus the grep index job when its grep mode maintains. | Namespaces it touches, while its maintenance mode is automatic. Set it manual when a dedicated process owns upkeep instead. |
 | **Embedded process** | Whatever the library host registers on its writer. | Namespaces it touches. |
-| **`loonfs admin maintenance run`** | The runtime's jobs and the grep index job, narrowed by `--job`. | The namespaces named by `--namespaces`, and nothing else — this command never discovers namespaces. It serves nothing, hosts until a signal, or catches its assignment up and exits with `--drain`. |
+| **`loonfs admin maintenance run`** | The runtime's jobs and the grep index job, narrowed by `--job`. | Namespaces passed with `--namespaces`. The command runs until stopped, or completes its assignments and exits with `--drain`. |
 
-Every host shuts down the same way, by calling `FsWriter::shutdown` once its own front door has closed — after a server's listener drains, after a `loonfs admin maintenance run` catches its stop signal. The order is the writer's, not the host's: close maintenance admission, close publication admission, drain admitted publications, drain the runner's in-flight steps. Maintenance admission closes first because draining publications is a wait, and an open runner spends that wait admitting steps the shutdown has already decided to drop — a metadata root advanced, provider objects deleted, index segments written, all after the process was asked to stop, and all of it work the drain then has to sit through. Closing first is also what makes the drain honest: nothing may register work after the registry has been drained, and a finishing step may not hand its slot to queued work once admission is shut. No order here can deadlock: a step publishes through the same compare-and-swap any writer uses rather than through the host's publication service, so a publication drain never waits on maintenance. A host with extension or query services of its own stops those after the writer has settled.
+Every host calls `FsWriter::shutdown` after it receives a stop signal. The
+writer stops accepting maintenance work, then stops accepting publications.
+It waits for accepted publications and in-progress maintenance steps to
+finish. Stopping maintenance first prevents new steps from being queued while
+publications drain.
+
+Maintenance steps publish through the normal compare-and-swap path, not the
+host's publication service, so the two drains do not wait on each other. A
+host stops its extension and query services after the writer has shut down.
