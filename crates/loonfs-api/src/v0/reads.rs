@@ -207,6 +207,60 @@ pub struct AuthoritativeFileBytes {
     pub bytes: Vec<u8>,
 }
 
+/// One deletion that can still be restored.
+///
+/// `inode_id` and `deletion_seq` are sufficient to restore it. The original
+/// parent and name are included when they were recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TrashEntry {
+    /// Inode hidden by the deletion.
+    #[serde(with = "crate::public_inode_id")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::schema)
+    )]
+    pub inode_id: InodeId,
+    /// Commit sequence that identifies this deletion.
+    pub deletion_seq: ChangeSeq,
+    /// Time of the deletion, in Unix milliseconds.
+    pub deleted_at_ms: u64,
+    /// Actor responsible for the deletion.
+    pub deleted_by: ActorRef,
+    /// Directory that held the deleted binding, when recorded.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::public_inode_id::option"
+    )]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(schema_with = crate::public_inode_id::optional_schema)
+    )]
+    pub parent_inode_id: Option<InodeId>,
+    /// Canonical key of the deleted binding, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_key: Option<NameKey>,
+    /// User-facing spelling of the deleted binding, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<DisplayName>,
+}
+
+/// One trash listing page: the namespace's recoverable deletions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ListTrashResponse {
+    /// Namespace that was read.
+    pub namespace_id: NamespaceId,
+    /// Head sequence this page was evaluated at.
+    pub head_seq: ChangeSeq,
+    /// Recoverable deletions, oldest deletion first.
+    pub entries: Vec<TrashEntry>,
+    /// Present when another page follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,58 +530,4 @@ mod tests {
             "the retired deletion handle must not decode"
         );
     }
-}
-
-/// One deletion that can still be restored.
-///
-/// `inode_id` and `deletion_seq` are sufficient to restore it. The original
-/// parent and name are included when they were recorded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct TrashEntry {
-    /// Inode hidden by the deletion.
-    #[serde(with = "crate::public_inode_id")]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::schema)
-    )]
-    pub inode_id: InodeId,
-    /// Commit sequence that identifies this deletion.
-    pub deletion_seq: ChangeSeq,
-    /// Time of the deletion, in Unix milliseconds.
-    pub deleted_at_ms: u64,
-    /// Actor responsible for the deletion.
-    pub deleted_by: ActorRef,
-    /// Directory that held the deleted binding, when recorded.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::public_inode_id::option"
-    )]
-    #[cfg_attr(
-        feature = "openapi",
-        schema(schema_with = crate::public_inode_id::optional_schema)
-    )]
-    pub parent_inode_id: Option<InodeId>,
-    /// Canonical key of the deleted binding, when recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name_key: Option<NameKey>,
-    /// User-facing spelling of the deleted binding, when recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<DisplayName>,
-}
-
-/// One trash listing page: the namespace's recoverable deletions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ListTrashResponse {
-    /// Namespace that was read.
-    pub namespace_id: NamespaceId,
-    /// Head sequence this page was evaluated at.
-    pub head_seq: ChangeSeq,
-    /// Recoverable deletions, oldest deletion first.
-    pub entries: Vec<TrashEntry>,
-    /// Present when another page follows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
 }
