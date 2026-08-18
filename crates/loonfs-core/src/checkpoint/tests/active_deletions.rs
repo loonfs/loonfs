@@ -25,6 +25,7 @@ fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombsto
     SubtreeTombstoneRecord {
         root_inode_id,
         generation: generation(seq),
+        commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         deleted_at_ms: 1_000 + seq,
         actor: loonfs_api::ActorRef::loonfs_system(),
         action: SubtreeTombstoneAction::Set {
@@ -41,6 +42,7 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
     SubtreeTombstoneRecord {
         root_inode_id,
         generation: generation(seq),
+        commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         deleted_at_ms: 1_000 + seq,
         actor: loonfs_api::ActorRef::loonfs_system(),
         action: SubtreeTombstoneAction::Revoke {

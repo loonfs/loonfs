@@ -378,6 +378,8 @@ mod tests {
             inode_id: InodeId(inode),
             attributes_revision_no: AttributeRevisionNo(revision),
             committed_seq: ChangeSeq(committed_seq),
+            commit_id: loonfs_api::CommitId::parse(format!("c_attribute_{committed_seq}"))
+                .expect("commit id"),
             delta_index: 0,
             actor: loonfs_api::ActorRef::loonfs_system(),
             updated_at_ms: 1_000 + committed_seq,

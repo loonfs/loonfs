@@ -27,12 +27,14 @@ pub(crate) fn inode_from_manifest_row(row: MetadataRow) -> Result<InodeRecord, C
             inode_id,
             inode_kind,
             created_seq,
+            commit_id,
             created_by,
             created_at_ms,
         } => Ok(InodeRecord {
             inode_id,
             inode_kind,
             created_seq,
+            commit_id,
             created_by,
             created_at_ms,
         }),
@@ -96,6 +98,7 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
             inode_id,
             revision_no,
             committed_seq,
+            commit_id,
             committed_at_ms,
             actor,
             revision_delta_index,
@@ -104,6 +107,7 @@ pub(crate) fn revision_from_manifest_row(row: MetadataRow) -> Result<RevisionRec
             inode_id,
             revision_no,
             committed_seq,
+            commit_id,
             committed_at_ms,
             actor,
             revision_delta_index,
@@ -129,12 +133,14 @@ pub(crate) fn tombstone_from_manifest_row(
         MetadataRow::Tombstone {
             root_inode_id,
             generation,
+            commit_id,
             action,
             deleted_at_ms,
             actor,
         } => Ok(SubtreeTombstoneRecord {
             root_inode_id,
             generation,
+            commit_id,
             deleted_at_ms,
             actor,
             action: subtree_tombstone_action(action),
@@ -204,6 +210,7 @@ pub(crate) fn attributes_revision_from_manifest_row(
             inode_id,
             attributes_revision_no,
             committed_seq,
+            commit_id,
             delta_index,
             actor,
             updated_at_ms,
@@ -212,6 +219,7 @@ pub(crate) fn attributes_revision_from_manifest_row(
             inode_id,
             attributes_revision_no,
             committed_seq,
+            commit_id,
             delta_index,
             actor,
             updated_at_ms,
@@ -225,13 +233,14 @@ pub(crate) fn attributes_revision_from_manifest_row(
 mod tests {
     use super::*;
     use loonfs_api::wire::manifest::TombstoneGeneration;
-    use loonfs_api::{ChangeSeq, InodeId};
+    use loonfs_api::{ChangeSeq, CommitId, InodeId};
 
     fn foreign() -> MetadataRow {
         MetadataRow::Inode {
             inode_id: InodeId(7),
             inode_kind: loonfs_api::InodeKind::File,
             created_seq: ChangeSeq(3),
+            commit_id: CommitId::parse("c_foreign_inode").expect("commit id"),
             created_by: loonfs_api::ActorRef::loonfs_system(),
             created_at_ms: 4_000,
         }
@@ -260,6 +269,7 @@ mod tests {
                 seq: ChangeSeq(1),
                 delta_index: 0,
             },
+            commit_id: CommitId::parse("c_foreign_tombstone").expect("commit id"),
             action: TombstoneRowAction::Set {
                 deleted_direntry: None,
             },

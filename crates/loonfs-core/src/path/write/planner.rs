@@ -94,6 +94,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             &mut resolved,
             &mut numbering,
             committed_seq,
+            &request.commit_id,
             &request.actor,
             committed_at_ms,
         )

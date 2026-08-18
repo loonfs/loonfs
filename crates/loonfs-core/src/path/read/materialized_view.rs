@@ -573,6 +573,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
+                commit_id: revision.commit_id,
                 committed_at_ms: revision.committed_at_ms,
                 committed_by: revision.actor,
                 content_ref: revision.content_ref,

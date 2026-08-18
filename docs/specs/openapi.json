@@ -4741,11 +4741,16 @@
           "inode_id",
           "revision_no",
           "committed_seq",
+          "commit_id",
           "committed_at_ms",
           "committed_by",
           "content_ref"
         ],
         "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Commit ID for this revision."
+          },
           "committed_at_ms": {
             "type": "integer",
             "format": "int64",

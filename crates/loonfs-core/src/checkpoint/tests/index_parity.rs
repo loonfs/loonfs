@@ -3,6 +3,18 @@
 use super::*;
 use loonfs_api::{Checksum, ContentId};
 
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PreCommitIdMetadataRow {
+    Inode {
+        inode_id: InodeId,
+        inode_kind: loonfs_api::InodeKind,
+        created_seq: ChangeSeq,
+        created_by: loonfs_api::ActorRef,
+        created_at_ms: u64,
+    },
+}
+
 pub(super) async fn rewrite_manifest_segment(
     store: &LocalFsStore,
     _namespace_id: &NamespaceId,
@@ -939,6 +951,93 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
 }
 
 #[tokio::test]
+async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    let mut materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
+            .await
+            .expect("load manifest before replacing a row");
+
+    let row_key = loonfs_api::wire::manifest::lookup_keys::inode_key(loonfs_api::ROOT_INODE_ID);
+    let mut builder = SegmentBlocksBuilder::default();
+    builder
+        .push(
+            &row_key,
+            &row_key,
+            &PreCommitIdMetadataRow::Inode {
+                inode_id: loonfs_api::ROOT_INODE_ID,
+                inode_kind: loonfs_api::InodeKind::Directory,
+                created_seq: ChangeSeq(0),
+                created_by: loonfs_api::ActorRef::loonfs_system(),
+                created_at_ms: context.now_ms,
+            },
+        )
+        .expect("encode pre-change row");
+    let built = builder.finish().expect("finish pre-change segment");
+    let descriptor = materialized
+        .manifest
+        .payload
+        .metadata_files
+        .iter_mut()
+        .find(|descriptor| descriptor.family == ApiMetadataTableFamily::Inodes)
+        .expect("inode segment");
+    store
+        .put_overwrite(&descriptor.object_key, Bytes::from(built.bytes.clone()))
+        .await
+        .expect("replace inode segment");
+    descriptor.row_count = built.row_count;
+    descriptor.min_key = built.min_key;
+    descriptor.max_key = built.max_key;
+    descriptor.index_block = built.index;
+    descriptor.filter_inline = (built.filter.stored_len
+        <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
+        .then(|| {
+            let start = built.filter.offset as usize;
+            loonfs_api::wire::hex::hex_encode_bytes(
+                &built.bytes[start..start + built.filter.stored_len as usize],
+            )
+        });
+    descriptor.filter_block = built.filter;
+    descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
+    let segment_key = descriptor.object_key.clone();
+    let manifest_id = materialized.manifest.payload.manifest_id;
+    overwrite_manifest(&store, &namespace_id, materialized.manifest).await;
+
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
+        Err(ManifestLoadError::SegmentCodec {
+            object_key,
+            message,
+        }) => {
+            assert_eq!(object_key, segment_key);
+            assert!(
+                message.contains("missing field `commit_id`"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected named segment codec rejection, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn manifest_writes_and_validates_direntry_child_bind_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1194,6 +1293,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
             inode_id,
             revision_no,
             committed_seq,
+            commit_id,
             committed_at_ms,
             actor,
             revision_delta_index,
@@ -1202,6 +1302,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
             inode_id,
             revision_no: loonfs_api::RevisionNo(revision_no.0 + 100),
             committed_seq,
+            commit_id,
             committed_at_ms,
             actor,
             revision_delta_index,

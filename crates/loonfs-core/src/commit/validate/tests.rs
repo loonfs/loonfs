@@ -29,6 +29,10 @@ fn content_ref(seed: &str) -> ContentRef {
     loonfs_test_support::ids::content_ref(seed.as_bytes())
 }
 
+fn commit_id_for_seq(seq: ChangeSeq) -> CommitId {
+    CommitId::parse(format!("c_validation_{}", seq.0)).expect("commit id")
+}
+
 fn test_attributes(entries: &[(&str, &str)]) -> Attributes {
     Attributes::new(
         entries
@@ -146,6 +150,7 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
 fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     let mut state = MetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(0),
+        &commit_id_for_seq(ChangeSeq(0)),
         &loonfs_test_support::test_actor(),
         4_200,
         &[WalDelta::CreateInode {
@@ -156,8 +161,10 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     );
 
     for (index, deltas) in sequences.iter().enumerate() {
+        let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
         state = state.apply_committed_wal_deltas(
-            ChangeSeq(u64::try_from(index + 1).expect("seq")),
+            seq,
+            &commit_id_for_seq(seq),
             &loonfs_test_support::test_actor(),
             4_200,
             deltas,
@@ -226,6 +233,7 @@ async fn build_commit_plan(
     let committed_seq = next_public_ordinal(context.head.seq.0)
         .map(ChangeSeq)
         .expect("test heads stay under the sequence cap");
+    let commit_id = CommitId::parse("validated-commit").expect("valid commit id");
     let mut metadata_state = PublishValidationView::new(
         InMemoryMetadataView::in_memory(context.metadata_state, None, context.head.seq),
         &accepted_rows,
@@ -237,6 +245,7 @@ async fn build_commit_plan(
         &mut metadata_state,
         &mut numbering,
         committed_seq,
+        &commit_id,
         &loonfs_test_support::test_actor(),
         committed_at_ms,
     )
@@ -251,7 +260,7 @@ async fn build_commit_plan(
         .expect("commit test allocation");
     Ok(ValidatedCommitPlan {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id: CommitId::parse("validated-commit").expect("valid commit id"),
+        commit_id,
         actor: loonfs_test_support::test_actor(),
         writer_epoch: context.head.writer_epoch,
         message: None,
@@ -834,6 +843,7 @@ async fn restore_revision_overflow_is_rejected() {
     let metadata_state = MetadataState::default()
         .apply_committed_wal_deltas(
             ChangeSeq(0),
+            &commit_id_for_seq(ChangeSeq(0)),
             &loonfs_test_support::test_actor(),
             4_200,
             &[WalDelta::CreateInode {
@@ -844,6 +854,7 @@ async fn restore_revision_overflow_is_rejected() {
         )
         .apply_committed_wal_deltas(
             ChangeSeq(1),
+            &commit_id_for_seq(ChangeSeq(1)),
             &loonfs_test_support::test_actor(),
             4_200,
             &deltas,

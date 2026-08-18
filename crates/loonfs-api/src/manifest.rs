@@ -124,6 +124,8 @@ pub enum MetadataRow {
         inode_kind: InodeKind,
         /// Commit sequence from which the inode can become visible.
         created_seq: ChangeSeq,
+        /// Commit ID associated with this row.
+        commit_id: CommitId,
         /// Actor that created the inode, as supplied by the application.
         created_by: crate::ActorRef,
         /// Time the inode was created, in Unix milliseconds.
@@ -171,6 +173,8 @@ pub enum MetadataRow {
         revision_no: RevisionNo,
         /// Namespace sequence that published the revision.
         committed_seq: ChangeSeq,
+        /// Commit ID associated with this row.
+        commit_id: CommitId,
         /// The owning commit's observational wall-clock stamp, denormalized
         /// onto the row so revision reads answer times without a receipt
         /// join. Never a validity input; `committed_seq` is the order.
@@ -189,6 +193,8 @@ pub enum MetadataRow {
         /// Where this event sits in the namespace's history, and the
         /// generation a later `revoke` names.
         generation: TombstoneGeneration,
+        /// Commit ID associated with this row.
+        commit_id: CommitId,
         /// What this event did; readers take the newest row per root and
         /// treat a `revoke` newest row as "no active tombstone".
         action: TombstoneRowAction,
@@ -247,6 +253,8 @@ pub enum MetadataRow {
         attributes_revision_no: AttributeRevisionNo,
         /// Namespace sequence that published the revision.
         committed_seq: ChangeSeq,
+        /// Commit ID associated with this row.
+        commit_id: CommitId,
         /// Delta position that disambiguates the revision within `committed_seq`.
         delta_index: u32,
         /// Actor responsible for this attribute update.
@@ -983,6 +991,10 @@ mod tests {
         NamespaceId, WriterEpoch,
     };
 
+    fn row_commit_id() -> CommitId {
+        CommitId::parse("c_metadata_row").expect("commit id")
+    }
+
     #[test]
     fn inode_row_keys_sort_by_ascending_inode_id() {
         // The inode family's durable order IS ascending inode id, which is
@@ -1152,6 +1164,7 @@ mod tests {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
+            commit_id: row_commit_id(),
             committed_at_ms: 12_000,
             actor: crate::ActorRef::loonfs_system(),
             revision_delta_index: 3,
@@ -1182,6 +1195,7 @@ mod tests {
                 inode_id: InodeId(42),
                 attributes_revision_no: crate::AttributeRevisionNo(revision),
                 committed_seq: ChangeSeq(seq),
+                commit_id: row_commit_id(),
                 delta_index,
                 actor: crate::ActorRef::loonfs_system(),
                 updated_at_ms: 12_000 + seq,
@@ -1238,6 +1252,7 @@ mod tests {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
+            commit_id: row_commit_id(),
             committed_at_ms: 12_000,
             actor: crate::ActorRef::loonfs_system(),
             revision_delta_index: 3,
@@ -1254,6 +1269,7 @@ mod tests {
                     inode_id: InodeId(42),
                     inode_kind: crate::InodeKind::File,
                     created_seq: ChangeSeq(3),
+                    commit_id: row_commit_id(),
                     created_by: crate::ActorRef::loonfs_system(),
                     created_at_ms: 3_000,
                 },
@@ -1283,6 +1299,7 @@ mod tests {
                         seq: ChangeSeq(12),
                         delta_index: 0,
                     },
+                    commit_id: row_commit_id(),
                     action: super::TombstoneRowAction::Set {
                         deleted_direntry: None,
                     },
@@ -1318,6 +1335,7 @@ mod tests {
                     inode_id: InodeId(42),
                     attributes_revision_no: crate::AttributeRevisionNo(3),
                     committed_seq: ChangeSeq(12),
+                    commit_id: row_commit_id(),
                     delta_index: 0,
                     actor: crate::ActorRef::loonfs_system(),
                     updated_at_ms: 12_000,
@@ -1350,6 +1368,7 @@ mod tests {
                         inode_id: InodeId(42),
                         inode_kind: crate::InodeKind::File,
                         created_seq: ChangeSeq(3),
+                        commit_id: row_commit_id(),
                         created_by: actor.clone(),
                         created_at_ms: 3_000,
                     },
@@ -1360,6 +1379,7 @@ mod tests {
                         inode_id: InodeId(42),
                         revision_no: crate::RevisionNo(7),
                         committed_seq: ChangeSeq(12),
+                        commit_id: row_commit_id(),
                         committed_at_ms: 12_000,
                         actor: actor.clone(),
                         revision_delta_index: 3,
@@ -1378,6 +1398,7 @@ mod tests {
                             seq: ChangeSeq(12),
                             delta_index: 3,
                         },
+                        commit_id: row_commit_id(),
                         action: super::TombstoneRowAction::Set {
                             deleted_direntry: None,
                         },
@@ -1403,6 +1424,7 @@ mod tests {
                         inode_id: InodeId(42),
                         attributes_revision_no: crate::AttributeRevisionNo(2),
                         committed_seq: ChangeSeq(12),
+                        commit_id: row_commit_id(),
                         delta_index: 3,
                         actor,
                         updated_at_ms: 12_000,
