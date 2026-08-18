@@ -25,6 +25,8 @@ mod uploads;
 use clap::Parser;
 use std::process::ExitCode;
 
+pub use args::Cli;
+
 /// Exit status for a command line the parser rejected, which is clap's own.
 ///
 /// It stays distinct from the failure status a command that actually ran
@@ -45,7 +47,7 @@ pub async fn main() -> ExitCode {
     // Boxing keeps the public entrypoint's future shallow for downstream binaries.
     let result = Box::pin(commands::run(cli, runtime)).await;
     match result {
-        Ok(output) => match render::render_success(&output, runtime.json) {
+        Ok(Some(output)) => match render::render_success(&output, runtime.json) {
             // A recursive transfer renders its per-item outcomes as success
             // data but still exits nonzero when any item failed.
             Ok(()) if output.data.reports_failures() => ExitCode::FAILURE,
@@ -61,6 +63,7 @@ pub async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(None) => ExitCode::SUCCESS,
         Err(failure) => {
             let _ = render::render_error(&failure, runtime.json);
             ExitCode::FAILURE

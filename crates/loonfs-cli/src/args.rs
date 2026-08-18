@@ -1,7 +1,7 @@
 //! The clap argument grammar for every `loonfs` command.
 
 use crate::progress::ProgressMode;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use loonfs_api::InodeId;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -10,23 +10,29 @@ fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
     loonfs_api::public_inode_id::decode(value).map_err(|error| error.to_string())
 }
 
+/// Parsed `loonfs` command line and its Clap command model.
 #[derive(Debug, Parser)]
 #[command(name = "loonfs", version)]
-pub(crate) struct Cli {
+pub struct Cli {
     /// Config file to use, ahead of LOONFS_CONFIG and the default location.
-    #[arg(long, global = true, value_name = "PATH")]
-    pub config: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        value_hint = ValueHint::FilePath
+    )]
+    pub(crate) config: Option<PathBuf>,
     /// Emit machine-readable JSON instead of human output.
     #[arg(long, global = true)]
-    pub json: bool,
+    pub(crate) json: bool,
     /// Never prompt; fail instead when input would be required.
     #[arg(long, global = true)]
-    pub no_input: bool,
+    pub(crate) no_input: bool,
     /// Say nothing about a transfer while it runs.
     #[arg(long, global = true)]
-    pub no_progress: bool,
+    pub(crate) no_progress: bool,
     #[command(subcommand)]
-    pub command: Command,
+    pub(crate) command: Command,
 }
 
 pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
@@ -102,12 +108,21 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Print a shell completion script to stdout.
+    Completions(CompletionsArgs),
     /// Print version and build metadata.
     Version,
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct CompletionsArgs {
+    /// Shell to generate for.
+    pub shell: clap_complete::Shell,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct InitArgs {
+    #[arg(value_hint = ValueHint::Other)]
     pub name: Option<String>,
     /// Profile mode to configure.
     #[arg(long, value_name = "embedded|remote")]
@@ -116,7 +131,7 @@ pub(crate) struct InitArgs {
     #[arg(long)]
     pub store_kind: Option<String>,
     /// Local filesystem store root.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::DirPath)]
     pub root: Option<String>,
     /// Optional object-key prefix within the provider.
     #[arg(long)]
@@ -139,7 +154,7 @@ pub(crate) struct InitArgs {
     #[arg(long)]
     pub secret_access_key: Option<String>,
     /// Custom provider endpoint URL.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
     /// Optional AWS session token (env AWS_SESSION_TOKEN).
     #[arg(long)]
@@ -160,17 +175,17 @@ pub(crate) struct InitArgs {
     #[arg(long)]
     pub access_key: Option<String>,
     /// Path to a GCP service-account key.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::FilePath)]
     pub service_account_key_path: Option<String>,
     /// Remote LoonFS server URL.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
     /// Remote LoonFS bearer token (env LOONFS_AUTH_TOKEN).
     #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
     /// https server URL, when a private CA issued the certificate.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::FilePath)]
     pub ca_cert_path: Option<String>,
     /// Actor kind to save in the profile. Must be used with --actor-id.
     /// Defaults to service/loonfs-cli when no actor is configured.
@@ -188,17 +203,27 @@ pub(crate) enum ProfileCommand {
     /// List configured profiles.
     List,
     /// Show one profile (secrets redacted).
-    Show { name: Option<String> },
+    Show {
+        #[arg(value_hint = ValueHint::Other)]
+        name: Option<String>,
+    },
     /// Update fields of an existing profile.
     Update(ProfileUpdateArgs),
     /// Delete a profile from the config file.
-    Delete { name: String },
+    Delete {
+        #[arg(value_hint = ValueHint::Other)]
+        name: String,
+    },
     /// Make a profile the default.
-    Use { name: String },
+    Use {
+        #[arg(value_hint = ValueHint::Other)]
+        name: String,
+    },
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileCreateArgs {
+    #[arg(value_hint = ValueHint::Other)]
     pub name: String,
     /// Profile mode to configure.
     #[arg(long, value_name = "embedded|remote")]
@@ -207,7 +232,7 @@ pub(crate) struct ProfileCreateArgs {
     #[arg(long)]
     pub store_kind: Option<String>,
     /// Local filesystem store root.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::DirPath)]
     pub root: Option<String>,
     /// Optional object-key prefix within the provider.
     #[arg(long)]
@@ -226,7 +251,7 @@ pub(crate) struct ProfileCreateArgs {
     #[arg(long)]
     pub secret_access_key: Option<String>,
     /// Custom provider endpoint URL.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
     /// Optional AWS session token (env AWS_SESSION_TOKEN).
     #[arg(long)]
@@ -247,17 +272,17 @@ pub(crate) struct ProfileCreateArgs {
     #[arg(long)]
     pub access_key: Option<String>,
     /// Path to a GCP service-account key.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::FilePath)]
     pub service_account_key_path: Option<String>,
     /// Remote LoonFS server URL.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
     /// Remote LoonFS bearer token (env LOONFS_AUTH_TOKEN).
     #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
     /// https server URL, when a private CA issued the certificate.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::FilePath)]
     pub ca_cert_path: Option<String>,
     /// Actor kind to save in the profile. Must be used with --actor-id.
     /// Defaults to service/loonfs-cli when no actor is configured.
@@ -270,9 +295,10 @@ pub(crate) struct ProfileCreateArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileUpdateArgs {
+    #[arg(value_hint = ValueHint::Other)]
     pub name: String,
     /// Local filesystem store root.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::DirPath)]
     pub root: Option<String>,
     /// Optional object-key prefix within the provider.
     #[arg(long)]
@@ -290,7 +316,7 @@ pub(crate) struct ProfileUpdateArgs {
     #[arg(long)]
     pub secret_access_key: Option<String>,
     /// Custom provider endpoint URL.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
     /// Optional AWS session token.
     #[arg(long)]
@@ -308,17 +334,17 @@ pub(crate) struct ProfileUpdateArgs {
     #[arg(long)]
     pub access_key: Option<String>,
     /// Path to a GCP service-account key.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::FilePath)]
     pub service_account_key_path: Option<String>,
     /// Remote LoonFS server URL.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
     /// Remote LoonFS bearer token.
     #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
     /// https server URL, when a private CA issued the certificate.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::FilePath)]
     pub ca_cert_path: Option<String>,
     /// Sets the profile's actor kind. Must be used with --actor-id.
     #[arg(long, value_enum)]
@@ -331,7 +357,7 @@ pub(crate) struct ProfileUpdateArgs {
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ProfileSelectorArgs {
     /// Profile to run against (defaults to the configured default profile).
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub profile: Option<String>,
     /// Disable bounded retry of `server_busy`, `commit_queue_full`,
     /// `shutting_down`, and transport errors.
@@ -345,7 +371,7 @@ pub(crate) struct TargetSelectorArgs {
     pub profile: ProfileSelectorArgs,
     /// Namespace to run against. Precedence is `--namespace`,
     /// `LOONFS_NAMESPACE`, then the profile default.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub namespace: Option<String>,
 }
 
@@ -382,6 +408,7 @@ impl From<ActorKindArg> for loonfs_api::ActorKind {
 pub(crate) struct NamespaceUseArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub namespace: String,
 }
 
@@ -405,6 +432,7 @@ pub(crate) enum NamespaceCommand {
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: String,
 }
 
@@ -412,6 +440,7 @@ pub(crate) struct NamespaceCreateArgs {
 pub(crate) struct NamespaceDeleteArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: String,
     /// Delete only if the namespace head is still at this sequence.
     #[arg(long)]
@@ -425,7 +454,9 @@ pub(crate) struct NamespaceDeleteArgs {
 pub(crate) struct NamespaceForkArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub source: String,
+    #[arg(value_hint = ValueHint::Other)]
     pub new_namespace_id: String,
 }
 
@@ -433,12 +464,13 @@ pub(crate) struct NamespaceForkArgs {
 pub(crate) struct FilesystemLsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub path: Option<String>,
     /// Stop after this many entries in total.
     #[arg(long, conflicts_with = "all")]
     pub limit: Option<u32>,
     /// Resume cursor from a previous bounded listing.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
     /// Follow every page and print entries as pages arrive.
     #[arg(long)]
@@ -453,7 +485,11 @@ pub(crate) struct FilesystemStatArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Absolute path to describe.
-    #[arg(required_unless_present = "inode", conflicts_with = "inode")]
+    #[arg(
+        required_unless_present = "inode",
+        conflicts_with = "inode",
+        value_hint = ValueHint::Other
+    )]
     pub path: Option<String>,
     /// Visible inode to describe instead of a path.
     #[arg(long, value_name = "INODE_ID", value_parser = parse_public_inode_id)]
@@ -466,6 +502,7 @@ pub(crate) struct FilesystemAnnotateArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Attribute to write, as `key=value`. The key ends at the first `=`, so
     /// the value may contain more of them. Repeat the flag to write more.
@@ -495,7 +532,7 @@ pub(crate) struct FilesystemAnnotateArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub commit_id: Option<String>,
 }
 
@@ -505,6 +542,7 @@ pub(crate) struct FilesystemRmArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Delete a directory and everything under it, as one commit. The whole
     /// subtree stays recoverable through the printed undelete handle.
@@ -517,7 +555,7 @@ pub(crate) struct FilesystemRmArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub commit_id: Option<String>,
 }
 
@@ -527,6 +565,7 @@ pub(crate) struct FilesystemMkdirArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Create missing parent directories as well.
     #[arg(short = 'p', long)]
@@ -538,7 +577,7 @@ pub(crate) struct FilesystemMkdirArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub commit_id: Option<String>,
 }
 
@@ -546,12 +585,13 @@ pub(crate) struct FilesystemMkdirArgs {
 pub(crate) struct FilesystemRevisionsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Maximum revisions to return in this page.
     #[arg(long)]
     pub limit: Option<u32>,
     /// Resume cursor from a previous revisions page.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
 }
 
@@ -559,6 +599,7 @@ pub(crate) struct FilesystemRevisionsArgs {
 pub(crate) struct FilesystemCatArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Print this revision instead of the current content.
     #[arg(long)]
@@ -570,9 +611,10 @@ pub(crate) struct FilesystemGrepArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Pattern in the Rust regex dialect; `^`/`$` anchor lines.
+    #[arg(value_hint = ValueHint::Other)]
     pub pattern: String,
     /// Restrict matches to files under this absolute path prefix.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub path_prefix: Option<String>,
     /// Match ASCII letters without regard to case.
     #[arg(short = 'i', long)]
@@ -598,6 +640,7 @@ pub(crate) struct FilesystemGrepArgs {
 pub(crate) struct FilesystemGetArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub remote_path: String,
     /// Local destination (defaults to the remote basename; `-` streams to
     /// stdout). A large file is written as it arrives and never held whole,
@@ -608,6 +651,7 @@ pub(crate) struct FilesystemGetArgs {
     /// they arrive, so content that fails verification at the end exits
     /// nonzero after part of it has already been written — the exit status,
     /// not the output, is what says the content was verified.
+    #[arg(value_hint = ValueHint::AnyPath)]
     pub local_destination: Option<String>,
     /// Download the directory tree rooted at `remote_path`, with bounded
     /// concurrency and per-file outcomes. The local destination is created
@@ -632,7 +676,9 @@ pub(crate) struct FilesystemPutArgs {
     /// and a pipe are both read once and never held whole, so what a put
     /// costs in memory does not follow what it uploads. Reading `-` needs
     /// an explicit remote path.
+    #[arg(value_hint = ValueHint::AnyPath)]
     pub local_path: String,
+    #[arg(value_hint = ValueHint::Other)]
     pub remote_path: Option<String>,
     /// Upload the directory tree rooted at `local_path`. Every file lands
     /// as its own commit with bounded concurrency, so progress is per file
@@ -653,7 +699,7 @@ pub(crate) struct FilesystemPutArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub commit_id: Option<String>,
 }
 
@@ -663,7 +709,9 @@ pub(crate) struct FilesystemTransferArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub source_path: String,
+    #[arg(value_hint = ValueHint::Other)]
     pub destination_path: String,
     /// Copy the directory tree rooted at `source_path` (cp only; mv moves
     /// a directory in one commit without -r).
@@ -679,7 +727,7 @@ pub(crate) struct FilesystemTransferArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub commit_id: Option<String>,
 }
 
@@ -689,6 +737,7 @@ pub(crate) struct FilesystemRestoreArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     #[arg(long)]
     pub revision: u64,
@@ -699,7 +748,7 @@ pub(crate) struct FilesystemRestoreArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub commit_id: Option<String>,
 }
 
@@ -714,6 +763,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// deletion recorded, which lands correctly even when the enclosing
     /// directories were renamed since. A deletion that recorded no binding
     /// needs the explicit path.
+    #[arg(value_hint = ValueHint::Other)]
     pub path: Option<String>,
     /// Inode ID of the deleted item, as reported by `rm` and the change
     /// feed.
@@ -731,7 +781,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub commit_id: Option<String>,
 }
 
@@ -743,7 +793,7 @@ pub(crate) struct TrashArgs {
     #[arg(long)]
     pub limit: Option<u32>,
     /// Resume cursor from a previous page.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
 }
 
@@ -807,7 +857,11 @@ pub(crate) struct AdminRunArgs {
     /// Namespace this host maintains. Repeat the flag to assign more; at
     /// least one is required, because this command never discovers
     /// namespaces.
-    #[arg(long = "namespace", required = true)]
+    #[arg(
+        long = "namespace",
+        required = true,
+        value_hint = ValueHint::Other
+    )]
     pub namespaces: Vec<String>,
     /// Maintenance job to host. Repeat the flag to select more; all four
     /// when omitted. `core-gc` selects the runtime's collection job, which
@@ -903,7 +957,7 @@ pub(crate) struct AdminCheckpointListArgs {
     #[arg(long)]
     pub limit: Option<u32>,
     /// Resume cursor from a previous page. Supplying this requests one page.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
 }
 
@@ -912,6 +966,7 @@ pub(crate) struct AdminCheckpointReleaseArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Checkpoint id to release.
+    #[arg(value_hint = ValueHint::Other)]
     pub checkpoint_id: String,
 }
 
@@ -946,7 +1001,11 @@ pub(crate) struct AdminGcArgs {
     pub max_objects: Option<u64>,
     /// Resume token from a previous pass's next_cursor; only valid for the
     /// same namespace.
-    #[arg(long, value_name = "TOKEN")]
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        value_hint = ValueHint::Other
+    )]
     pub cursor: Option<String>,
 }
 
@@ -1096,8 +1155,9 @@ impl CommandKind {
 }
 
 impl Cli {
-    pub(crate) fn kind(&self) -> CommandKind {
-        match &self.command {
+    pub(crate) fn kind(&self) -> Option<CommandKind> {
+        Some(match &self.command {
+            Command::Completions(_) => return None,
             Command::Init(_) => CommandKind::Init,
             Command::Profile { command } => match command {
                 ProfileCommand::Create(_) => CommandKind::ProfileCreate,
@@ -1150,6 +1210,6 @@ impl Cli {
                 ConfigCommand::Show => CommandKind::ConfigShow,
             },
             Command::Version => CommandKind::Version,
-        }
+        })
     }
 }

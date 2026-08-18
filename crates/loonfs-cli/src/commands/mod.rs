@@ -17,12 +17,25 @@ pub(crate) use self::output::{
 
 use crate::args::{Cli, Command, RuntimeBehavior};
 use crate::config::resolve_config_location;
+use clap::CommandFactory;
 
 pub(crate) async fn run(
     cli: Cli,
     runtime: RuntimeBehavior,
-) -> Result<CommandOutput, CommandFailure> {
-    let kind = cli.kind();
+) -> Result<Option<CommandOutput>, CommandFailure> {
+    if let Command::Completions(args) = &cli.command {
+        clap_complete::generate(
+            args.shell,
+            &mut Cli::command(),
+            "loonfs",
+            &mut std::io::stdout(),
+        );
+        return Ok(None);
+    }
+
+    let kind = cli
+        .kind()
+        .expect("completions is the only kindless command, and it returned above");
     if runtime.json && !kind.supports_json() {
         return Err(CommandFailure {
             kind,
@@ -38,7 +51,9 @@ pub(crate) async fn run(
         .map_err(|error| context::fail(kind, None, None, error))?;
     let config_path = location.path.as_path();
 
-    match cli.command {
+    let result = match cli.command {
+        // Completion generation returned before config resolution above.
+        Command::Completions(_) => return Ok(None),
         Command::Version => Ok(CommandOutput {
             kind,
             profile: None,
@@ -76,5 +91,6 @@ pub(crate) async fn run(
         Command::Admin { command } => {
             admin::run_admin_command(kind, config_path, command, runtime).await
         }
-    }
+    };
+    result.map(Some)
 }
