@@ -56,8 +56,7 @@ impl GrepRequest {
         seed = xxh64(
             self.path_prefix
                 .as_ref()
-                .map(AbsolutePath::as_str)
-                .unwrap_or("")
+                .map_or("", AbsolutePath::as_str)
                 .as_bytes(),
             seed,
         );

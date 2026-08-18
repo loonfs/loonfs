@@ -2273,8 +2273,8 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
         &store,
         &namespace_id,
         &context,
-        policy,
         &spec,
+        policy,
         &MetadataCompactionCancellation::default(),
     )
     .await
@@ -2340,8 +2340,8 @@ async fn a_cancelled_job_leaves_its_claim_standing() {
         &dying_store,
         &namespace_id,
         &context,
-        policy,
         &spec,
+        policy,
         &cancellation,
     )
     .await
@@ -3143,8 +3143,8 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             &dying_store,
             &namespace_id,
             &context,
-            policy,
             &spec,
+            policy,
             &cancellation,
         )
         .await

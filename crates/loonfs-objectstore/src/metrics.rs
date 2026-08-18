@@ -17,7 +17,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// One object-store call sample delivered to an object-store metrics recorder.
@@ -216,21 +216,21 @@ pub struct VecObjectStoreMetricsRecorder {
 }
 
 impl VecObjectStoreMetricsRecorder {
-    /// Returns a snapshot copy of every sample recorded so far.
-    pub fn samples(&self) -> Vec<ObjectStoreMetricSample> {
+    fn lock(&self) -> MutexGuard<'_, Vec<ObjectStoreMetricSample>> {
         self.samples
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+    }
+
+    /// Returns a copy of all recorded samples.
+    pub fn samples(&self) -> Vec<ObjectStoreMetricSample> {
+        self.lock().clone()
     }
 }
 
 impl ObjectStoreMetricsRecorder for VecObjectStoreMetricsRecorder {
     fn record(&self, sample: ObjectStoreMetricSample) {
-        self.samples
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(sample);
+        self.lock().push(sample);
     }
 }
 
@@ -243,6 +243,12 @@ pub struct JsonlObjectStoreMetricsRecorder {
 }
 
 impl JsonlObjectStoreMetricsRecorder {
+    fn lock(&self) -> MutexGuard<'_, BufWriter<File>> {
+        self.writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Creates or truncates a JSONL output file, creating missing parent directories.
     ///
     /// The operation fails when directories or the output file cannot be created.
@@ -262,19 +268,13 @@ impl JsonlObjectStoreMetricsRecorder {
     ///
     /// The operation fails when the filesystem cannot accept pending bytes.
     pub fn flush(&self) -> io::Result<()> {
-        self.writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .flush()
+        self.lock().flush()
     }
 }
 
 impl ObjectStoreMetricsRecorder for JsonlObjectStoreMetricsRecorder {
     fn record(&self, sample: ObjectStoreMetricSample) {
-        let mut writer = self
-            .writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut writer = self.lock();
         let _ = serde_json::to_writer(&mut *writer, &sample);
         let _ = writer.write_all(b"\n");
     }
@@ -725,14 +725,15 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::ContentBlob => KeyClass::Content,
         DurableObjectFamily::WalHead => KeyClass::NamespaceHead,
         DurableObjectFamily::WalSegment => KeyClass::WalSegment,
-        DurableObjectFamily::MetadataManifest => KeyClass::NamespaceManifest,
+        DurableObjectFamily::MetadataManifest | DurableObjectFamily::MetadataRoot => {
+            KeyClass::NamespaceManifest
+        }
         DurableObjectFamily::MetadataTable | DurableObjectFamily::MetadataCompactionStaging => {
             KeyClass::MetadataSst
         }
         DurableObjectFamily::CheckpointRecord
         | DurableObjectFamily::WalFloor
         | DurableObjectFamily::MetadataCompactionLease => KeyClass::GcControl,
-        DurableObjectFamily::MetadataRoot => KeyClass::NamespaceManifest,
         DurableObjectFamily::UploadSession => KeyClass::Metadata,
     }
 }

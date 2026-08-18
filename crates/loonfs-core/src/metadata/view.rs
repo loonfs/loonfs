@@ -749,8 +749,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 revision.inode_id == inode_id
                     && revision.committed_seq <= self.visible_seq()
                     && start_after
-                        .map(|position| revision_is_after_position_desc(revision, position))
-                        .unwrap_or(true)
+                        .is_none_or(|position| revision_is_after_position_desc(revision, position))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -848,8 +847,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 (None, None) => break,
             };
             let (row_key, record) = if take_tail {
+                let row = tail[tail_index].clone();
                 tail_index += 1;
-                tail[tail_index - 1].clone()
+                row
             } else {
                 durable
                     .buffered

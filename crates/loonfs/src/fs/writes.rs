@@ -5,7 +5,7 @@ use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, Prepar
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
-    ChangeSeq, CommitId, CommitResponse, ContentRef, CopyOptions, CoreError,
+    ChangeSeq, CommitId, CommitOptions, CommitResponse, ContentRef, CopyOptions, CoreError,
     CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceJobId, MetadataMaintenanceOptions,
     MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
     UpdateAttributesOptions,
@@ -18,6 +18,15 @@ use loonfs_api::{
 use loonfs_core::NamespaceWriterEngine;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+
+fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> CommitRequest {
+    CommitRequest::single(
+        commit.commit_id.clone().unwrap_or_else(CommitId::generate),
+        commit.actor.clone(),
+        commit.message.clone(),
+        operation,
+    )
+}
 
 fn classify_put_retry_error(error: &RuntimeError) -> PutRetryErrorClassification {
     match error.code() {
@@ -380,14 +389,8 @@ impl FsWriter {
         self.commit_candidate_inner(
             namespace_id,
             CommitCandidate::prepared(
-                CommitRequest::single(
-                    options
-                        .commit
-                        .commit_id
-                        .clone()
-                        .unwrap_or_else(CommitId::generate),
-                    options.commit.actor.clone(),
-                    options.commit.message.clone(),
+                single_operation(
+                    &options.commit,
                     FilesystemOperation::PutFile {
                         path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                         content_ref,
@@ -558,14 +561,8 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(
             namespace_id,
-            CommitCandidate::new(CommitRequest::single(
-                options
-                    .commit
-                    .commit_id
-                    .clone()
-                    .unwrap_or_else(CommitId::generate),
-                options.commit.actor.clone(),
-                options.commit.message.clone(),
+            CommitCandidate::new(single_operation(
+                &options.commit,
                 FilesystemOperation::CreateDirectory {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     parents: options.parents,
@@ -603,14 +600,8 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(
             namespace_id,
-            CommitCandidate::new(CommitRequest::single(
-                options
-                    .commit
-                    .commit_id
-                    .clone()
-                    .unwrap_or_else(CommitId::generate),
-                options.commit.actor.clone(),
-                options.commit.message.clone(),
+            CommitCandidate::new(single_operation(
+                &options.commit,
                 FilesystemOperation::DeletePath {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     behavior: options.behavior,
@@ -645,14 +636,8 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(
             namespace_id,
-            CommitCandidate::new(CommitRequest::single(
-                options
-                    .commit
-                    .commit_id
-                    .clone()
-                    .unwrap_or_else(CommitId::generate),
-                options.commit.actor.clone(),
-                options.commit.message.clone(),
+            CommitCandidate::new(single_operation(
+                &options.commit,
                 FilesystemOperation::MovePath {
                     from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                     to_path: loonfs_core::path::parse_mutation_path(to_path)?,
@@ -688,14 +673,8 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(
             namespace_id,
-            CommitCandidate::new(CommitRequest::single(
-                options
-                    .commit
-                    .commit_id
-                    .clone()
-                    .unwrap_or_else(CommitId::generate),
-                options.commit.actor.clone(),
-                options.commit.message.clone(),
+            CommitCandidate::new(single_operation(
+                &options.commit,
                 FilesystemOperation::CopyPath {
                     from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                     to_path: loonfs_core::path::parse_mutation_path(to_path)?,
@@ -730,14 +709,8 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(
             namespace_id,
-            CommitCandidate::new(CommitRequest::single(
-                options
-                    .commit
-                    .commit_id
-                    .clone()
-                    .unwrap_or_else(CommitId::generate),
-                options.commit.actor.clone(),
-                options.commit.message.clone(),
+            CommitCandidate::new(single_operation(
+                &options.commit,
                 FilesystemOperation::RestoreRevision {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     source_revision_no,
@@ -775,14 +748,8 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(
             namespace_id,
-            CommitCandidate::new(CommitRequest::single(
-                options
-                    .commit
-                    .commit_id
-                    .clone()
-                    .unwrap_or_else(CommitId::generate),
-                options.commit.actor.clone(),
-                options.commit.message.clone(),
+            CommitCandidate::new(single_operation(
+                &options.commit,
                 FilesystemOperation::UpdateAttributes {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     set: options.set,
@@ -825,14 +792,8 @@ impl FsWriter {
             .transpose()?;
         self.commit_candidate_inner(
             namespace_id,
-            CommitCandidate::new(CommitRequest::single(
-                options
-                    .commit
-                    .commit_id
-                    .clone()
-                    .unwrap_or_else(CommitId::generate),
-                options.commit.actor.clone(),
-                options.commit.message.clone(),
+            CommitCandidate::new(single_operation(
+                &options.commit,
                 FilesystemOperation::Undelete {
                     inode_id,
                     deletion_seq,
@@ -1012,9 +973,8 @@ pub(crate) async fn publish_batch_with_engine(
         .into_iter()
         .map(|result| result.map_err(RuntimeError::Core))
         .collect::<Vec<_>>();
-    // One reading of what landed serves both the host's observer and the
-    // jobs that asked to hear about publications.
-    if let Some(committed_seq) = landed_commit_seq(&results) {
+    // Notify observers only when at least one commit succeeded.
+    if let Some(committed_seq) = highest_committed_seq(&results) {
         notify_publish_observer(writer, namespace_id, committed_seq);
         writer
             .maintenance
@@ -1024,9 +984,8 @@ pub(crate) async fn publish_batch_with_engine(
     results
 }
 
-/// The furthest sequence this batch actually committed, or `None` when
-/// nothing in it landed.
-fn landed_commit_seq(results: &[Result<CommitResponse>]) -> Option<ChangeSeq> {
+/// Returns the highest sequence committed by the batch.
+fn highest_committed_seq(results: &[Result<CommitResponse>]) -> Option<ChangeSeq> {
     results
         .iter()
         .filter_map(|result| result.as_ref().ok())

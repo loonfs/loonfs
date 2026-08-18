@@ -126,12 +126,7 @@ pub(super) async fn enable_grep_index(
     match outcome {
         GrepEnableOutcome::Enabled { .. } | GrepEnableOutcome::AlreadyEnabled { .. } => {}
         GrepEnableOutcome::Superseded => {
-            return Err(map_grep_error(
-                &namespace_id,
-                GrepError::PublicationConflict {
-                    object_key: loonfs_grep::keyspace::root_key(&namespace_id),
-                },
-            ));
+            return Err(grep_root_conflict(&namespace_id));
         }
     }
     // Read after the transition so every index endpoint reports bookkeeping
@@ -225,12 +220,7 @@ pub(super) async fn disable_grep_index(
     match outcome {
         GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {}
         GrepDisableOutcome::Superseded => {
-            return Err(map_grep_error(
-                &namespace_id,
-                GrepError::PublicationConflict {
-                    object_key: loonfs_grep::keyspace::root_key(&namespace_id),
-                },
-            ));
+            return Err(grep_root_conflict(&namespace_id));
         }
     }
     // The disabled root retains genuine index bookkeeping, so read it after
@@ -293,14 +283,20 @@ pub(super) async fn gc_grep_index(
 fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> ApiResponseError {
     let code = error.code();
     match error {
-        // One name for the capability, whichever half is missing: a
-        // deployment that does not serve grep and a namespace whose index is
-        // not built both leave `query.grep` unavailable, which is the key
-        // capability discovery advertises it under.
+        // Both cases mean the advertised query.grep capability is unavailable.
         error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
             ApiResponseError::not_supported(FEATURE_QUERY_GREP, &error.to_string())
         }
         GrepError::Runtime(error) => ApiResponseError::runtime_for_namespace(namespace_id, error),
         error => ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string()),
     }
+}
+
+fn grep_root_conflict(namespace_id: &NamespaceId) -> ApiResponseError {
+    map_grep_error(
+        namespace_id,
+        GrepError::PublicationConflict {
+            object_key: loonfs_grep::keyspace::root_key(namespace_id),
+        },
+    )
 }

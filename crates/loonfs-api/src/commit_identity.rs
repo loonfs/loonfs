@@ -19,7 +19,6 @@ use crate::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::future::Future;
 use thiserror::Error;
 
@@ -54,13 +53,10 @@ where
 
 fn fingerprint_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    let mut value = String::with_capacity(FINGERPRINT_SCHEME.len() + 1 + digest.len() * 2);
-    value.push_str(FINGERPRINT_SCHEME);
-    value.push(':');
-    for byte in digest {
-        write!(&mut value, "{byte:02x}").expect("writing to a String should not fail");
-    }
-    value
+    format!(
+        "{FINGERPRINT_SCHEME}:{}",
+        crate::hex::hex_encode_bytes(&digest)
+    )
 }
 
 /// Canonical preimage for one operation inside a mutation fingerprint.
@@ -234,7 +230,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
             deleted_at_seq: *deletion_seq,
-            absolute_path: path.as_ref().map(|path| path.as_str()),
+            absolute_path: path.as_ref().map(AbsolutePath::as_str),
         },
         FilesystemOperation::UpdateAttributes {
             path,
@@ -436,8 +432,8 @@ where
 /// file.
 fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&ContentRef> {
     let mut content = change.events.iter().filter_map(|event| match event {
-        crate::v0::FilesystemChange::FileCreated { content_ref, .. } => Some(content_ref),
-        crate::v0::FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
+        crate::v0::FilesystemChange::FileCreated { content_ref, .. }
+        | crate::v0::FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
         _ => None,
     });
     let only = content.next()?;

@@ -115,16 +115,13 @@ fn actor_from_pair(
     id_name: &str,
     id: Option<&str>,
 ) -> Result<ActorRef, CliError> {
-    let kind = kind.ok_or_else(|| {
+    let together = || {
         CliError::invalid_input(format!(
             "{kind_name} and {id_name} must be supplied together"
         ))
-    })?;
-    let id = id.ok_or_else(|| {
-        CliError::invalid_input(format!(
-            "{kind_name} and {id_name} must be supplied together"
-        ))
-    })?;
+    };
+    let kind = kind.ok_or_else(&together)?;
+    let id = id.ok_or_else(together)?;
     let id = ActorId::parse(id)
         .map_err(|error| CliError::invalid_input(format!("invalid {id_name}: {error}")))?;
     Ok(ActorRef { kind, id })

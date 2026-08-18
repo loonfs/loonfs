@@ -941,8 +941,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
-            self.metadata_lsm_policy(),
             spec,
+            self.metadata_lsm_policy(),
             cancellation,
         )
         .await

@@ -587,22 +587,22 @@ impl ResolvedTarget {
     /// When `path` is absent, the original parent and name are used.
     pub(crate) async fn undelete(
         &self,
-        namespace: &NamespaceId,
-        path: Option<&AbsolutePath>,
+        namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
+        path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .undelete(namespace, path, inode_id, deletion_seq, options)
+                    .undelete(namespace_id, inode_id, deletion_seq, path, options)
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .undelete(namespace, inode_id, deletion_seq, path, options)
+                .undelete(namespace_id, inode_id, deletion_seq, path, options)
                 .await?),
         }
     }

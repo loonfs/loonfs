@@ -449,8 +449,8 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    policy: MetadataLsmPolicy,
     spec: &MetadataCompactionSpec,
+    policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<MetadataCompactionJobOutcome> {
     let timer = StdMonotonicTimer::default();

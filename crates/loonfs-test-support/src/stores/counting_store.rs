@@ -149,6 +149,24 @@ impl<S> CountingStore<S> {
         self.keys.matches(key)
     }
 
+    fn record_put_mode(&self, mode: &PutMode) {
+        match mode {
+            PutMode::Overwrite => {
+                self.counters.overwrite_puts.fetch_add(1, Ordering::SeqCst);
+            }
+            PutMode::CreateIfAbsent => {
+                self.counters
+                    .create_if_absent_puts
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            PutMode::CompareAndSwap { .. } => {
+                self.counters
+                    .compare_and_swaps
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
     fn record_read_bytes(&self, bytes: usize) {
         self.counters
             .read_bytes
@@ -221,21 +239,7 @@ impl<S: ObjectStore> ObjectStore for CountingStore<S> {
                 u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                 Ordering::SeqCst,
             );
-            match mode {
-                PutMode::Overwrite => {
-                    self.counters.overwrite_puts.fetch_add(1, Ordering::SeqCst);
-                }
-                PutMode::CreateIfAbsent => {
-                    self.counters
-                        .create_if_absent_puts
-                        .fetch_add(1, Ordering::SeqCst);
-                }
-                PutMode::CompareAndSwap { .. } => {
-                    self.counters
-                        .compare_and_swaps
-                        .fetch_add(1, Ordering::SeqCst);
-                }
-            }
+            self.record_put_mode(&mode);
         }
         self.inner.put(key, bytes, mode).await
     }
@@ -254,21 +258,7 @@ impl<S: ObjectStore> ObjectStore for CountingStore<S> {
                     .written_bytes
                     .fetch_add(*bytes, Ordering::SeqCst);
             }
-            match mode {
-                PutMode::Overwrite => {
-                    self.counters.overwrite_puts.fetch_add(1, Ordering::SeqCst);
-                }
-                PutMode::CreateIfAbsent => {
-                    self.counters
-                        .create_if_absent_puts
-                        .fetch_add(1, Ordering::SeqCst);
-                }
-                PutMode::CompareAndSwap { .. } => {
-                    self.counters
-                        .compare_and_swaps
-                        .fetch_add(1, Ordering::SeqCst);
-                }
-            }
+            self.record_put_mode(&mode);
         }
         result
     }

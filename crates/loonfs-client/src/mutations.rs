@@ -3,6 +3,10 @@
 use super::*;
 use crate::uploads::staging::{StagedContent, UploadContinuity};
 
+fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
+    commit.commit_id.clone().unwrap_or_else(CommitId::generate)
+}
+
 fn classify_put_retry_error(error: &ClientError) -> PutRetryErrorClassification {
     match error.code() {
         Some(ErrorCode::CommitIdReuseConflict) => {
@@ -178,11 +182,7 @@ impl Client {
         options: &PutFileOptions,
         uploaded: ContentEvidence<'_>,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options
-            .commit
-            .commit_id
-            .clone()
-            .unwrap_or_else(CommitId::generate);
+        let commit_id = commit_id_or_generated(&options.commit);
         let response = self
             .commit(
                 spec.namespace(),
@@ -247,26 +247,19 @@ impl Client {
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options
-            .commit
-            .commit_id
-            .clone()
-            .unwrap_or_else(CommitId::generate);
-        let response = self
-            .commit(
-                spec.namespace(),
-                &CommitRequest::single(
-                    commit_id,
-                    options.commit.actor.clone(),
-                    options.commit.message.clone(),
-                    FilesystemOperation::CreateDirectory {
-                        path: spec.absolute_path().clone(),
-                        parents: options.parents,
-                    },
-                ),
-            )
-            .await?;
-        Ok(response)
+        self.commit(
+            spec.namespace(),
+            &CommitRequest::single(
+                commit_id_or_generated(&options.commit),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
+                FilesystemOperation::CreateDirectory {
+                    path: spec.absolute_path().clone(),
+                    parents: options.parents,
+                },
+            ),
+        )
+        .await
     }
 
     /// Deletes the requested path.
@@ -275,27 +268,20 @@ impl Client {
         spec: &NamespacePath,
         options: &DeleteOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options
-            .commit
-            .commit_id
-            .clone()
-            .unwrap_or_else(CommitId::generate);
-        let response = self
-            .commit(
-                spec.namespace(),
-                &CommitRequest::single(
-                    commit_id,
-                    options.commit.actor.clone(),
-                    options.commit.message.clone(),
-                    FilesystemOperation::DeletePath {
-                        path: spec.absolute_path().clone(),
-                        behavior: options.behavior,
-                        expected_inode_id: options.expected_inode_id,
-                    },
-                ),
-            )
-            .await?;
-        Ok(response)
+        self.commit(
+            spec.namespace(),
+            &CommitRequest::single(
+                commit_id_or_generated(&options.commit),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
+                FilesystemOperation::DeletePath {
+                    path: spec.absolute_path().clone(),
+                    behavior: options.behavior,
+                    expected_inode_id: options.expected_inode_id,
+                },
+            ),
+        )
+        .await
     }
 
     /// Writes and removes attributes on the inode a path resolves to. The
@@ -305,29 +291,22 @@ impl Client {
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options
-            .commit
-            .commit_id
-            .clone()
-            .unwrap_or_else(CommitId::generate);
-        let response = self
-            .commit(
-                spec.namespace(),
-                &CommitRequest::single(
-                    commit_id,
-                    options.commit.actor.clone(),
-                    options.commit.message.clone(),
-                    FilesystemOperation::UpdateAttributes {
-                        path: spec.absolute_path().clone(),
-                        set: options.set.clone(),
-                        remove: options.remove.clone(),
-                        expected_inode_id: options.expected_inode_id,
-                        expected_attributes_revision_no: options.expected_attributes_revision_no,
-                    },
-                ),
-            )
-            .await?;
-        Ok(response)
+        self.commit(
+            spec.namespace(),
+            &CommitRequest::single(
+                commit_id_or_generated(&options.commit),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
+                FilesystemOperation::UpdateAttributes {
+                    path: spec.absolute_path().clone(),
+                    set: options.set.clone(),
+                    remove: options.remove.clone(),
+                    expected_inode_id: options.expected_inode_id,
+                    expected_attributes_revision_no: options.expected_attributes_revision_no,
+                },
+            ),
+        )
+        .await
     }
 
     /// Moves a path within one namespace.
@@ -344,27 +323,20 @@ impl Client {
                 to.namespace()
             )));
         }
-        let commit_id = options
-            .commit
-            .commit_id
-            .clone()
-            .unwrap_or_else(CommitId::generate);
-        let response = self
-            .commit(
-                from.namespace(),
-                &CommitRequest::single(
-                    commit_id,
-                    options.commit.actor.clone(),
-                    options.commit.message.clone(),
-                    FilesystemOperation::MovePath {
-                        from_path: from.absolute_path().clone(),
-                        to_path: to.absolute_path().clone(),
-                        behavior: options.behavior,
-                    },
-                ),
-            )
-            .await?;
-        Ok(response)
+        self.commit(
+            from.namespace(),
+            &CommitRequest::single(
+                commit_id_or_generated(&options.commit),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
+                FilesystemOperation::MovePath {
+                    from_path: from.absolute_path().clone(),
+                    to_path: to.absolute_path().clone(),
+                    behavior: options.behavior,
+                },
+            ),
+        )
+        .await
     }
 
     /// Copies a path within one namespace.
@@ -381,33 +353,26 @@ impl Client {
                 to.namespace()
             )));
         }
-        let commit_id = options
-            .commit
-            .commit_id
-            .clone()
-            .unwrap_or_else(CommitId::generate);
-        let response = self
-            .commit(
-                from.namespace(),
-                &CommitRequest::single(
-                    commit_id,
-                    options.commit.actor.clone(),
-                    options.commit.message.clone(),
-                    FilesystemOperation::CopyPath {
-                        from_path: from.absolute_path().clone(),
-                        to_path: to.absolute_path().clone(),
-                        behavior: options.behavior,
-                    },
-                ),
-            )
-            .await?;
-        Ok(response)
+        self.commit(
+            from.namespace(),
+            &CommitRequest::single(
+                commit_id_or_generated(&options.commit),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
+                FilesystemOperation::CopyPath {
+                    from_path: from.absolute_path().clone(),
+                    to_path: to.absolute_path().clone(),
+                    behavior: options.behavior,
+                },
+            ),
+        )
+        .await
     }
 
     /// Restores a deleted file or subtree, optionally at a new path.
     pub async fn undelete(
         &self,
-        namespace: &NamespaceId,
+        namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
         path: Option<&AbsolutePath>,
@@ -415,27 +380,20 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         // An absent destination restores in place: the entry re-binds under
         // the parent and name its deletion recorded.
-        let commit_id = options
-            .commit
-            .commit_id
-            .clone()
-            .unwrap_or_else(CommitId::generate);
-        let response = self
-            .commit(
-                namespace,
-                &CommitRequest::single(
-                    commit_id,
-                    options.commit.actor.clone(),
-                    options.commit.message.clone(),
-                    FilesystemOperation::Undelete {
-                        inode_id,
-                        deletion_seq,
-                        path: path.cloned(),
-                    },
-                ),
-            )
-            .await?;
-        Ok(response)
+        self.commit(
+            namespace_id,
+            &CommitRequest::single(
+                commit_id_or_generated(&options.commit),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
+                FilesystemOperation::Undelete {
+                    inode_id,
+                    deletion_seq,
+                    path: path.cloned(),
+                },
+            ),
+        )
+        .await
     }
 
     /// Makes an earlier file revision the current revision.
@@ -445,26 +403,19 @@ impl Client {
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options
-            .commit
-            .commit_id
-            .clone()
-            .unwrap_or_else(CommitId::generate);
-        let response = self
-            .commit(
-                spec.namespace(),
-                &CommitRequest::single(
-                    commit_id,
-                    options.commit.actor.clone(),
-                    options.commit.message.clone(),
-                    FilesystemOperation::RestoreRevision {
-                        path: spec.absolute_path().clone(),
-                        source_revision_no,
-                    },
-                ),
-            )
-            .await?;
-        Ok(response)
+        self.commit(
+            spec.namespace(),
+            &CommitRequest::single(
+                commit_id_or_generated(&options.commit),
+                options.commit.actor.clone(),
+                options.commit.message.clone(),
+                FilesystemOperation::RestoreRevision {
+                    path: spec.absolute_path().clone(),
+                    source_revision_no,
+                },
+            ),
+        )
+        .await
     }
 }
 

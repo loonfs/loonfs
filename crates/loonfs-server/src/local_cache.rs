@@ -141,12 +141,7 @@ impl FoyerStoredMetadataBlockCache {
         recorder: &dyn MetricsRecorder,
     ) -> Result<Self, ServerConfigError> {
         let root = PathBuf::from(config.path.trim());
-        std::fs::create_dir_all(&root).map_err(|error| {
-            invalid_local_cache(format!(
-                "failed to create `{}`: {error}",
-                display_path(&root)
-            ))
-        })?;
+        create_directory(&root)?;
         let directory_lock = lock_directory(&root)?;
 
         let directory = root.join(CACHE_DIRECTORY);
@@ -347,22 +342,15 @@ struct DiskGeometry {
     blocks: usize,
 }
 
-/// Makes the versioned directory one that can hold the configured geometry,
-/// discarding it when it cannot.
+/// Prepares the versioned cache directory for the configured capacity.
 ///
-/// A directory built for the same block size and no more blocks than this
-/// start claims is kept: foyer reopens the files that are there and creates
-/// the rest, so growing the tier keeps everything it had cached. A shrunk
-/// block count, a different block size, and a directory that says nothing
-/// about itself are all discarded, because each of them would leave files
-/// behind that nothing would ever open again. The tier holds nothing
-/// durable, so discarding costs one cold start.
+/// A directory with the same block size is reused when its capacity is no
+/// larger than the requested capacity. Other layouts are discarded because
+/// Foyer would leave unused block files behind. The cache contains no durable
+/// data, so rebuilding it is safe.
 ///
-/// The marker is written before the device is built, which is what makes it
-/// an upper bound: a build that dies partway can leave fewer block files
-/// than the marker names, never more. The directory lock is already held,
-/// and the lock file sits beside the versioned directory rather than inside
-/// it, so nothing here races and nothing here removes the lock.
+/// The geometry marker is written before Foyer opens the device. The caller
+/// already holds the directory lock.
 fn prepare_directory(directory: &Path, capacity: usize) -> Result<(), ServerConfigError> {
     let wanted = DiskGeometry {
         block_bytes: DISK_BLOCK_BYTES,
@@ -375,21 +363,20 @@ fn prepare_directory(directory: &Path, capacity: usize) -> Result<(), ServerConf
 
     if !keep && directory.exists() {
         let reason = match found {
-            None => "it records no geometry of its own".to_owned(),
+            None => "the geometry marker is missing or invalid".to_owned(),
             Some(found) if found.block_bytes != wanted.block_bytes => format!(
-                "it was built for blocks of {} bytes and this start uses {}",
+                "the stored block size is {} bytes but the configured size is {}",
                 found.block_bytes, wanted.block_bytes
             ),
             Some(found) => format!(
-                "it was built for {} blocks and this start claims only {}",
+                "the stored block count is {} but the configured capacity allows {}",
                 found.blocks, wanted.blocks
             ),
         };
         tracing::info!(
             cache = CACHE_NAME,
-            "discarding the local cache directory `{}` and starting it empty because {reason}; \
-             it holds nothing durable, and keeping it would leave block files behind that \
-             nothing reads and nothing reclaims",
+            "discarding the local cache directory `{}` because {reason}; keeping it would leave \
+             unused block files",
             display_path(directory)
         );
         std::fs::remove_dir_all(directory).map_err(|error| {
@@ -400,15 +387,8 @@ fn prepare_directory(directory: &Path, capacity: usize) -> Result<(), ServerConf
         })?;
     }
 
-    std::fs::create_dir_all(directory).map_err(|error| {
-        invalid_local_cache(format!(
-            "failed to create `{}`: {error}",
-            display_path(directory)
-        ))
-    })?;
-    // A marker that already says exactly this is left alone. Every other
-    // case — a discarded directory, and a kept one this start grows — needs
-    // the new geometry on disk before any block file is.
+    create_directory(directory)?;
+    // Update the marker after replacing the directory or increasing capacity.
     if found != Some(wanted) {
         write_geometry(directory, wanted)?;
     }
@@ -519,6 +499,15 @@ fn invalid_local_cache(reason: String) -> ServerConfigError {
         field: "local_cache.path",
         reason,
     }
+}
+
+fn create_directory(path: &Path) -> Result<(), ServerConfigError> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        invalid_local_cache(format!(
+            "failed to create `{}`: {error}",
+            display_path(path)
+        ))
+    })
 }
 
 /// A path as a string, for an error message. A path that is not UTF-8 still

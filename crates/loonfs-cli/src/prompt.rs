@@ -106,8 +106,8 @@ pub(crate) fn prompt_fuzzy_choice(
     options: &[&str],
     default: usize,
 ) -> Result<String, CliError> {
-    let mut items: Vec<String> = options.iter().map(|s| s.to_string()).collect();
-    items.push("(other)".to_string());
+    let mut items: Vec<String> = options.iter().map(|option| (*option).to_owned()).collect();
+    items.push("(other)".to_owned());
     let selection = FuzzySelect::new()
         .with_prompt(label)
         .items(&items)

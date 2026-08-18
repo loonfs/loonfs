@@ -644,9 +644,10 @@ async fn walk_remote_tree(
             match entry.kind {
                 AuthoritativePathEntryKind::Directory {} => {
                     tree.directories.push(child_components.clone());
-                    queue.push_back((format!("{remote_dir}/{name}", name = name.as_str()), {
-                        child_components
-                    }));
+                    queue.push_back((
+                        format!("{remote_dir}/{name}", name = name.as_str()),
+                        child_components,
+                    ));
                 }
                 AuthoritativePathEntryKind::File {
                     size_bytes,

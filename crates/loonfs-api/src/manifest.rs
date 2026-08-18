@@ -424,22 +424,23 @@ impl MetadataRow {
                 bind_seq,
                 bind_delta_index,
                 ..
-            } => match family {
-                MetadataTableFamily::DirentryChildBinds => {
-                    let name_key = hex_encode_row_key_component(name_key.as_str());
-                    format!(
-                        "direntry-child-{:020}-{:020}-{:010}-{:020}-{name_key}",
-                        child_inode_id.0, bind_seq.0, bind_delta_index, parent_inode_id.0
-                    )
+            } => {
+                let name_key = hex_encode_row_key_component(name_key.as_str());
+                match family {
+                    MetadataTableFamily::DirentryChildBinds => {
+                        format!(
+                            "direntry-child-{:020}-{:020}-{:010}-{:020}-{name_key}",
+                            child_inode_id.0, bind_seq.0, bind_delta_index, parent_inode_id.0
+                        )
+                    }
+                    _ => {
+                        format!(
+                            "direntry-{:020}-{name_key}-{:020}-{:010}",
+                            parent_inode_id.0, bind_seq.0, bind_delta_index
+                        )
+                    }
                 }
-                _ => {
-                    let name_key = hex_encode_row_key_component(name_key.as_str());
-                    format!(
-                        "direntry-{:020}-{name_key}-{:020}-{:010}",
-                        parent_inode_id.0, bind_seq.0, bind_delta_index
-                    )
-                }
-            },
+            }
             Self::DirentryUnbind {
                 parent_inode_id,
                 name_key,

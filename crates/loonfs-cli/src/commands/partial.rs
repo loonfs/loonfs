@@ -90,33 +90,29 @@ pub(super) fn resumable_bytes(destination: &Path, meta: &PartialMeta) -> u64 {
     let Ok(metadata) = std::fs::metadata(&partial_path) else {
         return 0;
     };
-    // A partial longer than the content is not a prefix of it, whatever the
-    // note says.
+    // A partial file cannot be reused if it is longer than the content.
     if metadata.len() > meta.size_bytes {
         return 0;
     }
     metadata.len()
 }
 
-/// A download's bytes on their way to a destination.
+/// Stores a partial download and its metadata until completion.
 pub(super) struct PartialDownload {
     file: tempfile::NamedTempFile,
-    /// The note, held as a temporary path so it is removed on exactly the
-    /// occasions the bytes are.
+    /// Metadata stored as a temporary path so it is removed with the partial
+    /// file.
     _meta: tempfile::TempPath,
     path: PathBuf,
     resumed_from: u64,
 }
 
 impl PartialDownload {
-    /// Opens the partial file for a download that starts at `resume_from`,
-    /// and lays the note down beside it.
+    /// Opens the partial file at `resume_from` and writes its metadata file.
     ///
-    /// The note is written before the first byte: bytes on disk with
-    /// nothing saying what they are cannot be resumed from, and a rerun
-    /// that guessed would be worse than one that started over. Content this
-    /// build cannot identify gets no note at all, which is the same answer
-    /// spelled by its absence.
+    /// Metadata is written before content so a later run can verify that the
+    /// existing bytes belong to the same download. Content without a stable
+    /// identity is not resumed.
     pub(super) fn open(
         destination: &Path,
         meta: Option<&PartialMeta>,
@@ -144,8 +140,7 @@ impl PartialDownload {
             .create(true)
             .truncate(false)
             .open(&path)?;
-        // One call covers both cases: it drops a longer partial's tail, and
-        // it empties one this download is not resuming at all.
+        // Remove stale trailing bytes, or clear the file when starting over.
         file.set_len(resume_from)?;
         file.seek(std::io::SeekFrom::Start(resume_from))?;
         Ok(Self {
@@ -159,14 +154,10 @@ impl PartialDownload {
         })
     }
 
-    /// Hands the download the bytes already on disk, so its verification
-    /// still covers the whole file and not merely the part this run
-    /// fetched.
+    /// Adds the existing bytes to the verifier so it checks the complete file.
     ///
-    /// `local_error` shapes a failure to read those bytes back. A download
-    /// that refuses them — a partial longer than the content it claims to
-    /// resume — reports its own reason instead, because that is the answer
-    /// worth printing.
+    /// `local_error` maps failures while reading the partial file. Validation
+    /// errors from the download are returned unchanged.
     pub(super) fn fold_into(
         &self,
         download: &mut FileDownload,

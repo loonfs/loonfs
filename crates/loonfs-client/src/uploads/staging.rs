@@ -244,7 +244,7 @@ impl Client {
                 .await
             }
             UploadTransport::DirectPut(algorithm) => {
-                self.stage_via_direct_put(namespace_id, bytes, algorithm)
+                self.stage_bytes_via_direct_put(namespace_id, bytes, algorithm)
                     .await
             }
             UploadTransport::Proxied => self.stage_bytes_via_server(namespace_id, bytes).await,
@@ -429,7 +429,7 @@ impl Client {
     /// Uploads in-memory bytes directly to object storage.
     ///
     /// The provider enforces the checksum included in the signed request.
-    async fn stage_via_direct_put(
+    async fn stage_bytes_via_direct_put(
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
@@ -538,7 +538,7 @@ impl Client {
                 )
             }
         };
-        let uploaded = self
+        let uploaded = match self
             .upload_every_part(
                 namespace_id,
                 &upload_id,
@@ -547,8 +547,8 @@ impl Client {
                 checksum_algorithm,
                 continuity,
             )
-            .await;
-        let uploaded = match uploaded {
+            .await
+        {
             Ok(uploaded) => uploaded,
             Err(error) => {
                 // Abort best-effort and preserve the original upload error.

@@ -368,11 +368,7 @@ impl CompactionClaim {
     }
 }
 
-/// Holds a namespace's compaction slot and gives it back exactly once.
-///
-/// Dropping is the only way the slot is released — on a normal finish, on a
-/// panic, and on a task discarded with its runtime — so no namespace is ever
-/// left claiming a job that is not running.
+/// Releases a namespace's compaction slot when the job ends or is dropped.
 struct CompactionSlot {
     namespaces: Arc<Mutex<BTreeMap<NamespaceId, NamespaceCompactions>>>,
     permits: Arc<Semaphore>,
@@ -381,17 +377,19 @@ struct CompactionSlot {
 }
 
 impl CompactionSlot {
-    /// Reports how many jobs are running and how many are waiting for a
-    /// permit, from the two facts that decide it: the slots claimed, and the
-    /// permits taken.
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<NamespaceId, NamespaceCompactions>> {
+        self.namespaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Updates the running and waiting compaction metrics.
     fn report_counts(&self) {
         let Some(runner) = self.runner.upgrade() else {
             return;
         };
         let claimed = self
-            .namespaces
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .filter(|entry| entry.active.is_some())
             .count();
@@ -405,10 +403,7 @@ impl CompactionSlot {
 impl Drop for CompactionSlot {
     fn drop(&mut self) {
         {
-            let mut namespaces = self
-                .namespaces
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut namespaces = self.lock();
             let Some(entry) = namespaces.get_mut(&self.namespace_id) else {
                 return;
             };

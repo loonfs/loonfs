@@ -11,7 +11,7 @@
 use crate::object_store::Result;
 use crate::ObjectStoreError;
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
 /// The two date spellings a V4 signature carries: the credential scope's day
 /// and the request's full timestamp, which must agree.
@@ -24,12 +24,7 @@ pub(crate) struct SigningDates {
 pub(crate) fn signing_dates(object_key: &str, time: SystemTime) -> Result<SigningDates> {
     let seconds = time
         .duration_since(UNIX_EPOCH)
-        .map_err(|err| {
-            ObjectStoreError::transport(
-                object_key,
-                format!("system time is before unix epoch: {err}"),
-            )
-        })?
+        .map_err(|err| before_unix_epoch(object_key, err))?
         .as_secs() as i64;
     let days = seconds.div_euclid(86_400);
     let seconds_of_day = seconds.rem_euclid(86_400);
@@ -48,13 +43,17 @@ pub(crate) fn signing_dates(object_key: &str, time: SystemTime) -> Result<Signin
 /// Unix milliseconds for a signing instant, used to report when an issued
 /// capability stops working.
 pub(crate) fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64> {
-    let duration = time.duration_since(UNIX_EPOCH).map_err(|err| {
-        ObjectStoreError::transport(
-            object_key,
-            format!("system time is before unix epoch: {err}"),
-        )
-    })?;
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| before_unix_epoch(object_key, err))?;
     Ok(duration.as_millis() as u64)
+}
+
+fn before_unix_epoch(object_key: &str, err: SystemTimeError) -> ObjectStoreError {
+    ObjectStoreError::transport(
+        object_key,
+        format!("system time is before unix epoch: {err}"),
+    )
 }
 
 pub(crate) fn canonical_query_string(query: &BTreeMap<String, String>) -> String {

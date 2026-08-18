@@ -102,10 +102,10 @@ impl ProgressState {
         if self.reported_bytes == Some(self.bytes_done) {
             return false;
         }
-        let Some(reported_ms) = self.reported_bytes.map(|_| self.reported_ms) else {
+        if self.reported_bytes.is_none() {
             return true;
-        };
-        now_ms.saturating_sub(reported_ms) >= MIN_REPORT_INTERVAL_MS
+        }
+        now_ms.saturating_sub(self.reported_ms) >= MIN_REPORT_INTERVAL_MS
             || self.percent() != self.reported_percent
     }
 
@@ -375,7 +375,8 @@ impl ProgressReporter {
 
     /// Redraws the one line in place, covering whatever the last one left.
     fn draw(&self, state: &mut ProgressState, line: &str) {
-        let padding = state.drawn_width.saturating_sub(line.chars().count());
+        let width = line.chars().count();
+        let padding = state.drawn_width.saturating_sub(width);
         let _ = write!(
             std::io::stderr().lock(),
             "\r{line}{:padding$}",
@@ -383,7 +384,7 @@ impl ProgressReporter {
             padding = padding
         );
         let _ = std::io::stderr().lock().flush();
-        state.drawn_width = line.chars().count();
+        state.drawn_width = width;
     }
 
     fn erase(&self, state: &mut ProgressState) {

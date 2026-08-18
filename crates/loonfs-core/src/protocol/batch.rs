@@ -201,8 +201,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         .last()
         .expect("accepted records should be non-empty")
         .commit;
-    let head_publish = prepare_commit_head_publish(&view.head, last_plan, &wal);
-    let head_publish = match head_publish {
+    let head_publish = match prepare_commit_head_publish(&view.head, last_plan, &wal) {
         Ok(value) => value,
         Err(error) => {
             let error = CoreError::Internal(format!("head publish preparation failed: {error}"));

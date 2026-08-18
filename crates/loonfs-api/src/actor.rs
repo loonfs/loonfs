@@ -210,7 +210,10 @@ fn validate_actor_id(value: &str) -> Result<(), ActorIdValidationError> {
         return Err(actor_id_error(value, "must not be empty"));
     }
     if value.len() > MAX_ACTOR_ID_BYTES {
-        return Err(actor_id_error(value, "must be 256 bytes or fewer"));
+        return Err(actor_id_error(
+            value,
+            &format!("must be {MAX_ACTOR_ID_BYTES} bytes or fewer"),
+        ));
     }
     if value.trim() != value {
         return Err(actor_id_error(

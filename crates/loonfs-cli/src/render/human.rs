@@ -588,9 +588,10 @@ fn escape_control_characters(value: &str) -> String {
     }
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
-        match character.is_control() {
-            true => escaped.extend(character.escape_default()),
-            false => escaped.push(character),
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
         }
     }
     escaped

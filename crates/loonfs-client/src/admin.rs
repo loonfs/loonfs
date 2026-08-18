@@ -56,11 +56,10 @@ impl Client {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListCheckpointsResponse> {
-        let url = format!(
+        let mut url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
             self.base_url
         );
-        let mut url = url;
         let mut has_query = false;
         append_optional_pagination_query(&mut url, &mut has_query, limit, cursor);
         self.request_json::<(), ListCheckpointsResponse>(self.get(&url), None)

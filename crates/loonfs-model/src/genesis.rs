@@ -14,10 +14,6 @@ pub fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
             created_by: ActorRef::loonfs_system(),
             created_at_ms,
         }],
-        direntry_binds: Vec::new(),
-        direntry_unbinds: Vec::new(),
-        revisions: Vec::new(),
-        subtree_tombstones: Vec::new(),
-        attribute_revisions: Vec::new(),
+        ..MetadataState::default()
     }
 }

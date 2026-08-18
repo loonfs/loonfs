@@ -1128,13 +1128,13 @@ impl NamespacePublisher {
             }
         }
 
-        for (result, wait_ms) in wait_traces {
-            self.read_core.instruments().publisher_publish(result);
+        for (outcome, wait_ms) in wait_traces {
+            self.read_core.instruments().publisher_publish(outcome);
             tracing::info!(
                 phase = "wait_for_result",
                 mode = self.trace_mode,
                 store_kind = self.trace_store_kind,
-                result = result.as_str(),
+                result = outcome.as_str(),
                 wait_ms
             );
         }

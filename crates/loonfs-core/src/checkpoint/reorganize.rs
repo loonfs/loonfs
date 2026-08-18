@@ -351,15 +351,15 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         .min()
         .unwrap_or(previous.payload.base_seq);
 
-    let manifest =
-        write_reorganized_manifest(store, namespace_id, previous, metadata_files, base_seq, {
-            let mut payload_floor = previous.payload.retention_floor_seq;
-            if floor_seq > payload_floor {
-                payload_floor = floor_seq;
-            }
-            payload_floor
-        })
-        .await?;
+    let manifest = write_reorganized_manifest(
+        store,
+        namespace_id,
+        previous,
+        metadata_files,
+        base_seq,
+        previous.payload.retention_floor_seq.max(floor_seq),
+    )
+    .await?;
 
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
     match publish_metadata_root(
@@ -498,9 +498,21 @@ pub(super) struct OverBudgetRun {
     pub(super) run_seq: ChangeSeq,
     pub(super) level: u32,
     pub(super) rows: u64,
-    /// The run's decoded byte total, or `None` when the row budget ruled
-    /// the run out before its byte total was read.
+    /// Decoded bytes, or `None` if the row limit rejected the run first.
     pub(super) decoded_bytes: Option<u64>,
+}
+
+fn over_budget_run(
+    run: &MetadataRunManifest,
+    rows: u64,
+    decoded_bytes: Option<u64>,
+) -> OverBudgetRun {
+    OverBudgetRun {
+        run_seq: run.run_seq,
+        level: run.level,
+        rows,
+        decoded_bytes,
+    }
 }
 
 /// Selects bounded merge input or plans a full compaction for one family
@@ -589,12 +601,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
                 // accumulator is still empty there, so this is the group's
                 // oldest run failing the budget on its own.
                 if index == 0 {
-                    group_bottom_over_budget = Some(OverBudgetRun {
-                        run_seq: run.run_seq,
-                        level: run.level,
-                        rows: run_rows,
-                        decoded_bytes: None,
-                    });
+                    group_bottom_over_budget = Some(over_budget_run(run, run_rows, None));
                 }
                 break;
             }
@@ -608,12 +615,8 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
             };
             if decoded_bytes.saturating_add(run_bytes) > byte_budget {
                 if index == 0 {
-                    group_bottom_over_budget = Some(OverBudgetRun {
-                        run_seq: run.run_seq,
-                        level: run.level,
-                        rows: run_rows,
-                        decoded_bytes: Some(run_bytes),
-                    });
+                    group_bottom_over_budget =
+                        Some(over_budget_run(run, run_rows, Some(run_bytes)));
                 }
                 break;
             }
