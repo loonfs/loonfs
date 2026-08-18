@@ -276,6 +276,8 @@ pub(crate) enum CommandData {
     Version {
         version: String,
     },
+    /// A generated shell completion script, rendered byte-for-byte.
+    CompletionScript(Vec<u8>),
     StreamBytes(Vec<u8>),
     /// The payload already went to standard output as it arrived, so there is
     /// nothing left to render. `get -` reports this: a download that is

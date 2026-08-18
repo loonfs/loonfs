@@ -464,7 +464,7 @@ pub(crate) async fn run_filesystem_get(
             kind,
             Some(context.profile_name),
             Some(context.mode),
-            CliError::json_not_supported_for_streaming(),
+            CliError::json_not_supported(),
         ));
     }
 

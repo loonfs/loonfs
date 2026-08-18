@@ -3,6 +3,22 @@
 `loonfs-cli` provides the `loonfs` command for managing profiles, namespaces, path-based
 filesystem operations, and namespace maintenance against LoonFS.
 
+## Shell completion
+
+Generate completion scripts for Bash, Zsh, Fish, PowerShell, or Elvish with:
+
+```sh
+loonfs completion --shell zsh
+```
+
+When omitted, `--shell` defaults from `$SHELL`.
+
+For example, enable Zsh completion in the current shell with:
+
+```sh
+source <(loonfs completion --shell zsh)
+```
+
 ## Command Reference
 
 ```text

@@ -32,7 +32,7 @@ pub(crate) fn render_success(output: &CommandOutput, json_mode: bool) -> io::Res
     }
 
     match &output.data {
-        CommandData::StreamBytes(bytes) => {
+        CommandData::CompletionScript(bytes) | CommandData::StreamBytes(bytes) => {
             let mut stdout = io::stdout().lock();
             stdout.write_all(bytes)?;
         }
