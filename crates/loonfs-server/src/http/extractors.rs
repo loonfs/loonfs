@@ -203,7 +203,7 @@ where
     T: serde::de::DeserializeOwned,
 {
     let mut deserializer = serde_json::Deserializer::from_slice(body);
-    serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+    let decoded = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
         let param = json_pointer(error.path())
             .and_then(|pointer| refine_internally_tagged_path(body, pointer));
         let response = ApiResponseError::new(
@@ -215,7 +215,17 @@ where
             Some(param) => response.with_param(param),
             None => response,
         }
-    })
+    })?;
+    // One value is the whole body: `end` rejects trailing data, which no
+    // single field can be blamed for, so this arm carries no param.
+    deserializer.end().map_err(|error| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!("invalid JSON request body: {error}"),
+        )
+    })?;
+    Ok(decoded)
 }
 
 fn refine_internally_tagged_path(body: &[u8], pointer: String) -> Option<String> {
@@ -638,6 +648,18 @@ mod tests {
         )
         .expect_err("path has the wrong type");
         assert_eq!(error.param(), Some("/operations/0/path"));
+    }
+
+    #[test]
+    fn json_decode_rejects_trailing_data_after_the_value() {
+        let error = decode_json::<Request>(br#"{"operations": []}{"operations": []}"#)
+            .expect_err("trailing data is not part of the request");
+        assert_eq!(error.param(), None);
+
+        assert!(
+            decode_json::<Request>(br#"{"operations": []}  "#).is_ok(),
+            "trailing whitespace is not data"
+        );
     }
 
     #[test]
