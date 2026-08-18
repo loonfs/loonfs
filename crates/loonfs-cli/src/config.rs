@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use loonfs_objectstore::StoreConfig;
 
-pub(crate) const CONFIG_VERSION: u32 = 2;
+pub(crate) const CONFIG_VERSION: u32 = 1;
 
 /// Environment override for the config file, and the escape hatch a shell
 /// session reaches for when the default file is one the CLI will not read.
@@ -121,9 +121,8 @@ impl CliConfig {
     pub(crate) fn validate(&self) -> Result<(), CliError> {
         if self.config_version != CONFIG_VERSION {
             return Err(CliError::invalid_config(format!(
-                "unsupported `config_version`: found `{}`, required `{CONFIG_VERSION}`; profiles \
-                 must be recreated",
-                self.config_version,
+                "unsupported `config_version`: expected `{CONFIG_VERSION}`, got `{}`",
+                self.config_version
             )));
         }
         if let Some(default_profile) = &self.default_profile {
@@ -446,8 +445,8 @@ fn load_config_source(path: &Path) -> Result<ConfigDocument, CliError> {
             Some(version) if version == i64::from(CONFIG_VERSION) => {}
             Some(version) => {
                 return Err(unusable_config(format!(
-                    "config {} declares `config_version = {version}`; this build requires \
-                     `config_version = {CONFIG_VERSION}` and profiles must be recreated",
+                    "config {} declares `config_version = {version}`; this build supports \
+                     `{CONFIG_VERSION}`",
                     path.display()
                 )));
             }
@@ -677,7 +676,7 @@ mod tests {
     fn cli_config_debug_redacts_secrets() {
         let config = parse(
             r#"
-config_version = 2
+config_version = 1
 default_profile = "cloud"
 
 [profiles.cloud]
@@ -716,7 +715,7 @@ auth_token = "debug-auth-token"
     fn redacted_config_serializes_without_secrets() {
         let config = parse(
             r#"
-config_version = 2
+config_version = 1
 
 [profiles.cloud]
 mode = "embedded"
@@ -753,7 +752,7 @@ auth_token = "plain-auth-token"
     fn unknown_keys_are_rejected_at_every_level() {
         let top_level = parse(
             r#"
-config_version = 2
+config_version = 1
 default_profil = "typo"
 "#,
         )
@@ -762,7 +761,7 @@ default_profil = "typo"
 
         let profile_level = parse(
             r#"
-config_version = 2
+config_version = 1
 
 [profiles.local]
 mode = "embedded"
@@ -778,7 +777,7 @@ root = "/tmp/store"
 
         let store_level = parse(
             r#"
-config_version = 2
+config_version = 1
 
 [profiles.local]
 mode = "embedded"
@@ -797,7 +796,7 @@ key_prefiks = "typo"
     fn validation_reports_profile_prefixed_store_fields() {
         let config = parse(
             r#"
-config_version = 2
+config_version = 1
 
 [profiles.cloud]
 mode = "embedded"
@@ -870,7 +869,7 @@ secret_access_key = "secret"
         std::fs::write(
             &cli_path,
             format!(
-                "config_version = 2\ndefault_profile = \"parity\"\n\n\
+                "config_version = 1\ndefault_profile = \"parity\"\n\n\
                  [profiles.parity]\nmode = \"embedded\"\n\n{qualified}"
             ),
         )
@@ -927,10 +926,10 @@ secret_access_key = "secret"
 
         // The version verdict beats unknown-field noise: a config written
         // for another version says so directly.
-        write("config_version = 3\nfuture_setting = true\n");
+        write("config_version = 2\nfuture_setting = true\n");
         let version = super::load_config(&path).expect_err("future version");
         assert!(
-            version.message.contains("`config_version = 3`"),
+            version.message.contains("`config_version = 2`"),
             "{}",
             version.message
         );
@@ -948,7 +947,7 @@ secret_access_key = "secret"
             unversioned.message
         );
 
-        write("config_version = 2\ndefault_profil = \"typo\"\n");
+        write("config_version = 1\ndefault_profil = \"typo\"\n");
         let unknown = super::load_config(&path).expect_err("unknown field");
         assert!(unknown.message.contains(&shown_path), "{}", unknown.message);
         assert!(
@@ -968,11 +967,11 @@ secret_access_key = "secret"
 
         for contents in [
             "config_version = ",
-            "config_version = 3\n",
+            "config_version = 2\n",
             "default_profile = \"x\"\n",
-            "config_version = 2\ndefault_profil = \"typo\"\n",
+            "config_version = 1\ndefault_profil = \"typo\"\n",
             // Semantic failures are as much a wall as shape failures.
-            "config_version = 2\ndefault_profile = \"missing\"\n",
+            "config_version = 1\ndefault_profile = \"missing\"\n",
         ] {
             write(contents);
             let error = super::load_config(&path).expect_err("unreadable config");
@@ -1086,7 +1085,7 @@ secret_access_key = "secret"
         std::fs::write(
             &path,
             r#"
-config_version = 2
+config_version = 1
 default_profile = "broken"
 
 [profiles.broken]

@@ -138,7 +138,7 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
 fn broken_configs_stay_repairable_with_the_repair_commands() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
-        r#"config_version = 2
+        r#"config_version = 1
 default_profile = "broken"
 
 [profiles.broken]
@@ -197,20 +197,12 @@ root = "{}"
     // A config for another version is a hard error, named before any
     // unknown-field noise; repair commands do not edit files written for a
     // different version.
-    harness.write_cli_config("config_version = 3\nfuture_setting = true\n");
+    harness.write_cli_config("config_version = 2\nfuture_setting = true\n");
     let future = harness.run(&["config", "show"]);
     assert_failure(&future);
     let future_message = stderr_string(&future);
     assert!(
-        future_message.contains("`config_version = 3`"),
-        "{future_message}"
-    );
-    assert!(
-        future_message.contains("requires `config_version = 2`"),
-        "{future_message}"
-    );
-    assert!(
-        future_message.contains("profiles must be recreated"),
+        future_message.contains("`config_version = 2`"),
         "{future_message}"
     );
     assert!(
@@ -309,7 +301,7 @@ fn config_resolution_prefers_the_flag_then_the_environment_then_xdg_then_legacy(
 #[test]
 fn config_path_answers_while_the_config_file_is_unreadable() {
     let harness = Harness::new();
-    harness.write_cli_config("config_version = 2\nunknown_knob = true\n");
+    harness.write_cli_config("config_version = 1\nunknown_knob = true\n");
 
     assert_failure(&harness.run(&["profile", "list"]));
 
@@ -337,7 +329,7 @@ fn config_path_answers_while_the_config_file_is_unreadable() {
 #[test]
 fn init_runs_through_an_override_while_the_default_config_is_unreadable() {
     let harness = Harness::new();
-    harness.write_cli_config("config_version = 2\nunknown_knob = true\n");
+    harness.write_cli_config("config_version = 1\nunknown_knob = true\n");
     let broken = fs::read_to_string(&harness.config_path).expect("read broken config");
 
     let flagged_path = harness.temp_dir.path().join("recovery").join("config.toml");
@@ -402,7 +394,7 @@ fn init_runs_through_an_override_while_the_default_config_is_unreadable() {
 #[test]
 fn unreadable_config_errors_name_the_file_the_field_and_the_way_out() {
     let harness = Harness::new();
-    harness.write_cli_config("config_version = 2\ndefault_profil = \"typo\"\n");
+    harness.write_cli_config("config_version = 1\ndefault_profil = \"typo\"\n");
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_failure(&list);
@@ -420,7 +412,7 @@ fn unreadable_config_errors_name_the_file_the_field_and_the_way_out() {
 
     // A semantic failure is just as much a wall, so it carries the same way
     // past it.
-    harness.write_cli_config("config_version = 2\ndefault_profile = \"missing\"\n");
+    harness.write_cli_config("config_version = 1\ndefault_profile = \"missing\"\n");
     let unresolvable = harness.run(&["--json", "profile", "list"]);
     assert_failure(&unresolvable);
     let message = json_error(&unresolvable)["message"]
@@ -927,7 +919,7 @@ fn init_rejects_existing_config_file() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
         r#"
-config_version = 2
+config_version = 1
 default_profile = "default"
 
 [profiles.default]
@@ -970,7 +962,7 @@ fn profiles_nest_under_their_own_table() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
         r#"
-config_version = 2
+config_version = 1
 
 [profiles.default_profile]
 mode = "embedded"
@@ -992,7 +984,7 @@ fn empty_default_profile_in_config_is_rejected() {
     let harness = Harness::new();
     harness.write_cli_config(
         r#"
-config_version = 2
+config_version = 1
 default_profile = ""
 "#,
     );
@@ -1012,7 +1004,7 @@ fn whitespace_default_profile_in_config_is_rejected() {
     let harness = Harness::new();
     harness.write_cli_config(
         r#"
-config_version = 2
+config_version = 1
 default_profile = "   "
 "#,
     );
@@ -1032,7 +1024,7 @@ fn invalid_store_field_messages_use_flattened_paths() {
     let harness = Harness::new();
     harness.write_cli_config(
         r#"
-config_version = 2
+config_version = 1
 default_profile = "default"
 
 [profiles.default]
@@ -1059,7 +1051,7 @@ fn invalid_default_namespace_in_config_is_rejected() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
         r#"
-config_version = 2
+config_version = 1
 default_profile = "default"
 
 [profiles.default]
@@ -1337,7 +1329,7 @@ fn current_uses_profile_default_without_namespace_environment() {
 fn current_does_not_require_backend_resolution() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
-        r#"config_version = 2
+        r#"config_version = 1
 default_profile = "broken"
 
 [profiles.broken]

@@ -13,7 +13,7 @@ pub(super) use std::time::{Duration, Instant};
 pub(super) use tempfile::TempDir;
 
 /// A valid config with no profiles.
-pub(super) const MINIMAL_CONFIG: &str = "config_version = 2\n";
+pub(super) const MINIMAL_CONFIG: &str = "config_version = 1\n";
 
 /// A file small enough to upload in one request during recursive tests.
 pub(super) const SMALL_TREE_FILE: &[u8] = b"small enough to hold";
@@ -244,7 +244,7 @@ impl Harness {
 
     pub(super) fn write_remote_listing_config(&self, server_url: &str) {
         self.write_cli_config(format!(
-            r#"config_version = 2
+            r#"config_version = 1
 default_profile = "remote"
 
 [profiles.remote]
