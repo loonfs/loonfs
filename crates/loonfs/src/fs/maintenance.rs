@@ -651,6 +651,7 @@ impl FsAdmin {
         skip_all,
         fields(
             operation = "maintenance.list_checkpoints",
+            method = "list_checkpoints_all",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -696,6 +697,7 @@ impl FsAdmin {
         skip_all,
         fields(
             operation = "maintenance.list_checkpoints",
+            method = "list_checkpoints_page",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -836,19 +838,15 @@ impl FsAdmin {
     /// Shared implementation for metadata maintenance and [`Self::flush_wal`].
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.wal_flush",
+        name = "loonfs.phase",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.wal_flush",
+            phase = "wal_flush",
             namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
         )
     )]
     async fn run_wal_flush(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
-        let span = tracing::Span::current();
-        self.core.record_trace_context(&span);
         let result = self
             .engine(namespace_id)
             .flush_wal()

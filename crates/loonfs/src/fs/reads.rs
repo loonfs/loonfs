@@ -92,6 +92,7 @@ impl FsReader {
         skip_all,
         fields(
             operation = "list_path_entries",
+            method = "list_path_entries_all",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -147,6 +148,7 @@ impl FsReader {
         skip_all,
         fields(
             operation = "list_path_entries",
+            method = "list_path_entries_page",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -206,6 +208,7 @@ impl FsReader {
         skip_all,
         fields(
             operation = "get_file_bytes",
+            method = "get_file_bytes",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -255,6 +258,7 @@ impl FsReader {
         skip_all,
         fields(
             operation = "get_file_bytes",
+            method = "read_file_stream",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -561,6 +565,7 @@ impl FsReader {
         skip_all,
         fields(
             operation = "get_file_bytes",
+            method = "get_file_revision_bytes",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

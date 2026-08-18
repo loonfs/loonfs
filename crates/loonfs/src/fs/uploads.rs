@@ -54,6 +54,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "begin_upload",
+            method = "begin_upload",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -79,6 +80,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "begin_upload",
+            method = "begin_direct_put_upload_target",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -108,6 +110,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "begin_upload",
+            method = "begin_direct_multipart_upload_target",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -161,6 +164,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "upload_content",
+            method = "upload_content",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -197,6 +201,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "upload_content",
+            method = "upload_streamed_content",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -224,6 +229,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "complete_upload",
+            method = "complete_upload",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -236,7 +242,11 @@ impl FsWriter {
     ) -> Result<UploadSessionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
-            .complete_upload_prepared(namespace_id, upload_id)
+            .complete_upload_prepared_inner(
+                namespace_id,
+                upload_id,
+                loonfs_core::ResolvedUploadCompletion::KnownContent,
+            )
             .await?
             .response)
     }
@@ -249,6 +259,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "complete_upload",
+            method = "complete_multipart_upload",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -262,7 +273,11 @@ impl FsWriter {
     ) -> Result<UploadSessionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
-            .complete_multipart_upload_prepared(namespace_id, upload_id, request)
+            .complete_upload_prepared_inner(
+                namespace_id,
+                upload_id,
+                loonfs_core::ResolvedUploadCompletion::Multipart(request.clone()),
+            )
             .await?
             .response)
     }
@@ -278,6 +293,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "complete_upload",
+            method = "complete_upload_prepared",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -305,6 +321,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "complete_upload",
+            method = "complete_multipart_upload_prepared",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -350,6 +367,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "complete_upload",
+            method = "complete_upload_prepared_for_mode",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
