@@ -44,7 +44,7 @@ pub struct InodeRecord {
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
     pub created_seq: ChangeSeq,
-    /// The commit that produced this row.
+    /// Commit ID associated with this row.
     pub commit_id: CommitId,
     pub created_by: ActorRef,
     /// Time the inode was created, in Unix milliseconds. `created_seq`
@@ -81,7 +81,7 @@ pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     pub committed_seq: ChangeSeq,
-    /// The commit that produced this row.
+    /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Observational wall-clock stamp of the owning commit; never a
     /// validity input — `committed_seq` is the order.
@@ -97,7 +97,7 @@ pub struct SubtreeTombstoneRecord {
     /// This event's own generation: the delete's committed position for a
     /// `Set`, the undelete's for a `Revoke`.
     pub generation: TombstoneGeneration,
-    /// The commit that produced this row.
+    /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Wall-clock stamp of the recording commit.
     pub deleted_at_ms: u64,
@@ -279,7 +279,7 @@ pub struct AttributesRevisionRecord {
     pub inode_id: InodeId,
     pub attributes_revision_no: AttributeRevisionNo,
     pub committed_seq: ChangeSeq,
-    /// The commit that produced this row.
+    /// Commit ID associated with this row.
     pub commit_id: CommitId,
     pub delta_index: u32,
     pub actor: ActorRef,

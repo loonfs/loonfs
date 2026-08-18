@@ -6,8 +6,8 @@
 //! the implementations would remove the independence those tests require.
 //!
 //! Inodes, file revisions, tombstones, and stored attribute revisions copy
-//! their commit identity, actor, and timestamp from the WAL commit. Directory
-//! bindings do not store attribution. The initial root inode uses
+//! the commit ID, actor, and timestamp from the WAL. Directory bindings do
+//! not store attribution. The initial root inode uses
 //! `ActorRef::loonfs_system()`, and the initial empty attribute state has no
 //! actor or timestamp because it is not stored as a revision.
 

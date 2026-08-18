@@ -4749,7 +4749,7 @@
         "properties": {
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
-            "description": "The commit that produced this revision."
+            "description": "Commit ID for this revision."
           },
           "committed_at_ms": {
             "type": "integer",

@@ -124,7 +124,7 @@ pub enum MetadataRow {
         inode_kind: InodeKind,
         /// Commit sequence from which the inode can become visible.
         created_seq: ChangeSeq,
-        /// The commit that produced this row.
+        /// Commit ID associated with this row.
         commit_id: CommitId,
         /// Actor that created the inode, as supplied by the application.
         created_by: crate::ActorRef,
@@ -173,7 +173,7 @@ pub enum MetadataRow {
         revision_no: RevisionNo,
         /// Namespace sequence that published the revision.
         committed_seq: ChangeSeq,
-        /// The commit that produced this row.
+        /// Commit ID associated with this row.
         commit_id: CommitId,
         /// The owning commit's observational wall-clock stamp, denormalized
         /// onto the row so revision reads answer times without a receipt
@@ -193,7 +193,7 @@ pub enum MetadataRow {
         /// Where this event sits in the namespace's history, and the
         /// generation a later `revoke` names.
         generation: TombstoneGeneration,
-        /// The commit that produced this row.
+        /// Commit ID associated with this row.
         commit_id: CommitId,
         /// What this event did; readers take the newest row per root and
         /// treat a `revoke` newest row as "no active tombstone".
@@ -253,7 +253,7 @@ pub enum MetadataRow {
         attributes_revision_no: AttributeRevisionNo,
         /// Namespace sequence that published the revision.
         committed_seq: ChangeSeq,
-        /// The commit that produced this row.
+        /// Commit ID associated with this row.
         commit_id: CommitId,
         /// Delta position that disambiguates the revision within `committed_seq`.
         delta_index: u32,

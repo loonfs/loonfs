@@ -2051,8 +2051,7 @@ fn sst_block_data_revision_golden_decodes_to_sample_rows() {
     assert_eq!(block.rows, sample_revision_rows());
 }
 
-/// The populated map and the cleared one both have encodings nothing else
-/// states, so their family has a dedicated single-block fixture.
+/// Covers the encodings for both populated and cleared attribute maps.
 #[test]
 fn sst_block_data_attribute_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
@@ -2259,8 +2258,8 @@ fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
     );
 }
 
-/// Commit identities, actors, and timestamps are required in version-one
-/// provenance rows. Decoding must fail when any required field is missing.
+/// Version-one provenance rows require a commit ID, actor, and timestamp.
+/// Decoding fails when any required field is missing.
 #[test]
 fn provenance_rows_reject_every_missing_required_field() {
     let cases = [
