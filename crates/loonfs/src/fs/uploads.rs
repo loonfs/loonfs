@@ -47,11 +47,24 @@ impl FsWriter {
     }
 
     /// Starts a durable upload session for a namespace.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.begin_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "begin_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn begin_upload(
         &self,
         namespace_id: &NamespaceId,
         request: BeginUploadRequest,
     ) -> Result<BeginUploadResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let response = self.engine(namespace_id).begin_upload(request).await?;
         self.schedule_upload_session_reclamation(namespace_id);
         Ok(response)
@@ -59,11 +72,24 @@ impl FsWriter {
 
     /// Mints the content object a direct upload will write to and returns
     /// the internal target for server-side signing.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.begin_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "begin_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
         claim: UploadContentClaim,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine(namespace_id)
             .begin_direct_put_upload_target(claim)
@@ -75,11 +101,24 @@ impl FsWriter {
     /// Mints the content object a direct multipart upload assembles into,
     /// opens the provider upload behind it, and returns the internal target
     /// for server-side signing.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.begin_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "begin_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn begin_direct_multipart_upload_target(
         &self,
         namespace_id: &NamespaceId,
         options: DirectMultipartUploadOptions,
     ) -> Result<BeginDirectMultipartUploadTargetResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine(namespace_id)
             .begin_direct_multipart_upload_target(options)
@@ -89,12 +128,25 @@ impl FsWriter {
     }
 
     /// Resolves one wave of multipart parts for server-side signing.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.sign_upload_parts",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "sign_upload_parts",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn direct_multipart_part_targets(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         requested: &[UploadPartChecksumClaim],
     ) -> Result<MultipartPartTargets> {
+        self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
             .direct_multipart_part_targets(upload_id, requested)
@@ -102,12 +154,28 @@ impl FsWriter {
     }
 
     /// Uploads whole-file content into an upload session.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.upload_content",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "upload_content",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
     pub async fn upload_content(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
+        let span = tracing::Span::current();
+        self.core.record_trace_context(&span);
+        span.record("payload_class", crate::trace::payload_class(bytes.len()));
         Ok(self
             .engine(namespace_id)
             .upload_content(upload_id, bytes)
@@ -122,12 +190,26 @@ impl FsWriter {
     /// produces, completion, publication — is identical to the buffered
     /// path's; callers that already hold their bytes should stay on
     /// [`Self::upload_content`].
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.upload_content",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "upload_content",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = "streamed",
+        )
+    )]
     pub async fn upload_streamed_content(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         body: ByteStream,
     ) -> Result<UploadContentResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
             .upload_streamed_content(upload_id, body)
@@ -135,11 +217,24 @@ impl FsWriter {
     }
 
     /// Completes a service-proxied or direct-PUT upload session.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.complete_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "complete_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<UploadSessionResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .complete_upload_prepared(namespace_id, upload_id)
             .await?
@@ -147,12 +242,25 @@ impl FsWriter {
     }
 
     /// Completes a direct-multipart upload session.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.complete_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "complete_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn complete_multipart_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
     ) -> Result<UploadSessionResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .complete_multipart_upload_prepared(namespace_id, upload_id, request)
             .await?
@@ -163,11 +271,24 @@ impl FsWriter {
     ///
     /// Service-proxied completion performs no content-blob I/O. Direct-put
     /// completion performs one content-blob HEAD and no content-blob GET.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.complete_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "complete_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn complete_upload_prepared(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<CompletedUpload> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.complete_upload_prepared_inner(
             namespace_id,
             upload_id,
@@ -177,12 +298,25 @@ impl FsWriter {
     }
 
     /// Completes a multipart upload and returns its publication proof.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.complete_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "complete_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn complete_multipart_upload_prepared(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
     ) -> Result<CompletedUpload> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.complete_upload_prepared_inner(
             namespace_id,
             upload_id,
@@ -209,6 +343,18 @@ impl FsWriter {
     }
 
     /// Completes an upload after decoding its request for the stored mode.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.complete_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "complete_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn complete_upload_prepared_for_mode<F>(
         &self,
         namespace_id: &NamespaceId,
@@ -220,6 +366,7 @@ impl FsWriter {
             UploadMode,
         ) -> std::result::Result<crate::uploads::ResolvedUploadCompletion, String>,
     {
+        self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
@@ -232,20 +379,46 @@ impl FsWriter {
     }
 
     /// Aborts an upload session and deletes the content object it owned.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.abort_upload",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "abort_upload",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn abort_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<UploadSessionResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         Ok(self.engine(namespace_id).abort_upload(upload_id).await?)
     }
 
     /// Reads one upload session, with a fresh receipt when it is completed.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.read_upload_status",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "read_upload_status",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn read_upload_status(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> Result<(UploadSessionResponse, Option<CompletedUploadReceipt>)> {
+        self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
             .read_upload_status(upload_id)

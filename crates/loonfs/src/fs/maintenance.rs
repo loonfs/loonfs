@@ -93,10 +93,23 @@ impl FsAdmin {
 
     /// Summarizes a namespace's current head: manifest, latest checkpoint,
     /// WAL tail, and retention floor.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.namespace_status",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "namespace_status",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn namespace_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         Ok(load_namespace_head_summary(self.core.store(), namespace_id).await?)
     }
 
@@ -118,6 +131,7 @@ impl FsAdmin {
         skip_all,
         fields(
             operation = "maintenance.step",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
@@ -425,10 +439,23 @@ impl FsAdmin {
     /// reach is compacted on this call rather than after two more delta
     /// merges have published over it — which, under sustained writes, is a
     /// wait with no end.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.compact_metadata",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.compact_metadata",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn compact_metadata(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<MetadataCompactionOutcome> {
+        self.core.record_trace_context(&tracing::Span::current());
         let spec = match self
             .reorganize_once(
                 namespace_id,
@@ -547,11 +574,24 @@ impl FsAdmin {
     /// [`MaintenancePlan::gc`] — and the one thing that asks on its own is a
     /// writer's collection job, which schedules a pass for each upload
     /// deadline that writer created.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.gc_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.gc_namespace",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
         config: &crate::GcConfig,
     ) -> Result<crate::GcResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let report = loonfs_core::gc_namespace(
             self.core.store(),
             namespace_id,
@@ -583,6 +623,7 @@ impl FsAdmin {
         skip_all,
         fields(
             operation = "maintenance.checkpoint_create",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
@@ -603,10 +644,23 @@ impl FsAdmin {
     }
 
     /// Lists every active checkpoint by following bounded pages.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.list_checkpoints",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.list_checkpoints",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_checkpoints_all(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<ListCheckpointsResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let limit = super::core::default_page_limit();
         let (mut response, mut next_cursor) = self
             .list_checkpoints_page_typed(
@@ -635,11 +689,24 @@ impl FsAdmin {
 
     /// Lists one page of active checkpoints in ascending id order. The cursor
     /// resumes a live listing and does not create a snapshot.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.list_checkpoints",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.list_checkpoints",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListCheckpointsResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (mut response, next_cursor) = self
             .list_checkpoints_page_typed(namespace_id, request)
             .await?;
@@ -669,11 +736,24 @@ impl FsAdmin {
     }
 
     /// Releases a user-owned checkpoint by id. Idempotent.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.release_checkpoint",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.release_checkpoint",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(namespace_id)
             .release_checkpoint(checkpoint_id)
@@ -690,10 +770,23 @@ impl FsAdmin {
     ///
     /// This checks only whether a WAL tail exists. It does not require the
     /// head to contain enough hints to count every segment.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.wal_flush",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.wal_flush",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn flush_wal(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<MetadataMaintenanceResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let basis = load_namespace_flush_basis(self.core.store(), namespace_id).await?;
         self.flush_then_reorganize(namespace_id, basis.has_unflushed_wal_tail, basis.head_seq)
             .await
@@ -709,10 +802,23 @@ impl FsAdmin {
     /// rather than upkeep. Nothing schedules it: no maintenance job exists
     /// for retention, so an unattended deployment keeps its whole history
     /// until a call arrives here.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.advance_retention_floor",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.advance_retention_floor",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let step = self
             .maintenance_step_namespace(
                 namespace_id,
@@ -735,6 +841,7 @@ impl FsAdmin {
         skip_all,
         fields(
             operation = "maintenance.wal_flush",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )

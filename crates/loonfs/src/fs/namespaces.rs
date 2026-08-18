@@ -13,11 +13,24 @@ impl FsWriter {
     ///
     /// With `options.allow_existing`, an already-existing namespace is
     /// treated as success. Returns the namespace's post-operation status.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.create_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "create_namespace",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
     ) -> Result<NamespaceStatusResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(namespace_id)
             .bootstrap_namespace(loonfs_core::BootstrapOptions {
@@ -32,11 +45,24 @@ impl FsWriter {
     ///
     /// The fork shares immutable file bytes but gets its own metadata history,
     /// and the response reports the target at the fork point.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.fork_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "fork_namespace",
+            namespace_id = %source,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn fork_namespace(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> Result<NamespaceStatusResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(source)
             .fork_namespace(target)
@@ -60,11 +86,24 @@ impl FsWriter {
     /// Sequenced as a barrier through the publication service: mutations
     /// admitted before the delete publish first, and mutations admitted
     /// after it fail once it succeeds.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.delete_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "delete_namespace",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.publisher
             .submit_delete(namespace_id.clone(), options)
             .await

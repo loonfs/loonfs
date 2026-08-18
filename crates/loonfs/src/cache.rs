@@ -438,7 +438,10 @@ impl ReadCore {
         level = "debug",
         name = "loonfs.phase",
         skip_all,
-        fields(phase = "update_cache")
+        fields(
+            phase = "update_cache",
+            namespace_id = %namespace_id,
+        )
     )]
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         self.inner

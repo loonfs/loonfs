@@ -74,6 +74,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "put",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -136,6 +137,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "put",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = "streamed",
@@ -251,6 +253,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "prepare",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -288,6 +291,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "prepare",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = "streamed",
@@ -319,6 +323,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "put",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -374,6 +379,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "put",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -411,6 +417,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "prepare",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -443,6 +450,18 @@ impl FsWriter {
 
     /// Verifies an authorized content token against the namespace's durable
     /// content-store binding.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.prepare",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "prepare",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn prepare_content_token(
         &self,
         namespace_id: &NamespaceId,
@@ -450,6 +469,7 @@ impl FsWriter {
         token: &crate::content_tokens::ContentToken,
         now_ms: u64,
     ) -> Result<std::result::Result<PreparedContent, loonfs_core::content::ContentTokenError>> {
+        self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
@@ -468,12 +488,25 @@ impl FsWriter {
     }
 
     /// Creates a directory at an absolute path.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn create_directory(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.commit(
             namespace_id,
             CommitRequest::single(
@@ -499,12 +532,25 @@ impl FsWriter {
     /// history. Physical reclamation is explicit garbage collection: nothing
     /// sweeps unless an operator asks, through `FsAdmin::gc_namespace` or a
     /// maintenance step that opted in.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn delete_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.commit(
             namespace_id,
             CommitRequest::single(
@@ -526,6 +572,18 @@ impl FsWriter {
     }
 
     /// Moves a path within the same namespace.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn move_path(
         &self,
         namespace_id: &NamespaceId,
@@ -533,6 +591,7 @@ impl FsWriter {
         to_path: &str,
         options: MoveOptions,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.commit(
             namespace_id,
             CommitRequest::single(
@@ -555,6 +614,18 @@ impl FsWriter {
 
     /// Copies a file to a new path in the same namespace. The new file
     /// reuses the source revision's content reference: no bytes are copied.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn copy_path(
         &self,
         namespace_id: &NamespaceId,
@@ -562,6 +633,7 @@ impl FsWriter {
         to_path: &str,
         options: CopyOptions,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.commit(
             namespace_id,
             CommitRequest::single(
@@ -583,6 +655,18 @@ impl FsWriter {
     }
 
     /// Restores a prior file revision by appending a new current revision.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn restore_file_revision(
         &self,
         namespace_id: &NamespaceId,
@@ -590,6 +674,7 @@ impl FsWriter {
         source_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.commit(
             namespace_id,
             CommitRequest::single(
@@ -615,12 +700,25 @@ impl FsWriter {
     ///
     /// Naming neither a write nor a removal is rejected, as is an update that
     /// would leave the map exactly as it was.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn update_attributes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: UpdateAttributesOptions,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.commit(
             namespace_id,
             CommitRequest::single(
@@ -644,6 +742,18 @@ impl FsWriter {
     }
 
     /// Restores a deleted file or subtree, optionally at a new path.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn undelete(
         &self,
         namespace_id: &NamespaceId,
@@ -652,6 +762,7 @@ impl FsWriter {
         absolute_path: Option<&str>,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         // An absent destination restores in place: the entry re-binds under
         // the parent and name its deletion recorded.
         let path = absolute_path
@@ -686,11 +797,24 @@ impl FsWriter {
     /// error of a request that stops names the operation that stopped it.
     /// Operations that introduce new external content require
     /// [`Self::commit_prepared`].
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn commit(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate(namespace_id, CommitCandidate::new(request))
             .await
     }
@@ -699,12 +823,25 @@ impl FsWriter {
     ///
     /// Submission and publication perform no content I/O. One prepared value
     /// covers every operation that uses its content ref.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn commit_prepared(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
         prepared_content: Vec<PreparedContent>,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate(
             namespace_id,
             CommitCandidate::prepared(request, prepared_content),
@@ -717,11 +854,24 @@ impl FsWriter {
     /// its own durable result, and admitted work is owned by the service's
     /// worker — a cancelled caller abandons only its result delivery, never
     /// the publication.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn commit_candidate(
         &self,
         namespace_id: &NamespaceId,
         candidate: CommitCandidate,
     ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         self.publisher
             .submit_candidate(namespace_id.clone(), candidate)
             .await

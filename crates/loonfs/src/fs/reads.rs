@@ -27,6 +27,7 @@ impl FsReader {
         skip_all,
         fields(
             operation = "stat",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             cache_path = tracing::field::Empty,
@@ -56,6 +57,7 @@ impl FsReader {
         skip_all,
         fields(
             operation = "stat_inode",
+            namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             cache_path = tracing::field::Empty,
@@ -83,11 +85,24 @@ impl FsReader {
     /// empty directory still reports which state answered the question).
     /// Entries are returned in canonical name-key order, matching paged
     /// listings.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.list_path_entries",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "list_path_entries",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_path_entries_all(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<ListPathEntriesResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let limit = default_page_limit();
         let (first_page, mut next_cursor) = self
             .list_path_entries_page_typed(
@@ -125,6 +140,18 @@ impl FsReader {
     /// Asking for attributes costs one lookup per entry and adds an unbounded
     /// number of bytes to the page, so a caller that turns the projection on
     /// should also size its page for the maps it expects back.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.list_path_entries",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "list_path_entries",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_path_entries_page(
         &self,
         namespace_id: &NamespaceId,
@@ -132,6 +159,7 @@ impl FsReader {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (mut response, next_cursor) = self
             .list_path_entries_page_typed(namespace_id, absolute_path, request, options)
             .await?;
@@ -171,11 +199,24 @@ impl FsReader {
     }
 
     /// Reads a file's current content plus the metadata entry it came from.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.get_file_bytes",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "get_file_bytes",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn get_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let read = engine
             .get_file(
@@ -207,12 +248,25 @@ impl FsReader {
     /// resumed stream refuses to fetch anything until it has been handed
     /// the bytes below its start through
     /// [`FileContentStream::fold_resumed_prefix`].
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.get_file_bytes",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "get_file_bytes",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn read_file_stream(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let stream = engine
             .read_file_stream(
@@ -234,12 +288,25 @@ impl FsReader {
     /// what this process buffers and nothing here buffers anything. A host
     /// signs a short-lived read of the returned key and hands the client
     /// the reference to check the arriving bytes against.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.begin_download",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "begin_download",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn direct_download_target(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadTarget> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let target = engine
             .direct_download_target(absolute_path, revision_no, &read_context)
@@ -249,12 +316,25 @@ impl FsReader {
 
     /// Resolves retained inode content for a direct download without
     /// requiring a current path.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.begin_download_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "begin_download_by_inode",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn direct_download_target_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<DirectDownloadByInodeTarget> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let target = engine
             .direct_download_target_by_inode(inode_id, revision_no, &read_context)
@@ -277,12 +357,25 @@ impl FsReader {
     ///
     /// This does not increment the latest-metadata-view metric because it
     /// reads a checkpoint snapshot.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.list_checkpoint_files_page",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "list_checkpoint_files_page",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_checkpoint_files_page(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
         request: PageRequest<CheckpointFilesPageCursor>,
     ) -> Result<CheckpointFilesPage> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         Ok(engine
             .list_checkpoint_files_page(checkpoint_id, request, &read_context)
@@ -301,11 +394,24 @@ impl FsReader {
     /// At most [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES)
     /// ids per call; a larger batch is refused with `invalid_request`
     /// before anything is read.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.resolve_current_files",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "resolve_current_files",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn resolve_current_files(
         &self,
         namespace_id: &NamespaceId,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let states = engine
             .resolve_current_files(inode_ids, &read_context)
@@ -322,12 +428,25 @@ impl FsReader {
     ///
     /// This does not increment the latest-metadata-view metric because it
     /// reads immutable content directly.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.read_content_ref",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "read_content_ref",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn read_content_ref(
         &self,
         namespace_id: &NamespaceId,
         content_ref: &ContentRef,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         Ok(engine
             .read_content_ref(content_ref, max_bytes, &read_context)
@@ -338,11 +457,24 @@ impl FsReader {
     /// by deleted root inode. Tombstone rows are immortal, so this answers
     /// however far the replay floor has advanced; entries carry the deleted
     /// name when the delete recorded one.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.list_trash",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "list_trash",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_trash_page(
         &self,
         namespace_id: &NamespaceId,
         request: PageRequest<loonfs_api::TrashPageCursor>,
     ) -> Result<loonfs_api::ListTrashResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let page = engine.list_trash_page(request, &read_context).await?;
         let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
@@ -355,12 +487,25 @@ impl FsReader {
     }
 
     /// Lists one page of a file path's revision history.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.list_file_revisions",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "list_file_revisions",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_file_revisions_page(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let absolute_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
@@ -377,12 +522,25 @@ impl FsReader {
     }
 
     /// Lists one page of retained revisions for a file inode.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.list_file_revisions_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "list_file_revisions_by_inode",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let page = engine
             .list_file_revisions_for_inode_page(inode_id, request, &read_context)
@@ -396,12 +554,25 @@ impl FsReader {
     }
 
     /// Reads the content of one historical file revision by path.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.get_file_bytes",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "get_file_bytes",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn get_file_revision_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let read = engine
             .get_file_revision(
@@ -416,12 +587,25 @@ impl FsReader {
 
     /// Reads and verifies one retained file revision by inode identity.
     /// Current visibility and path are not required.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.get_file_revision_bytes_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "get_file_revision_bytes_by_inode",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn get_file_revision_bytes_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
+        self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let bytes = engine
             .get_file_revision_for_inode(
@@ -435,12 +619,25 @@ impl FsReader {
     }
 
     /// Reads the ordered change feed after the `after_seq` cursor.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.list_changes",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "list_changes",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         options: ListChangesOptions,
     ) -> Result<ChangesResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
         let limit = match options.limit {
             Some(limit) => limit,
             None => PaginationPolicy::default()

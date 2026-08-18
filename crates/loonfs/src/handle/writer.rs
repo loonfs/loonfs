@@ -175,7 +175,21 @@ impl FsWriter {
     /// budget, and this waits for that to finish rather than stopping it.
     /// [`Self::shutdown`] cancels it instead, which is what makes a shutdown
     /// short.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.flush_background",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "flush_background",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn flush_background(&self) -> Result<()> {
+        let span = tracing::Span::current();
+        span.record("mode", self.core.trace_mode());
+        span.record("store_kind", self.core.trace_store_kind());
         self.bits.maintenance.drain().await
     }
 
@@ -198,7 +212,21 @@ impl FsWriter {
     /// are ignored, and reads continue to work. The method is idempotent and
     /// may be called from any clone because all clones share the same shutdown
     /// state. Task panics are returned as runtime errors.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.shutdown",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "shutdown",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub async fn shutdown(&self) -> Result<()> {
+        let span = tracing::Span::current();
+        span.record("mode", self.core.trace_mode());
+        span.record("store_kind", self.core.trace_store_kind());
         self.close_admission_for_shutdown();
         self.publisher.drain().await?;
         self.bits.maintenance.drain().await
