@@ -4,10 +4,11 @@
 use super::context::{fail, fail_for, parse_public_ordinal_arg, resolve_command_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::args::{
-    AdminCheckpointArgs, AdminCheckpointListArgs, AdminCheckpointReleaseArgs, AdminCommand,
-    AdminGcArgs, AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminRunArgs,
-    AdminStepArgs, AdminStoreProbeArgs, ChangesArgs, CommandKind, MaintenanceJobArg,
-    RuntimeBehavior,
+    AdminCheckpointArgs, AdminCheckpointCommand, AdminCheckpointListArgs,
+    AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminIndexCommand, AdminIndexEnableArgs,
+    AdminIndexGcArgs, AdminMaintenanceCommand, AdminNamespaceArgs, AdminRetentionCommand,
+    AdminRunArgs, AdminStepArgs, AdminStoreCommand, AdminStoreProbeArgs, ChangesArgs, CommandKind,
+    MaintenanceJobArg, RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::render::{format_utc_ms, write_stderr_progress};
@@ -32,25 +33,45 @@ pub(crate) async fn run_admin_command(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        AdminCommand::Checkpoint(args) => run_admin_checkpoint(kind, config_path, args).await,
-        AdminCommand::CheckpointList(args) => {
-            run_admin_checkpoint_list(kind, config_path, args).await
-        }
-        AdminCommand::CheckpointRelease(args) => {
-            run_admin_checkpoint_release(kind, config_path, args).await
-        }
-        AdminCommand::Flush(args) => run_admin_flush(kind, config_path, args).await,
-        AdminCommand::RetentionAdvance(args) => {
-            run_admin_retention_advance(kind, config_path, args).await
-        }
-        AdminCommand::Run(args) => run_admin_run(kind, config_path, args).await,
-        AdminCommand::Step(args) => run_admin_step(kind, config_path, args).await,
+        AdminCommand::Checkpoint { command } => match command {
+            AdminCheckpointCommand::Create(args) => {
+                run_admin_checkpoint(kind, config_path, args).await
+            }
+            AdminCheckpointCommand::List(args) => {
+                run_admin_checkpoint_list(kind, config_path, args).await
+            }
+            AdminCheckpointCommand::Release(args) => {
+                run_admin_checkpoint_release(kind, config_path, args).await
+            }
+        },
+        AdminCommand::Index { command } => match command {
+            AdminIndexCommand::Enable(args) => {
+                run_admin_index_enable(kind, config_path, args).await
+            }
+            AdminIndexCommand::Disable(args) => {
+                run_admin_index_disable(kind, config_path, args).await
+            }
+            AdminIndexCommand::Status(args) => {
+                run_admin_index_status(kind, config_path, args).await
+            }
+            AdminIndexCommand::Gc(args) => {
+                run_admin_index_gc(kind, config_path, args, runtime).await
+            }
+        },
+        AdminCommand::Maintenance { command } => match command {
+            AdminMaintenanceCommand::Run(args) => run_admin_run(kind, config_path, args).await,
+            AdminMaintenanceCommand::Step(args) => run_admin_step(kind, config_path, args).await,
+            AdminMaintenanceCommand::Flush(args) => run_admin_flush(kind, config_path, args).await,
+        },
+        AdminCommand::Retention { command } => match command {
+            AdminRetentionCommand::Advance(args) => {
+                run_admin_retention_advance(kind, config_path, args).await
+            }
+        },
         AdminCommand::Gc(args) => run_admin_gc(kind, config_path, args, runtime).await,
-        AdminCommand::StoreProbe(args) => run_admin_store_probe(kind, config_path, args).await,
-        AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, config_path, args).await,
-        AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, config_path, args).await,
-        AdminCommand::IndexStatus(args) => run_admin_index_status(kind, config_path, args).await,
-        AdminCommand::IndexGc(args) => run_admin_index_gc(kind, config_path, args, runtime).await,
+        AdminCommand::Store { command } => match command {
+            AdminStoreCommand::Probe(args) => run_admin_store_probe(kind, config_path, args).await,
+        },
     }
 }
 
@@ -60,8 +81,8 @@ async fn run_admin_step(
     args: AdminStepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    // Metadata upkeep is what `step` means; the flags add the two actions
-    // that cost something an operator has to ask for.
+    // A step always runs metadata maintenance. The flags add retention or
+    // garbage collection when requested.
     let request = MaintenanceStepRequest {
         metadata: Some(MetadataMaintenanceRequest {
             max_wal_tail_segments: args.max_wal_tail_segments,
@@ -83,14 +104,10 @@ async fn run_admin_step(
     })
 }
 
-/// Sweeps the namespace, looping the cursor through completion unless
-/// `--max-objects` asks for one pass.
-///
-/// A run that takes several passes says where it has got to as each pass
-/// lands, on standard error: the summary on standard output is still one
-/// accumulated report per invocation, whether the run took one pass or
-/// twenty, and `--json` is untouched by the progress. A single-pass run
-/// prints no progress at all — its summary is the whole story.
+/// Runs garbage collection until it finishes unless `--max-objects` requests
+/// one bounded pass. Multi-pass human output writes progress to stderr and a
+/// combined summary to stdout. JSON and single-pass output contain no progress
+/// lines.
 async fn run_admin_gc(
     kind: CommandKind,
     config_path: &Path,
@@ -379,19 +396,15 @@ async fn run_admin_retention_advance(
     })
 }
 
-/// Hosts maintenance for the namespaces named on the command line.
-///
-/// Nothing here discovers a namespace, because LoonFS has no operation that
-/// enumerates them. The flags are the assignment, and the assignment is what
-/// brings a namespace no process is writing to under automatic maintenance:
-/// continuously until a signal, or as one bounded catch-up with `--drain`.
+/// Runs maintenance for explicitly assigned namespaces. The command runs
+/// until stopped, or completes the current assignments once with `--drain`.
 async fn run_admin_run(
     kind: CommandKind,
     config_path: &Path,
     args: AdminRunArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -399,13 +412,11 @@ async fn run_admin_run(
         .namespaces
         .iter()
         .map(|namespace| {
-            parse_namespace_id(namespace).map_err(|error| error.with_param("--namespace"))
+            parse_namespace_id(namespace).map_err(|error| error.with_param("--namespaces"))
         })
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
-    // Sorted and deduplicated, so the keys are driven in the order the
-    // runner itself keys them and two spellings of one assignment produce
-    // one report.
+    // Sort and deduplicate assignments for stable execution and reporting.
     let namespaces: Vec<NamespaceId> = namespaces.into_iter().collect();
     let jobs = selected_jobs(&args.jobs);
     let fail_here = |error| fail_for(kind, &resolved.profile_name, &mode, error);
@@ -448,16 +459,15 @@ async fn run_admin_run(
     })
 }
 
-/// Proves the profile's object store honours the contract LoonFS depends
-/// on. Store-scoped like `admin run`: it names no namespace, because the
-/// store is the subject.
+/// Checks that the profile's object store supports the operations LoonFS
+/// requires. This command checks the store, not a namespace.
 async fn run_admin_store_probe(
     kind: CommandKind,
     config_path: &Path,
     args: AdminStoreProbeArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -475,8 +485,8 @@ async fn run_admin_store_probe(
     })
 }
 
-/// The jobs to host, in the order the runner keys them, with no repeats.
-/// An empty selection is every job this host knows how to run.
+/// Returns the selected jobs in a stable order without duplicates.
+/// An empty selection enables every available job.
 fn selected_jobs(requested: &[MaintenanceJobArg]) -> Vec<MaintenanceJobId> {
     MaintenanceJobArg::value_variants()
         .iter()

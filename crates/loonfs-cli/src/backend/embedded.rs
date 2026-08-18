@@ -66,8 +66,7 @@ pub(crate) struct EmbeddedBackend {
 /// step that raced another writer's debt. Past that the error surfaces.
 const MAX_MAINTENANCE_RECOVERIES: usize = 2;
 
-/// One job `admin run` was asked to host, and the executor registered under
-/// it.
+/// A selected maintenance job and its executor.
 type HostedJob = (MaintenanceJobId, Arc<dyn MaintenanceJob>);
 
 impl EmbeddedBackend {
@@ -970,8 +969,7 @@ mod tests {
             .get()
     }
 
-    /// The four jobs `admin run` hosts by default, in the order it drives
-    /// them.
+    /// Jobs selected when `admin maintenance run` omits `--job`.
     fn every_job() -> [MaintenanceJobId; 4] {
         [
             MaintenanceJobId::METADATA,
@@ -1023,10 +1021,8 @@ mod tests {
         (config, store)
     }
 
-    /// A drain is the assigned host's catch-up: it walks every
-    /// `{job, namespace}` key it was given to a settled conclusion and does
-    /// the work it finds on the way. Two namespaces here, one with an index
-    /// to build and one with none at all.
+    /// Verifies that a drain settles every assigned job and namespace. One
+    /// namespace has an index to build, and the other does not.
     #[tokio::test]
     async fn a_drain_settles_every_assigned_key_and_does_the_work_it_finds() {
         let temp_dir = tempdir().expect("create temp dir");
@@ -1401,7 +1397,7 @@ mod tests {
         // More publishes than the WAL backpressure cap: the Enabled policy
         // must keep stepping the tail down so no write ever stalls on
         // `maintenance_required` (each stall used to require a manual
-        // `loonfs admin step`).
+        // `loonfs admin maintenance step`).
         for index in 0..140 {
             target
                 .backend

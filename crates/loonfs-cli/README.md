@@ -39,6 +39,10 @@ Global flags
     from the 1 a command that actually ran and failed reports, so the two
     stay separable without reading the message
 
+  --no-retry
+    Disable bounded retry of `server_busy`, `commit_queue_full`,
+    `shutting_down`, and transport errors
+
   --no-input
     Never prompt; fail instead when a value would be asked for
 
@@ -55,11 +59,10 @@ Global flags
 Selectors
   Every command that reaches a store accepts:
     --profile <name>
-      Profile to run against, defaulting to the configured default profile
-
-    --no-retry
-      Disable bounded retry of `server_busy`, `commit_queue_full`,
-      `shutting_down`, and transport errors
+      Profile to use. If omitted, the CLI uses LOONFS_PROFILE and then the
+      configured default.
+    LOONFS_PROFILE=<name>
+      Default profile for the current environment.
 
   Commands that address one namespace also accept:
     --namespace <name>
@@ -78,9 +81,9 @@ Selectors
       conflict
 
 Setup and configuration
-  loonfs init [name] [profile-options]
-    Create the config file with a first profile and make it the default;
-    fails when the config file already exists
+  loonfs init
+    Interactively create the config file with a first profile and make it
+    the default; fails when the config file already exists
 
   loonfs config path
     Print the config file this invocation uses and which rule chose it
@@ -98,8 +101,9 @@ Config file location
     3. $XDG_CONFIG_HOME/loonfs/config.toml, when XDG_CONFIG_HOME names an
        absolute directory
     4. ~/.loonfs/config.toml
-  Namespace selection uses --namespace, then LOONFS_NAMESPACE=<name>, then
-  the profile default.
+  Profile selection uses --profile, then LOONFS_PROFILE=<name>, then the
+  configured default. Namespace selection uses --namespace, then
+  LOONFS_NAMESPACE=<name>, then the profile default.
 
   A path given to --config or LOONFS_CONFIG is the file this invocation
   uses whether or not it is there yet, and `loonfs init` creates the
@@ -116,14 +120,20 @@ Config file location
   preferred path to move it to.
 
 Profile management
-  loonfs profile create <name> [profile-options]
-    Add a profile to the config file
+  loonfs profile create s3 <name> [s3-options]
+  loonfs profile create r2 <name> [r2-options]
+  loonfs profile create gcs <name> [gcs-options]
+  loonfs profile create azure <name> [azure-options]
+  loonfs profile create local <name> [local-options]
+  loonfs profile create remote <name> [remote-options]
+    Add a provider-specific profile to the config file
 
   loonfs profile list
     List configured profiles and mark the default
 
   loonfs profile show [name]
-    Show one profile with secrets redacted, or the default profile
+    Show one profile with secrets redacted. Without a name, show the profile
+    selected by LOONFS_PROFILE or the configured default.
 
   loonfs profile update <name> [update-options]
     Change fields of an existing profile; with no flags on a terminal it
@@ -139,6 +149,9 @@ Namespace management
   loonfs namespace create <namespace>
     Create a new empty namespace
 
+  loonfs namespace show [namespace]
+    Show the selected namespace's status
+
   loonfs namespace fork <source> <new-namespace>
     Fork a namespace into a new one; O(1), no bytes copied
 
@@ -151,7 +164,7 @@ Namespace management
     Set the default namespace for a profile
 
   loonfs current
-    Show the active profile and its default namespace
+    Show the selected profile and namespace
 
 Reading
   loonfs ls [path] [--limit <n> | --all] [--cursor <cursor>] [--jsonl]
@@ -257,29 +270,24 @@ History and recovery
     retained history when --after is omitted
 
 Maintenance
-  loonfs admin run --namespace <ns>... [--job <job>...] [--drain] [--max-steps <n>] [--deadline-ms <ms>]
-    This command is embedded-only; remote servers host background
-    maintenance themselves
-    Host maintenance for the namespaces named here, continuously until a
-    signal; nothing discovers namespaces, so at least one --namespace is
-    required. --job selects `metadata`, `core-gc`, `grep-index`, or
-    `grep-gc`, all four when omitted. --drain catches every assigned
-    namespace up and
-    exits instead, which suits cron, and --max-steps or --deadline-ms bound
-    the drain, exit nonzero, and report where every namespace stopped
+  loonfs admin maintenance run --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]
+    Run maintenance for explicitly named namespaces in embedded mode. The
+    command runs until stopped. With --drain, it finishes the current
+    assignments and exits. --job selects metadata, core-gc, grep-index, or
+    grep-gc; omitting it selects all four. --max-steps and --deadline-ms
+    bound a drain.
 
-  loonfs admin step [--max-wal-tail-segments <n>] [--retention] [--gc]
-    Run one core maintenance step (WAL flush and metadata folds), with
-    --retention and --gc adding that work after the flush;
-    --max-wal-tail-segments sets how many segments the tail needs before the
-    step flushes it, in place of the server's default
+  loonfs admin maintenance step [--max-wal-tail-segments <n>] [--retention] [--gc]
+    Run one metadata maintenance step. --retention and --gc add retention
+    advancement and garbage collection. --max-wal-tail-segments overrides
+    the default flush threshold.
 
-  loonfs admin flush
-    Flush the WAL tail into a durable segment, whatever the tail's length
+  loonfs admin maintenance flush
+    Flush the current WAL tail regardless of its length.
 
-  loonfs admin retention-advance
-    Advance the retention floor, surrendering replay history below the
-    flushed manifest head; file revision history is never affected
+  loonfs admin retention advance
+    Advance the retention floor. This removes change-feed replay history
+    below the flushed manifest head but does not remove file revisions.
 
   loonfs admin gc [--grace-window-ms <ms>] [--max-objects <n>] [--cursor <token>]
     Run mark-and-sweep collection, looping bounded passes through
@@ -290,96 +298,88 @@ Maintenance
     reports each pass on standard error as it lands, and the summary says
     what the pass kept and mostly why; --json carries every retention reason
 
-  loonfs admin store-probe
-    Prove the profile's object store honours the contract LoonFS depends on
-    (create-if-absent, compare-and-swap, visibility, listing, ranged reads)
-    and print one line per check; the run writes and deletes objects under a
-    scratch prefix it empties afterwards, and exits nonzero when any check
-    failed
+  loonfs admin store probe
+    Test the object-store operations LoonFS requires. The command creates
+    and removes temporary objects, prints each result, and exits nonzero if
+    any check fails.
 
-  loonfs admin checkpoint --name <label> [--ttl-ms <ms>]
-    Pin the namespace's current state under a named checkpoint; --ttl-ms
-    expires the pin, and an omitted TTL holds it until release
+  loonfs admin checkpoint create --name <label> [--ttl-ms <ms>]
+    Pin the namespace's current state. --ttl-ms sets an expiry; without it,
+    the checkpoint remains until release.
 
-  loonfs admin checkpoint-list [--limit <n>] [--cursor <cursor>]
-    List active checkpoint pins in checkpoint-id order. By default the
-    command follows every page. Use --limit or --cursor to request one page;
-    next_cursor is printed when another page is available. Expired pins stay
-    visible until collection releases them
+  loonfs admin checkpoint list [--limit <n>] [--cursor <cursor>]
+    List active checkpoints in ID order. By default the command follows all
+    pages. --limit or --cursor requests one page and prints next_cursor when
+    more results are available. Expired checkpoints remain visible until
+    garbage collection removes them.
 
-  loonfs admin checkpoint-release <checkpoint-id>
+  loonfs admin checkpoint release <checkpoint-id>
     Release a checkpoint pin
 
-  loonfs admin index-enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
-    Enable the gram content index and wait for its backfill to reach the
-    sequence the namespace was at when the command started; --no-wait
-    returns as soon as the index is enabled, and --max-steps or --deadline-ms
-    give up, exit nonzero, and report how far the index got
+  loonfs admin index enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
+    Enable the gram index and wait until it reaches the namespace sequence
+    captured at startup. --no-wait returns after enabling it. --max-steps
+    and --deadline-ms bound the wait and report incomplete progress.
 
-  loonfs admin index-status
-    Report where the gram content index is: disabled, backfilling, or active
-    at a watermark
+  loonfs admin index status
+    Show whether the gram index is disabled, backfilling, or active.
 
-  loonfs admin index-disable
+  loonfs admin index disable
     Disable the gram content index
 
-  loonfs admin index-gc [--max-objects <n>]
-    Collect the namespace's unreferenced gram-index objects, looping bounded
-    passes through completion; --max-objects spends at most that many reads
-    and returns after one pass
+  loonfs admin index gc [--max-objects <n>]
+    Remove unreferenced gram-index objects. By default the command follows
+    all bounded passes. --max-objects runs one pass with that read limit.
 
-Profile options
+Profile create options
   Used by:
-    loonfs init
-    loonfs profile create
+    loonfs profile create <provider> <name>
 
-  A field the store requires and the command line omits is asked for on a
-  terminal, and is an error under --no-input or --json. Secrets fall back to
-  the standard environment variables, so a quickstart never has to put them
-  in argv. A variable a provider has no use for is ignored: an exported
-  AWS key does not make a gcp-gcs profile fail as though --access-key-id
-  had been passed. A flag actually typed on the command line is still
-  rejected when it does not apply.
-
-  Mode:
-    --mode <embedded|remote>
+  If a required value is missing, the CLI prompts for it on a terminal. Under
+  --no-input or --json, the command returns an error instead. Each provider
+  exposes only its own flags. S3 and R2 use ambient credentials by default,
+  reading AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY when the store is
+  opened. Passing static credential flags stores those credentials in the
+  profile.
 
   Every embedded profile:
-    --store-kind <local-fs|aws-s3|cloudflare-r2|gcp-gcs|azure-abs>
     --key-prefix <prefix>              optional
 
-  local-fs store:
+  loonfs profile create local:
     --root <path>
 
-  aws-s3 store:
+  loonfs profile create s3:
     --bucket <name>
     --region <region>
-    --access-key-id <id>               env AWS_ACCESS_KEY_ID
-    --secret-access-key <secret>       env AWS_SECRET_ACCESS_KEY
-    --session-token <token>            optional, env AWS_SESSION_TOKEN
+    --credential-source <ambient|static>
+    --access-key-id <id>               static credentials only
+    --secret-access-key <secret>       static credentials only
+    --session-token <token>            optional static session token
     --endpoint-url <url>               optional
     --force-path-style                 optional
 
-  cloudflare-r2 store:
+  loonfs profile create r2:
     --bucket <name>
     --account-id <id>
     --endpoint-url <url>
-    --access-key-id <id>               env AWS_ACCESS_KEY_ID
-    --secret-access-key <secret>       env AWS_SECRET_ACCESS_KEY
+    --credential-source <ambient|static>
+    --access-key-id <id>               static credentials only
+    --secret-access-key <secret>       static credentials only
 
-  gcp-gcs store:
+  loonfs profile create gcs:
     --bucket <name>
     --service-account-key-path <path>
 
-  azure-abs store:
+  loonfs profile create azure:
     --account-name <name>
     --container-name <name>
     --access-key <key>
     --endpoint-url <url>               optional
 
-  Remote profile:
+  loonfs profile create remote:
     --server-url <url>
-    --auth-token <token>               optional, env LOONFS_AUTH_TOKEN
+    --auth-token <token>               optional; otherwise read
+                                       LOONFS_AUTH_TOKEN when used
     --ca-cert-path <path>              optional, PEM bundle of extra
                                        certificate authorities to trust for
                                        an https server url
@@ -406,6 +406,7 @@ Update options
   aws-s3 profile updates:
     --bucket <name>
     --region <region>
+    --credential-source <ambient|static>
     --access-key-id <id>
     --secret-access-key <secret>
     --session-token <token>
@@ -415,6 +416,7 @@ Update options
     --bucket <name>
     --account-id <id>
     --endpoint-url <url>
+    --credential-source <ambient|static>
     --access-key-id <id>
     --secret-access-key <secret>
 
@@ -590,11 +592,9 @@ Behavior notes
   file by file: its byte count moves through a large file as that file is
   read, and advances a whole file at a time over the small ones
 
-  An embedded profile's edit latency grows with the WAL tail between
-  maintenance passes: every write appends, and reads replay what has not
-  been folded into the metadata yet, so a namespace that is written to and
-  never maintained gets slower. Embedded profiles run maintenance manually
-  — `loonfs admin run --namespace <ns>` hosts it, `--drain` catches up and
-  exits, and `loonfs admin step` runs one pass — while a server runs its
-  own automatically for the namespaces it serves
+  Embedded profiles do not run continuous maintenance. Run
+  `loonfs admin maintenance run --namespaces <ns>` for ongoing maintenance,
+  or `loonfs admin maintenance step` for one step. Without maintenance, the
+  WAL tail grows and reads become slower. Servers maintain the namespaces
+  they use automatically.
 ```

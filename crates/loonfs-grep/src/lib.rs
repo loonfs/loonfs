@@ -39,15 +39,10 @@
 //! or miss a rename without ever returning a wrong match — and it is why
 //! per-call reads suffice where a pinned snapshot once seemed necessary.
 //!
-//! **Three hosting modes, one protocol.** The reference server composes
-//! grep in-process and registers [`GrepMaintenanceJob`] with the writer's
-//! maintenance runner, nudged by the publish observer; a query-serving
-//! deployment answers searches while a detached `loonfs admin run` host
-//! registers that same job for the namespaces it was assigned; a one-shot
-//! host (the CLI's `index-enable`) runs the job's steps itself, until the
-//! index reaches a sequence it captured before it started. All three run
-//! the identical durable protocol, so which one is running is a deployment
-//! choice, not a format.
+//! [`GrepMaintenanceJob`] can run in a server or in a dedicated
+//! `loonfs admin maintenance run` process. The CLI's `index enable` command
+//! can also run it until the index reaches a captured sequence. All three use
+//! the same durable state and update protocol.
 //!
 //! **An extension owns its keyspace and its garbage.** Grep's durable state
 //! lives under each namespace's `extensions/grep/` prefix and is

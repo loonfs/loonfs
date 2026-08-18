@@ -7,7 +7,7 @@ use super::profile_config::{
     create_profile_spec_from_create, has_update_flags,
 };
 use crate::args::{
-    CommandKind, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior,
+    CommandKind, ProfileCommand, ProfileCreateCommand, ProfileUpdateArgs, RuntimeBehavior,
 };
 use crate::config::{
     load_config, load_config_for_repair, load_config_if_exists, mutate_config, save_config_table,
@@ -30,7 +30,9 @@ pub(crate) fn run_profile_command(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        ProfileCommand::Create(args) => run_profile_create(kind, config_path, args, runtime),
+        ProfileCommand::Create { provider } => {
+            run_profile_create(kind, config_path, *provider, runtime)
+        }
         ProfileCommand::List => {
             let config = load_config_if_exists(config_path)
                 .map_err(|error| fail(kind, None, None, error))?;
@@ -56,7 +58,7 @@ pub(crate) fn run_profile_command(
                 data: CommandData::Profile(redacted),
             })
         }
-        ProfileCommand::Update(args) => run_profile_update(kind, config_path, args, runtime),
+        ProfileCommand::Update(args) => run_profile_update(kind, config_path, *args, runtime),
         ProfileCommand::Delete { name } => run_profile_delete(kind, config_path, &name, runtime),
         ProfileCommand::Use { name } => run_profile_use(kind, config_path, &name),
     }
@@ -65,13 +67,12 @@ pub(crate) fn run_profile_command(
 fn run_profile_create(
     kind: CommandKind,
     config_path: &Path,
-    args: ProfileCreateArgs,
+    command: ProfileCreateCommand,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let name = args.name.clone();
+    let (name, spec) = create_profile_spec_from_create(command);
     let result = (|| -> Result<(String, ProfileConfig), CliError> {
-        let profile =
-            build_profile_from_create_spec(create_profile_spec_from_create(args), runtime)?;
+        let profile = build_profile_from_create_spec(spec, runtime)?;
         mutate_config(config_path, |config| add_profile(config, &name, profile))
     })()
     .map_err(|error| fail(kind, Some(name.clone()), None, error))?;

@@ -162,63 +162,41 @@ segments, and publish the cursor (the last inode consumed) and segment set
 in one root CAS. The completing step changes the lifecycle to `active` and
 releases the checkpoint.
 
-The grep index is background maintenance like any other, so it runs under
-the runtime's maintenance runner rather than a scheduler of its own. A host
-registers one `MaintenanceJob` — build one bounded unit, and fold one when
-there is nothing left to build — and the runner owns everything about when
-that job runs: one pending key per `{job, namespace}`, coalescing, the one
-permit pool `max_concurrent_maintenance` sizes across every maintenance
-family, per-key exponential backoff capped at one second, and a periodic
-reconciliation sweep that asks the job's probe whether a key it admitted
-still has work. A poisoned root therefore backs off alone and cannot delay
-a sibling namespace, and no permit is held by a namespace with nothing to do.
+The grep index uses the runtime's existing maintenance runner. A host
+registers one `MaintenanceJob`. Each step builds one bounded batch, or
+reorganizes one batch when there is nothing left to build. The runner handles
+deduplication, concurrency, retries, and periodic checks. A failure for one
+namespace does not delay another namespace.
 
-The job's probe is the cheap question the sweep and the query path both ask:
-read the grep root, and — only for an active root sitting at a commit
-boundary — ask the change feed for one commit after its watermark. Two small
-reads answer whether the index trails its namespace.
+The periodic check reads the grep root. If an active root is at a commit
+boundary, it also asks the change feed for the next commit. These reads show
+whether the index is behind the namespace.
 
-A server that maintains the index registers that job on its writer, and
-registering it is all the wiring there is: the job says on the maintenance
-trait that publications concern it, so the runtime nudges it after every
-publication the writer commits without the host connecting anything to the
-write path. Enable nudges the namespace so the backfill starts at once, and
-a grep query nudges a namespace whose probe says it is behind, which is what
-resumes durable work after a restart without a scan. Disable is one durable
-compare-and-swap and nothing else: a step already running loses its own root
-publication to it, retries, reads a disabled root, and the runner forgets the
-namespace. A server that only serves queries registers no job and refuses
-the routes that would mutate a grep root.
+A server configured to maintain the index registers this job with its writer.
+Enabling the index schedules the first backfill. Publications and queries that
+find a stale index schedule later work. This allows maintenance to resume
+after a restart without listing every namespace.
 
-A library-embedded host (the CLI's embedded mode) schedules nothing, so
-enabling the index is the schedule: `loonfs admin index-enable` captures one
-namespace sequence before it starts — the target a fresh backfill's
-checkpoint pinned, or the namespace's current head for an index that is
-already active — and then runs the same job's bounded steps itself until the
-index has built through that sequence. It stops there even if writes keep
-landing, so a busy namespace cannot keep the command running; `--no-wait`
-skips the waiting entirely, and `--max-steps` and `--deadline-ms` bound it,
-reporting how far the index got and exiting nonzero rather than pretending
-to have finished. Re-running enable on an already-enabled namespace is how
-an embedded operator advances a lagging index. Between enables, small write
-tails are served by the query-time exhaustive tail scan within its budget.
+Disabling the index updates its root with one compare-and-swap. An in-progress
+step that loses that race reads the disabled root and stops. A query-only
+server does not register the maintenance job and rejects index mutations.
 
-Automatic maintenance covers the namespaces a process touches and the ones a
-host is explicitly assigned, and `loonfs admin run --namespace <id>` is how a
-namespace nobody is writing to gets assigned. It opens an embedded runtime,
-hosts that runtime's runner, registers this job beside the runtime's own, and
-tells the runner about every assigned key at start-up and again on an
-interval — the runner forgets a key its probe found idle, which is right for
-a namespace merely touched and not enough for one an operator named. Repeat
-`--job grep-index` to narrow the host to this job. `--drain` catches the
-assignment up and exits instead of hosting until a signal, bounded by
-`--max-steps` and `--deadline-ms`, and reports where every key stopped. A
-namespace with no grep root settles `not_enabled`, so assigning one costs a
-read and nothing else. That command is also the whole detached deployment
-story: the index needs no host of its own, because a process that serves
-nothing and maintains assigned namespaces is what `admin run` already is.
-Grep has no private poller, no private timer, and no private configuration
-file; it never lists a namespace prefix.
+Embedded CLI profiles do not run background maintenance. The
+`loonfs admin index enable` command captures a target sequence and runs
+bounded maintenance steps until the index reaches it. Later writes do not
+move that target, so the command can finish on an active namespace.
+`--no-wait` returns after enabling the index. `--max-steps` and
+`--deadline-ms` limit how long the command works and report incomplete
+progress as an error. Running the command again advances an index that has
+fallen behind. Queries scan a bounded unindexed tail between runs.
+
+Automatic maintenance covers namespaces used by the current process. To
+maintain an inactive namespace, assign it with
+`loonfs admin maintenance run --namespaces <id>`. Use `--job grep-index` to
+run only index maintenance. Use `--drain` to complete the current assignment
+and exit. `--max-steps` and `--deadline-ms` limit a drain. A namespace without
+a grep index returns `not_enabled` after one read. No separate grep daemon is
+required.
 
 Once active, build steps read the change feed after `built_through_seq` as
 semantic events, collect the file revisions those events published, read
@@ -230,16 +208,13 @@ what a query returns without changing a posting. Work per step is budgeted
 by files and bytes (defaults 256 files or 64 MiB), and every watermark
 advance shares one root CAS with the segment set that implements it.
 
-Two rules keep the cycle honest:
+Two rules matter:
 
-- **Index building never rides core maintenance.** Metadata steps flush and
-  reorganize core state only. Grep build and reorganize steps are their own
-  job under the same runner, sharing its admission and its permits but never
-  its steps, and freshness between them is the query path's job.
-- **Retention may outrun the index.** The independent worker does not hold
-  the core WAL floor behind `built_through_seq`. If the change feed reports
-  that retention removed required history, the worker starts a fresh
-  checkpointed backfill instead of guessing across the gap.
+- **Index work is separate from metadata maintenance.** Both use the same
+  runner and concurrency limit, but they run as different jobs.
+- **Retention may advance past the index.** The index does not hold back the
+  WAL retention floor. If required change history has been removed, the index
+  starts a new checkpointed backfill.
 
 When delta runs accumulate past the same threshold shape the
 metadata families use, a reorganization consumes them. This is the same
@@ -305,27 +280,20 @@ invisible to reads:
   segment of the reorganization, fixed when it starts so a resumed
   reorganization keeps its identity.
 
-Enabling the index on a namespace that already has data starts a
-backfill: the worker creates an expiring user checkpoint and a root cursor
-walks the files that checkpoint pins, in inode order across steps, indexing
-as it goes. While lifecycle is `backfilling` the index is not yet
-materialized and queries are refused with the feature named; when the walk
-completes, lifecycle becomes `active`, the checkpoint is released, and the
-watermark takes over. Two answers mean the basis is gone — the enumeration
-reporting its checkpoint no longer pins a manifest, and the feed reporting
-the watermark below the retention floor — and both discard the incomplete
-projection and start again from a fresh checkpoint.
+Enabling the index on a namespace with existing data starts a backfill. The
+worker creates an expiring checkpoint and scans the files pinned by that
+checkpoint in inode order. Queries are unavailable while the index is
+`backfilling`. When the scan finishes, the index becomes `active`, releases
+the checkpoint, and begins tracking the change-feed watermark. If the
+checkpoint or required change history disappears, the worker discards the
+incomplete index and starts a new backfill.
 
-Grep garbage collection is also explicit and per namespace. It is never an
-automatic job: `loonfs admin index-gc` asks for one namespace's pass and
-loops its cursor, and the server exposes
-`POST /v0/admin/namespaces/{ns}/grep/index/gc`, a sibling of core's explicit
-per-namespace GC endpoint. Pointing that operation at an absent or tombstoned
-namespace reaps its aged `extensions/grep/` state. The core namespace head's
-deleted tombstone is already the absorbing gate: enable refuses it, so pointer
-deletion under a reverified tombstone needs no grep-specific condemned state.
-The index job never collects: a build or fold step writes and publishes, and
-reclaiming what it orphaned is a separate operation somebody asks for.
+Grep garbage collection is explicit and runs per namespace. The CLI command
+is `loonfs admin index gc`; the server endpoint is
+`POST /v0/admin/namespaces/{ns}/grep/index/gc`. The operation can remove old
+grep state for a missing or deleted namespace after rechecking that state is
+safe to delete. Index build and reorganization steps never perform garbage
+collection.
 
 Every candidate manifest is written under a freshly minted id, so an
 identical rebuild claims a new object rather than adopting the one an earlier
@@ -475,7 +443,6 @@ Following the segment-format convention, two different contracts:
   common substrings and sharpens selectivity; it needs a
   frequency table derived from real corpora, and it is exactly
   the kind of change the feature version exists for.
-- **Richer text queries.** A tokenized full-text index would be a
-  sibling feature, but every seam here — the query profile, the
-  extension keyspace, the derived segment family, the WAL-driven build
-  step — is the seam it would reuse.
+- **Richer text queries.** A tokenized full-text index could reuse the query
+  profile, extension keyspace, derived segment format, and WAL-driven build
+  process.

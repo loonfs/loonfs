@@ -10,9 +10,50 @@ fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
     loonfs_api::public_inode_id::decode(value).map_err(|error| error.to_string())
 }
 
+const TOP_LEVEL_HELP_TEMPLATE: &str = "\
+{before-help}{about-with-newline}
+{usage-heading} {usage}
+
+Filesystem:
+  ls          List a directory
+  cat         Print a file's content to stdout
+  grep        Search file content through the grep index
+  get         Download a file or directory tree
+  put         Upload a file or directory tree
+  restore     Restore a prior file revision
+  undelete    Recover a deleted file or directory
+  mkdir       Create a directory
+  rm          Delete a file or directory
+  mv          Move or rename a path
+  cp          Copy a file or directory tree
+  annotate    Write and remove attributes
+
+Context and configuration:
+  init        Interactively create a config and first profile
+  profile     Manage connection profiles
+  namespace   Manage namespaces
+  use         Set a profile's default namespace
+  current     Show the selected profile and namespace
+  config      Inspect the CLI config file
+
+Inspection:
+  stat        Describe one visible path or inode
+  revisions   List a file's revision history
+  trash       List recoverable deletions
+  changes     List committed changes
+  completion  Print a shell completion script
+  version     Print version and build metadata
+
+Administration:
+  admin       Run administrative operations
+
+Options:
+{options}{after-help}\
+";
+
 /// Defines the `loonfs` command-line interface.
 #[derive(Debug, Parser)]
-#[command(name = "loonfs", version)]
+#[command(name = "loonfs", version, help_template = TOP_LEVEL_HELP_TEMPLATE)]
 pub(crate) struct Cli {
     /// Config file to use, ahead of LOONFS_CONFIG and the default location.
     #[arg(
@@ -25,6 +66,10 @@ pub(crate) struct Cli {
     /// Emit machine-readable JSON instead of human output.
     #[arg(long, global = true)]
     pub(crate) json: bool,
+    /// Disable bounded retry of `server_busy`, `commit_queue_full`,
+    /// `shutting_down`, and transport errors.
+    #[arg(long, global = true)]
+    pub(crate) no_retry: bool,
     /// Never prompt; fail instead when input would be required.
     #[arg(long, global = true)]
     pub(crate) no_input: bool,
@@ -52,8 +97,8 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Create the config file and a first profile.
-    Init(InitArgs),
+    /// Interactively create the config file and a first profile.
+    Init,
     /// Manage connection profiles (embedded stores and remote servers).
     Profile {
         #[command(subcommand)]
@@ -68,7 +113,7 @@ pub(crate) enum Command {
     /// This sets the interactive default; concurrent automation should pass
     /// `--namespace` or set `LOONFS_NAMESPACE`.
     Use(NamespaceUseArgs),
-    /// Show the active profile and its default namespace.
+    /// Show the selected profile and namespace.
     Current(CurrentArgs),
     /// List a directory.
     Ls(FilesystemLsArgs),
@@ -126,84 +171,13 @@ pub(crate) struct CompletionArgs {
     pub(crate) shell: Option<clap_complete::Shell>,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct InitArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: Option<String>,
-    /// Profile mode to configure.
-    #[arg(long, value_name = "embedded|remote")]
-    pub mode: Option<String>,
-    /// Embedded object-store provider.
-    #[arg(long)]
-    pub store_kind: Option<String>,
-    /// Local filesystem store root.
-    #[arg(long, value_hint = ValueHint::DirPath)]
-    pub root: Option<String>,
-    /// Optional object-key prefix within the provider.
-    #[arg(long)]
-    pub key_prefix: Option<String>,
-    /// S3, R2, or GCS bucket name.
-    #[arg(long)]
-    pub bucket: Option<String>,
-    /// AWS region.
-    #[arg(long)]
-    pub region: Option<String>,
-    /// AWS or R2 credential source.
-    #[arg(long, value_name = "ambient|static")]
-    pub credential_source: Option<String>,
-    /// AWS or R2 static access key id.
-    #[arg(long)]
-    pub access_key_id: Option<String>,
-    /// AWS or R2 static secret access key.
-    #[arg(long)]
-    pub secret_access_key: Option<String>,
-    /// Custom provider endpoint URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub endpoint_url: Option<String>,
-    /// Optional static AWS session token.
-    #[arg(long)]
-    pub session_token: Option<String>,
-    /// Use path-style S3 addressing.
-    #[arg(long)]
-    pub force_path_style: bool,
-    /// Cloudflare R2 account id.
-    #[arg(long)]
-    pub account_id: Option<String>,
-    /// Azure storage account name.
-    #[arg(long)]
-    pub account_name: Option<String>,
-    /// Azure blob container name.
-    #[arg(long)]
-    pub container_name: Option<String>,
-    /// Azure storage access key.
-    #[arg(long)]
-    pub access_key: Option<String>,
-    /// Path to a GCP service-account key.
-    #[arg(long, value_hint = ValueHint::FilePath)]
-    pub service_account_key_path: Option<String>,
-    /// Remote LoonFS server URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub server_url: Option<String>,
-    /// Remote bearer token to store; omitted profiles use LOONFS_AUTH_TOKEN at request time.
-    #[arg(long)]
-    pub auth_token: Option<String>,
-    /// PEM bundle of extra certificate authorities to trust for an
-    /// https server URL, when a private CA issued the certificate.
-    #[arg(long, value_hint = ValueHint::FilePath)]
-    pub ca_cert_path: Option<String>,
-    /// Actor kind to save in the profile. Must be used with --actor-id.
-    /// Defaults to service/loonfs-cli when no actor is configured.
-    #[arg(long, value_enum)]
-    pub actor_kind: Option<ActorKindArg>,
-    /// Actor ID to save in the profile. Must be used with --actor-kind.
-    #[arg(long)]
-    pub actor_id: Option<String>,
-}
-
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProfileCommand {
     /// Add a profile to the config file.
-    Create(ProfileCreateArgs),
+    Create {
+        #[command(subcommand)]
+        provider: Box<ProfileCreateCommand>,
+    },
     /// List configured profiles.
     List,
     /// Show one profile (secrets redacted).
@@ -212,7 +186,7 @@ pub(crate) enum ProfileCommand {
         name: Option<String>,
     },
     /// Update fields of an existing profile.
-    Update(ProfileUpdateArgs),
+    Update(Box<ProfileUpdateArgs>),
     /// Delete a profile from the config file.
     Delete {
         #[arg(value_hint = ValueHint::Other)]
@@ -225,78 +199,166 @@ pub(crate) enum ProfileCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProfileCreateCommand {
+    /// Create an AWS S3-backed embedded profile.
+    S3(ProfileCreateS3Args),
+    /// Create a Cloudflare R2-backed embedded profile.
+    R2(ProfileCreateR2Args),
+    /// Create a Google Cloud Storage-backed embedded profile.
+    Gcs(ProfileCreateGcsArgs),
+    /// Create an Azure Blob Storage-backed embedded profile.
+    Azure(ProfileCreateAzureArgs),
+    /// Create a local-filesystem-backed embedded profile.
+    Local(ProfileCreateLocalArgs),
+    /// Create a remote-server profile.
+    Remote(ProfileCreateRemoteArgs),
+}
+
 #[derive(Debug, Args)]
-pub(crate) struct ProfileCreateArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    /// Profile mode to configure.
-    #[arg(long, value_name = "embedded|remote")]
-    pub mode: Option<String>,
-    /// Embedded object-store provider.
-    #[arg(long)]
-    pub store_kind: Option<String>,
-    /// Local filesystem store root.
-    #[arg(long, value_hint = ValueHint::DirPath)]
-    pub root: Option<String>,
-    /// Optional object-key prefix within the provider.
-    #[arg(long)]
-    pub key_prefix: Option<String>,
-    /// S3, R2, or GCS bucket name.
-    #[arg(long)]
-    pub bucket: Option<String>,
-    /// AWS region.
-    #[arg(long)]
-    pub region: Option<String>,
-    /// AWS or R2 credential source.
-    #[arg(long, value_name = "ambient|static")]
-    pub credential_source: Option<String>,
-    /// AWS or R2 static access key id.
-    #[arg(long)]
-    pub access_key_id: Option<String>,
-    /// AWS or R2 static secret access key.
-    #[arg(long)]
-    pub secret_access_key: Option<String>,
-    /// Custom provider endpoint URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub endpoint_url: Option<String>,
-    /// Optional static AWS session token.
-    #[arg(long)]
-    pub session_token: Option<String>,
-    /// Use path-style S3 addressing.
-    #[arg(long)]
-    pub force_path_style: bool,
-    /// Cloudflare R2 account id.
-    #[arg(long)]
-    pub account_id: Option<String>,
-    /// Azure storage account name.
-    #[arg(long)]
-    pub account_name: Option<String>,
-    /// Azure blob container name.
-    #[arg(long)]
-    pub container_name: Option<String>,
-    /// Azure storage access key.
-    #[arg(long)]
-    pub access_key: Option<String>,
-    /// Path to a GCP service-account key.
-    #[arg(long, value_hint = ValueHint::FilePath)]
-    pub service_account_key_path: Option<String>,
-    /// Remote LoonFS server URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub server_url: Option<String>,
-    /// Remote bearer token to store; omitted profiles use LOONFS_AUTH_TOKEN at request time.
-    #[arg(long)]
-    pub auth_token: Option<String>,
-    /// PEM bundle of extra certificate authorities to trust for an
-    /// https server URL, when a private CA issued the certificate.
-    #[arg(long, value_hint = ValueHint::FilePath)]
-    pub ca_cert_path: Option<String>,
+pub(crate) struct ProfileCreateActorArgs {
     /// Actor kind to save in the profile. Must be used with --actor-id.
     /// Defaults to service/loonfs-cli when no actor is configured.
     #[arg(long, value_enum)]
     pub actor_kind: Option<ActorKindArg>,
     /// Actor ID to save in the profile. Must be used with --actor-kind.
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub actor_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateS3Args {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    /// S3 bucket name.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub bucket: Option<String>,
+    /// AWS region.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub region: Option<String>,
+    /// AWS credential source.
+    #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
+    pub credential_source: Option<String>,
+    /// Static access key id.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub access_key_id: Option<String>,
+    /// Static secret access key.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub secret_access_key: Option<String>,
+    /// Custom S3 endpoint URL.
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub endpoint_url: Option<String>,
+    /// Optional static session token.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub session_token: Option<String>,
+    /// Use path-style S3 addressing.
+    #[arg(long)]
+    pub force_path_style: bool,
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileCreateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateR2Args {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    /// R2 bucket name.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub bucket: Option<String>,
+    /// Cloudflare account id.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub account_id: Option<String>,
+    /// R2 endpoint URL.
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub endpoint_url: Option<String>,
+    /// R2 credential source.
+    #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
+    pub credential_source: Option<String>,
+    /// Static access key id.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub access_key_id: Option<String>,
+    /// Static secret access key.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub secret_access_key: Option<String>,
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileCreateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateGcsArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    /// GCS bucket name.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub bucket: Option<String>,
+    /// Path to a GCP service-account key.
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    pub service_account_key_path: Option<String>,
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileCreateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateAzureArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    /// Azure storage account name.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub account_name: Option<String>,
+    /// Azure blob container name.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub container_name: Option<String>,
+    /// Azure storage access key.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub access_key: Option<String>,
+    /// Custom Azure endpoint URL.
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub endpoint_url: Option<String>,
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileCreateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateLocalArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    /// Local filesystem store root.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    pub root: Option<String>,
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub key_prefix: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileCreateActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileCreateRemoteArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    /// Remote LoonFS server URL.
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub server_url: Option<String>,
+    /// Remote bearer token to store; omitted profiles use LOONFS_AUTH_TOKEN at request time.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub auth_token: Option<String>,
+    /// PEM bundle of extra certificate authorities to trust.
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    pub ca_cert_path: Option<String>,
+    #[command(flatten)]
+    pub actor: ProfileCreateActorArgs,
 }
 
 #[derive(Debug, Args)]
@@ -365,12 +427,15 @@ pub(crate) struct ProfileUpdateArgs {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ProfileSelectorArgs {
-    /// Profile to run against (defaults to the configured default profile).
+    /// Profile to run against. Precedence is `--profile`, `LOONFS_PROFILE`,
+    /// then the configured default profile.
     #[arg(long, value_hint = ValueHint::Other)]
     pub profile: Option<String>,
-    /// Disable bounded retry of `server_busy`, `commit_queue_full`,
-    /// `shutting_down`, and transport errors.
-    #[arg(long)]
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct RequestBehaviorArgs {
+    #[arg(from_global)]
     pub no_retry: bool,
 }
 
@@ -382,6 +447,8 @@ pub(crate) struct TargetSelectorArgs {
     /// `LOONFS_NAMESPACE`, then the profile default.
     #[arg(long, value_hint = ValueHint::Other)]
     pub namespace: Option<String>,
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -417,6 +484,8 @@ impl From<ActorKindArg> for loonfs_api::ActorKind {
 pub(crate) struct NamespaceUseArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub namespace: String,
 }
@@ -431,6 +500,8 @@ pub(crate) struct CurrentArgs {
 pub(crate) enum NamespaceCommand {
     /// Create a new empty namespace.
     Create(NamespaceCreateArgs),
+    /// Show a namespace's current status.
+    Show(NamespaceShowArgs),
     /// Permanently delete a namespace and retire its id.
     Delete(NamespaceDeleteArgs),
     /// Fork a namespace into a new one; O(1), no bytes copied.
@@ -438,9 +509,20 @@ pub(crate) enum NamespaceCommand {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct NamespaceShowArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Namespace to show; selection defaults apply when omitted.
+    #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
+    pub namespace_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: String,
 }
@@ -449,6 +531,8 @@ pub(crate) struct NamespaceCreateArgs {
 pub(crate) struct NamespaceDeleteArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: String,
     /// Delete only if the namespace head is still at this sequence.
@@ -463,6 +547,8 @@ pub(crate) struct NamespaceDeleteArgs {
 pub(crate) struct NamespaceForkArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub source: String,
     #[arg(value_hint = ValueHint::Other)]
@@ -821,82 +907,116 @@ pub(crate) struct ChangesArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AdminCommand {
-    /// Pin the namespace's current state under a named checkpoint.
-    Checkpoint(AdminCheckpointArgs),
-    /// List active checkpoint pins in checkpoint-id order.
-    CheckpointList(AdminCheckpointListArgs),
-    /// Release a checkpoint pin.
-    CheckpointRelease(AdminCheckpointReleaseArgs),
-    /// Flush the WAL tail into a durable segment.
-    Flush(AdminNamespaceArgs),
-    /// Advance the retention floor, surrendering replay history below the
-    /// flushed manifest head. File revision history is never affected.
-    RetentionAdvance(AdminNamespaceArgs),
-    /// Host maintenance in-process for assigned namespaces; this command is
-    /// embedded-only.
-    Run(AdminRunArgs),
-    /// Run one core maintenance step (WAL flush and metadata folds).
-    Step(AdminStepArgs),
+    /// Create, list, or release checkpoint pins.
+    Checkpoint {
+        #[command(subcommand)]
+        command: AdminCheckpointCommand,
+    },
+    /// Inspect and manage the gram content index.
+    Index {
+        #[command(subcommand)]
+        command: AdminIndexCommand,
+    },
+    /// Run or directly trigger maintenance work.
+    Maintenance {
+        #[command(subcommand)]
+        command: AdminMaintenanceCommand,
+    },
+    /// Manage retained replay history.
+    Retention {
+        #[command(subcommand)]
+        command: AdminRetentionCommand,
+    },
     /// Run a mark-and-sweep garbage-collection pass.
     Gc(AdminGcArgs),
-    /// Prove the profile's object store honours the contract LoonFS
-    /// depends on, and report what it found check by check.
-    StoreProbe(AdminStoreProbeArgs),
-    /// Enable the gram content index and wait for its backfill to reach the
-    /// sequence the namespace was at when this command started.
-    IndexEnable(AdminIndexEnableArgs),
-    /// Disable the gram content index.
-    IndexDisable(AdminNamespaceArgs),
-    /// Report where the gram content index is: disabled, backfilling, or
-    /// active at a watermark.
-    IndexStatus(AdminNamespaceArgs),
-    /// Collect the namespace's unreferenced gram-index objects.
-    IndexGc(AdminIndexGcArgs),
+    /// Inspect and manage the profile's object store.
+    Store {
+        #[command(subcommand)]
+        command: AdminStoreCommand,
+    },
 }
 
-/// Floor on `--poll-interval-ms`. A re-assertion is a nudge per assigned
-/// key and the runner answers each one by reading durable state, so a
-/// cadence below this buys nothing and only spends provider requests.
+#[derive(Debug, Subcommand)]
+pub(crate) enum AdminCheckpointCommand {
+    /// Pin the namespace's current state under a named checkpoint.
+    Create(AdminCheckpointArgs),
+    /// List active checkpoint pins in checkpoint-id order.
+    List(AdminCheckpointListArgs),
+    /// Release a checkpoint pin.
+    Release(AdminCheckpointReleaseArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AdminIndexCommand {
+    /// Enable the gram content index and wait for its backfill to reach the
+    /// sequence the namespace was at when this command started.
+    Enable(AdminIndexEnableArgs),
+    /// Disable the gram content index.
+    Disable(AdminNamespaceArgs),
+    /// Show whether the gram content index is disabled, backfilling, or active.
+    Status(AdminNamespaceArgs),
+    /// Collect the namespace's unreferenced gram-index objects.
+    Gc(AdminIndexGcArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AdminMaintenanceCommand {
+    /// Run maintenance for selected namespaces. Requires an embedded profile.
+    Run(AdminRunArgs),
+    /// Run one metadata maintenance step.
+    Step(AdminStepArgs),
+    /// Flush the WAL tail into a durable segment.
+    Flush(AdminNamespaceArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AdminRetentionCommand {
+    /// Advance the retention floor and discard older replay history.
+    /// This does not remove file revisions.
+    Advance(AdminNamespaceArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AdminStoreCommand {
+    /// Test the object-store operations LoonFS requires.
+    Probe(AdminStoreProbeArgs),
+}
+
+/// Minimum `--poll-interval-ms`. Each poll reads durable state for every
+/// assigned key, so shorter intervals add provider requests without improving
+/// scheduling precision.
 const MIN_POLL_INTERVAL_MS: u64 = 100;
 
 #[derive(Debug, Args)]
 pub(crate) struct AdminRunArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
-    /// Namespace this host maintains. Repeat the flag to assign more; at
-    /// least one is required, because this command never discovers
-    /// namespaces.
-    #[arg(
-        long = "namespace",
-        required = true,
-        value_hint = ValueHint::Other
-    )]
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
+    /// Namespace to maintain. Repeat the flag to select more than one.
+    #[arg(long = "namespaces", required = true, value_hint = ValueHint::Other)]
     pub namespaces: Vec<String>,
-    /// Maintenance job to host. Repeat the flag to select more; all four
-    /// when omitted. `core-gc` selects the runtime's collection job, which
-    /// logs and settles under its own name, `gc`.
+    /// Maintenance job to run. Repeat the flag to select more than one.
+    /// Omitting it selects all four jobs. `core-gc` selects the job reported
+    /// internally as `gc`.
     #[arg(long = "job")]
     pub jobs: Vec<MaintenanceJobArg>,
-    /// How often every assigned namespace is re-checked for work, in
-    /// milliseconds. Defaults to 60000, and a drain ignores it because it
-    /// never rests between keys.
+    /// Interval between checks for assigned namespaces, in milliseconds.
+    /// Defaults to 60000. Drains ignore this setting.
     #[arg(long, value_parser = clap::value_parser!(u64).range(MIN_POLL_INTERVAL_MS..))]
     pub poll_interval_ms: Option<u64>,
-    /// Catch every assigned namespace up and exit, instead of hosting until
-    /// a signal.
+    /// Complete the current assignments and exit.
     #[arg(long)]
     pub drain: bool,
-    /// Give up after this many steps across the whole drain. Exits nonzero
-    /// and reports where every key got to. Requires --drain.
+    /// Stop the drain after this many total steps. Requires `--drain`.
     #[arg(long, requires = "drain")]
     pub max_steps: Option<u64>,
-    /// Give up after this many milliseconds across the whole drain. Exits
-    /// nonzero and reports where every key got to. Requires --drain.
+    /// Stop the drain after this many milliseconds. Requires `--drain`.
     #[arg(long, requires = "drain")]
     pub deadline_ms: Option<u64>,
 }
 
-/// The maintenance jobs `admin run` can host, as an operator names them.
+/// Jobs accepted by `admin maintenance run --job`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum MaintenanceJobArg {
     /// Flush the WAL tail past its threshold and fold one reorganization
@@ -987,8 +1107,8 @@ pub(crate) struct AdminStepArgs {
     /// segments (server default when omitted).
     #[arg(long)]
     pub max_wal_tail_segments: Option<u64>,
-    /// Advance the retention floor after the step's flush work. Replay
-    /// history below the flushed manifest head is surrendered.
+    /// Advance the retention floor after the step's flush work. This discards
+    /// replay history below the flushed manifest head.
     #[arg(long)]
     pub retention: bool,
     /// Run a garbage-collection pass after the step's flush work.
@@ -1022,6 +1142,8 @@ pub(crate) struct AdminGcArgs {
 pub(crate) struct AdminStoreProbeArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
+    #[command(flatten)]
+    pub request: RequestBehaviorArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1071,6 +1193,7 @@ pub(crate) enum CommandKind {
     ProfileDelete,
     ProfileUse,
     NamespaceCreate,
+    NamespaceShow,
     NamespaceDelete,
     NamespaceFork,
     NamespaceUse,
@@ -1091,13 +1214,13 @@ pub(crate) enum CommandKind {
     FilesystemMv,
     FilesystemCp,
     Changes,
-    AdminCheckpoint,
+    AdminCheckpointCreate,
     AdminCheckpointList,
     AdminCheckpointRelease,
-    AdminFlush,
+    AdminMaintenanceFlush,
     AdminRetentionAdvance,
-    AdminRun,
-    AdminStep,
+    AdminMaintenanceRun,
+    AdminMaintenanceStep,
     AdminGc,
     AdminStoreProbe,
     AdminIndexEnable,
@@ -1121,6 +1244,7 @@ impl CommandKind {
             CommandKind::ProfileDelete => "profile_delete",
             CommandKind::ProfileUse => "profile_use",
             CommandKind::NamespaceCreate => "namespace_create",
+            CommandKind::NamespaceShow => "namespace_show",
             CommandKind::NamespaceDelete => "namespace_delete",
             CommandKind::NamespaceFork => "namespace_fork",
             CommandKind::NamespaceUse => "namespace_use",
@@ -1141,13 +1265,13 @@ impl CommandKind {
             CommandKind::FilesystemMv => "filesystem_mv",
             CommandKind::FilesystemCp => "filesystem_cp",
             CommandKind::Changes => "changes",
-            CommandKind::AdminCheckpoint => "admin_checkpoint",
+            CommandKind::AdminCheckpointCreate => "admin_checkpoint_create",
             CommandKind::AdminCheckpointList => "admin_checkpoint_list",
             CommandKind::AdminCheckpointRelease => "admin_checkpoint_release",
-            CommandKind::AdminFlush => "admin_flush",
+            CommandKind::AdminMaintenanceFlush => "admin_maintenance_flush",
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
-            CommandKind::AdminRun => "admin_run",
-            CommandKind::AdminStep => "admin_step",
+            CommandKind::AdminMaintenanceRun => "admin_maintenance_run",
+            CommandKind::AdminMaintenanceStep => "admin_maintenance_step",
             CommandKind::AdminGc => "admin_gc",
             CommandKind::AdminStoreProbe => "admin_store_probe",
             CommandKind::AdminIndexEnable => "admin_index_enable",
@@ -1169,9 +1293,9 @@ impl Cli {
     pub(crate) fn kind(&self) -> CommandKind {
         match &self.command {
             Command::Completion(_) => CommandKind::Completion,
-            Command::Init(_) => CommandKind::Init,
+            Command::Init => CommandKind::Init,
             Command::Profile { command } => match command {
-                ProfileCommand::Create(_) => CommandKind::ProfileCreate,
+                ProfileCommand::Create { .. } => CommandKind::ProfileCreate,
                 ProfileCommand::List => CommandKind::ProfileList,
                 ProfileCommand::Show { .. } => CommandKind::ProfileShow,
                 ProfileCommand::Update(_) => CommandKind::ProfileUpdate,
@@ -1180,6 +1304,7 @@ impl Cli {
             },
             Command::Namespace { command } => match command {
                 NamespaceCommand::Create(_) => CommandKind::NamespaceCreate,
+                NamespaceCommand::Show(_) => CommandKind::NamespaceShow,
                 NamespaceCommand::Delete(_) => CommandKind::NamespaceDelete,
                 NamespaceCommand::Fork(_) => CommandKind::NamespaceFork,
             },
@@ -1202,19 +1327,29 @@ impl Cli {
             Command::Cp(_) => CommandKind::FilesystemCp,
             Command::Changes(_) => CommandKind::Changes,
             Command::Admin { command } => match command {
-                AdminCommand::Checkpoint(_) => CommandKind::AdminCheckpoint,
-                AdminCommand::CheckpointList(_) => CommandKind::AdminCheckpointList,
-                AdminCommand::CheckpointRelease(_) => CommandKind::AdminCheckpointRelease,
-                AdminCommand::Flush(_) => CommandKind::AdminFlush,
-                AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
-                AdminCommand::Run(_) => CommandKind::AdminRun,
-                AdminCommand::Step(_) => CommandKind::AdminStep,
+                AdminCommand::Checkpoint { command } => match command {
+                    AdminCheckpointCommand::Create(_) => CommandKind::AdminCheckpointCreate,
+                    AdminCheckpointCommand::List(_) => CommandKind::AdminCheckpointList,
+                    AdminCheckpointCommand::Release(_) => CommandKind::AdminCheckpointRelease,
+                },
+                AdminCommand::Index { command } => match command {
+                    AdminIndexCommand::Enable(_) => CommandKind::AdminIndexEnable,
+                    AdminIndexCommand::Disable(_) => CommandKind::AdminIndexDisable,
+                    AdminIndexCommand::Status(_) => CommandKind::AdminIndexStatus,
+                    AdminIndexCommand::Gc(_) => CommandKind::AdminIndexGc,
+                },
+                AdminCommand::Maintenance { command } => match command {
+                    AdminMaintenanceCommand::Run(_) => CommandKind::AdminMaintenanceRun,
+                    AdminMaintenanceCommand::Step(_) => CommandKind::AdminMaintenanceStep,
+                    AdminMaintenanceCommand::Flush(_) => CommandKind::AdminMaintenanceFlush,
+                },
+                AdminCommand::Retention { command } => match command {
+                    AdminRetentionCommand::Advance(_) => CommandKind::AdminRetentionAdvance,
+                },
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
-                AdminCommand::StoreProbe(_) => CommandKind::AdminStoreProbe,
-                AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,
-                AdminCommand::IndexDisable(_) => CommandKind::AdminIndexDisable,
-                AdminCommand::IndexStatus(_) => CommandKind::AdminIndexStatus,
-                AdminCommand::IndexGc(_) => CommandKind::AdminIndexGc,
+                AdminCommand::Store { command } => match command {
+                    AdminStoreCommand::Probe(_) => CommandKind::AdminStoreProbe,
+                },
             },
             Command::Config { command } => match command {
                 ConfigCommand::Path => CommandKind::ConfigPath,
@@ -1228,6 +1363,138 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_kind_envelope_values_are_pinned() {
+        let cases = [
+            (CommandKind::Completion, "completion"),
+            (CommandKind::Init, "init"),
+            (CommandKind::ProfileCreate, "profile_create"),
+            (CommandKind::ProfileList, "profile_list"),
+            (CommandKind::ProfileShow, "profile_show"),
+            (CommandKind::ProfileUpdate, "profile_update"),
+            (CommandKind::ProfileDelete, "profile_delete"),
+            (CommandKind::ProfileUse, "profile_use"),
+            (CommandKind::NamespaceCreate, "namespace_create"),
+            (CommandKind::NamespaceShow, "namespace_show"),
+            (CommandKind::NamespaceDelete, "namespace_delete"),
+            (CommandKind::NamespaceFork, "namespace_fork"),
+            (CommandKind::NamespaceUse, "namespace_use"),
+            (CommandKind::Current, "current"),
+            (CommandKind::FilesystemLs, "filesystem_ls"),
+            (CommandKind::FilesystemStat, "filesystem_stat"),
+            (CommandKind::FilesystemAnnotate, "filesystem_annotate"),
+            (CommandKind::FilesystemCat, "filesystem_cat"),
+            (CommandKind::FilesystemGrep, "filesystem_grep"),
+            (CommandKind::FilesystemGet, "filesystem_get"),
+            (CommandKind::FilesystemPut, "filesystem_put"),
+            (CommandKind::FilesystemRevisions, "filesystem_revisions"),
+            (CommandKind::FilesystemTrash, "filesystem_trash"),
+            (CommandKind::FilesystemRestore, "filesystem_restore"),
+            (CommandKind::FilesystemUndelete, "filesystem_undelete"),
+            (CommandKind::FilesystemMkdir, "filesystem_mkdir"),
+            (CommandKind::FilesystemRm, "filesystem_rm"),
+            (CommandKind::FilesystemMv, "filesystem_mv"),
+            (CommandKind::FilesystemCp, "filesystem_cp"),
+            (CommandKind::Changes, "changes"),
+            (
+                CommandKind::AdminCheckpointCreate,
+                "admin_checkpoint_create",
+            ),
+            (CommandKind::AdminCheckpointList, "admin_checkpoint_list"),
+            (
+                CommandKind::AdminCheckpointRelease,
+                "admin_checkpoint_release",
+            ),
+            (
+                CommandKind::AdminMaintenanceFlush,
+                "admin_maintenance_flush",
+            ),
+            (
+                CommandKind::AdminRetentionAdvance,
+                "admin_retention_advance",
+            ),
+            (CommandKind::AdminMaintenanceRun, "admin_maintenance_run"),
+            (CommandKind::AdminMaintenanceStep, "admin_maintenance_step"),
+            (CommandKind::AdminGc, "admin_gc"),
+            (CommandKind::AdminStoreProbe, "admin_store_probe"),
+            (CommandKind::AdminIndexEnable, "admin_index_enable"),
+            (CommandKind::AdminIndexDisable, "admin_index_disable"),
+            (CommandKind::AdminIndexStatus, "admin_index_status"),
+            (CommandKind::AdminIndexGc, "admin_index_gc"),
+            (CommandKind::ConfigPath, "config_path"),
+            (CommandKind::ConfigShow, "config_show"),
+            (CommandKind::Version, "version"),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(kind.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn management_command_model_uses_noun_families() {
+        let command = Cli::command();
+        let profile_create = subcommand(subcommand(&command, "profile"), "create");
+        assert_subcommands(
+            profile_create,
+            &["s3", "r2", "gcs", "azure", "local", "remote"],
+        );
+
+        let namespace = subcommand(&command, "namespace");
+        assert_subcommands(namespace, &["create", "show", "delete", "fork"]);
+
+        let admin = subcommand(&command, "admin");
+        assert_subcommands(
+            admin,
+            &[
+                "checkpoint",
+                "index",
+                "maintenance",
+                "retention",
+                "gc",
+                "store",
+            ],
+        );
+        assert_subcommands(
+            subcommand(admin, "checkpoint"),
+            &["create", "list", "release"],
+        );
+        assert_subcommands(
+            subcommand(admin, "index"),
+            &["enable", "disable", "status", "gc"],
+        );
+        assert_subcommands(subcommand(admin, "maintenance"), &["run", "step", "flush"]);
+        assert_subcommands(subcommand(admin, "retention"), &["advance"]);
+        assert_subcommands(subcommand(admin, "store"), &["probe"]);
+    }
+
+    #[test]
+    fn provider_create_commands_only_expose_applicable_flags() {
+        let command = Cli::command();
+        let create = subcommand(subcommand(&command, "profile"), "create");
+        let s3 = subcommand(create, "s3");
+        assert!(has_argument(s3, "credential_source"));
+        assert!(has_argument(s3, "session_token"));
+        assert!(!has_argument(s3, "account_id"));
+
+        let r2 = subcommand(create, "r2");
+        assert!(has_argument(r2, "credential_source"));
+        assert!(has_argument(r2, "account_id"));
+        assert!(!has_argument(r2, "region"));
+
+        let local = subcommand(create, "local");
+        assert!(has_argument(local, "root"));
+        assert!(!has_argument(local, "bucket"));
+
+        let remote = subcommand(create, "remote");
+        assert!(has_argument(remote, "server_url"));
+        assert!(!has_argument(remote, "key_prefix"));
+
+        let init = subcommand(&command, "init");
+        assert!(!has_argument(init, "mode"));
+        assert!(!has_argument(init, "store_kind"));
+    }
 
     #[test]
     fn local_and_remote_paths_have_completion_hints() {
@@ -1249,6 +1516,15 @@ mod tests {
         let mv = subcommand(&command, "mv");
         assert_hint(mv, "source_path", ValueHint::Other);
         assert_hint(mv, "destination_path", ValueHint::Other);
+
+        let profile_create = subcommand(subcommand(&command, "profile"), "create");
+        let local = subcommand(profile_create, "local");
+        assert_hint(local, "name", ValueHint::Other);
+        assert_hint(local, "root", ValueHint::DirPath);
+        let gcs = subcommand(profile_create, "gcs");
+        assert_hint(gcs, "service_account_key_path", ValueHint::FilePath);
+        let namespace_show = subcommand(subcommand(&command, "namespace"), "show");
+        assert_hint(namespace_show, "namespace_id", ValueHint::Other);
     }
 
     fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {
@@ -1264,5 +1540,20 @@ mod tests {
             .find(|argument| argument.get_id() == id)
             .expect("argument exists");
         assert_eq!(argument.get_value_hint(), expected);
+    }
+
+    fn has_argument(command: &clap::Command, id: &str) -> bool {
+        command
+            .get_arguments()
+            .any(|argument| argument.get_id() == id)
+    }
+
+    fn assert_subcommands(command: &clap::Command, expected: &[&str]) {
+        let actual = command
+            .get_subcommands()
+            .filter(|subcommand| subcommand.get_name() != "help")
+            .map(clap::Command::get_name)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 }

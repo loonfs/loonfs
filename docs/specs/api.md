@@ -978,43 +978,32 @@ candidate under `no_reference_manifest`.
 Two horizons decide when a namespace actually gets smaller, and they are
 independent.
 
-The first is the **metadata retention floor**. It bounds incremental replay:
-below it, the WAL history a client could have replayed is surrendered, and
-the segments holding it become collectable. Nothing advances it on its own —
-no maintenance job exists for it — so it moves only when an operator asks
-(`POST .../maintenance/step` with `advance_retention: true`, or `loonfs
-admin retention-advance`). File revision history is never affected, however far
-the floor has moved.
+The first is the **metadata retention floor**. It limits how far back clients
+can replay the WAL. Advancing the floor makes older WAL segments eligible for
+garbage collection. It advances only through an explicit request:
+`POST .../maintenance/step` with `advance_retention: true`, or
+`loonfs admin retention advance`. It does not remove file revisions.
 
-The second is the **content reclamation grace**, a little over seven days.
-It is derived rather than configured, and it is what separates a file
-disappearing from its bytes disappearing. Content is staged by an upload
-session before any commit can name it, so an object whose session completed
-but which nothing ever published cannot be reclaimed until no receipt can
-still turn it into a reference (format spec, "Garbage collection", rule 11).
-Until that grace passes, a pass keeps the object and reports it under
-`upload_session_window`.
+The second is the **content reclamation grace**, which is slightly longer than
+seven days and is derived rather than configured. Upload sessions stage
+content before a commit references it. LoonFS keeps unreferenced staged
+content until no valid upload receipt can still publish it. During this
+period, garbage collection reports the object under `upload_session_window`.
 
-Deleting a file is not what reclaims its bytes, and no waiting changes that:
-file revision history is never pruned, so every revision goes on referencing
-its content and the object stays live. What reclamation collects is staged
-content nothing published — an abandoned upload, a completed session whose
-commit never arrived. An operator who deletes a large tree and watches the
-bucket should expect it to stay the size it is.
+Deleting a file does not reclaim its content because LoonFS retains every file
+revision. Garbage collection removes staged content that no commit published,
+such as data from an abandoned upload. Deleting a large tree therefore does
+not make the object-store bucket smaller.
 
-Nothing has to be scheduled for the second horizon by hand. A pass that sees
-one reports `next_reclamation_at_ms`, the soonest instant ahead of it at
-which something it kept becomes reclaimable, and the runtime's collection
-job hands that straight back as the earliest it will run the namespace
-again. A namespace that is being written to therefore reclaims its own
-staged content without a cron entry.
+The runtime schedules another garbage-collection pass at
+`next_reclamation_at_ms`, when the oldest retained object becomes eligible.
+Active namespaces do not need a separate cron job for this cleanup.
 
-What that leaves is namespaces nobody is writing to. LoonFS has no operation
-that enumerates namespaces, so nothing can discover them: coverage is an
-assignment. `loonfs admin run --namespace <id>` hosts maintenance for exactly
-the namespaces named on the command line, continuously until a signal, or as
-one bounded catch-up with `--drain` for a cron entry. A cold namespace gets
-collected because it is on somebody's assignment list, and not otherwise.
+LoonFS does not enumerate namespaces for maintenance. Use
+`loonfs admin maintenance run --namespaces <id>` to maintain inactive
+namespaces explicitly. The command runs until stopped, or performs one
+bounded pass with `--drain`. An inactive namespace receives no maintenance
+unless a process is assigned to it.
 
 When a pass keeps more than it deletes, `retained` above says why. The one
 answer that is an operator decision rather than a wait is

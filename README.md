@@ -43,9 +43,7 @@ This example uses S3 in embedded mode, where the CLI talks directly to the bucke
 ```bash
 export AWS_ACCESS_KEY_ID={access_key_id}
 export AWS_SECRET_ACCESS_KEY={secret_access_key}
-loonfs init default --no-input \
-  --mode embedded \
-  --store-kind aws-s3 \
+loonfs --no-input profile create s3 default \
   --bucket {bucket_name} \
   --region {aws_region}
 loonfs namespace create {namespace_id}

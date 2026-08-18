@@ -42,8 +42,9 @@ fn upload_sessions_need_a_remote_profile() -> BackendError {
 fn maintenance_host_needs_an_embedded_profile() -> BackendError {
     BackendError::new(
         loonfs_api::ErrorCode::NotSupported.as_str(),
-        "`admin run` is embedded-only; the remote server hosts background maintenance itself; \
-         use `loonfs admin step` for an on-demand pass and `loonfs admin index-status` to inspect index maintenance",
+        "`admin maintenance run` requires an embedded profile because remote servers run their \
+         own maintenance; use `loonfs admin maintenance step` for one pass or `loonfs admin \
+         index status` to inspect the index",
     )
 }
 

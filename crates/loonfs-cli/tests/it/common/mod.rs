@@ -122,7 +122,7 @@ pub(super) fn feed_messages(harness: &Harness) -> Vec<String> {
 }
 
 pub(super) fn backfilling_text_names_no_watermark(harness: &Harness) -> bool {
-    let rendered = stdout_string(&harness.run(&["admin", "index-status"]));
+    let rendered = stdout_string(&harness.run(&["admin", "index", "status"]));
     rendered.contains("backfilling toward seq") && !rendered.contains("built through")
 }
 
@@ -168,6 +168,7 @@ impl Harness {
             .env("HOME", &self.home_dir)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("LOONFS_CONFIG")
+            .env_remove("LOONFS_PROFILE")
             .env_remove("LOONFS_NAMESPACE")
             .env_remove("LOONFS_ACTOR_KIND")
             .env_remove("LOONFS_ACTOR_ID");
@@ -190,6 +191,7 @@ impl Harness {
             .env("HOME", &self.home_dir)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("LOONFS_CONFIG")
+            .env_remove("LOONFS_PROFILE")
             .env_remove("LOONFS_NAMESPACE")
             .env_remove("LOONFS_ACTOR_KIND")
             .env_remove("LOONFS_ACTOR_ID")
@@ -225,11 +227,8 @@ impl Harness {
             "--json",
             "profile",
             "create",
+            "local",
             name,
-            "--mode",
-            "embedded",
-            "--store-kind",
-            "local-fs",
             "--root",
             self.store_root(name).to_str().expect("utf-8 path"),
         ]);

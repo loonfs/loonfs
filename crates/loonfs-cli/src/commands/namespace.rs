@@ -1,10 +1,10 @@
-//! `loonfs namespace` commands: create, fork, delete, use, and current.
+//! `loonfs namespace` commands: create, show, fork, and delete.
 
 use super::context::{fail, fail_for, parse_public_ordinal_arg};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, CurrentArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
-    NamespaceForkArgs, NamespaceUseArgs, RuntimeBehavior,
+    NamespaceForkArgs, NamespaceShowArgs, NamespaceUseArgs, RuntimeBehavior,
 };
 use crate::config::mutate_config;
 use crate::error::CliError;
@@ -26,11 +26,49 @@ pub(crate) async fn run_namespace_command(
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
         NamespaceCommand::Create(args) => run_namespace_create(kind, config_path, args).await,
+        NamespaceCommand::Show(args) => run_namespace_show(kind, config_path, args).await,
         NamespaceCommand::Delete(args) => {
             run_namespace_delete(kind, config_path, args, runtime).await
         }
         NamespaceCommand::Fork(args) => run_namespace_fork(kind, config_path, args).await,
     }
+}
+
+async fn run_namespace_show(
+    kind: CommandKind,
+    config_path: &Path,
+    args: NamespaceShowArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let explicit_profile = args.target.profile.profile.as_deref();
+    let loaded = load_cli_config(config_path)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let resolved = resolve_target_profile_from_config(
+        &loaded.config,
+        explicit_profile,
+        args.target.request.no_retry,
+    )
+    .await
+    .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = resolved.target.mode_str().to_owned();
+    let explicit_namespace = args
+        .namespace_id
+        .as_deref()
+        .or(args.target.namespace.as_deref());
+    let namespace_id = resolve_namespace(&loaded.config, explicit_profile, explicit_namespace)
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?
+        .namespace;
+    let namespace = resolved
+        .target
+        .namespace_status(&namespace_id)
+        .await
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(resolved.profile_name),
+        mode: Some(mode),
+        data: CommandData::NamespaceStatus(namespace),
+    })
 }
 
 async fn run_namespace_create(
@@ -39,7 +77,7 @@ async fn run_namespace_create(
     args: NamespaceCreateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -67,7 +105,7 @@ async fn run_namespace_delete(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -137,7 +175,7 @@ async fn run_namespace_fork(
     args: NamespaceForkArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.request.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -170,7 +208,7 @@ pub(crate) async fn run_namespace_use(
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let resolved =
-        resolve_target_profile_from_config(&loaded.config, explicit_profile, args.profile.no_retry)
+        resolve_target_profile_from_config(&loaded.config, explicit_profile, args.request.no_retry)
             .await
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -212,9 +250,9 @@ pub(crate) async fn run_namespace_current(
         crate::profiles::resolve_profile(&loaded.config, explicit_profile)
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = profile.mode_str().to_owned();
-    // `current` is a status command, so an unassigned namespace remains a
-    // successful `null`; configured values still use normal flag/env/profile
-    // precedence and validation.
+    // `current` is a status command, so an unset namespace is returned as
+    // `null`. Environment selection still takes precedence over the profile
+    // default.
     let namespace = match resolve_namespace(&loaded.config, explicit_profile, None) {
         Ok(resolved) => Some(resolved.namespace.to_string()),
         Err(error) if error.is_no_default_namespace() => None,

@@ -21,7 +21,7 @@ writer_id = "loonfs-server-local"
 # them; "manual" registers none of them and schedules nothing, leaving every
 # `loonfs admin` operation working exactly as before. Set "manual" on a
 # write-serving node when a dedicated maintenance process owns these
-# namespaces, and assign them to it with `loonfs admin run --namespace ...`.
+# namespaces, and assign them to it with `loonfs admin maintenance run --namespaces ...`.
 # This word and the grep mode are the only maintenance switches.
 #maintenance = "automatic"
 

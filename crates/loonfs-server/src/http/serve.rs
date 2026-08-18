@@ -517,22 +517,13 @@ fn tls_server_config(
     config.tls.as_ref().map(tls::server_config).transpose()
 }
 
-/// Runs the startup work that reads more than the config file, then releases
-/// what it took.
+/// Validates configuration and startup resources without starting the server.
 ///
-/// `loonfs-server --check-config` calls this once the config has loaded, so
-/// the flag also fails on the two things that load correctly and start
-/// incorrectly: a TLS identity this process cannot use, and a local cache
-/// directory it cannot own. Both go through the functions [`app`] and
-/// [`serve_with_shutdown`] call, so what this accepts is what a start
-/// accepts.
-///
-/// Two startup failures stay outside it. It does not bind the configured
-/// address, because a check that held the port could not run beside the
-/// server it is checking, and it performs no object-store operation, because
-/// a reachability check belongs to `loonfs-server --probe-store` or
-/// `loonfs admin store-probe`. Constructing the store still creates a
-/// `local-fs` root, as a start does.
+/// This checks the TLS identity and opens the local cache through the same
+/// paths used at startup. It does not bind the configured address or contact
+/// the object store. Use `loonfs-server --probe-store` or
+/// `loonfs admin store probe` to test storage access. Constructing a local
+/// store still creates its root directory.
 pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     config.validate()?;
     config.object_store()?;

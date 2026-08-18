@@ -228,8 +228,7 @@ curl http://127.0.0.1:9400/readiness
 Create a CLI profile for the server:
 
 ```bash
-LOONFS_AUTH_TOKEN="$LOONFS_AUTH_TOKEN" loonfs init self-hosted --no-input \
-  --mode remote \
+LOONFS_AUTH_TOKEN="$LOONFS_AUTH_TOKEN" loonfs --no-input profile create remote self-hosted \
   --server-url http://127.0.0.1:9400
 ```
 
@@ -239,10 +238,10 @@ TLS path.
 Check the object store:
 
 ```bash
-loonfs admin store-probe
+loonfs admin store probe
 ```
 
-`store-probe` creates and removes temporary objects. It catches invalid
+`store probe` creates and removes temporary objects. It catches invalid
 credentials, the wrong bucket or region, and stores that do not provide the
 operations LoonFS requires.
 
@@ -280,7 +279,7 @@ The script creates a temporary namespace and deletes it before exiting.
 | `GET /metrics` | Bearer token | Prometheus metrics for the server. |
 
 Health and readiness do not contact the object store. Use
-`loonfs admin store-probe` when you need to check storage access.
+`loonfs admin store probe` when you need to check storage access.
 
 Prometheus must send the API token as
 `Authorization: Bearer <LOONFS_AUTH_TOKEN>` when scraping `/metrics`.
@@ -341,7 +340,7 @@ sending `SIGKILL`.
 Before an upgrade, flush each namespace with the current version:
 
 ```bash
-loonfs admin flush --namespace <namespace>
+loonfs admin maintenance flush --namespace <namespace>
 ```
 
 For Docker, pull the new version and replace the container with the same

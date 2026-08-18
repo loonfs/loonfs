@@ -117,8 +117,8 @@ pub(super) fn maintenance_assignment(namespaces: &[NamespaceId], jobs: &[String]
 
 /// Formats a checkpoint owner for the table view.
 ///
-/// User checkpoints show their label. Fork checkpoints show the target
-/// namespace because they cannot be released with `admin checkpoint-release`.
+/// User checkpoints show their label. Fork checkpoints show their target
+/// namespace because users cannot release them.
 pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     match owner {
         CheckpointOwnerSummary::User { name } => name.clone(),

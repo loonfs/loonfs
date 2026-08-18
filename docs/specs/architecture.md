@@ -54,52 +54,76 @@ Control objects and implementation-specific helpers never create a second histor
 
 ## 5. Background maintenance
 
-Maintenance is split in two, and the split is the whole design. A **runner** owns scheduling: which work is eligible, how much runs at once, what happens when a step fails, and when everything stops. A **job** owns one kind of work and knows nothing about scheduling: asked for a step, it re-reads durable state, does one bounded unit, publishes the result through the same compare-and-swap protocol any writer uses, and says what it accomplished. There is one runner per write-capable handle and one implementation of retry, coalescing, concurrency, and shutdown in it. A job that wants a scheduler of its own is a design error.
+Each write-capable handle has one maintenance runner. The runner schedules
+work, limits concurrency, retries failures, and coordinates shutdown. A
+maintenance job performs one bounded unit of work after reading the latest
+durable state. The job publishes changes through the same compare-and-swap
+path as other writers. Jobs do not schedule themselves.
 
-The runner keys work by `{job, namespace}`. One key runs at a time, duplicate hints for a key coalesce into one, and every key shares a single permit pool sized by `max_concurrent_maintenance`, so a burst across many namespaces cannot fan out into unbounded concurrent maintenance. Hints are level-triggered and never authoritative: a step's own read of durable state decides whether there was anything to do. User writes never wait on maintenance admission or execution.
+The runner tracks work by `{job, namespace}`. It runs at most one step for a
+given key, combines duplicate notifications, and applies the shared
+`max_concurrent_maintenance` limit across all jobs and namespaces. A
+notification means work may exist; the job must read durable state to confirm
+it. User writes do not wait for maintenance to start or finish.
 
-### Conclusions
+### Step results
 
-A step's return value is its entire scheduling vocabulary.
+Each maintenance step returns one of these results:
 
-| Conclusion | What it says | What the runner does |
+| Result | Meaning | Runner action |
 | --- | --- | --- |
-| `progressed` | Durable state advanced. | Eligible again at once, behind whatever else is waiting. |
-| `idle` | Nothing to do. | Parks until a nudge or a reconciliation sweep finds work. |
-| `blocked` | There is work this step's policy cannot advance — an input that does not fit the per-step budget, for one. | Parks like `idle`; requeueing zero-progress work would only spin. |
-| `superseded` | Another writer won this step's race. | Eligible again at once, to take the race against what landed. Not a failure. |
-| `not_enabled` | This job has nothing to maintain here at all. | Forgets the key. |
+| `progressed` | Durable state changed. | Queue another step after other waiting work. |
+| `idle` | No work is currently available. | Wait for another notification or periodic check. |
+| `blocked` | Work exists but cannot fit the current step policy or budget. | Wait instead of repeatedly running a step that cannot progress. |
+| `superseded` | Another writer won the compare-and-swap race. | Read the new state and try again. |
+| `not_enabled` | This job is not enabled for the namespace. | Stop tracking the key. |
 
-A step may also hand back an opaque continuation — where it stopped, for the next step to resume from — and the earliest time it saw work becoming eligible, such as a lease expiry. The runner holds both; jobs keep no scheduler state beside it. A continuation never crosses a process boundary, so a job that cannot safely restart its pass from the beginning must not use one. Transient errors get per-key exponential backoff with a fleet-safe ceiling, because one provider outage must not turn into every namespace retrying in lockstep.
+A step may also return a continuation cursor and the earliest time its next
+work can begin, such as a lease expiry. The runner stores both. Continuations
+are process-local, so a job must be able to restart safely if the process
+exits. Transient failures use separate exponential backoff for each key so a
+provider outage does not make every namespace retry at the same time.
 
 ### Jobs and admission policy
 
 | Job | Step | Admission |
 | --- | --- | --- |
-| `metadata` | Flush the WAL tail past its threshold, then fold one bounded reorganization unit. | Automatic. Nudged by publication. |
-| `gc` | One bounded mark-and-sweep pass. | Automatic, and clock-driven: work becomes eligible when a lease expires or a grace window passes, so the deadlines that create reclaimable state are what plant the wakeup. |
-| `grep-index` | One bounded gram-index build or fold unit. | Automatic where a host maintains the index. Nudged by enable, publication, and queries that find the index behind. |
-| `grep-gc` | One bounded pass over one namespace's grep keyspace. | Registered where a host maintains the index, on the same switch. Never nudged by anything the index does: like grep collection generally, somebody asks for it. |
-| retention (*not a job*) | Advance the retention floor. | **Never automatic.** There is no job id to register; an operator asks for it. |
+| `metadata` | Flush the WAL tail when needed, then perform one bounded reorganization step. | Automatic after publication. |
+| `gc` | Perform one bounded mark-and-sweep pass. | Automatic after publication or when a lease or grace period expires. |
+| `grep-index` | Build or reorganize one bounded unit of the grep index. | Automatic on hosts configured to maintain the index. |
+| `grep-gc` | Inspect one bounded part of a namespace's grep objects. | Runs only when explicitly requested. |
+| retention (*not a job*) | Advance the retention floor. | Runs only when explicitly requested. |
 
-Retention is the one deliberate exception, and it is a moral distinction rather than a safety budget. Collection reclaims state that is provably dead; advancing the retention floor surrenders replay history that is still there. So collection runs on its own and retention is asked for explicitly, through the maintenance step's `retention` opt-in or the typed admin operation. Grep collection is likewise explicit and per namespace: `grep-gc` is a job so that a pass resumes where the last one stopped and shares the runner's admission and permits, but nothing schedules it on grep's behalf.
+Retention is not automatic because it intentionally discards replay history.
+An operator must request it through a maintenance step or
+`loonfs admin retention advance`. Garbage collection may run automatically
+because it removes state that is no longer reachable. Grep garbage collection
+also requires an explicit request, but it uses a maintenance job so it can
+resume across bounded steps and share the runner's concurrency limit.
 
 ### Coverage: touched and assigned
 
-LoonFS has no global namespace enumeration, so no local runner can promise to reach every namespace in a deployment. Coverage is stated exactly:
+LoonFS has no operation that lists every namespace. A runner can therefore
+maintain only namespaces the current process uses or an operator assigns to
+it.
 
-> Automatic maintenance covers namespaces touched by the running process and namespaces explicitly assigned to a maintenance host.
-
-A **touched** namespace — written, queried, or nudged by this process — stays covered for the rest of the process lifetime, and the runner may forget it once a probe finds it idle. An **assigned** namespace is named by an operator and stays covered across quiet periods and restarts, because its host asserts the assignment again on an interval. Nothing claims that reconciliation eventually finds every namespace; a deployment that wants a cold namespace maintained assigns it somewhere.
+A **touched** namespace has been written, queried, or otherwise used by the
+current process. An **assigned** namespace is named explicitly with
+`loonfs admin maintenance run --namespaces`. Assign inactive namespaces to a
+maintenance process if they must continue receiving maintenance.
 
 ### Hosts
 
-The same runner and the same jobs run in every host; which one is running is a deployment choice.
+The same runner and jobs can run in several kinds of process:
 
 | Host | Registers | Covers |
 | --- | --- | --- |
-| **Server** | The runtime's jobs, plus the grep index job when its grep mode maintains. | Namespaces it touches, while its maintenance mode is automatic. Set it manual when a dedicated process owns upkeep instead. |
+| **Server** | Runtime jobs, plus the grep index job when configured. | Namespaces the server uses while automatic maintenance is enabled. |
 | **Embedded process** | Whatever the library host registers on its writer. | Namespaces it touches. |
-| **`loonfs admin run`** | The runtime's jobs and the grep index job, narrowed by `--job`. | The namespaces named by `--namespace`, and nothing else — this command never discovers namespaces. It serves nothing, hosts until a signal, or catches its assignment up and exits with `--drain`. |
+| **`loonfs admin maintenance run`** | Runtime jobs selected by `--job`. | Namespaces passed with `--namespaces`. It runs until stopped, or completes the current assignments and exits with `--drain`. |
 
-Every host shuts down the same way, by calling `FsWriter::shutdown` once its own front door has closed — after a server's listener drains, after a `loonfs admin run` catches its stop signal. The order is the writer's, not the host's: close maintenance admission, close publication admission, drain admitted publications, drain the runner's in-flight steps. Maintenance admission closes first because draining publications is a wait, and an open runner spends that wait admitting steps the shutdown has already decided to drop — a metadata root advanced, provider objects deleted, index segments written, all after the process was asked to stop, and all of it work the drain then has to sit through. Closing first is also what makes the drain honest: nothing may register work after the registry has been drained, and a finishing step may not hand its slot to queued work once admission is shut. No order here can deadlock: a step publishes through the same compare-and-swap any writer uses rather than through the host's publication service, so a publication drain never waits on maintenance. A host with extension or query services of its own stops those after the writer has settled.
+After a stop signal, the process calls `FsWriter::shutdown`. The writer stops
+accepting new maintenance work and publications, then waits for accepted work
+to finish. Maintenance publishes directly through compare-and-swap, so
+shutting down publication and maintenance cannot make them wait on each
+other. Extension and query services stop after the writer finishes.

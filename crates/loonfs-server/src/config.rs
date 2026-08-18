@@ -230,21 +230,13 @@ pub struct RuntimeCacheConfigOverrides {
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
 }
 
-/// Whether this server maintains the namespaces it touches.
+/// Controls whether this server schedules maintenance automatically.
 ///
-/// One word decides it, and it is the only switch: `automatic` registers the
-/// runtime's own jobs — metadata upkeep and collection — and the grep index
-/// job when `[grep]`'s mode maintains, and lets the writer's runner schedule
-/// all of them; `manual` registers nothing automatic and schedules nothing.
-/// Explicit admin operations work identically either way, and the retention
-/// floor is never advanced automatically under either.
-///
-/// Set `manual` on a write-serving node when a dedicated maintenance
-/// process — `loonfs admin run --namespace ...`, or another server — owns
-/// upkeep for these namespaces. Automatic maintenance covers namespaces
-/// touched by the running process and namespaces explicitly assigned to a
-/// maintenance host, so a deployment that switches this off has to assign
-/// its namespaces somewhere.
+/// `automatic` schedules metadata, garbage collection, and enabled grep
+/// index jobs for namespaces used by this process. `manual` schedules no
+/// jobs; use it when another server or `loonfs admin maintenance run`
+/// maintains those namespaces. Explicit admin operations remain available
+/// in both modes. Retention is never advanced automatically.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceMode {

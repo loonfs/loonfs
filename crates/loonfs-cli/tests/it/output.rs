@@ -348,8 +348,9 @@ fn json_covers_command_lines_the_parser_rejects() {
         vec![
             "--json",
             "admin",
+            "maintenance",
             "run",
-            "--namespace",
+            "--namespaces",
             "demo",
             "--drain",
             "--max-steps",
@@ -408,7 +409,6 @@ fn embedded_and_remote_profiles_emit_the_same_error_codes() {
         "profile",
         "create",
         "remote",
-        "--mode",
         "remote",
         "--server-url",
         &remote_server.server_url,
@@ -476,6 +476,14 @@ fn help_lists_the_context_commands() {
         .expect("run help");
     assert_success(&output);
     let stdout = stdout_string(&output);
+    for heading in [
+        "Filesystem:",
+        "Context and configuration:",
+        "Inspection:",
+        "Administration:",
+    ] {
+        assert!(stdout.contains(heading), "{stdout}");
+    }
     assert!(stdout.contains("current"));
     assert!(stdout.contains("use"));
 }
