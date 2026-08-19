@@ -1857,11 +1857,7 @@
       },
       "AttributesProjection": {
         "type": "object",
-        "description": "One inode's structurally complete attribute projection.",
-        "required": [
-          "attributes_revision_no",
-          "attributes"
-        ],
+        "description": "One inode's structurally complete attribute projection.\n\nThe projection appears only flattened into `AuthoritativePathEntry`, where\nthe whole group is omitted unless the caller asks for attributes. The two\nalways-present fields are therefore marked not-required in the document:\n`allOf` composition cannot express an optional flattened group any other\nway.",
         "properties": {
           "attributes": {
             "$ref": "#/components/schemas/Attributes",

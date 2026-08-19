@@ -1405,8 +1405,11 @@ fn openapi_flattens_the_path_entry_attribute_projection() {
     assert!(projection_properties.contains_key("attributes_revision_no"));
     assert!(projection_properties.contains_key("attributes"));
     let required = required_fields(projection);
-    assert!(required.contains("attributes_revision_no"));
-    assert!(required.contains("attributes"));
+    assert!(
+        !required.contains("attributes_revision_no") && !required.contains("attributes"),
+        "the projection is optionally flattened into the entry, and allOf merges \
+         required lists, so its fields must stay not required in the document"
+    );
 
     let path_entry = schemas
         .get("AuthoritativePathEntry")
