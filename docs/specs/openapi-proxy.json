@@ -1,0 +1,4125 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "LoonFS HTTP API",
+    "description": "Static OpenAPI document for the LoonFS v0 HTTP API.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "0.2.1"
+  },
+  "paths": {
+    "/v0/capabilities": {
+      "get": {
+        "tags": [
+          "capabilities"
+        ],
+        "summary": "Get capabilities",
+        "description": "Returns a summary of supported features and limits.",
+        "operationId": "capabilities",
+        "responses": {
+          "200": {
+            "description": "Capability document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityDocument"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/changes": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "List changes after a sequence",
+        "description": "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
+        "operationId": "list_changes",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "description": "Return committed changes after this sequence",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ChangeSeq"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid change cursor or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/commits": {
+      "post": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "Apply a commit",
+        "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
+        "operationId": "apply_commit",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Commit applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid commit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "409": {
+            "description": "Operation conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Commit unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "replay"
+      }
+    },
+    "/v0/mounts/{mount}/filesystem/content": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "Read file",
+        "description": "Returns file bytes for the current revision at a path, or for a specific retained revision when `revision_no` is provided.",
+        "operationId": "get_file_bytes",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute file path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_no",
+            "in": "query",
+            "description": "Optional prior revision number",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/RevisionNo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace, path, or revision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Content exceeds the advertised `download.max_content_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is at its concurrent content-read limit; retry shortly",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/filesystem/downloads": {
+      "post": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "Begin download",
+        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
+        "operationId": "begin_download",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeginDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Download authorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BeginDownloadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace, path, or revision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Direct download is unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/filesystem/list": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "List directory",
+        "description": "Lists a directory at the current namespace head.",
+        "operationId": "list_path_entries",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute filesystem path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque directory-list page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_attributes",
+            "in": "query",
+            "description": "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory listing page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPathEntriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, limit, cursor, or include_attributes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/filesystem/revisions": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "List file revisions",
+        "description": "Resolves the current path to a file inode and returns revisions for that file. If the file could be renamed, use the inode revision API for stable identity.",
+        "operationId": "list_file_revisions",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute file path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque file-revisions page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File revisions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListFileRevisionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/filesystem/stat": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "Stat path",
+        "description": "Returns the current metadata for a path, including inode identity, kind, display name, file content metadata, and the inode's attributes.",
+        "operationId": "stat_path",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute filesystem path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_attributes",
+            "in": "query",
+            "description": "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative path entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthoritativePathEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or include_attributes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/filesystem/trash": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "List recoverable deletions",
+        "description": "Returns the namespace's recoverable deletions, oldest deletion first. Entries never age out at the retention floor; each carries the inode id and deletion sequence undelete needs, plus the deleted name when the delete recorded one.",
+        "operationId": "list_trash",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque trash page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recoverable deletions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTrashResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/query/grep": {
+      "post": {
+        "tags": [
+          "query"
+        ],
+        "summary": "Content search",
+        "description": "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep root.",
+        "operationId": "grep",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrepRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "One page of matches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrepResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid pattern, cursor, or an unindexable pattern without allow_scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The backing store rejected its configured credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The index trails the head past the scan budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/uploads": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Begin upload",
+        "description": "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
+        "operationId": "begin_upload",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeginUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upload session started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BeginUploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds the 1 MiB upload-control limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Requested upload mode is unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "new_attempt"
+      }
+    },
+    "/v0/mounts/{mount}/uploads/{upload_id}": {
+      "get": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Get upload session",
+        "description": "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
+        "operationId": "get_upload_status",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upload session state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/uploads/{upload_id}/abort": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Abort upload",
+        "description": "Ends an upload session without selecting content and deletes the object it was writing. Repeating it succeeds; a session that already completed cannot be aborted.",
+        "operationId": "abort_upload",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upload aborted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "409": {
+            "description": "Upload already completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/uploads/{upload_id}/complete": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Complete upload",
+        "description": "Completes an upload. The request mode must match the mode used to start the session. Direct-multipart requests also include the content claim and completed parts.",
+        "operationId": "complete_upload",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The request mode must match the upload session.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upload completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid completion request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "409": {
+            "description": "Upload completion conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Completion body exceeds the advertised `upload.completion_max_body_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "replay"
+      }
+    },
+    "/v0/mounts/{mount}/uploads/{upload_id}/content": {
+      "put": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Upload content",
+        "description": "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
+        "operationId": "upload_content",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upload content accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadContentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Upload content conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds the advertised `upload.max_content_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is at its concurrent proxied-upload limit; retry shortly",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    },
+    "/v0/mounts/{mount}/uploads/{upload_id}/parts": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Sign multipart parts",
+        "description": "Returns one short-lived, checksum-bound upload capability per requested part of an open direct_multipart session. Asking again for a part is how a client retries it.",
+        "operationId": "sign_upload_parts",
+        "parameters": [
+          {
+            "name": "mount",
+            "in": "path",
+            "description": "Application mount label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignUploadPartsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Part capabilities issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignUploadPartsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid part request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/DeadlineExceededResponse"
+          },
+          "409": {
+            "description": "Upload already completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds the 1 MiB upload-control limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Direct multipart upload is unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-loonfs-retry": "safe"
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AbsolutePath": {
+        "type": "string",
+        "description": "Validated complete absolute namespace path, serialized as a plain string.",
+        "example": "/docs/report.txt"
+      },
+      "ActorId": {
+        "type": "string",
+        "description": "Opaque hosting-platform actor id: non-empty, at most 256 UTF-8 bytes, without leading or trailing whitespace or control characters.",
+        "example": "usr_8f3c"
+      },
+      "ActorKind": {
+        "type": "string",
+        "description": "The type of actor responsible for a commit.",
+        "enum": [
+          "user",
+          "service",
+          "system"
+        ]
+      },
+      "ActorRef": {
+        "type": "object",
+        "description": "Identifies the user, service, or system responsible for a commit.\n\nLoonFS stores this value as provided. It does not authenticate the actor or\nlook up profile information.",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ActorId",
+            "description": "A stable identifier supplied by the application."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ActorKind",
+            "description": "The type of actor."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ApiError": {
+        "type": "object",
+        "description": "HTTP error body used by LoonFS APIs.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails",
+            "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
+          },
+          "feature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error message."
+          },
+          "param": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
+          }
+        }
+      },
+      "AttributeKey": {
+        "type": "string",
+        "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected.",
+        "example": "owner"
+      },
+      "AttributeRevisionNo": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Revision number for an inode's attributes. It starts at 0 and increases whenever the attribute map changes.",
+        "maximum": 9007199254740991,
+        "minimum": 0
+      },
+      "AttributeValue": {
+        "type": "string",
+        "description": "One validated attribute value.\n\nA value is at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes. It is\notherwise free text: control characters and the empty string are legal.\nEmpty is a stored value, not a tombstone; only an explicit remove\noperation deletes an attribute.",
+        "example": "platform"
+      },
+      "Attributes": {
+        "type": "object",
+        "description": "A validated attribute map for one inode.\n\nConstruction and decoding both enforce the same limits: a map holds at\nmost [`MAX_ATTRIBUTE_ENTRIES`] entries, each value is at most\n[`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes, and the whole map is at most\n[`MAX_ATTRIBUTES_TOTAL_BYTES`] logical UTF-8 bytes. The total counts key\nbytes and value bytes and nothing else, so it does not depend on the\nencoding the map is written in. Durable state that breaks a limit fails to\ndecode rather than decoding to something smaller.\n\nAn empty map is valid. It is the cleared state, and clearing an inode's\nattributes is a real update with its own revision.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/AttributeValue"
+        },
+        "propertyNames": {
+          "type": "string"
+        }
+      },
+      "AttributesProjection": {
+        "type": "object",
+        "description": "One inode's structurally complete attribute projection.",
+        "required": [
+          "attributes_revision_no",
+          "attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/Attributes",
+            "description": "The complete attribute map at `attributes_revision_no`.\n\nAn inode that has never had attributes written is at revision 0 with\nan empty map."
+          },
+          "attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "The attribute revision this projection represents."
+          },
+          "attributes_updated_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Time of the latest attribute update, in Unix milliseconds. This is\n`None` for the initial empty state at revision 0.",
+            "minimum": 0
+          },
+          "attributes_updated_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the latest attribute update. This is `None` for\nthe initial empty state at revision 0."
+          }
+        }
+      },
+      "AuthoritativePathEntry": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AuthoritativePathEntryKind",
+            "description": "File-or-directory classification and its kind-specific payload."
+          },
+          {
+            "$ref": "#/components/schemas/AttributesProjection",
+            "description": "The inode's attribute projection, when requested."
+          },
+          {
+            "type": "object",
+            "required": [
+              "namespace_id",
+              "path",
+              "inode_id",
+              "created_by",
+              "created_at_ms",
+              "head_seq"
+            ],
+            "properties": {
+              "created_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Time the inode was created, in Unix milliseconds. Sequence numbers\ndetermine order.",
+                "minimum": 0
+              },
+              "created_by": {
+                "$ref": "#/components/schemas/ActorRef",
+                "description": "Actor that created this inode, as supplied by the application."
+              },
+              "display_name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Stored display name for this path component, absent for the nameless root."
+              },
+              "head_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Namespace head sequence this answer was read from."
+              },
+              "inode_id": {
+                "type": "string",
+                "description": "Stable inode ID within a namespace",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
+              },
+              "namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace that was read."
+              },
+              "parent_inode_id": {
+                "type": "string",
+                "description": "Stable inode ID within a namespace",
+                "example": "ino_123",
+                "pattern": "^ino_[1-9][0-9]*$"
+              },
+              "path": {
+                "$ref": "#/components/schemas/AbsolutePath",
+                "description": "Absolute path as rendered from stored display names."
+              }
+            }
+          }
+        ],
+        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. The entry kind carries\nthe file-only revision and content summary, so a directory cannot carry a\npartial file payload. Attributes are likewise projected as one value or\nomitted as one value, while serializing as prefixed sibling fields.\nThe attribute revision is read independently — clients feed it to\n`expected_attributes_revision_no` on the next write without touching the\nvalues — so this is a prefixed-sibling projection rather than a value\nconsumed as one nested unit."
+      },
+      "AuthoritativePathEntryKind": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/AuthoritativePathEntryDirectory"
+          },
+          {
+            "$ref": "#/components/schemas/AuthoritativePathEntryFile"
+          }
+        ],
+        "description": "Kind-specific metadata for an authoritative path entry.",
+        "discriminator": {
+          "propertyName": "inode_kind",
+          "mapping": {
+            "dir": "#/components/schemas/AuthoritativePathEntryDirectory",
+            "file": "#/components/schemas/AuthoritativePathEntryFile"
+          }
+        }
+      },
+      "BeginDownloadRequest": {
+        "type": "object",
+        "description": "What a client names when it asks to read a file directly.\n\nA path and, optionally, the revision it wants — the same two things the\nproxied content read takes, so a caller switching transports changes\nnothing about what it is asking for.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path of the file to read."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision to read, or `None` for the path's current revision."
+          }
+        },
+        "additionalProperties": false
+      },
+      "BeginDownloadResponse": {
+        "type": "object",
+        "description": "A short-lived capability to read one file's content object, plus\neverything the reader needs to check what arrives.\n\nThe raw object key is deliberately not here, exactly as it is not in a\n`direct_put` grant: a client learns a URL that expires, not an address it\ncan revisit.\n\nThe grant names one immutable content object, so it does not go stale\nwhen the path moves on. A commit that replaces the file writes a new\nobject and leaves this one alone; what the capability reads is what the\nrequested revision held when the grant was issued, and the reference\nsays which bytes those are.",
+        "required": [
+          "namespace_id",
+          "path",
+          "revision_no",
+          "content_ref",
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Short-lived read capability the client uses without learning the raw object key."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Identity, byte length, and checksum evidence for the object the\ncapability reads. A reader checks the bytes it receives against\n`size_bytes` and recomputes `checksum.algorithm` over the complete\npayload."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path as rendered from stored display names."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision the capability reads, resolved from the request."
+          }
+        }
+      },
+      "BeginUploadRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/BeginUploadServiceProxied"
+          },
+          {
+            "$ref": "#/components/schemas/BeginUploadDirectPut"
+          },
+          {
+            "$ref": "#/components/schemas/BeginUploadDirectMultipart"
+          }
+        ],
+        "description": "Request to start an upload session, tagged by transport mode.\n\nEach variant contains only fields valid for that transport, so invalid\ncombinations are rejected during decoding. The `mode` field is required.",
+        "discriminator": {
+          "propertyName": "mode",
+          "mapping": {
+            "service_proxied": "#/components/schemas/BeginUploadServiceProxied",
+            "direct_put": "#/components/schemas/BeginUploadDirectPut",
+            "direct_multipart": "#/components/schemas/BeginUploadDirectMultipart"
+          }
+        }
+      },
+      "BeginUploadResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/BeginUploadResponseServiceProxied"
+          },
+          {
+            "$ref": "#/components/schemas/BeginUploadResponseDirectPut"
+          },
+          {
+            "$ref": "#/components/schemas/BeginUploadResponseDirectMultipart"
+          }
+        ],
+        "description": "Response to starting an upload session, tagged by transport mode.\n\nEach variant contains only the fields needed by that transport. Unknown\nresponse fields are accepted for forward compatibility.",
+        "discriminator": {
+          "propertyName": "mode",
+          "mapping": {
+            "service_proxied": "#/components/schemas/BeginUploadResponseServiceProxied",
+            "direct_put": "#/components/schemas/BeginUploadResponseDirectPut",
+            "direct_multipart": "#/components/schemas/BeginUploadResponseDirectMultipart"
+          }
+        }
+      },
+      "CapabilityDocument": {
+        "type": "object",
+        "description": "A deployment's self-description (API spec, \"Capability discovery\").\n\nA remote client fetches this from `GET /v0/capabilities` and caches it; an\nembedded engine exposes the same document as a constant. SDK gating logic\nis therefore identical for both backends: check [`supports`] or\n[`has_profile`], and treat a `not_supported` error as authoritative when\nthe two disagree.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
+        "required": [
+          "protocol_version",
+          "profiles"
+        ],
+        "properties": {
+          "features": {
+            "type": "object",
+            "description": "Named features and whether this deployment supports them. An absent\nkey means unsupported.",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "description": "Advisory numeric limits clients may use to pre-validate requests.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Advertised profiles, each `plane/version`. All-or-nothing: every\nrequired op of an advertised profile is implemented."
+          },
+          "protocol_version": {
+            "type": "string",
+            "description": "The protocol generation, currently `v0`."
+          }
+        }
+      },
+      "ChangeSeq": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Sequence number assigned to a namespace commit. It determines the order in which commits become visible.",
+        "maximum": 9007199254740991,
+        "minimum": 0
+      },
+      "ChangesResponse": {
+        "type": "object",
+        "description": "Change-feed response after a cursor.",
+        "required": [
+          "namespace_id",
+          "after_seq",
+          "through_seq",
+          "changes"
+        ],
+        "properties": {
+          "after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Exclusive cursor supplied by the caller, or the endpoint's initial position."
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommittedChange"
+            },
+            "description": "Logical commits after `after_seq`, ordered by ascending namespace sequence."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose ordered commit stream was read."
+          },
+          "next_after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Cursor to request when another page remains, or `None` at `through_seq`."
+          },
+          "through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Snapshot head through which this page was evaluated."
+          }
+        }
+      },
+      "Checksum": {
+        "type": "object",
+        "description": "An algorithm and its canonical lowercase-hex checksum value.\n\nThe enclosing value defines which bytes the checksum covers.",
+        "required": [
+          "algorithm",
+          "value"
+        ],
+        "properties": {
+          "algorithm": {
+            "$ref": "#/components/schemas/ChecksumAlgorithm",
+            "description": "Algorithm that produced `value`."
+          },
+          "value": {
+            "type": "string",
+            "description": "Lowercase hex of the raw checksum bytes.\n\nThe algorithm is its own field, so the value carries no prefix.\nProvider APIs that report base64 are converted at the adapter."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ChecksumAlgorithm": {
+        "type": "string",
+        "description": "Supported checksum algorithms.\n\nThe enclosing value defines which bytes a checksum covers. Unknown\nalgorithms fail to decode because every in-memory `ChecksumAlgorithm` must\nbe recomputable by this build. Adding a variant also requires adding its\nimplementation.",
+        "enum": [
+          "sha256",
+          "crc64nvme",
+          "crc32c"
+        ]
+      },
+      "CommitId": {
+        "type": "string",
+        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] returns\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
+        "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+      },
+      "CommitRequest": {
+        "type": "object",
+        "description": "A request to commit one or more filesystem operations.\n\nOperations run in order and either all succeed or none are committed. A\nrequest with one operation uses the same fingerprint rules as a batch.\n\nUnknown fields are rejected here for the same reason they are on\n[`FilesystemOperation`]: the fields a typo can hide are the ones that\ndecide whether the commit is guarded at all.",
+        "required": [
+          "commit_id",
+          "actor",
+          "operations"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the commit, as supplied by the application."
+          },
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Caller-supplied idempotency key for the whole request."
+          },
+          "content_tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContentToken"
+            },
+            "description": "Proofs for any new external content refs introduced by this request.\nOne proof covers every operation that names its content ref."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Caller annotation recorded on the commit and reported by the change\nfeed. Part of the commit's identity: reusing `commit_id` with a\ndifferent message is a `commit_id_reuse_conflict`, exactly as it is\nfor an explicit commit."
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilesystemOperation"
+            },
+            "description": "Ordered operations to apply. Must be non-empty; they commit all\ntogether or not at all."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CommitResponse": {
+        "type": "object",
+        "description": "Result of one commit.\n\nEvery commit resolves to this envelope — path-oriented operations and\nexplicit commits, embedded or remote. The commit id is the caller's\nreconciliation handle: resubmitting the same request with the same id\nreplays this result instead of committing twice.",
+        "required": [
+          "namespace_id",
+          "commit_id",
+          "committed_seq"
+        ],
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Idempotency key the commit landed under: caller-supplied, or\ngenerated on the caller's behalf when the request carried none."
+          },
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence number where the commit became visible."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that changed."
+          }
+        }
+      },
+      "CommittedChange": {
+        "type": "object",
+        "description": "One committed change in namespace order.",
+        "required": [
+          "committed_seq",
+          "commit_id",
+          "committed_by",
+          "committed_at_ms",
+          "events"
+        ],
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Client idempotency key for this logical commit."
+          },
+          "committed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `committed_seq` is the order.",
+            "minimum": 0
+          },
+          "committed_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the commit, as supplied by the application."
+          },
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence for this logical commit."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilesystemChange"
+            },
+            "description": "Semantic filesystem events for this commit, in the order the commit\napplied them. One request operation may produce more than one event\n(see [`FilesystemChange`])."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Caller annotation, omitted when absent and carrying no filesystem semantics."
+          }
+        }
+      },
+      "CompleteUploadRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CompleteUploadServiceProxied"
+          },
+          {
+            "$ref": "#/components/schemas/CompleteUploadDirectPut"
+          },
+          {
+            "$ref": "#/components/schemas/CompleteUploadDirectMultipart"
+          }
+        ],
+        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Service-proxied and\ndirect-PUT uploads need no other fields. Direct multipart uploads also\ninclude the completed parts and the expected content details.",
+        "discriminator": {
+          "propertyName": "mode",
+          "mapping": {
+            "service_proxied": "#/components/schemas/CompleteUploadServiceProxied",
+            "direct_put": "#/components/schemas/CompleteUploadDirectPut",
+            "direct_multipart": "#/components/schemas/CompleteUploadDirectMultipart"
+          }
+        }
+      },
+      "CompletedUploadPart": {
+        "type": "object",
+        "description": "One uploaded part, as the client observed the provider accept it.\n\nThe server keeps no durable record of any part. Part bookkeeping is the\nclient's, exactly as it is in the provider's own multipart API, and this\nis where the client hands it back.",
+        "required": [
+          "part_number",
+          "etag",
+          "checksum"
+        ],
+        "properties": {
+          "checksum": {
+            "$ref": "#/components/schemas/Checksum",
+            "description": "Checksum the part was signed and accepted with."
+          },
+          "etag": {
+            "type": "string",
+            "description": "Entity tag the provider returned for the accepted part."
+          },
+          "part_number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "One-based part number.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ContentId": {
+        "type": "string",
+        "description": "Durable identity of one immutable content object.\n\nThe body is 128 fully random bits, with no time component: content\nobject keys shard on the id's leading characters, and a clock-derived\nprefix would put every upload in one window into one shard. The id\nnames *which object*, never what it contains — integrity evidence\nrides [`crate::ContentRef`] beside it.",
+        "example": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+        "pattern": "^con_[0-9a-f]{32}$"
+      },
+      "ContentRef": {
+        "type": "object",
+        "description": "Pointer to one immutable content object.\n\n`content_id` is identity — *which* object — and the checksum is\nevidence about its bytes. Separating the two is what lets the final\nobject key exist before the first byte is read.\n\nA `ContentRef` is safe to publish only after the referenced bytes are\ndurable in the namespace's content store.",
+        "required": [
+          "kind",
+          "content_id",
+          "size_bytes",
+          "checksum"
+        ],
+        "properties": {
+          "checksum": {
+            "$ref": "#/components/schemas/Checksum",
+            "description": "Mandatory checksum over the complete object."
+          },
+          "content_id": {
+            "$ref": "#/components/schemas/ContentId",
+            "description": "Immutable identity of the referenced object."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Content strategy used by the referenced object."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Complete byte length of the referenced content.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ContentToken": {
+        "type": "object",
+        "description": "Proof that a specific `content_ref` may be used in a later commit.",
+        "required": [
+          "content_ref",
+          "token"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Content authorized by this token."
+          },
+          "token": {
+            "type": "string",
+            "description": "Opaque, server-signed token. Clients must not parse it."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteDirectoryBehavior": {
+        "type": "string",
+        "description": "Directory delete behavior for path-oriented deletes.",
+        "enum": [
+          "non_recursive",
+          "recursive"
+        ]
+      },
+      "DeletedDirentry": {
+        "type": "object",
+        "description": "Directory entry removed by a delete operation.",
+        "required": [
+          "parent_inode_id",
+          "name_key",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Name shown to users."
+          },
+          "name_key": {
+            "$ref": "#/components/schemas/NameKey",
+            "description": "Name used to look up the entry."
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "DestinationBehavior": {
+        "type": "string",
+        "description": "Destination-conflict behavior for path-oriented puts, moves, and copies.",
+        "enum": [
+          "no_replace",
+          "replace"
+        ]
+      },
+      "DirectMultipartUpload": {
+        "type": "object",
+        "description": "Part geometry returned for a direct multipart upload.\n\nThe begin response does not include a content reference or part count\nbecause the final payload is not known yet. The server owns the provider\nupload id and returns the content reference only after completion.",
+        "required": [
+          "part_size_bytes",
+          "checksum_algorithm"
+        ],
+        "properties": {
+          "checksum_algorithm": {
+            "$ref": "#/components/schemas/ChecksumAlgorithm",
+            "description": "Checksum algorithm every part and the complete assembled payload must\nuse for this session."
+          },
+          "part_size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Byte length of every part except the last. At most 10,000 parts may\nbe uploaded, so this bounds the object at `part_size_bytes × 10_000`.",
+            "minimum": 0
+          }
+        }
+      },
+      "DirectMultipartUploadOptions": {
+        "type": "object",
+        "description": "What a `direct_multipart` client asks for when it opens a session.\n\nA begin request declares no length and no digest: the session exists to\nreceive bytes whose length may not be known yet. All it settles is the\ngeometry the client cuts to.",
+        "properties": {
+          "part_size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Byte length of every part except the last, or `None` for the\nserver's default.\n\nThe value bounds the object: a provider accepts at most 10,000\nparts, so this session can carry at most `part_size_bytes × 10_000`\nbytes. A client that knows its payload is very large asks for a\nlarger part size; one that does not know its length at all takes the\ndefault and keeps asking for part URLs until its stream ends.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DirectPutUpload": {
+        "type": "object",
+        "description": "Presigned direct_put upload details. The raw object key is intentionally not public.",
+        "required": [
+          "content_ref",
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Short-lived write capability the client uses without learning the raw object key."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Immutable object identity the server minted, plus the byte length and\nchecksum covered by the signed request. Completion and the later\ncommit both name exactly this reference."
+          }
+        }
+      },
+      "DisplayName": {
+        "type": "string",
+        "description": "User-facing spelling of one path component.",
+        "example": "report.txt"
+      },
+      "ErrorDetails": {
+        "type": "object",
+        "description": "Optional machine-readable details for an [`ApiError`].\n\nClients make retry decisions from the error code and use these fields for\nrelevant identifiers such as commit ids, writer epochs, and revisions.\nFields may be absent and clients must ignore fields they do not use.",
+        "properties": {
+          "active_acquired_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix milliseconds at which the current epoch's acquirer took it, when\nthe head recorded one. Writer ids are process labels, so two runs on\none machine can share one; the stamp is what tells them apart.",
+            "minimum": 0
+          },
+          "active_deletion_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Deletion generation actually active for the inode."
+          },
+          "active_writer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Writer id recorded by the current epoch's acquirer, when the head\nrecorded one."
+          },
+          "active_writer_epoch": {
+            "$ref": "#/components/schemas/WriterEpoch",
+            "description": "Epoch that currently owns the namespace."
+          },
+          "actual_attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "Attribute revision that is actually current for the inode."
+          },
+          "actual_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Head sequence the namespace was actually at, which is what a caller\nthat still means to delete it retries against."
+          },
+          "actual_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision that is actually current; absent when the inode has none."
+          },
+          "after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Change-feed cursor the request asked to resume after."
+          },
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Idempotency key of the commit the error concerns."
+          },
+          "committed_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Semantic identity of the mutation that already landed under that\ncommit id, from the same receipt as `committed_seq` and present\nexactly when it is. A retry recomputes this value from the request it\njust made — see\n[`put_retry_fingerprint`](crate::put_retry_fingerprint) — and equality\nis what proves the two are the same request."
+          },
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence at which that commit id already landed. Present when the\nfailure was decided against a durable commit receipt, which is what\nholds the sequence; absent when nothing has committed under the id\nyet and two live requests are simply claiming it at once."
+          },
+          "expected_attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "Attribute revision the request expected to be current."
+          },
+          "expected_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Head sequence a namespace delete required the namespace to still be\nat."
+          },
+          "expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision the request expected to be current."
+          },
+          "fenced_epoch": {
+            "$ref": "#/components/schemas/WriterEpoch",
+            "description": "Epoch the failing writer session held when it was displaced."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "operation_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Position, in the request's operation list, of the operation that\nfailed. A commit applies all of its operations or none of them, so\nthis names the one that stopped the whole request.",
+            "minimum": 0
+          },
+          "requested_deletion_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Deletion generation an undelete asked to recover."
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Oldest sequence still promised for incremental replay."
+          }
+        }
+      },
+      "FileRevision": {
+        "type": "object",
+        "description": "One immutable file revision.",
+        "required": [
+          "inode_id",
+          "revision_no",
+          "committed_seq",
+          "commit_id",
+          "committed_at_ms",
+          "committed_by",
+          "content_ref"
+        ],
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Commit ID for this revision."
+          },
+          "committed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Wall-clock stamp of the commit that created this revision, in Unix\nmilliseconds. Observational: `committed_seq` is the order.",
+            "minimum": 0
+          },
+          "committed_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for this revision, as supplied by the application."
+          },
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence that created this revision."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Content stored for this revision."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision number within the file inode."
+          }
+        }
+      },
+      "FilesystemChange": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FilesystemChangeDirectoryCreated"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemChangeFileCreated"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemChangeContentChanged"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemChangeMoved"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemChangeDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemChangeUndeleted"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemChangeAttributesChanged"
+          }
+        ],
+        "description": "One semantic filesystem change inside a commit.\n\nA commit's events are the operations it applied, in the order it applied\nthem. One request operation can apply several: creating missing parent\ndirectories, or replacing a file by moving over it, each produce an event\nper directory created or file replaced. So a request with three\noperations may report more than three events, and the events stay in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode or\nmaintain its own binding projection from this feed.",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "directory_created": "#/components/schemas/FilesystemChangeDirectoryCreated",
+            "file_created": "#/components/schemas/FilesystemChangeFileCreated",
+            "content_changed": "#/components/schemas/FilesystemChangeContentChanged",
+            "moved": "#/components/schemas/FilesystemChangeMoved",
+            "deleted": "#/components/schemas/FilesystemChangeDeleted",
+            "undeleted": "#/components/schemas/FilesystemChangeUndeleted",
+            "attributes_changed": "#/components/schemas/FilesystemChangeAttributesChanged"
+          }
+        }
+      },
+      "FilesystemOperation": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FsOpCreateDirectory"
+          },
+          {
+            "$ref": "#/components/schemas/FsOpPutFile"
+          },
+          {
+            "$ref": "#/components/schemas/FsOpDeletePath"
+          },
+          {
+            "$ref": "#/components/schemas/FsOpMovePath"
+          },
+          {
+            "$ref": "#/components/schemas/FsOpCopyPath"
+          },
+          {
+            "$ref": "#/components/schemas/FsOpUndelete"
+          },
+          {
+            "$ref": "#/components/schemas/FsOpRestoreRevision"
+          },
+          {
+            "$ref": "#/components/schemas/FsOpUpdateAttributes"
+          }
+        ],
+        "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because concurrency guards are optional. A\nmisspelled guard must fail decoding instead of silently becoming `None`\nand allowing an unguarded write. Any future fieldless variant must use\nempty braces so serde also rejects unexpected fields for that variant.",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "create_directory": "#/components/schemas/FsOpCreateDirectory",
+            "put_file": "#/components/schemas/FsOpPutFile",
+            "delete_path": "#/components/schemas/FsOpDeletePath",
+            "move_path": "#/components/schemas/FsOpMovePath",
+            "copy_path": "#/components/schemas/FsOpCopyPath",
+            "undelete": "#/components/schemas/FsOpUndelete",
+            "restore_revision": "#/components/schemas/FsOpRestoreRevision",
+            "update_attributes": "#/components/schemas/FsOpUpdateAttributes"
+          }
+        }
+      },
+      "GrepMatch": {
+        "type": "object",
+        "description": "One line-oriented match.",
+        "required": [
+          "path",
+          "inode_id",
+          "revision_no",
+          "line_number",
+          "byte_offset",
+          "line"
+        ],
+        "properties": {
+          "byte_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Byte offset of the match within the file.",
+            "minimum": 0
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "line": {
+            "type": "string",
+            "description": "The matching line, truncated to the server's line cap."
+          },
+          "line_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "One-based line number of the match.",
+            "minimum": 0
+          },
+          "line_truncated": {
+            "type": "boolean",
+            "description": "True when `line` was truncated."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "The file's absolute path, derived at the snapshot."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "The matched revision (the newest visible one at the snapshot)."
+          }
+        }
+      },
+      "GrepRequest": {
+        "type": "object",
+        "description": "One content-search request.\n\nEvery field but `pattern` is optional, and each one selects results. A\nmisspelled `case_insensitive` or `path_prefix` would decode to the default\nand answer a different search than the caller asked for, with no sign that\nanything was dropped, so unknown fields are rejected.",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "allow_scan": {
+            "type": "boolean",
+            "description": "Permit a capped exhaustive scan when the pattern yields no required\ngrams. Refused beyond the server's scan budget."
+          },
+          "allow_stale": {
+            "type": "boolean",
+            "description": "When the unindexed tail exceeds the scan budget, return\nindexed-only results (reported via `tail_scanned: false`) instead\nof failing with `index_lagging`."
+          },
+          "case_insensitive": {
+            "type": "boolean",
+            "description": "Match case-insensitively. Verification is exact; the index remains\nconsulted through its case-folded grams."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resume cursor from a previous page. The cursor resumes strictly\nafter the last candidate the issuing page finished scanning and is\nbound to that page's request; each page is evaluated against the\nnamespace head at page time."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum matches per page.",
+            "minimum": 0
+          },
+          "path_prefix": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Restrict matches to files under this complete absolute path, resolved\nto a directory inode before candidates are filtered."
+          },
+          "pattern": {
+            "type": "string",
+            "description": "The pattern, in the Rust `regex` crate's dialect (no backreferences\nor lookaround). Patterns that require no literal bytes are rejected\nwith `query_unindexable` unless `allow_scan` is set."
+          }
+        },
+        "additionalProperties": false
+      },
+      "GrepResponse": {
+        "type": "object",
+        "description": "One content-search page.",
+        "required": [
+          "namespace_id",
+          "head_seq",
+          "built_through_seq",
+          "tail_scanned",
+          "matches"
+        ],
+        "properties": {
+          "built_through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Commits at or below this sequence were answered from the index."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence this page was evaluated at. Pages are evaluated against\nthe namespace head at page time; the cursor is an ordering resume,\nnot a snapshot pin."
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrepMatch"
+            },
+            "description": "Matches in ascending `(inode_id, byte_offset)` order. A page may\nreturn fewer matches than its limit and still carry a cursor: the\nper-page verified-candidate budget bounds how much content one\nrequest reads, whatever the plan's false-positive rate."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace searched."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present when another page follows."
+          },
+          "tail_scanned": {
+            "type": "boolean",
+            "description": "True when revisions after `built_through_seq` were scanned\nexhaustively; false only when `allow_stale` skipped them."
+          }
+        }
+      },
+      "ListFileRevisionsResponse": {
+        "type": "object",
+        "description": "Response for listing file revisions.",
+        "required": [
+          "namespace_id",
+          "inode_id",
+          "head_seq",
+          "revisions"
+        ],
+        "properties": {
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence used for the read."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, if more revisions are available."
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileRevision"
+            },
+            "description": "Retained revisions in order."
+          }
+        }
+      },
+      "ListPathEntriesResponse": {
+        "type": "object",
+        "description": "One directory listing and the namespace head it was answered at.\n\nThe envelope names the listing target and head so an empty directory\nstill tells the caller which state it observed, and so the response can\ngrow without reshaping `entries`.",
+        "required": [
+          "namespace_id",
+          "path",
+          "head_seq",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuthoritativePathEntry"
+            },
+            "description": "Directory entries for this page.\n\nEntries are returned in canonical name-key order. Higher-level display\nsurfaces may sort entries separately for presentation."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence this listing was read from."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor for the next page, if more entries remain."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path of the listed directory."
+          }
+        }
+      },
+      "ListTrashResponse": {
+        "type": "object",
+        "description": "One trash listing page: the namespace's recoverable deletions.",
+        "required": [
+          "namespace_id",
+          "head_seq",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrashEntry"
+            },
+            "description": "Recoverable deletions, oldest deletion first."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Head sequence this page was evaluated at."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present when another page follows."
+          }
+        }
+      },
+      "NameKey": {
+        "type": "string",
+        "description": "Name-policy-derived directory entry key.\n\nUse this for exact name preconditions. Keep user-facing spelling in\n`DisplayName`.",
+        "example": "report.txt"
+      },
+      "NamespaceId": {
+        "type": "string",
+        "description": "Durable id for one namespace.\n\nA namespace is one filesystem history. This id is not a display name and\nshould not be reused after destruction. Its serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
+        "example": "demo",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+      },
+      "ObjectTransferAccess": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ObjectTransferAccessPresignedUrl"
+          }
+        ],
+        "description": "Client-facing direct transfer capability.",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "presigned_url": "#/components/schemas/ObjectTransferAccessPresignedUrl"
+          }
+        }
+      },
+      "RevisionNo": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Revision number for a file's content. It increases whenever the content is replaced or restored.",
+        "maximum": 9007199254740991,
+        "minimum": 0
+      },
+      "SignUploadPartsRequest": {
+        "type": "object",
+        "description": "Request for part-upload capabilities on an open multipart session.",
+        "required": [
+          "parts"
+        ],
+        "properties": {
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UploadPartChecksumClaim"
+            },
+            "description": "Parts to authorize, each with the checksum the provider will enforce\non it. Asking again for a part already uploaded is how a client\nretries one: a repeated part is last-write-wins at the provider."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SignUploadPartsResponse": {
+        "type": "object",
+        "description": "Response carrying one capability per requested part.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "parts"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that owns the upload session."
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignedUploadPart"
+            },
+            "description": "Capabilities in the order the request asked for them."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Session the parts belong to."
+          }
+        }
+      },
+      "SignedUploadPart": {
+        "type": "object",
+        "description": "One authorized part upload.",
+        "required": [
+          "part_number",
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Short-lived write capability for that part."
+          },
+          "part_number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Part number this capability writes.",
+            "minimum": 0
+          }
+        }
+      },
+      "TrashEntry": {
+        "type": "object",
+        "description": "One deletion that can still be restored.\n\n`inode_id` and `deletion_seq` are sufficient to restore it. The original\nparent and name are included when they were recorded.",
+        "required": [
+          "inode_id",
+          "deletion_seq",
+          "deleted_at_ms",
+          "deleted_by"
+        ],
+        "properties": {
+          "deleted_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time of the deletion, in Unix milliseconds.",
+            "minimum": 0
+          },
+          "deleted_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the deletion."
+          },
+          "deletion_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Commit sequence that identifies this deletion."
+          },
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "User-facing spelling of the deleted binding, when recorded."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "name_key": {
+            "$ref": "#/components/schemas/NameKey",
+            "description": "Canonical key of the deleted binding, when recorded."
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "UploadContentClaim": {
+        "type": "object",
+        "description": "What an upload client claims about a complete payload.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. Direct PUT binds the claim into the provider\nwrite; multipart verifies it against the assembled object at completion.\n\nThe digest names its own algorithm because providers do not agree on one:\neach binds into a presigned write whatever its API can enforce. The\ndeployment advertises which it is, and a claim in any other algorithm is\nrefused at begin rather than signed into a write the provider would\nreject.",
+        "required": [
+          "size_bytes",
+          "checksum"
+        ],
+        "properties": {
+          "checksum": {
+            "$ref": "#/components/schemas/Checksum",
+            "description": "Whole-payload checksum in the algorithm required by this operation."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Complete byte length the client will write.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "UploadContentResponse": {
+        "type": "object",
+        "description": "Response after uploading bytes into a session.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "content_ref"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Digest and byte length computed from the accepted body."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that owns the upload session."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Session into which the service staged these bytes."
+          }
+        }
+      },
+      "UploadId": {
+        "type": "string",
+        "description": "Durable id for one upload session.",
+        "example": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
+        "pattern": "^upl_[0-9a-f]{32}$"
+      },
+      "UploadMode": {
+        "type": "string",
+        "description": "Upload transport mode.",
+        "enum": [
+          "service_proxied",
+          "direct_put",
+          "direct_multipart"
+        ]
+      },
+      "UploadPartChecksumClaim": {
+        "type": "object",
+        "description": "One part's checksum, supplied by the client so the server can sign it\ninto that part's upload URL.",
+        "required": [
+          "part_number",
+          "checksum"
+        ],
+        "properties": {
+          "checksum": {
+            "$ref": "#/components/schemas/Checksum",
+            "description": "Checksum over this part's bytes."
+          },
+          "part_number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "One-based part number, at most the provider's 10,000-part limit.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "UploadSessionResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/UploadSessionStatus",
+            "description": "The session's lifecycle and state-specific fields. Completed HTTP\nresponses carry a fresh receipt while the minting window remains open."
+          },
+          {
+            "type": "object",
+            "required": [
+              "namespace_id",
+              "upload_id",
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "$ref": "#/components/schemas/UploadMode",
+                "description": "Transport selected when the session began."
+              },
+              "namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace that owns the session."
+              },
+              "upload_id": {
+                "$ref": "#/components/schemas/UploadId",
+                "description": "Session represented by this view."
+              }
+            }
+          }
+        ],
+        "description": "Current view of one upload session."
+      },
+      "UploadSessionStatus": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/UploadSessionStatusOpen"
+          },
+          {
+            "$ref": "#/components/schemas/UploadSessionStatusCompleted"
+          },
+          {
+            "$ref": "#/components/schemas/UploadSessionStatusAborted"
+          }
+        ],
+        "description": "Observed state of an upload session.\n\nA session starts as `Open` and ends as either `Completed` or `Aborted`.\nBoth final states are permanent. Reading a completed session issues a new\nreceipt for the durable content, so a lost commit response does not require\nthe content to be uploaded again.",
+        "discriminator": {
+          "propertyName": "status",
+          "mapping": {
+            "open": "#/components/schemas/UploadSessionStatusOpen",
+            "completed": "#/components/schemas/UploadSessionStatusCompleted",
+            "aborted": "#/components/schemas/UploadSessionStatusAborted"
+          }
+        }
+      },
+      "WriterEpoch": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Counter used to reject writes from an older writer.",
+        "maximum": 9007199254740991,
+        "minimum": 0
+      },
+      "AuthoritativePathEntryDirectory": {
+        "type": "object",
+        "description": "A directory, which has no revision payload in v0.\n\nThe entry tag reuses [`InodeKind`]'s wire vocabulary.",
+        "required": [
+          "inode_kind"
+        ],
+        "properties": {
+          "inode_kind": {
+            "type": "string",
+            "enum": [
+              "dir"
+            ]
+          }
+        }
+      },
+      "AuthoritativePathEntryFile": {
+        "type": "object",
+        "description": "A file and its current revision summary.",
+        "required": [
+          "revision_no",
+          "size_bytes",
+          "content_ref",
+          "revision_committed_by",
+          "revision_committed_at_ms",
+          "inode_kind"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Current content reference."
+          },
+          "inode_kind": {
+            "type": "string",
+            "enum": [
+              "file"
+            ]
+          },
+          "revision_committed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
+            "minimum": 0
+          },
+          "revision_committed_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the current revision."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Current file revision number."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current file size in bytes.\n\nThis remains explicit even though `content_ref` also carries the\nlength because callers sort directory listings by this field.",
+            "minimum": 0
+          }
+        }
+      },
+      "BeginUploadServiceProxied": {
+        "type": "object",
+        "description": "Send the bytes to the service, which writes the content object.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "service_proxied"
+            ]
+          }
+        }
+      },
+      "BeginUploadDirectPut": {
+        "type": "object",
+        "description": "Write the whole object through one presigned request. The server\nsigns exactly these bytes into the write it authorizes, so the claim\nis required.",
+        "required": [
+          "content",
+          "mode"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Byte length and digest of the payload about to be written."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_put"
+            ]
+          }
+        }
+      },
+      "BeginUploadDirectMultipart": {
+        "type": "object",
+        "description": "Write the object in parts through presigned part uploads.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_multipart"
+            ]
+          },
+          "multipart": {
+            "$ref": "#/components/schemas/DirectMultipartUploadOptions",
+            "description": "Selects the part geometry; absent takes the server's default.\nA multipart upload claims its content at completion, so nothing\nabout the payload is declared here."
+          }
+        }
+      },
+      "BeginUploadResponseServiceProxied": {
+        "type": "object",
+        "description": "The service will receive the bytes and write the content object.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "service_proxied"
+            ]
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace authorized to consume the eventual staged content."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Durable session identity used by subsequent append and completion\ncalls."
+          }
+        }
+      },
+      "BeginUploadResponseDirectPut": {
+        "type": "object",
+        "description": "One presigned request writes the whole object.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "direct_put",
+          "mode"
+        ],
+        "properties": {
+          "direct_put": {
+            "$ref": "#/components/schemas/DirectPutUpload",
+            "description": "The object this session writes, and the capability to write it."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_put"
+            ]
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace authorized to consume the eventual staged content."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Durable session identity used by subsequent completion calls."
+          }
+        }
+      },
+      "BeginUploadResponseDirectMultipart": {
+        "type": "object",
+        "description": "Presigned part uploads assemble the object.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "direct_multipart",
+          "mode"
+        ],
+        "properties": {
+          "direct_multipart": {
+            "$ref": "#/components/schemas/DirectMultipartUpload",
+            "description": "The geometry the client cuts its payload to."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_multipart"
+            ]
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace authorized to consume the eventual staged content."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Durable session identity used by subsequent part-signing and\ncompletion calls."
+          }
+        }
+      },
+      "CompleteUploadServiceProxied": {
+        "type": "object",
+        "description": "Complete a service-proxied upload.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "service_proxied"
+            ]
+          }
+        }
+      },
+      "CompleteUploadDirectPut": {
+        "type": "object",
+        "description": "Complete a direct-PUT upload.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_put"
+            ]
+          }
+        }
+      },
+      "CompleteUploadDirectMultipart": {
+        "type": "object",
+        "description": "Complete a direct multipart upload.",
+        "required": [
+          "content",
+          "parts",
+          "mode"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Expected length and checksum of the assembled object."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_multipart"
+            ]
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompletedUploadPart"
+            },
+            "description": "Uploaded parts in ascending part order."
+          }
+        }
+      },
+      "FilesystemChangeDirectoryCreated": {
+        "type": "object",
+        "description": "A directory was created.",
+        "required": [
+          "inode_id",
+          "parent_inode_id",
+          "display_name",
+          "kind"
+        ],
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "User-facing spelling of the new entry."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "directory_created"
+            ]
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "FilesystemChangeFileCreated": {
+        "type": "object",
+        "description": "A file and its first revision were created.",
+        "required": [
+          "inode_id",
+          "parent_inode_id",
+          "display_name",
+          "revision_no",
+          "content_ref",
+          "kind"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Content of the first revision."
+          },
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "User-facing spelling of the new entry."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "file_created"
+            ]
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "First revision number."
+          }
+        }
+      },
+      "FilesystemChangeContentChanged": {
+        "type": "object",
+        "description": "A file received a new current revision — a put over an existing\nfile, or a revision restore (one durable fact for both).",
+        "required": [
+          "inode_id",
+          "revision_no",
+          "content_ref",
+          "kind"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Immutable content published by the revision."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "content_changed"
+            ]
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "New monotonic position in that file's revision history."
+          }
+        }
+      },
+      "FilesystemChangeMoved": {
+        "type": "object",
+        "description": "An inode moved to a new parent directory or name.",
+        "required": [
+          "inode_id",
+          "from_parent_inode_id",
+          "from_display_name",
+          "to_parent_inode_id",
+          "to_display_name",
+          "kind"
+        ],
+        "properties": {
+          "from_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Spelling of the old binding."
+          },
+          "from_parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "moved"
+            ]
+          },
+          "to_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Spelling of the new binding."
+          },
+          "to_parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "FilesystemChangeDeleted": {
+        "type": "object",
+        "description": "A file or directory subtree was deleted. Use the enclosing change's\n`committed_seq` as `deletion_seq` when restoring it.",
+        "required": [
+          "inode_id",
+          "kind"
+        ],
+        "properties": {
+          "deleted_direntry": {
+            "$ref": "#/components/schemas/DeletedDirentry",
+            "description": "Directory binding removed by the deletion, when the delete\nrecorded one."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "deleted"
+            ]
+          }
+        }
+      },
+      "FilesystemChangeUndeleted": {
+        "type": "object",
+        "description": "A deleted inode was recovered and re-bound.",
+        "required": [
+          "inode_id",
+          "parent_inode_id",
+          "display_name",
+          "kind"
+        ],
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Spelling of the recovered binding."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "undeleted"
+            ]
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "FilesystemChangeAttributesChanged": {
+        "type": "object",
+        "description": "An inode's attributes changed.",
+        "required": [
+          "inode_id",
+          "attributes_revision_no",
+          "attributes",
+          "kind"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/Attributes",
+            "description": "The inode's complete attribute map after the update, so a consumer\nprojects it without reading anything back. An empty map is the\ncleared state."
+          },
+          "attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "New attribute revision for that inode."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "attributes_changed"
+            ]
+          }
+        }
+      },
+      "FsOpCreateDirectory": {
+        "type": "object",
+        "description": "Create one directory.",
+        "required": [
+          "path",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "create_directory"
+            ]
+          },
+          "parents": {
+            "type": "boolean",
+            "description": "Also create missing ancestor directories (the same auto-create\n`put_file` performs). The final component must still be new."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination path, rejected when invalid or already bound."
+          }
+        }
+      },
+      "FsOpPutFile": {
+        "type": "object",
+        "description": "Create or replace one file with an already-durable content ref.",
+        "required": [
+          "path",
+          "content_ref",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DestinationBehavior",
+            "description": "Whether an existing file may receive a new revision instead of causing a conflict."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Immutable bytes that must be covered by a valid preparation proof."
+          },
+          "expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "When set (with `replace` behavior), the put applies only while\nthe file's current revision is still this one; a raced write\nfails the request instead of silently stacking on it, and a\nmissing file answers `path_not_found`."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "put_file"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination path; missing ancestors are created automatically."
+          }
+        }
+      },
+      "FsOpDeletePath": {
+        "type": "object",
+        "description": "Delete one path.",
+        "required": [
+          "path",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DeleteDirectoryBehavior",
+            "description": "Whether a non-empty directory may be tombstoned recursively."
+          },
+          "expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "delete_path"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path that must resolve to a visible inode."
+          }
+        }
+      },
+      "FsOpMovePath": {
+        "type": "object",
+        "description": "Move one path to another path.",
+        "required": [
+          "from_path",
+          "to_path",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DestinationBehavior",
+            "description": "Whether an existing destination file may be replaced."
+          },
+          "from_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute source path that must resolve to a visible inode."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "move_path"
+            ]
+          },
+          "to_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination whose parent must be visible and writable."
+          }
+        }
+      },
+      "FsOpCopyPath": {
+        "type": "object",
+        "description": "Copy one file path to another path.",
+        "required": [
+          "from_path",
+          "to_path",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DestinationBehavior",
+            "description": "Whether an existing destination file may receive a copied revision."
+          },
+          "from_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute source path that must resolve to a visible file."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "copy_path"
+            ]
+          },
+          "to_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination whose parent must be visible and writable."
+          }
+        }
+      },
+      "FsOpUndelete": {
+        "type": "object",
+        "description": "Restore a deleted file or subtree.\n\n`inode_id` and `deletion_seq` identify one exact deletion. A stale\nsequence returns `not_deleted` and cannot undo a later deletion.",
+        "required": [
+          "inode_id",
+          "deletion_seq",
+          "kind"
+        ],
+        "properties": {
+          "deletion_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "undelete"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames. An explicit path is required when the\ndeletion recorded no binding."
+          }
+        }
+      },
+      "FsOpRestoreRevision": {
+        "type": "object",
+        "description": "Restore an older revision as the current revision for a path.",
+        "required": [
+          "path",
+          "source_revision_no",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "restore_revision"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path that must resolve to a visible file."
+          },
+          "source_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Existing historical revision whose content will be copied into a new current revision."
+          }
+        }
+      },
+      "FsOpUpdateAttributes": {
+        "type": "object",
+        "description": "Write and remove attributes on the inode one path resolves to.",
+        "required": [
+          "path",
+          "kind"
+        ],
+        "properties": {
+          "expected_attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "When set, the update applies only while the inode's attribute\nrevision is still this one. Absent means the update is applied\nover whatever revision is current; either way the write carries\nits own revision guard, so a concurrent update never merges\nsilently."
+          },
+          "expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "update_attributes"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path that must resolve to a visible file or directory."
+          },
+          "remove": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttributeKey"
+            },
+            "description": "Attribute keys to remove.\n\nA list preserves duplicate entries so validation can report them instead\nof silently deduplicating the request."
+          },
+          "set": {
+            "type": "object",
+            "description": "Attributes to write. Each key replaces whatever the inode\ncurrently holds under it; keys the inode holds and this map does\nnot name are left alone.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AttributeValue"
+            },
+            "propertyNames": {
+              "type": "string",
+              "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected.",
+              "example": "owner"
+            }
+          }
+        }
+      },
+      "ObjectTransferAccessPresignedUrl": {
+        "type": "object",
+        "description": "Short-lived URL plus required headers for one object-store write.",
+        "required": [
+          "method",
+          "url",
+          "expires_at_ms",
+          "kind"
+        ],
+        "properties": {
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiration timestamp in Unix milliseconds.",
+            "minimum": 0
+          },
+          "headers": {
+            "type": "object",
+            "description": "Headers that are covered by the signature and must be sent.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "presigned_url"
+            ]
+          },
+          "method": {
+            "type": "string",
+            "description": "HTTP method the client must use."
+          },
+          "url": {
+            "type": "string",
+            "description": "Full presigned URL."
+          }
+        }
+      },
+      "UploadSessionStatusOpen": {
+        "type": "object",
+        "description": "Accepting content until its lease passes.",
+        "required": [
+          "expires_at_ms",
+          "status"
+        ],
+        "properties": {
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix-millisecond instant after which the session is abandoned and\nmay be aborted by server-side cleanup.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open"
+            ]
+          }
+        }
+      },
+      "UploadSessionStatusCompleted": {
+        "type": "object",
+        "description": "Final: the content is durable and verified.",
+        "required": [
+          "completed_at_ms",
+          "content_ref",
+          "status"
+        ],
+        "properties": {
+          "completed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix-millisecond stamp of the completion.",
+            "minimum": 0
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Verified content selected by this session."
+          },
+          "content_token": {
+            "$ref": "#/components/schemas/ContentToken",
+            "description": "Fresh proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed"
+            ]
+          }
+        }
+      },
+      "UploadSessionStatusAborted": {
+        "type": "object",
+        "description": "Final: the session selected no content and its object is gone.",
+        "required": [
+          "aborted_at_ms",
+          "status"
+        ],
+        "properties": {
+          "aborted_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix-millisecond stamp of the abort.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "aborted"
+            ]
+          }
+        }
+      }
+    },
+    "responses": {
+      "DeadlineExceededResponse": {
+        "description": "The request exceeded `request_deadline_ms`. A timed-out mutation may still complete, so clients must determine its outcome before retrying.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "description": "HTTP error body used by LoonFS APIs.",
+              "required": [
+                "code",
+                "message"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
+                },
+                "details": {
+                  "$ref": "#/components/schemas/ErrorDetails",
+                  "description": "Structured context for the code, present when the failure carries\nmachine-usable identity (API spec, \"Standard error contract\"). Boxed\nso the rare detailed error does not widen every error-carrying result."
+                },
+                "feature": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
+                },
+                "message": {
+                  "type": "string",
+                  "description": "Human-readable error message."
+                },
+                "param": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Identifies the invalid input. Body fields use JSON Pointer paths;\nquery and path parameters use their names; CLI errors use the flag or\nargument as written."
+                },
+                "request_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Correlation id the server assigned to the failed request; the same\nvalue is sent as the `x-request-id` response header."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "capabilities",
+      "description": "Capability discovery"
+    },
+    {
+      "name": "namespaces",
+      "description": "Namespace lifecycle and status"
+    },
+    {
+      "name": "filesystem",
+      "description": "Path-oriented filesystem APIs"
+    },
+    {
+      "name": "inodes",
+      "description": "Identity-oriented inode read APIs"
+    },
+    {
+      "name": "uploads",
+      "description": "Upload session APIs"
+    },
+    {
+      "name": "query",
+      "description": "Derived-index query APIs"
+    }
+  ]
+}
