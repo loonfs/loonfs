@@ -11,6 +11,7 @@ members = [
   "crates/loonfs-server",
   "crates/loonfs-client",
   "crates/loonfs-cli",
+  "crates/loonfs-conformance",
   "crates/loonfs-sim",
 ]
 

@@ -58,6 +58,7 @@ ureq.workspace = true
 
 [features]
 openapi = ["dep:utoipa", "loonfs-api/openapi"]
+test-support = []
 
 [lints]
 workspace = true

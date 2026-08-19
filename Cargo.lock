@@ -1465,6 +1465,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "loonfs-conformance"
+version = "0.2.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "futures",
+ "loonfs-api",
+ "loonfs-client",
+ "loonfs-objectstore",
+ "loonfs-server",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "loonfs-core"
 version = "0.2.1"
 dependencies = [

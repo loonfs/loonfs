@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "upload_multipart",
+  "intent": "Checks that repeating complete_upload after a multipart upload returns the stored result.",
+  "family": "upload_multipart",
+  "request": {
+    "namespace_id": "conf-upload-multipart",
+    "path": "/multipart.bin",
+    "commit_id": "conf-upload-multipart-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-upload"
+    },
+    "part_size_bytes": 5242880,
+    "content_pattern": {
+      "length": 5243904,
+      "modulus": 251
+    }
+  },
+  "expected": {
+    "mode": "direct_multipart",
+    "part_count": 2,
+    "size_bytes": 5243904,
+    "checksum_algorithm": "crc64nvme",
+    "committed_seq": 1
+  }
+}

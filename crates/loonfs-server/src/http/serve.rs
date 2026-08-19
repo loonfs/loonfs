@@ -251,6 +251,20 @@ pub async fn app_with_store(
         .0)
 }
 
+/// Builds the server router with custom direct-transfer providers for tests.
+#[cfg(feature = "test-support")]
+pub async fn app_with_test_transfers(
+    config: ServerConfig,
+    store: SharedObjectStore,
+    direct_transfers: DirectTransferIssuers,
+) -> Result<Router, ServerConfigError> {
+    Ok(
+        app_with_store_and_direct_transfers(config, store, Some(direct_transfers))
+            .await?
+            .0,
+    )
+}
+
 /// Test-only: the router plus its state, so tests can hold admission
 /// permits or close publisher admission and observe the served answers.
 #[cfg(test)]

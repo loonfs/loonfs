@@ -14,6 +14,8 @@ pub use config::{
     load_server_config, GrepConfig, GrepMode, LocalCacheConfig, MaintenanceMode,
     RuntimeCacheConfigOverrides, ServerConfig, ServerConfigError, StoreConfig, TlsServerConfig,
 };
+#[cfg(feature = "test-support")]
+pub use http::app_with_test_transfers;
 #[cfg(feature = "openapi")]
 pub use http::openapi_document;
 pub use http::{

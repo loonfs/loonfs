@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "download",
+  "intent": "Checks direct download length, checksum, and content.",
+  "family": "download",
+  "request": {
+    "namespace_id": "conf-download",
+    "path": "/download.txt",
+    "commit_id": "conf-download-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-download"
+    },
+    "content_utf8": "download grant corpus payload\n"
+  },
+  "expected": {
+    "size_bytes": 30,
+    "checksum_algorithm": "sha256",
+    "committed_seq": 1
+  }
+}

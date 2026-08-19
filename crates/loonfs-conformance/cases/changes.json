@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "changes",
+  "intent": "Checks the change feed fields returned after a supplied sequence.",
+  "family": "changes",
+  "request": {
+    "namespace_id": "conf-changes",
+    "path": "/changed",
+    "commit_id": "conf-changes-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-changes"
+    },
+    "after_seq": 0
+  },
+  "expected": {
+    "committed_seq": 1,
+    "change_count": 1,
+    "event_kind": "directory_created"
+  }
+}

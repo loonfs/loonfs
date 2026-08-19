@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "error_contract",
+  "intent": "Checks standard errors for missing authentication, malformed JSON, and invalid query values.",
+  "family": "error_contract",
+  "request": {
+    "namespace_id": "conf-error-contract",
+    "malformed_body": {
+      "commit_id": "conf-error-malformed-body",
+      "actor": {
+        "kind": "service",
+        "id": "conformance-error"
+      },
+      "operations": [
+        {
+          "kind": "create_directory",
+          "path": "relative"
+        }
+      ]
+    },
+    "invalid_after_seq": "not-a-sequence"
+  },
+  "expected": {
+    "unauthenticated": {
+      "status": 401,
+      "code": "unauthorized"
+    },
+    "malformed_body": {
+      "status": 400,
+      "code": "invalid_request",
+      "param": "/operations/0/path"
+    },
+    "invalid_query": {
+      "status": 400,
+      "code": "invalid_request",
+      "param": "after_seq"
+    }
+  }
+}

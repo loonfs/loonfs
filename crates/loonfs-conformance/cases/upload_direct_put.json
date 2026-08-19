@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "upload_direct_put",
+  "intent": "Checks a direct PUT upload from creation through a verified file read.",
+  "family": "upload_direct_put",
+  "request": {
+    "namespace_id": "conf-upload-direct-put",
+    "path": "/direct-put.txt",
+    "commit_id": "conf-upload-direct-put-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-upload"
+    },
+    "content_utf8": "direct PUT corpus payload\n"
+  },
+  "expected": {
+    "mode": "direct_put",
+    "size_bytes": 26,
+    "checksum_algorithm": "sha256",
+    "committed_seq": 1
+  }
+}

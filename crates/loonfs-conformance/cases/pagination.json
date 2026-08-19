@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "name": "pagination",
+  "intent": "Checks that pagination returns every entry once and can resume from a saved cursor.",
+  "family": "pagination",
+  "request": {
+    "namespace_id": "conf-pagination",
+    "directory": "/entries",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-pagination"
+    },
+    "entry_names": [
+      "entry-00",
+      "entry-01",
+      "entry-02",
+      "entry-03",
+      "entry-04",
+      "entry-05",
+      "entry-06",
+      "entry-07",
+      "entry-08",
+      "entry-09"
+    ],
+    "page_size": 3,
+    "resume_after_page": 2
+  },
+  "expected": {
+    "entry_count": 10,
+    "minimum_page_count": 4,
+    "head_seq": 11
+  }
+}

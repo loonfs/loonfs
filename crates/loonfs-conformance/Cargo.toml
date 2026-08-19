@@ -1,0 +1,31 @@
+[package]
+name = "loonfs-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Shared SDK conformance tests and their Rust harness."
+repository.workspace = true
+publish = false
+readme = "README.md"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+futures.workspace = true
+loonfs-api.workspace = true
+loonfs-client.workspace = true
+loonfs-objectstore.workspace = true
+loonfs-server = { path = "../loonfs-server", features = ["test-support"] }
+reqwest = { workspace = true, features = ["json"] }
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
