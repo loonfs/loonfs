@@ -2,6 +2,8 @@
 //!
 //! The integration harness is in `tests/reference.rs`.
 
+pub mod server;
+
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;

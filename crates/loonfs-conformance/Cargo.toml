@@ -10,22 +10,22 @@ publish = false
 readme = "README.md"
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
 futures.workspace = true
 loonfs-api.workspace = true
-loonfs-client.workspace = true
 loonfs-objectstore.workspace = true
 loonfs-server = { path = "../loonfs-server", features = ["test-support"] }
-reqwest = { workspace = true, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+loonfs-client.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 
 [lints]
 workspace = true
