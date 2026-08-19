@@ -1,10 +1,16 @@
 //! The `query/v0` plane: derived-index reads.
 
+#[cfg(feature = "openapi")]
+use super::handlers_filesystem::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
 use super::handlers_uploads::current_unix_ms;
-use super::{authorize, AppJson, AppState, NamespaceIdPath, OptionalAppJson};
+use super::{
+    authorize,
+    handlers_filesystem::{parse_boolean_query_param, required_query_param, resolve_page_limit},
+    AppQuery, AppState, NamespaceIdPath, OptionalAppJson, MAX_GREP_PATTERN_BYTES,
+};
 use crate::http::error::{status_for_core_error_code, ApiResponseError};
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use loonfs_api::v0::{GrepGcRequest, GrepGcResponse, GrepIndexStatusResponse};
 #[cfg(feature = "openapi")]
@@ -14,17 +20,36 @@ use loonfs_api::{
 };
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
 
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct GrepQuery {
+    pattern: Option<String>,
+    case_insensitive: Option<String>,
+    path_prefix: Option<String>,
+    allow_scan: Option<String>,
+    allow_stale: Option<String>,
+    limit: Option<String>,
+    cursor: Option<String>,
+}
+
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
-        post,
+        get,
         operation_id = "grep",
         path = "/v0/namespaces/{namespace_id}/query/grep",
         tag = "query",
         summary = "Content search",
         description = "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep root.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
-        request_body = GrepRequest,
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("pattern" = String, Query, description = "Pattern in the Rust `regex` crate's dialect. Its UTF-8 encoding must be at most 1024 bytes."),
+            ("case_insensitive" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Match case-insensitively (`true` or `false`). Defaults to `false`."),
+            ("path_prefix" = Option<String>, Query, description = "Complete absolute path used to restrict matches."),
+            ("allow_scan" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Permit a capped exhaustive scan when the pattern has no required grams (`true` or `false`). Defaults to `false`."),
+            ("allow_stale" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Return indexed-only results when the unindexed tail exceeds the scan budget (`true` or `false`). Defaults to `false`."),
+            ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum matches per page"),
+            ("cursor" = Option<String>, Query, description = "Opaque grep page cursor")
+        ),
         responses(
             (status = 200, description = "One page of matches", body = GrepResponse),
             (status = 400, description = "Invalid pattern, cursor, or an unindexable pattern without allow_scan", body = ApiError),
@@ -42,9 +67,12 @@ use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceRea
 pub(super) async fn grep(
     State(state): State<AppState>,
     namespace_id_path: NamespaceIdPath,
-    AppJson(request): AppJson<GrepRequest>,
+    headers: HeaderMap,
+    query: AppQuery<GrepQuery>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
+    authorize(state.config.auth_policy(), &headers)?;
     let namespace_id = namespace_id_path.into_id()?;
+    let request = grep_request(query.into_params()?)?;
     // First touch: on a deployment that maintains this index, a search is
     // also the hint that someone cares about this namespace again — after a
     // restart, nothing else has said so.
@@ -62,6 +90,54 @@ pub(super) async fn grep(
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(response))
+}
+
+fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
+    let pattern = required_query_param(query.pattern, "pattern")?;
+    if pattern.len() > MAX_GREP_PATTERN_BYTES {
+        return Err(ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            loonfs_api::ErrorCode::InvalidRequest,
+            &format!(
+                "grep pattern is {} bytes; the maximum is {MAX_GREP_PATTERN_BYTES} bytes",
+                pattern.len()
+            ),
+        )
+        .with_param("pattern"));
+    }
+    let path_prefix = query
+        .path_prefix
+        .map(|value| {
+            loonfs_api::AbsolutePath::parse(&value).map_err(|error| {
+                ApiResponseError::new(
+                    StatusCode::BAD_REQUEST,
+                    loonfs_api::ErrorCode::InvalidRequest,
+                    &error.to_string(),
+                )
+                .with_param("path_prefix")
+            })
+        })
+        .transpose()?;
+    let limit = query
+        .limit
+        .map(|value| resolve_page_limit(Some(value)).map(|limit| limit.get()))
+        .transpose()?;
+    Ok(GrepRequest {
+        pattern,
+        case_insensitive: parse_optional_boolean(query.case_insensitive, "case_insensitive")?,
+        path_prefix,
+        cursor: query.cursor,
+        limit,
+        allow_stale: parse_optional_boolean(query.allow_stale, "allow_stale")?,
+        allow_scan: parse_optional_boolean(query.allow_scan, "allow_scan")?,
+    })
+}
+
+fn parse_optional_boolean(value: Option<String>, name: &str) -> Result<bool, ApiResponseError> {
+    value
+        .as_deref()
+        .map(|value| parse_boolean_query_param(value, name))
+        .unwrap_or(Ok(false))
 }
 
 /// Absent-capability response where this deployment answers no searches.
@@ -299,7 +375,7 @@ fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> A
             );
             let response = ApiResponseError::runtime_for_namespace(namespace_id, error);
             if cursor_is_invalid {
-                response.with_param("/cursor")
+                response.with_param("cursor")
             } else {
                 response
             }

@@ -142,12 +142,7 @@
             }
           }
         },
-        "x-loonfs-retry": "safe",
-        "x-fern-pagination": {
-          "cursor": "$request.after_seq",
-          "next_cursor": "$response.next_after_seq",
-          "results": "$response.changes"
-        }
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/mounts/{mount}/commits": {
@@ -898,7 +893,7 @@
       }
     },
     "/v0/mounts/{mount}/query/grep": {
-      "post": {
+      "get": {
         "tags": [
           "query"
         ],
@@ -914,18 +909,78 @@
             "schema": {
               "type": "string"
             }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GrepRequest"
-              }
+          },
+          {
+            "name": "pattern",
+            "in": "query",
+            "description": "Pattern in the Rust `regex` crate's dialect. Its UTF-8 encoding must be at most 1024 bytes.",
+            "required": true,
+            "schema": {
+              "type": "string"
             }
           },
-          "required": true
-        },
+          {
+            "name": "case_insensitive",
+            "in": "query",
+            "description": "Match case-insensitively (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "path_prefix",
+            "in": "query",
+            "description": "Complete absolute path used to restrict matches.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "allow_scan",
+            "in": "query",
+            "description": "Permit a capped exhaustive scan when the pattern has no required grams (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "allow_stale",
+            "in": "query",
+            "description": "Return indexed-only results when the unindexed tail exceeds the scan budget (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum matches per page",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque grep page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "One page of matches",
@@ -1021,7 +1076,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.matches"
+        }
       }
     },
     "/v0/mounts/{mount}/uploads": {
@@ -2709,52 +2769,6 @@
             "description": "The matched revision (the newest visible one at the snapshot)."
           }
         }
-      },
-      "GrepRequest": {
-        "type": "object",
-        "description": "One content-search request.\n\nEvery field but `pattern` is optional, and each one selects results. A\nmisspelled `case_insensitive` or `path_prefix` would decode to the default\nand answer a different search than the caller asked for, with no sign that\nanything was dropped, so unknown fields are rejected.",
-        "required": [
-          "pattern"
-        ],
-        "properties": {
-          "allow_scan": {
-            "type": "boolean",
-            "description": "Permit a capped exhaustive scan when the pattern yields no required\ngrams. Refused beyond the server's scan budget."
-          },
-          "allow_stale": {
-            "type": "boolean",
-            "description": "When the unindexed tail exceeds the scan budget, return\nindexed-only results (reported via `tail_scanned: false`) instead\nof failing with `index_lagging`."
-          },
-          "case_insensitive": {
-            "type": "boolean",
-            "description": "Match case-insensitively. Verification is exact; the index remains\nconsulted through its case-folded grams."
-          },
-          "cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Resume cursor from a previous page. The cursor resumes strictly\nafter the last candidate the issuing page finished scanning and is\nbound to that page's request; each page is evaluated against the\nnamespace head at page time."
-          },
-          "limit": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Maximum matches per page.",
-            "minimum": 0
-          },
-          "path_prefix": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Restrict matches to files under this complete absolute path, resolved\nto a directory inode before candidates are filtered."
-          },
-          "pattern": {
-            "type": "string",
-            "description": "The pattern, in the Rust `regex` crate's dialect (no backreferences\nor lookaround). Patterns that require no literal bytes are rejected\nwith `query_unindexable` unless `allow_scan` is set."
-          }
-        },
-        "additionalProperties": false
       },
       "GrepResponse": {
         "type": "object",

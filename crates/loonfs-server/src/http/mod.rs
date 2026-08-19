@@ -34,7 +34,7 @@ use self::error::ApiResponseError;
 use self::extractors::{
     authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
     UploadBodyBytes, UploadBodyStream, UploadControlJson, MAX_COMPLETION_BODY_BYTES,
-    MAX_UPLOAD_CONTROL_BODY_BYTES,
+    MAX_GREP_PATTERN_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use self::handlers_downloads::{begin_download, begin_download_by_inode};
 use self::handlers_filesystem::{
@@ -195,9 +195,9 @@ fn router(state: AppState) -> Router {
     let serves_grep = state.config.grep.mode.serves_grep();
     let maintains_index = state.config.grep.mode.maintains_index();
     let grep_route = if serves_grep {
-        post(grep)
+        get(grep)
     } else {
-        post(grep_queries_not_served)
+        get(grep_queries_not_served)
     };
     let enable_grep_route = if maintains_index {
         post(enable_grep_index)

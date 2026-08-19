@@ -26,7 +26,7 @@ within a plane is expressed as **named features** (section 2).
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace state by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Read namespace storage diagnostics; create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
-| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace_id}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized active grep root for the namespace. | Optional |
+| `query/v0` | Query plane | Content search over derived indexes (`GET /v0/namespaces/{namespace_id}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized active grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
 Notes:
@@ -161,7 +161,7 @@ hoc.
 | `core.uploads.direct_put.checksum.<algorithm>` | Nothing on its own; it names the whole-object checksum a `direct_put` claim must carry. | Exactly one is advertised, alongside `core.uploads.direct_put`, and only ever `true`. Registered algorithms are `sha256`, `crc64nvme`, and `crc32c`, matching the `checksum.algorithm` spellings. Providers do not agree on what they can bind into a presigned write, so the deployment names it and the client folds that digest while staging; a claim in any other algorithm answers `invalid_request` at begin. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
-| `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
+| `query.grep` | Content search (`GET /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0`'s only feature key is `admin.grep.index`; the rest of that plane
 is required ops. `acl.*` keys are unregistered until that plane
@@ -723,7 +723,7 @@ The table below lists the retry class for every v0 operation.
 | List checkpoints | `list_checkpoints` | `safe` | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
 | Release a checkpoint | `release_checkpoint` | `safe` | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
 | Run maintenance | `maintenance_step` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/maintenance/step` |
-| Search file contents | `grep` | `safe` | `POST /v0/namespaces/{ns}/query/grep`; requires the `query.grep` feature and an active index |
+| Search file contents | `grep` | `safe` | `GET /v0/namespaces/{ns}/query/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
 | Read grep index status | `get_grep_index_status` | `safe` | `GET /v0/admin/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `safe` | `POST /v0/admin/namespaces/{ns}/grep/index/enable`; idempotent |
 | Disable the grep index | `disable_grep_index` | `safe` | `POST /v0/admin/namespaces/{ns}/grep/index/disable`; idempotent |
@@ -2361,17 +2361,12 @@ same `namespace_exists` or `namespace_deleted` error as namespace creation.
 If the source checkpoint disappears before the operation completes, the
 server deletes the new target and returns `checkpoint_unavailable`.
 
-### 6.13 `POST /query/grep`
+### 6.13 `GET /query/grep`
 
 Representative request:
 
-```json
-{
-  "pattern": "fn (grep|search)",
-  "case_insensitive": false,
-  "path_prefix": "/src",
-  "limit": 100
-}
+```http
+GET /query/grep?pattern=fn%20%28grep%7Csearch%29&case_insensitive=false&path_prefix=%2Fsrc&limit=100
 ```
 
 Representative response:

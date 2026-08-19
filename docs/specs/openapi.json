@@ -1339,12 +1339,7 @@
             }
           }
         },
-        "x-loonfs-retry": "safe",
-        "x-fern-pagination": {
-          "cursor": "$request.after_seq",
-          "next_cursor": "$response.next_after_seq",
-          "results": "$response.changes"
-        }
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/commits": {
@@ -2671,7 +2666,7 @@
       }
     },
     "/v0/namespaces/{namespace_id}/query/grep": {
-      "post": {
+      "get": {
         "tags": [
           "query"
         ],
@@ -2687,18 +2682,78 @@
             "schema": {
               "type": "string"
             }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GrepRequest"
-              }
+          },
+          {
+            "name": "pattern",
+            "in": "query",
+            "description": "Pattern in the Rust `regex` crate's dialect. Its UTF-8 encoding must be at most 1024 bytes.",
+            "required": true,
+            "schema": {
+              "type": "string"
             }
           },
-          "required": true
-        },
+          {
+            "name": "case_insensitive",
+            "in": "query",
+            "description": "Match case-insensitively (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "path_prefix",
+            "in": "query",
+            "description": "Complete absolute path used to restrict matches.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "allow_scan",
+            "in": "query",
+            "description": "Permit a capped exhaustive scan when the pattern has no required grams (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "allow_stale",
+            "in": "query",
+            "description": "Return indexed-only results when the unindexed tail exceeds the scan budget (`true` or `false`). Defaults to `false`.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum matches per page",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque grep page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "One page of matches",
@@ -2794,7 +2849,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.matches"
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/uploads": {
@@ -5009,7 +5069,7 @@
           },
           "pattern": {
             "type": "string",
-            "description": "The pattern, in the Rust `regex` crate's dialect (no backreferences\nor lookaround). Patterns that require no literal bytes are rejected\nwith `query_unindexable` unless `allow_scan` is set."
+            "description": "The pattern, in the Rust `regex` crate's dialect (no backreferences\nor lookaround). Its UTF-8 encoding must be at most 1024 bytes.\nPatterns that require no literal bytes are rejected with\n`query_unindexable` unless `allow_scan` is set."
           }
         },
         "additionalProperties": false

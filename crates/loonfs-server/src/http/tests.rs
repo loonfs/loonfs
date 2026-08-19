@@ -2029,28 +2029,22 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     }
 
     // Invalid grep path prefixes return invalid_request after authentication.
-    let grep_url = format!("http://{addr}/v0/namespaces/demo/query/grep");
-    let invalid_grep = r#"{"pattern":"needle","path_prefix":"relative"}"#;
+    let grep_url =
+        format!("http://{addr}/v0/namespaces/demo/query/grep?pattern=needle&path_prefix=relative");
     let body = expect_enveloped(
         || {
             raw_agent()
-                .post(&grep_url)
+                .get(&grep_url)
                 .set("authorization", "Bearer test-token")
-                .set("content-type", "application/json")
-                .send_string(invalid_grep)
+                .call()
         },
         "invalid grep path should answer 400",
         400,
         "invalid_request",
     );
-    assert_eq!(body["param"], "/path_prefix");
+    assert_eq!(body["param"], "path_prefix");
     expect_enveloped(
-        || {
-            raw_agent()
-                .post(&grep_url)
-                .set("content-type", "application/json")
-                .send_string(invalid_grep)
-        },
+        || raw_agent().get(&grep_url).call(),
         "authorization should precede grep path decoding",
         401,
         "unauthorized",

@@ -54,7 +54,7 @@ impl GrepHost {
         }
     }
 
-    /// The query the server's `POST .../query/grep` performs: this host's
+    /// The query the server's `GET .../query/grep` performs: this host's
     /// service and store for grep's own segments, its reader for the
     /// filesystem.
     pub(crate) async fn grep(
