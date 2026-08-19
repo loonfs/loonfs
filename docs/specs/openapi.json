@@ -3643,7 +3643,7 @@
       },
       "AttributesProjection": {
         "type": "object",
-        "description": "One inode's structurally complete attribute projection.\n\nThe projection appears only flattened into `AuthoritativePathEntry`, where\nthe whole group is omitted unless the caller asks for attributes. The two\nalways-present fields are therefore marked not-required in the document:\n`allOf` composition cannot express an optional flattened group any other\nway.",
+        "description": "Attributes returned for one inode.\n\nA path entry omits this entire group unless the caller requests attributes.\nOpenAPI flattens these fields with `allOf`, so none of them can be marked as\nrequired on every path entry.",
         "properties": {
           "attributes": {
             "$ref": "#/components/schemas/Attributes",
@@ -3730,7 +3730,7 @@
             }
           }
         ],
-        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. The entry kind carries\nthe file-only revision and content summary, so a directory cannot carry a\npartial file payload. Attributes are likewise projected as one value or\nomitted as one value, while serializing as prefixed sibling fields.\nThe attribute revision is read independently — clients feed it to\n`expected_attributes_revision_no` on the next write without touching the\nvalues — so this is a prefixed-sibling projection rather than a value\nconsumed as one nested unit."
+        "description": "Metadata for one path returned by stat and directory-listing operations.\n\nFile entries include the current revision and content details. Directory\nentries do not. Attribute fields are included only when requested and are\nserialized at the top level of the entry. Callers can pass\n`attributes_revision_no` as `expected_attributes_revision_no` when updating\nattributes."
       },
       "AuthoritativePathEntryKind": {
         "oneOf": [

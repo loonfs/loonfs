@@ -1407,8 +1407,7 @@ fn openapi_flattens_the_path_entry_attribute_projection() {
     let required = required_fields(projection);
     assert!(
         !required.contains("attributes_revision_no") && !required.contains("attributes"),
-        "the projection is optionally flattened into the entry, and allOf merges \
-         required lists, so its fields must stay not required in the document"
+        "path entries may omit attribute fields when attributes are not requested"
     );
 
     let path_entry = schemas

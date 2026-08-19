@@ -8,16 +8,13 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Authoritative metadata for one visible path.
+/// Metadata for one path returned by stat and directory-listing operations.
 ///
-/// This is the result shape for stat/list style reads. The entry kind carries
-/// the file-only revision and content summary, so a directory cannot carry a
-/// partial file payload. Attributes are likewise projected as one value or
-/// omitted as one value, while serializing as prefixed sibling fields.
-/// The attribute revision is read independently — clients feed it to
-/// `expected_attributes_revision_no` on the next write without touching the
-/// values — so this is a prefixed-sibling projection rather than a value
-/// consumed as one nested unit.
+/// File entries include the current revision and content details. Directory
+/// entries do not. Attribute fields are included only when requested and are
+/// serialized at the top level of the entry. Callers can pass
+/// `attributes_revision_no` as `expected_attributes_revision_no` when updating
+/// attributes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AuthoritativePathEntry {
@@ -158,13 +155,11 @@ impl AuthoritativePathEntryKind {
     }
 }
 
-/// One inode's structurally complete attribute projection.
+/// Attributes returned for one inode.
 ///
-/// The projection appears only flattened into `AuthoritativePathEntry`, where
-/// the whole group is omitted unless the caller asks for attributes. The two
-/// always-present fields are therefore marked not-required in the document:
-/// `allOf` composition cannot express an optional flattened group any other
-/// way.
+/// A path entry omits this entire group unless the caller requests attributes.
+/// OpenAPI flattens these fields with `allOf`, so none of them can be marked as
+/// required on every path entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AttributesProjection {

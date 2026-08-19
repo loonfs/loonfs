@@ -8,7 +8,7 @@ import { LoonFS, LoonFSClient } from "../../../generated/typescript/index.js";
 
 const FIXTURE_VERSION = 1;
 const RUNNER_SKIP = "run scripts/run-sdk-conformance.sh typescript";
-const TRANSFER_SKIP = "needs transfer orchestration; covered by the Rust reference harness";
+const TRANSFER_SKIP = "file transfer cases are not implemented in the TypeScript harness yet";
 const CASE_FIELDS = ["expected", "family", "intent", "name", "request", "version"];
 const EXPECTED_CASES = [
     ["changes", "changes"],

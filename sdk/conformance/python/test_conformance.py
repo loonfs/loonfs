@@ -14,7 +14,7 @@ from loonfs_sdk import ActorRef, FilesystemOperation_CreateDirectory, LoonFS, Un
 
 FIXTURE_VERSION = 1
 RUNNER_SKIP = "run scripts/run-sdk-conformance.sh python"
-TRANSFER_SKIP = "needs transfer orchestration; covered by the Rust reference harness"
+TRANSFER_SKIP = "file transfer cases are not implemented in the Python harness yet"
 CASE_FIELDS = {"version", "name", "intent", "family", "request", "expected"}
 EXPECTED_CASES = [
     ("changes", "changes"),
