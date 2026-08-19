@@ -80,6 +80,8 @@ pub(crate) enum OpenapiPostprocessError {
     Json(#[from] serde_json::Error),
     #[error("OpenAPI operation `{operation_id}` has no retry classification")]
     MissingRetryClassification { operation_id: String },
+    #[error("OpenAPI union variant `{schema_name}` conflicts with an existing component schema")]
+    UnionVariantSchemaCollision { schema_name: String },
 }
 
 /// Retry class for each public operation.
@@ -165,6 +167,7 @@ pub(crate) fn openapi_json_pretty(
     let mut document = serde_json::from_str(&derived)?;
     normalize_optional_schemas(&mut document);
     add_union_discriminators(&mut document);
+    extract_union_variants(&mut document)?;
     add_operation_retry_classes(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
 }
@@ -232,6 +235,154 @@ fn normalize_optional_schemas(document: &mut Value) {
 /// Adds discriminators that utoipa 5.5 omits from tagged unions.
 fn add_union_discriminators(document: &mut Value) {
     visit(document, &mut Vec::new());
+}
+
+/// Moves inline union variants into `components.schemas`.
+fn extract_union_variants(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+    struct UnionRewrite {
+        union_name: String,
+        variants: Vec<Value>,
+        mapping: Map,
+    }
+
+    let schemas = document
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("OpenAPI document has no component schemas object");
+    let mut extracted = Map::new();
+    let mut rewrites = Vec::new();
+
+    for (union_name, union) in schemas {
+        let Some(variants) = union.get("oneOf").and_then(Value::as_array) else {
+            continue;
+        };
+        let Some(discriminator) = union.get("discriminator").and_then(Value::as_object) else {
+            continue;
+        };
+        let property_name = discriminator
+            .get("propertyName")
+            .and_then(Value::as_str)
+            .expect("OpenAPI discriminator has no propertyName");
+        let mut mapping = Map::new();
+        let mut references = Vec::with_capacity(variants.len());
+
+        for variant in variants {
+            if let Some(reference) = variant.get("$ref").and_then(Value::as_str) {
+                let schema = component_schema_for_reference(schemas, reference)
+                    .expect("OpenAPI union variant does not reference a component schema");
+                let tag = fixed_discriminator_value(schema, property_name)
+                    .expect("OpenAPI union variant has no fixed discriminator value");
+                mapping.insert(tag, Value::String(reference.to_owned()));
+                references.push(variant.clone());
+                continue;
+            }
+
+            let tag = fixed_discriminator_value(variant, property_name)
+                .expect("OpenAPI union variant has no fixed discriminator value");
+            let schema_name = variant
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{union_name}{}", pascal_case(&tag)));
+            let reference = component_schema_reference(&schema_name);
+            let mut schema = variant.clone();
+            schema
+                .as_object_mut()
+                .expect("OpenAPI union variant is not an object")
+                .shift_remove("title");
+
+            register_extracted_schema(schemas, &mut extracted, &schema_name, schema)?;
+            mapping.insert(tag, Value::String(reference.clone()));
+            references.push(Value::Object(IndexMap::from([(
+                "$ref".to_owned(),
+                Value::String(reference),
+            )])));
+        }
+
+        rewrites.push(UnionRewrite {
+            union_name: union_name.clone(),
+            variants: references,
+            mapping,
+        });
+    }
+
+    let schemas = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("components"))
+        .and_then(Value::as_object_mut)
+        .and_then(|components| components.get_mut("schemas"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no component schemas object");
+    for rewrite in rewrites {
+        let union = schemas
+            .get_mut(&rewrite.union_name)
+            .and_then(Value::as_object_mut)
+            .expect("OpenAPI union component is not an object");
+        union.insert("oneOf".to_owned(), Value::Array(rewrite.variants));
+        union
+            .get_mut("discriminator")
+            .and_then(Value::as_object_mut)
+            .expect("OpenAPI union discriminator is not an object")
+            .insert("mapping".to_owned(), Value::Object(rewrite.mapping));
+    }
+    schemas.extend(extracted);
+    Ok(())
+}
+
+fn register_extracted_schema(
+    schemas: &Map,
+    extracted: &mut Map,
+    schema_name: &str,
+    schema: Value,
+) -> Result<(), OpenapiPostprocessError> {
+    if let Some(existing) = schemas
+        .get(schema_name)
+        .or_else(|| extracted.get(schema_name))
+    {
+        if existing != &schema {
+            return Err(OpenapiPostprocessError::UnionVariantSchemaCollision {
+                schema_name: schema_name.to_owned(),
+            });
+        }
+        return Ok(());
+    }
+
+    extracted.insert(schema_name.to_owned(), schema);
+    Ok(())
+}
+
+fn fixed_discriminator_value(variant: &Value, property_name: &str) -> Option<String> {
+    fixed_required_properties(variant)?
+        .into_iter()
+        .find_map(|(name, value)| (name == property_name).then_some(value))
+}
+
+fn component_schema_for_reference<'a>(schemas: &'a Map, reference: &str) -> Option<&'a Value> {
+    let encoded_name = reference.strip_prefix("#/components/schemas/")?;
+    let schema_name = encoded_name.replace("~1", "/").replace("~0", "~");
+    schemas.get(&schema_name)
+}
+
+fn component_schema_reference(schema_name: &str) -> String {
+    format!(
+        "#/components/schemas/{}",
+        schema_name.replace('~', "~0").replace('/', "~1")
+    )
+}
+
+fn pascal_case(value: &str) -> String {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut characters = part.chars();
+            let first = characters
+                .next()
+                .expect("filtered discriminator part is not empty");
+            first.to_ascii_uppercase().to_string() + characters.as_str()
+        })
+        .collect()
 }
 
 fn normalize_optional_schemas_in(value: &mut Value) {
@@ -454,20 +605,21 @@ mod tests {
     }
 
     #[test]
-    fn derives_a_complete_mapping_from_fixed_required_properties() {
+    fn extracts_named_and_derived_union_variants() {
         let mut document = ordered(serde_json::json!({
             "components": {
                 "schemas": {
                     "Choice": {
                         "oneOf": [
                             {
+                                "title": "ChoiceFirst",
                                 "required": ["kind"],
                                 "properties": {"kind": {"enum": ["first"]}}
                             },
                             {
                                 "required": ["kind", "value"],
                                 "properties": {
-                                    "kind": {"const": "second"},
+                                    "kind": {"const": "not_needed"},
                                     "value": {"type": "string"}
                                 }
                             }
@@ -478,21 +630,102 @@ mod tests {
         }));
 
         add_union_discriminators(&mut document);
+        extract_union_variants(&mut document).expect("extract union variants");
         let actual = unordered(&document);
         assert_eq!(
             actual.pointer("/components/schemas/Choice/discriminator"),
             Some(&serde_json::json!({
                 "propertyName": "kind",
                 "mapping": {
-                    "first": "#/components/schemas/Choice/oneOf/0",
-                    "second": "#/components/schemas/Choice/oneOf/1"
+                    "first": "#/components/schemas/ChoiceFirst",
+                    "not_needed": "#/components/schemas/ChoiceNotNeeded"
+                }
+            }))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/Choice/oneOf"),
+            Some(&serde_json::json!([
+                {"$ref": "#/components/schemas/ChoiceFirst"},
+                {"$ref": "#/components/schemas/ChoiceNotNeeded"}
+            ]))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/ChoiceFirst"),
+            Some(&serde_json::json!({
+                "required": ["kind"],
+                "properties": {"kind": {"enum": ["first"]}}
+            }))
+        );
+        assert_eq!(
+            actual.pointer("/components/schemas/ChoiceNotNeeded"),
+            Some(&serde_json::json!({
+                "required": ["kind", "value"],
+                "properties": {
+                    "kind": {"const": "not_needed"},
+                    "value": {"type": "string"}
                 }
             }))
         );
 
         let once = document.clone();
         add_union_discriminators(&mut document);
+        extract_union_variants(&mut document).expect("extract union variants again");
         assert_eq!(document, once);
+    }
+
+    #[test]
+    fn rejects_a_different_schema_under_the_variant_name() {
+        let mut document = ordered(serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Choice": {
+                        "oneOf": [{
+                            "title": "ChoiceFirst",
+                            "required": ["kind"],
+                            "properties": {"kind": {"const": "first"}}
+                        }]
+                    },
+                    "ChoiceFirst": {"type": "string"}
+                }
+            }
+        }));
+
+        add_union_discriminators(&mut document);
+        let error = extract_union_variants(&mut document)
+            .expect_err("different component content should fail generation");
+        assert!(matches!(
+            error,
+            OpenapiPostprocessError::UnionVariantSchemaCollision { schema_name }
+                if schema_name == "ChoiceFirst"
+        ));
+    }
+
+    #[test]
+    fn reuses_identical_schema_under_the_variant_name() {
+        let variant = serde_json::json!({
+            "required": ["kind"],
+            "properties": {"kind": {"const": "first"}}
+        });
+        let mut titled_variant = variant.clone();
+        titled_variant
+            .as_object_mut()
+            .expect("variant object")
+            .insert("title".to_owned(), serde_json::json!("ChoiceFirst"));
+        let mut document = ordered(serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Choice": {"oneOf": [titled_variant]},
+                    "ChoiceFirst": variant
+                }
+            }
+        }));
+
+        add_union_discriminators(&mut document);
+        extract_union_variants(&mut document).expect("reuse identical component schema");
+        assert_eq!(
+            unordered(&document).pointer("/components/schemas/Choice/oneOf/0/$ref"),
+            Some(&serde_json::json!("#/components/schemas/ChoiceFirst"))
+        );
     }
 
     #[test]

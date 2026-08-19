@@ -41,6 +41,11 @@ fn every_one_of_is_a_discriminated_non_null_union() {
     .expect("parse openapi json");
     let mut unions = Vec::new();
     collect_one_of_objects(&spec, &mut unions);
+    let schemas = spec
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
     assert!(
         !unions.is_empty(),
         "the generated document has no oneOf schemas"
@@ -76,6 +81,13 @@ fn every_one_of_is_a_discriminated_non_null_union() {
             "oneOf discriminator mapping is incomplete: {union:?}"
         );
         for variant in variants {
+            let variant_ref = variant
+                .get("$ref")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("discriminated oneOf member is not a $ref: {variant:?}"));
+            let variant = component_schema_for_ref(schemas, variant_ref).unwrap_or_else(|| {
+                panic!("discriminated oneOf member does not reference a component: {variant_ref}")
+            });
             let tag_schema = variant
                 .get("properties")
                 .and_then(Value::as_object)
@@ -96,9 +108,20 @@ fn every_one_of_is_a_discriminated_non_null_union() {
                 .unwrap_or_else(|| {
                     panic!("oneOf variant has no fixed discriminator value: {variant:?}")
                 });
+            assert_eq!(
+                mapping.get(tag).and_then(Value::as_str),
+                Some(variant_ref),
+                "oneOf discriminator mapping does not reference the `{tag}` variant: {union:?}"
+            );
+        }
+        for mapping_ref in mapping.values().map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("oneOf discriminator mapping is not a $ref: {union:?}"))
+        }) {
             assert!(
-                mapping.get(tag).and_then(Value::as_str).is_some(),
-                "oneOf discriminator has no mapping for `{tag}`: {union:?}"
+                component_schema_for_ref(schemas, mapping_ref).is_some(),
+                "oneOf discriminator mapping does not reference a component: {mapping_ref}"
             );
         }
     }
@@ -589,12 +612,28 @@ fn openapi_names_tagged_one_of_alternatives() {
         .and_then(Value::as_object)
         .expect("openapi schemas object");
 
-    for (schema_name, expected_titles) in [
+    for (schema_name, expected_names) in [
         (
             "AuthoritativePathEntryKind",
             &[
                 "AuthoritativePathEntryDirectory",
                 "AuthoritativePathEntryFile",
+            ][..],
+        ),
+        (
+            "BeginUploadRequest",
+            &[
+                "BeginUploadServiceProxied",
+                "BeginUploadDirectPut",
+                "BeginUploadDirectMultipart",
+            ][..],
+        ),
+        (
+            "BeginUploadResponse",
+            &[
+                "BeginUploadResponseServiceProxied",
+                "BeginUploadResponseDirectPut",
+                "BeginUploadResponseDirectMultipart",
             ][..],
         ),
         (
@@ -638,11 +677,48 @@ fn openapi_names_tagged_one_of_alternatives() {
             "CheckpointOwnerSummary",
             &["CheckpointOwnerUser", "CheckpointOwnerFork"][..],
         ),
+        (
+            "CompleteUploadRequest",
+            &[
+                "CompleteUploadServiceProxied",
+                "CompleteUploadDirectPut",
+                "CompleteUploadDirectMultipart",
+            ][..],
+        ),
+        (
+            "GrepIndexLifecycle",
+            &[
+                "GrepIndexLifecycleDisabled",
+                "GrepIndexLifecycleBackfilling",
+                "GrepIndexLifecycleActive",
+            ][..],
+        ),
+        (
+            "ReorganizeStepOutcome",
+            &[
+                "ReorganizeStepOutcomeNotNeeded",
+                "ReorganizeStepOutcomeUnitPublished",
+                "ReorganizeStepOutcomeCompactionStarted",
+                "ReorganizeStepOutcomeCompactionRunning",
+                "ReorganizeStepOutcomeCompactionAtCapacity",
+                "ReorganizeStepOutcomeCompactionRequired",
+                "ReorganizeStepOutcomeSuperseded",
+            ][..],
+        ),
+        (
+            "WalFlushStepOutcome",
+            &[
+                "WalFlushStepOutcomeNotNeeded",
+                "WalFlushStepOutcomeFlushed",
+                "WalFlushStepOutcomeSuperseded",
+                "WalFlushStepOutcomeRaceLost",
+            ][..],
+        ),
     ] {
-        let titles = one_of_titles(schemas, schema_name);
+        let names = one_of_schema_names(schemas, schema_name);
         assert_eq!(
-            titles, expected_titles,
-            "unexpected oneOf titles for `{schema_name}`"
+            names, expected_names,
+            "unexpected oneOf schema names for `{schema_name}`"
         );
     }
 }
@@ -951,12 +1027,21 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         .and_then(Value::as_array)
         .expect("completion variants");
     assert_eq!(completion_variants.len(), 3);
-    for (variant, (title, mode)) in completion_variants.iter().zip([
+    for (variant_ref, (schema_name, mode)) in completion_variants.iter().zip([
         ("CompleteUploadServiceProxied", "service_proxied"),
         ("CompleteUploadDirectPut", "direct_put"),
         ("CompleteUploadDirectMultipart", "direct_multipart"),
     ]) {
-        assert_eq!(variant.get("title").and_then(Value::as_str), Some(title));
+        let reference = variant_ref
+            .get("$ref")
+            .and_then(Value::as_str)
+            .expect("completion variant component ref");
+        assert_eq!(
+            reference.strip_prefix("#/components/schemas/"),
+            Some(schema_name)
+        );
+        let variant = component_schema_for_ref(schemas, reference)
+            .expect("completion variant component schema");
         assert_eq!(
             variant
                 .pointer("/properties/mode/enum/0")
@@ -976,7 +1061,12 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             );
         }
     }
-    let multipart_required = required_fields(&completion_variants[2]);
+    let multipart = completion_variants[2]
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|reference| component_schema_for_ref(schemas, reference))
+        .expect("multipart completion variant component schema");
+    let multipart_required = required_fields(multipart);
     assert!(multipart_required.contains("content"));
     assert!(multipart_required.contains("parts"));
     assert!(!schemas.contains_key("CompleteKnownContentUploadRequest"));
@@ -1063,15 +1153,8 @@ fn openapi_documents_delete_path_behavior() {
         .and_then(Value::as_object)
         .expect("openapi schemas object");
     let delete_schema = schemas
-        .get("FilesystemOperation")
-        .and_then(|schema| schema.get("oneOf"))
-        .and_then(Value::as_array)
-        .and_then(|schemas| {
-            schemas.iter().find(|schema| {
-                schema.get("title").and_then(Value::as_str) == Some("FsOpDeletePath")
-            })
-        })
-        .expect("FsOpDeletePath oneOf schema");
+        .get("FsOpDeletePath")
+        .expect("FsOpDeletePath component schema");
 
     assert!(!delete_schema
         .get("required")
@@ -1147,7 +1230,15 @@ fn required_fields(schema: &Value) -> BTreeSet<&str> {
         .collect()
 }
 
-fn one_of_titles<'a>(
+fn component_schema_for_ref<'a>(
+    schemas: &'a serde_json::Map<String, Value>,
+    reference: &str,
+) -> Option<&'a Value> {
+    let schema_name = reference.strip_prefix("#/components/schemas/")?;
+    schemas.get(schema_name)
+}
+
+fn one_of_schema_names<'a>(
     schemas: &'a serde_json::Map<String, Value>,
     schema_name: &str,
 ) -> Vec<&'a str> {
@@ -1159,9 +1250,10 @@ fn one_of_titles<'a>(
         .iter()
         .map(|schema| {
             schema
-                .get("title")
+                .get("$ref")
                 .and_then(Value::as_str)
-                .unwrap_or_else(|| panic!("missing oneOf title in schema `{schema_name}`"))
+                .and_then(|reference| reference.strip_prefix("#/components/schemas/"))
+                .unwrap_or_else(|| panic!("missing oneOf component ref in schema `{schema_name}`"))
         })
         .collect()
 }
