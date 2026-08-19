@@ -1,10 +1,9 @@
 #!/bin/sh
-# Generates the three SDKs locally from docs/specs/openapi.json using the
-# pinned Fern CLI and generator versions in fern/generators.yml.
-# Requires docker. Output lands under fern/generated/ (not tracked).
+# Generates SDKs from docs/specs/openapi.json with the pinned Fern versions.
+# Requires Docker. Output is written to the untracked fern/generated directory.
 #
 # Usage: scripts/generate-sdks.sh [go|python|typescript]
-# With no argument, validates the spec and generates all three.
+# With no argument, validates the document and generates all three SDKs.
 
 set -eu
 

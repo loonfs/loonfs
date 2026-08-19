@@ -1,6 +1,5 @@
-# SDK generation configuration. Versions are pinned; regeneration is local
-# (docker) and must not depend on a hosted project. Validated against the
-# spec on 2026-08-19; see docs/specs/openapi.json for the source document.
+# Generates SDKs from docs/specs/openapi.json with pinned generator versions.
+# Output is written locally through Docker.
 api:
   specs:
     - openapi: ../docs/specs/openapi.json
