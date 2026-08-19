@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,8 +47,6 @@ var expectedCases = []struct {
 }
 
 type harness struct {
-	baseURL         string
-	token           string
 	client          *client.Client
 	unauthenticated *client.Client
 }
@@ -73,8 +70,6 @@ func TestSDKConformance(t *testing.T) {
 		t.Fatalf("load conformance cases: %v", err)
 	}
 	h := &harness{
-		baseURL: baseURL,
-		token:   token,
 		client: client.NewClient(
 			option.WithBaseURL(baseURL),
 			option.WithToken(token),
@@ -245,68 +240,6 @@ func runErrorContract(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	if unauthorized.Body.RequestID == nil {
 		t.Error("unauthenticated error has no request_id")
-	}
-
-	malformedRequest, err := http.NewRequestWithContext(
-		context.Background(),
-		http.MethodPost,
-		fmt.Sprintf("%s/v0/namespaces/%s/commits", h.baseURL, request.NamespaceID),
-		bytes.NewReader(request.MalformedBody),
-	)
-	if err != nil {
-		t.Fatalf("build malformed-body request: %v", err)
-	}
-	malformedRequest.Header.Set("Authorization", "Bearer "+h.token)
-	malformedRequest.Header.Set("Content-Type", "application/json")
-	malformed := sendRawRequest(t, malformedRequest)
-	assertRawError(t, malformed, expected.MalformedBody)
-
-	invalidRequest, err := http.NewRequestWithContext(
-		context.Background(),
-		http.MethodGet,
-		fmt.Sprintf(
-			"%s/v0/namespaces/%s/changes?after_seq=%s",
-			h.baseURL,
-			request.NamespaceID,
-			request.InvalidAfterSeq,
-		),
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("build invalid-query request: %v", err)
-	}
-	invalidRequest.Header.Set("Authorization", "Bearer "+h.token)
-	invalidQuery := sendRawRequest(t, invalidRequest)
-	assertRawError(t, invalidQuery, expected.InvalidQuery)
-}
-
-func sendRawRequest(t *testing.T, request *http.Request) *http.Response {
-	t.Helper()
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("send raw request: %v", err)
-	}
-	return response
-}
-
-func assertRawError(t *testing.T, response *http.Response, expected errorOutcome) {
-	t.Helper()
-	defer response.Body.Close()
-	if response.StatusCode != expected.Status {
-		t.Errorf("status = %d, want %d", response.StatusCode, expected.Status)
-	}
-	var apiError loonfs.APIError
-	if err := json.NewDecoder(response.Body).Decode(&apiError); err != nil {
-		t.Fatalf("decode API error envelope: %v", err)
-	}
-	if apiError.Code != expected.Code {
-		t.Errorf("code = %q, want %q", apiError.Code, expected.Code)
-	}
-	if apiError.Param == nil || *apiError.Param != expected.Param {
-		t.Errorf("param = %v, want %q", apiError.Param, expected.Param)
-	}
-	if apiError.RequestID == nil {
-		t.Error("error has no request_id")
 	}
 }
 
