@@ -21,7 +21,7 @@ import (
 
 const fixtureVersion = 1
 
-const transferSkip = "needs transfer orchestration; covered by the Rust reference harness"
+const transferSkip = "file transfer cases are not implemented in the Go harness yet"
 
 type conformanceCase struct {
 	Version  int             `json:"version"`
@@ -130,7 +130,7 @@ func loadCases(directory string) ([]conformanceCase, error) {
 		return cases[i].Name < cases[j].Name
 	})
 	if len(cases) != len(expectedCases) {
-		return nil, fmt.Errorf("version one requires %d cases, found %d", len(expectedCases), len(cases))
+		return nil, fmt.Errorf("fixture version 1 requires %d cases, found %d", len(expectedCases), len(cases))
 	}
 	for index, expected := range expectedCases {
 		if cases[index].Name != expected.name || cases[index].Family != expected.family {
@@ -152,16 +152,16 @@ func validateCase(path string, testCase *conformanceCase) error {
 	}
 	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	if testCase.Name != stem {
-		return fmt.Errorf("invalid fixture %s: name %q must match the JSON file stem", path, testCase.Name)
+		return fmt.Errorf("invalid fixture %s: name is %q, expected %q", path, testCase.Name, stem)
 	}
 	if strings.TrimSpace(testCase.Intent) == "" {
 		return fmt.Errorf("invalid fixture %s: intent must not be empty", path)
 	}
 	if !isJSONObject(testCase.Request) {
-		return fmt.Errorf("invalid fixture %s: request must be a JSON object", path)
+		return fmt.Errorf("invalid fixture %s: request field must be a JSON object", path)
 	}
 	if !isJSONObject(testCase.Expected) {
-		return fmt.Errorf("invalid fixture %s: expected must be a JSON object", path)
+		return fmt.Errorf("invalid fixture %s: expected field must be a JSON object", path)
 	}
 	return nil
 }
@@ -191,11 +191,11 @@ func decodeCaseValues[R, E any](t *testing.T, testCase conformanceCase) (R, E) {
 	t.Helper()
 	request, err := decodeStrict[R](testCase.Request)
 	if err != nil {
-		t.Fatalf("%s request did not parse: %v", testCase.Name, err)
+		t.Fatalf("decode %s request: %v", testCase.Name, err)
 	}
 	expected, err := decodeStrict[E](testCase.Expected)
 	if err != nil {
-		t.Fatalf("%s expected values did not parse: %v", testCase.Name, err)
+		t.Fatalf("decode %s expected values: %v", testCase.Name, err)
 	}
 	return request, expected
 }
@@ -441,10 +441,10 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Error("final cursor is not nil")
 	}
 	if savedCursor == nil {
-		t.Fatal("saved mid-walk cursor is nil")
+		t.Fatal("resume cursor was not recorded")
 	}
 	if resumeOffset < 0 {
-		t.Fatal("saved mid-walk offset is absent")
+		t.Fatal("resume position was not recorded")
 	}
 
 	resumed := make([]string, 0, len(request.EntryNames)-resumeOffset)
@@ -489,18 +489,18 @@ func validatePageWalk(expected, observed []string, resumeOffset int, resumed []s
 	seen := make(map[string]struct{}, len(observed))
 	for _, name := range observed {
 		if _, exists := seen[name]; exists {
-			return fmt.Errorf("full pagination walk repeated %q", name)
+			return fmt.Errorf("pagination returned %q more than once", name)
 		}
 		seen[name] = struct{}{}
 	}
 	if !equalStrings(observed, expected) {
-		return errors.New("full pagination walk did not match the expected entries")
+		return errors.New("pagination returned unexpected entries")
 	}
 	if resumeOffset > len(expected) {
 		return fmt.Errorf("pagination resume offset %d exceeds %d entries", resumeOffset, len(expected))
 	}
 	if !equalStrings(resumed, expected[resumeOffset:]) {
-		return errors.New("resumed pagination walk did not match the expected suffix")
+		return errors.New("resumed pagination returned unexpected entries")
 	}
 	return nil
 }

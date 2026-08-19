@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs one generated SDK against the shared conformance server and cases.
+# Runs a generated SDK against a local server using the shared test cases.
 #
 # Usage: scripts/run-sdk-conformance.sh <go|python|typescript>
 

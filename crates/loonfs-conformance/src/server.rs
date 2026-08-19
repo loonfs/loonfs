@@ -1,4 +1,4 @@
-//! Local server infrastructure for SDK conformance tests.
+//! Starts a local LoonFS server for SDK conformance tests.
 
 use async_trait::async_trait;
 use axum::extract::{Path as AxumPath, State};
