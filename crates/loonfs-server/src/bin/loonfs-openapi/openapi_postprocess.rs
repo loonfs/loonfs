@@ -228,7 +228,7 @@ pub(crate) fn proxy_openapi_json_pretty(
     describe_proxy_document(&mut document);
     derive_proxy_paths(&mut document)?;
     remove_proxy_security(&mut document);
-    remove_trusted_tags(&mut document);
+    retain_referenced_tags(&mut document);
     prune_proxy_components(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
 }
@@ -403,7 +403,30 @@ fn remove_proxy_security(document: &mut Value) {
     }
 }
 
-fn remove_trusted_tags(document: &mut Value) {
+/// Retains only tag definitions that a retained operation references, so a
+/// tag whose operations were all pruned does not survive as a dead entry.
+fn retain_referenced_tags(document: &mut Value) {
+    let mut referenced = BTreeSet::new();
+    if let Some(paths) = document.get("paths").and_then(Value::as_object) {
+        for path_item in paths.values() {
+            let Some(path_item) = path_item.as_object() else {
+                continue;
+            };
+            for (field, operation) in path_item {
+                if !HTTP_METHODS.contains(&field.as_str()) {
+                    continue;
+                }
+                let Some(tags) = operation.get("tags").and_then(Value::as_array) else {
+                    continue;
+                };
+                for tag in tags {
+                    if let Some(tag) = tag.as_str() {
+                        referenced.insert(tag.to_owned());
+                    }
+                }
+            }
+        }
+    }
     let Some(tags) = document
         .as_object_mut()
         .and_then(|document| document.get_mut("tags"))
@@ -415,10 +438,9 @@ fn remove_trusted_tags(document: &mut Value) {
         return;
     };
     tags.retain(|tag| {
-        !matches!(
-            tag.get("name").and_then(Value::as_str),
-            Some("system" | "admin")
-        )
+        tag.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| referenced.contains(name))
     });
 }
 

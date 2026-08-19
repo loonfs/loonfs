@@ -4102,16 +4102,8 @@
       "description": "Capability discovery"
     },
     {
-      "name": "namespaces",
-      "description": "Namespace lifecycle and status"
-    },
-    {
       "name": "filesystem",
       "description": "Path-oriented filesystem APIs"
-    },
-    {
-      "name": "inodes",
-      "description": "Identity-oriented inode read APIs"
     },
     {
       "name": "uploads",

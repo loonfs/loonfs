@@ -477,6 +477,18 @@ fn proxy_paths_use_mounts_and_declare_no_security() {
         .collect::<BTreeSet<_>>();
     assert!(!tag_names.contains("system"));
     assert!(!tag_names.contains("admin"));
+    let referenced_tags = spec["paths"]
+        .as_object()
+        .expect("proxy openapi paths object")
+        .values()
+        .flat_map(|path_item| path_item.as_object().expect("proxy path item").values())
+        .flat_map(|operation| operation["tags"].as_array().into_iter().flatten())
+        .filter_map(|tag| tag.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        tag_names, referenced_tags,
+        "every declared proxy tag must be referenced by a retained operation"
+    );
 
     let paths = spec["paths"]
         .as_object()
