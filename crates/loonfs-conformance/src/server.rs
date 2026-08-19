@@ -135,10 +135,6 @@ struct LoopbackIssuer {
     base_url: String,
 }
 
-/// A presigned URL expiry one hour past `now`, in Unix milliseconds.
-///
-/// Real issuers bound their expiries; a sentinel like `u64::MAX` overflows
-/// the signed 64-bit timestamp fields in the generated SDKs.
 fn presigned_expiry_ms(now: SystemTime) -> u64 {
     let expiry = now + Duration::from_secs(3600);
     expiry

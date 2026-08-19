@@ -4,8 +4,8 @@
 #
 # Usage: scripts/generate-sdks.sh [go|python|typescript]
 # With no argument, validates the document and generates all three SDKs.
-# Handwritten transfer code under sdk/transfers/<language> is copied over the
-# generated tree, so sdk/generated holds the complete SDK.
+# Handwritten files under sdk/transfers/<language> are copied into each SDK
+# after generation.
 
 set -eu
 
