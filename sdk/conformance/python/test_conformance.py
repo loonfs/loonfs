@@ -1,20 +1,40 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-from loonfs_sdk import ActorRef, FilesystemOperation_CreateDirectory, LoonFS, UnauthorizedError
+from loonfs_sdk import (
+    ActorRef,
+    BeginUploadRequest_DirectMultipart,
+    BeginUploadRequest_DirectPut,
+    BeginUploadRequest_ServiceProxied,
+    Checksum,
+    CompleteUploadRequest_DirectMultipart,
+    CompleteUploadRequest_DirectPut,
+    CompletedUploadPart,
+    ContentRef,
+    DirectMultipartUploadOptions,
+    FilesystemOperation_CreateDirectory,
+    FilesystemOperation_DeletePath,
+    FilesystemOperation_MovePath,
+    FilesystemOperation_PutFile,
+    LoonFS,
+    UnauthorizedError,
+    UploadContentClaim,
+    UploadPartChecksumClaim,
+)
+from loonfs_sdk.transfers import get_file, put_file
 
 
 FIXTURE_VERSION = 1
 RUNNER_SKIP = "run scripts/run-sdk-conformance.sh python"
-TRANSFER_SKIP = "file transfer cases are not implemented in the Python harness yet"
 CASE_FIELDS = {"version", "name", "intent", "family", "request", "expected"}
 EXPECTED_CASES = [
     ("changes", "changes"),
@@ -27,14 +47,6 @@ EXPECTED_CASES = [
     ("upload_direct_put", "upload_direct_put"),
     ("upload_multipart", "upload_multipart"),
 ]
-TRANSFER_CASES = [
-    "download",
-    "end_to_end",
-    "upload_abort",
-    "upload_direct_put",
-    "upload_multipart",
-]
-
 pytestmark = pytest.mark.skipif(
     not os.environ.get("LOONFS_CONFORMANCE_URL"),
     reason=RUNNER_SKIP,
@@ -94,6 +106,105 @@ class CommitReplayExpected:
 
 
 @dataclass(frozen=True)
+class DirectPutRequest:
+    namespace_id: str
+    path: str
+    commit_id: str
+    actor: ActorRef
+    content_utf8: str
+
+
+@dataclass(frozen=True)
+class DirectPutExpected:
+    mode: str
+    size_bytes: int
+    checksum_algorithm: str
+    committed_seq: int
+
+
+@dataclass(frozen=True)
+class BytePattern:
+    length: int
+    modulus: int
+
+
+@dataclass(frozen=True)
+class MultipartRequest:
+    namespace_id: str
+    path: str
+    commit_id: str
+    actor: ActorRef
+    part_size_bytes: int
+    content_pattern: BytePattern
+
+
+@dataclass(frozen=True)
+class MultipartExpected:
+    mode: str
+    part_count: int
+    size_bytes: int
+    checksum_algorithm: str
+    committed_seq: int
+
+
+@dataclass(frozen=True)
+class AbortRequest:
+    namespace_id: str
+
+
+@dataclass(frozen=True)
+class AbortExpected:
+    mode: str
+    status: str
+
+
+@dataclass(frozen=True)
+class DownloadRequest:
+    namespace_id: str
+    path: str
+    commit_id: str
+    actor: ActorRef
+    content_utf8: str
+
+
+@dataclass(frozen=True)
+class DownloadExpected:
+    size_bytes: int
+    checksum_algorithm: str
+    committed_seq: int
+
+
+@dataclass(frozen=True)
+class EndToEndCommitIds:
+    mkdir: str
+    upload: str
+    move: str
+    remove: str
+
+
+@dataclass(frozen=True)
+class EndToEndRequest:
+    namespace_id: str
+    directory: str
+    upload_path: str
+    moved_path: str
+    actor: ActorRef
+    content_utf8: str
+    commit_ids: EndToEndCommitIds
+
+
+@dataclass(frozen=True)
+class EndToEndExpected:
+    mkdir_committed_seq: int
+    upload_committed_seq: int
+    move_committed_seq: int
+    remove_committed_seq: int
+    size_bytes: int
+    revision_count: int
+    change_count: int
+
+
+@dataclass(frozen=True)
 class PaginationRequest:
     namespace_id: str
     directory: str
@@ -141,7 +252,9 @@ def _strict_object(value: object, fields: set[str], label: str) -> JsonObject:
     if actual != fields:
         unknown = sorted(actual - fields)
         missing = sorted(fields - actual)
-        raise AssertionError(f"{label} fields differ: unknown={unknown}, missing={missing}")
+        raise AssertionError(
+            f"{label} fields differ: unknown={unknown}, missing={missing}"
+        )
     return value
 
 
@@ -212,8 +325,12 @@ def _decode_error_contract(
     )
     return (
         ErrorContractRequest(
-            namespace_id=_string(request["namespace_id"], "error_contract request.namespace_id"),
-            malformed_body=_json_object(request["malformed_body"], "error_contract request.malformed_body"),
+            namespace_id=_string(
+                request["namespace_id"], "error_contract request.namespace_id"
+            ),
+            malformed_body=_json_object(
+                request["malformed_body"], "error_contract request.malformed_body"
+            ),
             invalid_after_seq=_string(
                 request["invalid_after_seq"], "error_contract request.invalid_after_seq"
             ),
@@ -247,14 +364,279 @@ def _decode_commit_replay(
     )
     return (
         CommitReplayRequest(
-            namespace_id=_string(request["namespace_id"], "commit_replay request.namespace_id"),
+            namespace_id=_string(
+                request["namespace_id"], "commit_replay request.namespace_id"
+            ),
             commit_id=_string(request["commit_id"], "commit_replay request.commit_id"),
             actor=_actor(request["actor"], "commit_replay request.actor"),
             message=_string(request["message"], "commit_replay request.message"),
             path=_string(request["path"], "commit_replay request.path"),
         ),
         CommitReplayExpected(
-            committed_seq=_integer(expected["committed_seq"], "commit_replay expected.committed_seq")
+            committed_seq=_integer(
+                expected["committed_seq"], "commit_replay expected.committed_seq"
+            )
+        ),
+    )
+
+
+def _decode_direct_put(
+    test_case: ConformanceCase,
+) -> tuple[DirectPutRequest, DirectPutExpected]:
+    request = _strict_object(
+        test_case.request,
+        {"namespace_id", "path", "commit_id", "actor", "content_utf8"},
+        f"{test_case.name} request",
+    )
+    expected = _strict_object(
+        test_case.expected,
+        {"mode", "size_bytes", "checksum_algorithm", "committed_seq"},
+        f"{test_case.name} expected",
+    )
+    return (
+        DirectPutRequest(
+            namespace_id=_string(
+                request["namespace_id"], "upload_direct_put request.namespace_id"
+            ),
+            path=_string(request["path"], "upload_direct_put request.path"),
+            commit_id=_string(
+                request["commit_id"], "upload_direct_put request.commit_id"
+            ),
+            actor=_actor(request["actor"], "upload_direct_put request.actor"),
+            content_utf8=_string(
+                request["content_utf8"], "upload_direct_put request.content_utf8"
+            ),
+        ),
+        DirectPutExpected(
+            mode=_string(expected["mode"], "upload_direct_put expected.mode"),
+            size_bytes=_integer(
+                expected["size_bytes"], "upload_direct_put expected.size_bytes"
+            ),
+            checksum_algorithm=_string(
+                expected["checksum_algorithm"],
+                "upload_direct_put expected.checksum_algorithm",
+            ),
+            committed_seq=_integer(
+                expected["committed_seq"], "upload_direct_put expected.committed_seq"
+            ),
+        ),
+    )
+
+
+def _decode_multipart(
+    test_case: ConformanceCase,
+) -> tuple[MultipartRequest, MultipartExpected]:
+    request = _strict_object(
+        test_case.request,
+        {
+            "namespace_id",
+            "path",
+            "commit_id",
+            "actor",
+            "part_size_bytes",
+            "content_pattern",
+        },
+        f"{test_case.name} request",
+    )
+    pattern = _strict_object(
+        request["content_pattern"],
+        {"length", "modulus"},
+        "upload_multipart request.content_pattern",
+    )
+    expected = _strict_object(
+        test_case.expected,
+        {"mode", "part_count", "size_bytes", "checksum_algorithm", "committed_seq"},
+        f"{test_case.name} expected",
+    )
+    return (
+        MultipartRequest(
+            namespace_id=_string(
+                request["namespace_id"], "upload_multipart request.namespace_id"
+            ),
+            path=_string(request["path"], "upload_multipart request.path"),
+            commit_id=_string(
+                request["commit_id"], "upload_multipart request.commit_id"
+            ),
+            actor=_actor(request["actor"], "upload_multipart request.actor"),
+            part_size_bytes=_integer(
+                request["part_size_bytes"], "upload_multipart request.part_size_bytes"
+            ),
+            content_pattern=BytePattern(
+                length=_integer(
+                    pattern["length"], "upload_multipart request.content_pattern.length"
+                ),
+                modulus=_integer(
+                    pattern["modulus"],
+                    "upload_multipart request.content_pattern.modulus",
+                ),
+            ),
+        ),
+        MultipartExpected(
+            mode=_string(expected["mode"], "upload_multipart expected.mode"),
+            part_count=_integer(
+                expected["part_count"], "upload_multipart expected.part_count"
+            ),
+            size_bytes=_integer(
+                expected["size_bytes"], "upload_multipart expected.size_bytes"
+            ),
+            checksum_algorithm=_string(
+                expected["checksum_algorithm"],
+                "upload_multipart expected.checksum_algorithm",
+            ),
+            committed_seq=_integer(
+                expected["committed_seq"], "upload_multipart expected.committed_seq"
+            ),
+        ),
+    )
+
+
+def _decode_abort(test_case: ConformanceCase) -> tuple[AbortRequest, AbortExpected]:
+    request = _strict_object(
+        test_case.request,
+        {"namespace_id"},
+        f"{test_case.name} request",
+    )
+    expected = _strict_object(
+        test_case.expected,
+        {"mode", "status"},
+        f"{test_case.name} expected",
+    )
+    return (
+        AbortRequest(
+            namespace_id=_string(
+                request["namespace_id"], "upload_abort request.namespace_id"
+            )
+        ),
+        AbortExpected(
+            mode=_string(expected["mode"], "upload_abort expected.mode"),
+            status=_string(expected["status"], "upload_abort expected.status"),
+        ),
+    )
+
+
+def _decode_download(
+    test_case: ConformanceCase,
+) -> tuple[DownloadRequest, DownloadExpected]:
+    request = _strict_object(
+        test_case.request,
+        {"namespace_id", "path", "commit_id", "actor", "content_utf8"},
+        f"{test_case.name} request",
+    )
+    expected = _strict_object(
+        test_case.expected,
+        {"size_bytes", "checksum_algorithm", "committed_seq"},
+        f"{test_case.name} expected",
+    )
+    return (
+        DownloadRequest(
+            namespace_id=_string(
+                request["namespace_id"], "download request.namespace_id"
+            ),
+            path=_string(request["path"], "download request.path"),
+            commit_id=_string(request["commit_id"], "download request.commit_id"),
+            actor=_actor(request["actor"], "download request.actor"),
+            content_utf8=_string(
+                request["content_utf8"], "download request.content_utf8"
+            ),
+        ),
+        DownloadExpected(
+            size_bytes=_integer(expected["size_bytes"], "download expected.size_bytes"),
+            checksum_algorithm=_string(
+                expected["checksum_algorithm"], "download expected.checksum_algorithm"
+            ),
+            committed_seq=_integer(
+                expected["committed_seq"], "download expected.committed_seq"
+            ),
+        ),
+    )
+
+
+def _decode_end_to_end(
+    test_case: ConformanceCase,
+) -> tuple[EndToEndRequest, EndToEndExpected]:
+    request = _strict_object(
+        test_case.request,
+        {
+            "namespace_id",
+            "directory",
+            "upload_path",
+            "moved_path",
+            "actor",
+            "content_utf8",
+            "commit_ids",
+        },
+        f"{test_case.name} request",
+    )
+    commit_ids = _strict_object(
+        request["commit_ids"],
+        {"mkdir", "upload", "move", "remove"},
+        "end_to_end request.commit_ids",
+    )
+    expected = _strict_object(
+        test_case.expected,
+        {
+            "mkdir_committed_seq",
+            "upload_committed_seq",
+            "move_committed_seq",
+            "remove_committed_seq",
+            "size_bytes",
+            "revision_count",
+            "change_count",
+        },
+        f"{test_case.name} expected",
+    )
+    return (
+        EndToEndRequest(
+            namespace_id=_string(
+                request["namespace_id"], "end_to_end request.namespace_id"
+            ),
+            directory=_string(request["directory"], "end_to_end request.directory"),
+            upload_path=_string(
+                request["upload_path"], "end_to_end request.upload_path"
+            ),
+            moved_path=_string(request["moved_path"], "end_to_end request.moved_path"),
+            actor=_actor(request["actor"], "end_to_end request.actor"),
+            content_utf8=_string(
+                request["content_utf8"], "end_to_end request.content_utf8"
+            ),
+            commit_ids=EndToEndCommitIds(
+                mkdir=_string(
+                    commit_ids["mkdir"], "end_to_end request.commit_ids.mkdir"
+                ),
+                upload=_string(
+                    commit_ids["upload"], "end_to_end request.commit_ids.upload"
+                ),
+                move=_string(commit_ids["move"], "end_to_end request.commit_ids.move"),
+                remove=_string(
+                    commit_ids["remove"], "end_to_end request.commit_ids.remove"
+                ),
+            ),
+        ),
+        EndToEndExpected(
+            mkdir_committed_seq=_integer(
+                expected["mkdir_committed_seq"],
+                "end_to_end expected.mkdir_committed_seq",
+            ),
+            upload_committed_seq=_integer(
+                expected["upload_committed_seq"],
+                "end_to_end expected.upload_committed_seq",
+            ),
+            move_committed_seq=_integer(
+                expected["move_committed_seq"], "end_to_end expected.move_committed_seq"
+            ),
+            remove_committed_seq=_integer(
+                expected["remove_committed_seq"],
+                "end_to_end expected.remove_committed_seq",
+            ),
+            size_bytes=_integer(
+                expected["size_bytes"], "end_to_end expected.size_bytes"
+            ),
+            revision_count=_integer(
+                expected["revision_count"], "end_to_end expected.revision_count"
+            ),
+            change_count=_integer(
+                expected["change_count"], "end_to_end expected.change_count"
+            ),
         ),
     )
 
@@ -264,7 +646,14 @@ def _decode_pagination(
 ) -> tuple[PaginationRequest, PaginationExpected]:
     request = _strict_object(
         test_case.request,
-        {"namespace_id", "directory", "actor", "entry_names", "page_size", "resume_after_page"},
+        {
+            "namespace_id",
+            "directory",
+            "actor",
+            "entry_names",
+            "page_size",
+            "resume_after_page",
+        },
         f"{test_case.name} request",
     )
     expected = _strict_object(
@@ -274,17 +663,23 @@ def _decode_pagination(
     )
     return (
         PaginationRequest(
-            namespace_id=_string(request["namespace_id"], "pagination request.namespace_id"),
+            namespace_id=_string(
+                request["namespace_id"], "pagination request.namespace_id"
+            ),
             directory=_string(request["directory"], "pagination request.directory"),
             actor=_actor(request["actor"], "pagination request.actor"),
-            entry_names=_string_list(request["entry_names"], "pagination request.entry_names"),
+            entry_names=_string_list(
+                request["entry_names"], "pagination request.entry_names"
+            ),
             page_size=_integer(request["page_size"], "pagination request.page_size"),
             resume_after_page=_integer(
                 request["resume_after_page"], "pagination request.resume_after_page"
             ),
         ),
         PaginationExpected(
-            entry_count=_integer(expected["entry_count"], "pagination expected.entry_count"),
+            entry_count=_integer(
+                expected["entry_count"], "pagination expected.entry_count"
+            ),
             minimum_page_count=_integer(
                 expected["minimum_page_count"], "pagination expected.minimum_page_count"
             ),
@@ -293,7 +688,9 @@ def _decode_pagination(
     )
 
 
-def _decode_changes(test_case: ConformanceCase) -> tuple[ChangesRequest, ChangesExpected]:
+def _decode_changes(
+    test_case: ConformanceCase,
+) -> tuple[ChangesRequest, ChangesExpected]:
     request = _strict_object(
         test_case.request,
         {"namespace_id", "path", "commit_id", "actor", "after_seq"},
@@ -306,15 +703,21 @@ def _decode_changes(test_case: ConformanceCase) -> tuple[ChangesRequest, Changes
     )
     return (
         ChangesRequest(
-            namespace_id=_string(request["namespace_id"], "changes request.namespace_id"),
+            namespace_id=_string(
+                request["namespace_id"], "changes request.namespace_id"
+            ),
             path=_string(request["path"], "changes request.path"),
             commit_id=_string(request["commit_id"], "changes request.commit_id"),
             actor=_actor(request["actor"], "changes request.actor"),
             after_seq=_integer(request["after_seq"], "changes request.after_seq"),
         ),
         ChangesExpected(
-            committed_seq=_integer(expected["committed_seq"], "changes expected.committed_seq"),
-            change_count=_integer(expected["change_count"], "changes expected.change_count"),
+            committed_seq=_integer(
+                expected["committed_seq"], "changes expected.committed_seq"
+            ),
+            change_count=_integer(
+                expected["change_count"], "changes expected.change_count"
+            ),
             event_kind=_string(expected["event_kind"], "changes expected.event_kind"),
         ),
     )
@@ -333,7 +736,9 @@ def load_cases(directory: str) -> dict[str, ConformanceCase]:
             )
         name = _string(root["name"], f"{path} name")
         if name != path.stem:
-            raise AssertionError(f"invalid fixture {path}: name is {name!r}, expected {path.stem!r}")
+            raise AssertionError(
+                f"invalid fixture {path}: name is {name!r}, expected {path.stem!r}"
+            )
         intent = _string(root["intent"], f"{path} intent")
         if not intent.strip():
             raise AssertionError(f"invalid fixture {path}: intent must not be empty")
@@ -348,7 +753,9 @@ def load_cases(directory: str) -> dict[str, ConformanceCase]:
 
     inventory = [(test_case.name, test_case.family) for test_case in cases]
     if inventory != EXPECTED_CASES:
-        raise AssertionError(f"fixture version 1 inventory is {inventory!r}, expected {EXPECTED_CASES!r}")
+        raise AssertionError(
+            f"fixture version 1 inventory is {inventory!r}, expected {EXPECTED_CASES!r}"
+        )
     return {test_case.name: test_case for test_case in cases}
 
 
@@ -363,6 +770,22 @@ def _remove_authorization(request: httpx.Request) -> None:
     request.headers.pop("Authorization", None)
 
 
+def _crc_table(polynomial: int, mask: int) -> tuple[int, ...]:
+    values = []
+    for byte in range(256):
+        value = byte
+        for _ in range(8):
+            value = (value >> 1) ^ polynomial if value & 1 else value >> 1
+        values.append(value & mask)
+    return tuple(values)
+
+
+_CRC64_NVME_MASK = (1 << 64) - 1
+_CRC32C_MASK = (1 << 32) - 1
+_CRC64_NVME_TABLE = _crc_table(0x9A6C9329AC4BC9B5, _CRC64_NVME_MASK)
+_CRC32C_TABLE = _crc_table(0x82F63B78, _CRC32C_MASK)
+
+
 @pytest.fixture(scope="session")
 def cases() -> dict[str, ConformanceCase]:
     return load_cases(_required_environment("LOONFS_CONFORMANCE_CASES"))
@@ -372,7 +795,9 @@ def cases() -> dict[str, ConformanceCase]:
 def harness() -> Iterator[Harness]:
     base_url = _required_environment("LOONFS_CONFORMANCE_URL")
     token = _required_environment("LOONFS_CONFORMANCE_TOKEN")
-    unauthenticated_http = httpx.Client(event_hooks={"request": [_remove_authorization]})
+    unauthenticated_http = httpx.Client(
+        event_hooks={"request": [_remove_authorization]}
+    )
     try:
         yield Harness(
             client=LoonFS(base_url=base_url, token=token),
@@ -409,6 +834,96 @@ def _apply_create_directory(
         operations=[operation],
         message=message,
     )
+
+
+def _apply_put_file(
+    client: LoonFS,
+    namespace_id: str,
+    commit_id: str,
+    actor: ActorRef,
+    path: str,
+    content_ref: ContentRef,
+    content_token: str | None,
+) -> Any:
+    return client.filesystem.apply_commit(
+        namespace_id,
+        actor=actor,
+        commit_id=commit_id,
+        operations=[FilesystemOperation_PutFile(path=path, content_ref=content_ref)],
+        content_tokens=[content_token] if content_token is not None else [],
+    )
+
+
+def _apply_operation(
+    client: LoonFS,
+    namespace_id: str,
+    commit_id: str,
+    actor: ActorRef,
+    operation: Any,
+) -> Any:
+    return client.filesystem.apply_commit(
+        namespace_id,
+        actor=actor,
+        commit_id=commit_id,
+        operations=[operation],
+    )
+
+
+def _byte_pattern(pattern: BytePattern) -> bytes:
+    if pattern.modulus == 0:
+        raise AssertionError("byte pattern modulus must be greater than zero")
+    return bytes(offset % pattern.modulus for offset in range(pattern.length))
+
+
+def _checksum(algorithm: str, content: bytes) -> Checksum:
+    if algorithm == "sha256":
+        value = hashlib.sha256(content).hexdigest()
+    elif algorithm == "crc64nvme":
+        value = f"{_crc(content, _CRC64_NVME_TABLE, _CRC64_NVME_MASK):016x}"
+    elif algorithm == "crc32c":
+        value = f"{_crc(content, _CRC32C_TABLE, _CRC32C_MASK):08x}"
+    else:
+        raise AssertionError(f"unsupported checksum algorithm {algorithm!r}")
+    return Checksum(algorithm=algorithm, value=value)
+
+
+def _crc(content: bytes, table: tuple[int, ...], mask: int) -> int:
+    value = mask
+    for byte in content:
+        value = table[(value ^ byte) & 0xFF] ^ (value >> 8)
+    return value ^ mask
+
+
+def _put_presigned(access: Any, content: bytes) -> httpx.Response:
+    assert access.method.upper() == "PUT"
+    response = httpx.put(
+        access.url,
+        headers=access.headers or {},
+        content=content,
+    )
+    response.raise_for_status()
+    return response
+
+
+def _content_ref(value: object) -> ContentRef:
+    if isinstance(value, ContentRef):
+        return value
+    if isinstance(value, Mapping):
+        return ContentRef(**value)
+    raise AssertionError("response has no content reference")
+
+
+def _completed_content(response: Any) -> tuple[ContentRef, str | None, int]:
+    assert response.status == "completed"
+    return (
+        _content_ref(response.content_ref),
+        getattr(response, "content_token", None),
+        response.completed_at_ms,
+    )
+
+
+def _read_proxied(client: LoonFS, namespace_id: str, path: str) -> bytes:
+    return b"".join(client.filesystem.get_file_bytes(namespace_id, path=path))
 
 
 def _listed_names(entries: list[Any]) -> list[str]:
@@ -527,7 +1042,9 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
         if cursor is None:
             break
 
-    assert len(set(observed)) == len(observed), "pagination returned an entry more than once"
+    assert len(set(observed)) == len(observed), (
+        "pagination returned an entry more than once"
+    )
     assert observed == request.entry_names
     assert resume_offset <= len(request.entry_names)
     assert resumed == request.entry_names[resume_offset:]
@@ -560,10 +1077,328 @@ def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert change.events[0].kind == "directory_created"
 
 
-@pytest.mark.parametrize("case_name", TRANSFER_CASES)
-def test_transfer_family_is_skipped(
-    case_name: str,
-    cases: dict[str, ConformanceCase],
-) -> None:
-    assert cases[case_name].family == case_name
-    pytest.skip(TRANSFER_SKIP)
+def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode_direct_put(cases["upload_direct_put"])
+    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    payload = request.content_utf8.encode()
+    claim = UploadContentClaim(
+        size_bytes=len(payload),
+        checksum=_checksum("sha256", payload),
+    )
+    begin = harness.client.uploads.begin_upload(
+        request.namespace_id,
+        request=BeginUploadRequest_DirectPut(content=claim),
+    )
+
+    assert expected.mode == "direct_put"
+    assert begin.mode == expected.mode
+    assert begin.direct_put.content_ref.size_bytes == expected.size_bytes
+    assert (
+        begin.direct_put.content_ref.checksum.algorithm == expected.checksum_algorithm
+    )
+    assert begin.direct_put.content_ref.checksum == _checksum(
+        begin.direct_put.content_ref.checksum.algorithm,
+        payload,
+    )
+
+    _put_presigned(begin.direct_put.access, payload)
+    completed = harness.client.uploads.complete_upload(
+        request.namespace_id,
+        begin.upload_id,
+        request=CompleteUploadRequest_DirectPut(),
+    )
+    content_ref, content_token, _ = _completed_content(completed)
+    assert content_ref == begin.direct_put.content_ref
+
+    committed = _apply_put_file(
+        harness.client,
+        request.namespace_id,
+        request.commit_id,
+        request.actor,
+        request.path,
+        content_ref,
+        content_token,
+    )
+    assert committed.committed_seq == expected.committed_seq
+    stat = harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
+    assert _content_ref(stat.content_ref) == content_ref
+    assert _read_proxied(harness.client, request.namespace_id, request.path) == payload
+
+
+def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode_multipart(cases["upload_multipart"])
+    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    payload = _byte_pattern(request.content_pattern)
+    begin = harness.client.uploads.begin_upload(
+        request.namespace_id,
+        request=BeginUploadRequest_DirectMultipart(
+            multipart=DirectMultipartUploadOptions(
+                part_size_bytes=request.part_size_bytes,
+            )
+        ),
+    )
+
+    assert expected.mode == "direct_multipart"
+    assert begin.mode == expected.mode
+    assert begin.direct_multipart.part_size_bytes == request.part_size_bytes
+    assert begin.direct_multipart.checksum_algorithm == expected.checksum_algorithm
+
+    part_size = begin.direct_multipart.part_size_bytes
+    chunks = [
+        payload[offset : offset + part_size]
+        for offset in range(0, len(payload), part_size)
+    ]
+    assert len(chunks) == expected.part_count
+    claims = [
+        UploadPartChecksumClaim(
+            part_number=index,
+            checksum=_checksum(begin.direct_multipart.checksum_algorithm, chunk),
+        )
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+    signed = harness.client.uploads.sign_upload_parts(
+        request.namespace_id,
+        begin.upload_id,
+        parts=claims,
+    )
+    assert len(signed.parts) == expected.part_count
+
+    completed_parts = []
+    for signed_part in signed.parts:
+        index = signed_part.part_number - 1
+        response = _put_presigned(signed_part.access, chunks[index])
+        etag = response.headers.get("etag")
+        assert etag is not None, (
+            f"part {signed_part.part_number} upload returned no ETag"
+        )
+        completed_parts.append(
+            CompletedUploadPart(
+                part_number=signed_part.part_number,
+                etag=etag,
+                checksum=claims[index].checksum,
+            )
+        )
+    completed_parts.sort(key=lambda part: part.part_number)
+    whole_checksum = _checksum(begin.direct_multipart.checksum_algorithm, payload)
+    completion_request = CompleteUploadRequest_DirectMultipart(
+        content=UploadContentClaim(
+            size_bytes=len(payload),
+            checksum=whole_checksum,
+        ),
+        parts=completed_parts,
+    )
+    first = harness.client.uploads.complete_upload(
+        request.namespace_id,
+        begin.upload_id,
+        request=completion_request,
+    )
+    first_content_ref, _, first_completed_at_ms = _completed_content(first)
+    replayed = harness.client.uploads.complete_upload(
+        request.namespace_id,
+        begin.upload_id,
+        request=completion_request,
+    )
+    replayed_content_ref, replayed_token, replayed_completed_at_ms = _completed_content(
+        replayed
+    )
+
+    assert replayed.namespace_id == first.namespace_id
+    assert replayed.upload_id == first.upload_id
+    assert replayed.mode == first.mode
+    assert replayed_content_ref == first_content_ref
+    assert replayed_completed_at_ms == first_completed_at_ms
+    assert first_content_ref.size_bytes == expected.size_bytes
+    assert first_content_ref.checksum == whole_checksum
+    assert first_content_ref.checksum == _checksum(
+        first_content_ref.checksum.algorithm,
+        payload,
+    )
+
+    committed = _apply_put_file(
+        harness.client,
+        request.namespace_id,
+        request.commit_id,
+        request.actor,
+        request.path,
+        first_content_ref,
+        replayed_token,
+    )
+    assert committed.committed_seq == expected.committed_seq
+    assert _read_proxied(harness.client, request.namespace_id, request.path) == payload
+
+    # The same content through the high-level helper: the payload exceeds the
+    # part size, so this exercises put_file's multipart branch.
+    helper_path = request.path + "-helper"
+    helper_commit = put_file(
+        harness.client,
+        namespace_id=request.namespace_id,
+        path=helper_path,
+        content=payload,
+        actor=request.actor,
+        commit_id=request.commit_id + "-helper",
+    )
+    assert helper_commit.committed_seq > 0
+    helper_read = get_file(
+        harness.client,
+        namespace_id=request.namespace_id,
+        path=helper_path,
+    )
+    assert helper_read.content == payload
+    # Content ids are random per upload and the helper may choose a different
+    # checksum algorithm; the comparable content fact is the size.
+    assert helper_read.content_ref.size_bytes == first_content_ref.size_bytes
+
+
+def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode_abort(cases["upload_abort"])
+    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    begin = harness.client.uploads.begin_upload(
+        request.namespace_id,
+        request=BeginUploadRequest_ServiceProxied(),
+    )
+    first = harness.client.uploads.abort_upload(request.namespace_id, begin.upload_id)
+    replayed = harness.client.uploads.abort_upload(
+        request.namespace_id, begin.upload_id
+    )
+
+    assert expected.mode == "service_proxied"
+    assert expected.status == "aborted"
+    assert first.mode == expected.mode
+    assert first.status == expected.status
+    assert replayed == first
+    assert replayed.aborted_at_ms == first.aborted_at_ms
+
+
+def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode_download(cases["download"])
+    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    payload = request.content_utf8.encode()
+    committed = put_file(
+        harness.client,
+        namespace_id=request.namespace_id,
+        path=request.path,
+        content=payload,
+        actor=request.actor,
+        commit_id=request.commit_id,
+    )
+    assert committed.committed_seq == expected.committed_seq
+
+    stat = harness.client.filesystem.stat_path(request.namespace_id, path=request.path)
+    downloaded = get_file(
+        harness.client,
+        namespace_id=request.namespace_id,
+        path=request.path,
+    )
+    assert _content_ref(stat.content_ref) == downloaded.content_ref
+    assert downloaded.content_ref.size_bytes == expected.size_bytes
+    assert downloaded.content_ref.checksum.algorithm == expected.checksum_algorithm
+    assert len(downloaded.content) == downloaded.content_ref.size_bytes
+    assert downloaded.content_ref.checksum == _checksum(
+        downloaded.content_ref.checksum.algorithm,
+        downloaded.content,
+    )
+    assert downloaded.content == payload
+
+
+def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode_end_to_end(cases["end_to_end"])
+    harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
+    mkdir = _apply_create_directory(
+        harness.client,
+        request.namespace_id,
+        request.commit_ids.mkdir,
+        request.actor,
+        request.directory,
+    )
+    assert mkdir.committed_seq == expected.mkdir_committed_seq
+
+    payload = request.content_utf8.encode()
+    upload = put_file(
+        harness.client,
+        namespace_id=request.namespace_id,
+        path=request.upload_path,
+        content=payload,
+        actor=request.actor,
+        commit_id=request.commit_ids.upload,
+    )
+    assert upload.committed_seq == expected.upload_committed_seq
+    stat = harness.client.filesystem.stat_path(
+        request.namespace_id, path=request.upload_path
+    )
+    assert stat.size_bytes == expected.size_bytes
+    uploaded_inode = stat.inode_id
+
+    initial_listing = harness.client.filesystem.list_path_entries(
+        request.namespace_id,
+        path=request.directory,
+    )
+    assert any(entry.path == request.upload_path for entry in initial_listing.entries)
+
+    downloaded = get_file(
+        harness.client,
+        namespace_id=request.namespace_id,
+        path=request.upload_path,
+    )
+    assert downloaded.content == payload
+
+    moved = _apply_operation(
+        harness.client,
+        request.namespace_id,
+        request.commit_ids.move,
+        request.actor,
+        FilesystemOperation_MovePath(
+            from_path=request.upload_path,
+            to_path=request.moved_path,
+        ),
+    )
+    assert moved.committed_seq == expected.move_committed_seq
+    moved_listing = harness.client.filesystem.list_path_entries(
+        request.namespace_id,
+        path=request.directory,
+    )
+    assert any(entry.path == request.moved_path for entry in moved_listing.entries)
+
+    revisions = harness.client.filesystem.list_file_revisions(
+        request.namespace_id,
+        path=request.moved_path,
+    )
+    assert len(revisions.revisions) == expected.revision_count
+    assert revisions.revisions[0].commit_id == request.commit_ids.upload
+
+    changes_before_remove = harness.client.filesystem.list_changes(
+        request.namespace_id,
+        after_seq=0,
+    )
+    assert len(changes_before_remove.changes) == expected.change_count - 1
+
+    removed = _apply_operation(
+        harness.client,
+        request.namespace_id,
+        request.commit_ids.remove,
+        request.actor,
+        FilesystemOperation_DeletePath(path=request.moved_path),
+    )
+    assert removed.committed_seq == expected.remove_committed_seq
+
+    changes = harness.client.filesystem.list_changes(
+        request.namespace_id,
+        after_seq=0,
+    )
+    assert len(changes.changes) == expected.change_count
+    assert [change.commit_id for change in changes.changes] == [
+        request.commit_ids.mkdir,
+        request.commit_ids.upload,
+        request.commit_ids.move,
+        request.commit_ids.remove,
+    ]
+    assert all(
+        change.committed_by.id == request.actor.id
+        and change.committed_by.kind == request.actor.kind
+        for change in changes.changes
+    )
+
+    trash = harness.client.filesystem.list_trash(request.namespace_id)
+    removed_entry = next(
+        entry for entry in trash.entries if entry.inode_id == uploaded_inode
+    )
+    assert removed_entry.deletion_seq == removed.committed_seq
