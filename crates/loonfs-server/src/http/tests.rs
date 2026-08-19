@@ -110,6 +110,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "max_wal_tail_segments",
     "name_key",
     "namespace_id",
+    "new_attempt",
     "new_namespace_id",
     "next_after_seq",
     "next_cursor",

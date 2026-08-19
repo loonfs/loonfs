@@ -35,7 +35,8 @@
         },
         "security": [
           {}
-        ]
+        ],
+        "x-loonfs-retry": "safe"
       }
     },
     "/metrics": {
@@ -70,7 +71,8 @@
           "408": {
             "$ref": "#/components/responses/DeadlineExceededResponse"
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/readiness": {
@@ -108,7 +110,8 @@
         },
         "security": [
           {}
-        ]
+        ],
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/admin/namespaces/{namespace_id}/checkpoints": {
@@ -196,7 +199,8 @@
           "408": {
             "$ref": "#/components/responses/DeadlineExceededResponse"
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       },
       "post": {
         "tags": [
@@ -291,7 +295,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "new_attempt"
       }
     },
     "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release": {
@@ -366,7 +371,8 @@
           "408": {
             "$ref": "#/components/responses/DeadlineExceededResponse"
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/admin/namespaces/{namespace_id}/diagnostics": {
@@ -442,7 +448,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/admin/namespaces/{namespace_id}/grep/index": {
@@ -518,7 +525,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/admin/namespaces/{namespace_id}/grep/index/disable": {
@@ -614,7 +622,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/admin/namespaces/{namespace_id}/grep/index/enable": {
@@ -710,7 +719,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/admin/namespaces/{namespace_id}/grep/index/gc": {
@@ -802,7 +812,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "new_attempt"
       }
     },
     "/v0/admin/namespaces/{namespace_id}/maintenance/step": {
@@ -886,7 +897,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "new_attempt"
       }
     },
     "/v0/admin/store/probe": {
@@ -939,7 +951,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "new_attempt"
       }
     },
     "/v0/capabilities": {
@@ -974,7 +987,8 @@
           "408": {
             "$ref": "#/components/responses/DeadlineExceededResponse"
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces": {
@@ -1049,7 +1063,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "new_attempt"
       }
     },
     "/v0/namespaces/{namespace_id}": {
@@ -1125,7 +1140,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       },
       "delete": {
         "tags": [
@@ -1218,7 +1234,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "new_attempt"
       }
     },
     "/v0/namespaces/{namespace_id}/changes": {
@@ -1316,7 +1333,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/commits": {
@@ -1422,7 +1440,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "replay"
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/content": {
@@ -1538,7 +1557,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/downloads": {
@@ -1634,7 +1654,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/list": {
@@ -1751,7 +1772,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/revisions": {
@@ -1858,7 +1880,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/stat": {
@@ -1953,7 +1976,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/trash": {
@@ -2041,7 +2065,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/forks": {
@@ -2137,7 +2162,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "new_attempt"
       }
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}": {
@@ -2234,7 +2260,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions": {
@@ -2353,7 +2380,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {
@@ -2481,7 +2509,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads": {
@@ -2607,7 +2636,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/query/grep": {
@@ -2733,7 +2763,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/uploads": {
@@ -2839,7 +2870,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "new_attempt"
       }
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}": {
@@ -2924,7 +2956,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort": {
@@ -3019,7 +3052,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete": {
@@ -3135,7 +3169,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "replay"
       }
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content": {
@@ -3262,7 +3297,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts": {
@@ -3387,7 +3423,8 @@
               }
             }
           }
-        }
+        },
+        "x-loonfs-retry": "safe"
       }
     }
   },

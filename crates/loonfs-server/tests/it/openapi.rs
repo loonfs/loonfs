@@ -1,7 +1,7 @@
 #![allow(clippy::panic)]
 
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "../../src/bin/loonfs-openapi/openapi_postprocess.rs"]
 mod openapi_postprocess;
@@ -314,7 +314,7 @@ fn openapi_documents_current_server_paths() {
 
 #[test]
 fn openapi_operation_ids_match_the_public_registry() {
-    const REGISTRY_MESSAGE: &str = "operation IDs define generated SDK method names; update crates/loonfs-server/tests/it/openapi.rs::openapi_operation_ids_match_the_public_registry only for a deliberate public rename";
+    const REGISTRY_MESSAGE: &str = "operation IDs define generated SDK method names; update OPENAPI_OPERATION_IDS only when renaming a public method";
 
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -366,47 +366,66 @@ fn openapi_operation_ids_match_the_public_registry() {
     operation_ids.sort_unstable();
     assert_eq!(
         operation_ids,
-        [
-            "abort_upload",
-            "apply_commit",
-            "begin_download",
-            "begin_download_by_inode",
-            "begin_upload",
-            "capabilities",
-            "complete_upload",
-            "create_checkpoint",
-            "create_namespace",
-            "delete_namespace",
-            "disable_grep_index",
-            "enable_grep_index",
-            "fork_namespace",
-            "gc_grep_index",
-            "get_file_bytes",
-            "get_file_revision_bytes_by_inode",
-            "get_grep_index_status",
-            "get_metrics",
-            "get_namespace",
-            "get_namespace_diagnostics",
-            "get_upload_status",
-            "grep",
-            "health",
-            "list_changes",
-            "list_checkpoints",
-            "list_file_revisions",
-            "list_file_revisions_by_inode",
-            "list_path_entries",
-            "list_trash",
-            "maintenance_step",
-            "probe_store",
-            "readiness",
-            "release_checkpoint",
-            "sign_upload_parts",
-            "stat_inode",
-            "stat_path",
-            "upload_content",
-        ],
+        openapi_postprocess::OPENAPI_OPERATION_IDS,
         "operationIds changed; {REGISTRY_MESSAGE}"
     );
+}
+
+#[test]
+fn every_registered_operation_publishes_its_retry_class() {
+    let registered = openapi_postprocess::OPENAPI_OPERATION_IDS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let classified = openapi_postprocess::OPERATION_RETRY_CLASSES
+        .iter()
+        .map(|(operation_id, _)| *operation_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        openapi_postprocess::OPENAPI_OPERATION_IDS.len(),
+        registered.len(),
+        "operation IDs must be unique"
+    );
+    assert_eq!(
+        openapi_postprocess::OPERATION_RETRY_CLASSES.len(),
+        classified.len(),
+        "each operation must have one retry class"
+    );
+    assert_eq!(classified, registered);
+
+    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
+        .expect("generate openapi json");
+    let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
+    let paths = spec
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("openapi paths object");
+    let mut published = BTreeMap::new();
+    for path_item in paths.values().filter_map(Value::as_object) {
+        for method in ["get", "post", "put", "delete", "patch"] {
+            let Some(operation) = path_item.get(method) else {
+                continue;
+            };
+            let operation_id = operation
+                .get("operationId")
+                .and_then(Value::as_str)
+                .expect("OpenAPI operation has an operationId");
+            let retry_class = operation
+                .get("x-loonfs-retry")
+                .and_then(Value::as_str)
+                .expect("OpenAPI operation has an x-loonfs-retry extension");
+            assert!(
+                published.insert(operation_id, retry_class).is_none(),
+                "duplicate operationId `{operation_id}`"
+            );
+        }
+    }
+
+    let expected = openapi_postprocess::OPERATION_RETRY_CLASSES
+        .iter()
+        .map(|(operation_id, retry_class)| (*operation_id, retry_class.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(published, expected);
 }
 
 #[test]

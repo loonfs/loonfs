@@ -610,10 +610,11 @@ commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
 read the definitive answer from the response.
 
-The blocking Rust client automatically retries reads, commits,
-replay-safe upload stages, and idempotent maintenance calls, but makes one
-attempt for namespace create, fork, and delete, upload-session begin, and
-presigned direct PUT.
+The blocking Rust client automatically retries reads, commits, replay-safe
+upload stages, upload completion, and idempotent maintenance calls. It makes
+one attempt for every `new_attempt` operation: namespace create, fork, and
+delete; upload-session begin; checkpoint create; maintenance step; grep-index
+collection; and store probe. Presigned direct PUT also makes one attempt.
 
 Commits record a durable receipt binding the `commit_id` to its
 `committed_seq`; replay reads that receipt, and a reuse conflict reports the
@@ -682,46 +683,53 @@ by anyone who can read the connection. Serve `https` for any deployment
 reachable beyond localhost — either terminated by the server itself or by a
 proxy in front of it.
 
-A representative v0 binding is shown below.
+Every operation includes an `x-loonfs-retry` value for generated SDKs:
 
-| Purpose | Representative HTTP shape |
-| --- | --- |
-| Read deployment capabilities | `GET /v0/capabilities` |
-| Create a namespace | `POST /v0/namespaces` |
-| Read one namespace's core state | `GET /v0/namespaces/{ns}` |
-| Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
-| Stat an inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
-| List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
-| List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
-| List file revisions by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
-| Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
-| Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
-| Read prior file content by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
-| Take a download grant for one file | `POST /v0/namespaces/{ns}/filesystem/downloads` |
-| Take a download grant by inode | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with strict empty body `{}` |
-| List recoverable deletions | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
-| Apply a commit | `POST /v0/namespaces/{ns}/commits` |
-| Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
-| Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
-| Sign staged upload parts | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
-| Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
-| Read an upload session | `GET /v0/namespaces/{ns}/uploads/{upload_id}` (a completed session answers with a freshly minted `content_token`) |
-| Abort an upload session | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
-| Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
-| Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
-| Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
-| Read namespace storage diagnostics | `GET /v0/admin/namespaces/{ns}/diagnostics` |
-| Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; every call mints a new user-owned record under a new id, and that record is a GC root until it is released) |
-| List checkpoints | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` (one bounded page of active records in ascending checkpoint-id order, with the id the release route takes; see below) |
-| Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
-| Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
-| Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized active grep root) |
-| Read the grep index's lifecycle | `GET /v0/admin/namespaces/{ns}/grep/index` (feature `admin.grep.index`; one grep root read, no side effects) |
-| Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (feature `admin.grep.index`; CAS-publishes the independent grep root into checkpointed backfill and nudges the deployment's maintenance runner; idempotent) |
-| Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (feature `admin.grep.index`; CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
-| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (feature `admin.grep.index`; one explicit pass over only that namespace's grep extension; the body may be absent for the default request; `max_objects` bounds the reads it spends and defaults to 1024 when omitted, returning a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
-| Probe the store contract | `POST /v0/admin/store/probe` (the one admin route whose subject is the store rather than a namespace; body carries no options today and `{}` is the request; see below) |
-| Scrape metrics | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
+- `safe`: the operation is read-only, or resending the same request is harmless.
+- `replay`: resend the same request to receive the original result.
+- `new_attempt`: another request starts new work or returns a final conflict.
+
+The table below lists the retry class for every v0 operation.
+
+| Purpose | Operation ID | Retry class | Representative HTTP shape |
+| --- | --- | --- | --- |
+| Check server health | `health` | `safe` | `GET /health` |
+| Check server readiness | `readiness` | `safe` | `GET /readiness` |
+| Read deployment capabilities | `capabilities` | `safe` | `GET /v0/capabilities` |
+| Create a namespace | `create_namespace` | `new_attempt` | `POST /v0/namespaces` |
+| Read a namespace | `get_namespace` | `safe` | `GET /v0/namespaces/{ns}` |
+| Stat a path | `stat_path` | `safe` | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt&include_attributes=false` (the parameter is optional and defaults to `true`) |
+| Stat an inode | `stat_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
+| List a path | `list_path_entries` | `safe` | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
+| List file revisions by path | `list_file_revisions` | `safe` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
+| List file revisions by inode | `list_file_revisions_by_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
+| Read current or prior file content by path | `get_file_bytes` | `safe` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` (`revision_no` is optional) |
+| Read prior file content by inode | `get_file_revision_bytes_by_inode` | `safe` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
+| Start a download by path | `begin_download` | `safe` | `POST /v0/namespaces/{ns}/filesystem/downloads` |
+| Start a download by inode | `begin_download_by_inode` | `safe` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with body `{}` |
+| List recoverable deletions | `list_trash` | `safe` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
+| Apply a commit | `apply_commit` | `replay` | `POST /v0/namespaces/{ns}/commits` |
+| Start an upload | `begin_upload` | `new_attempt` | `POST /v0/namespaces/{ns}/uploads` |
+| Upload content through the server | `upload_content` | `safe` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
+| Create multipart upload URLs | `sign_upload_parts` | `safe` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
+| Complete an upload | `complete_upload` | `replay` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
+| Read upload status | `get_upload_status` | `safe` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
+| Abort an upload session | `abort_upload` | `safe` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
+| Read committed changes | `list_changes` | `safe` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
+| Fork a namespace | `fork_namespace` | `new_attempt` | `POST /v0/namespaces/{source_ns}/forks` |
+| Delete a namespace | `delete_namespace` | `new_attempt` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
+| Read namespace diagnostics | `get_namespace_diagnostics` | `safe` | `GET /v0/admin/namespaces/{ns}/diagnostics` |
+| Create a checkpoint | `create_checkpoint` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
+| List checkpoints | `list_checkpoints` | `safe` | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
+| Release a checkpoint | `release_checkpoint` | `safe` | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
+| Run maintenance | `maintenance_step` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/maintenance/step` |
+| Search file contents | `grep` | `safe` | `POST /v0/namespaces/{ns}/query/grep`; requires the `query.grep` feature and an active index |
+| Read grep index status | `get_grep_index_status` | `safe` | `GET /v0/admin/namespaces/{ns}/grep/index` |
+| Enable the grep index | `enable_grep_index` | `safe` | `POST /v0/admin/namespaces/{ns}/grep/index/enable`; idempotent |
+| Disable the grep index | `disable_grep_index` | `safe` | `POST /v0/admin/namespaces/{ns}/grep/index/disable`; idempotent |
+| Collect grep index garbage | `gc_grep_index` | `new_attempt` | `POST /v0/admin/namespaces/{ns}/grep/index/gc`; supports `max_objects` and `next_cursor` |
+| Test object storage | `probe_store` | `new_attempt` | `POST /v0/admin/store/probe` with body `{}` |
+| Scrape metrics | `get_metrics` | `safe` | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
 The status, enable, and disable routes all return one flat grep-index object:
 `namespace_id`, lifecycle fields tagged by `status`, `next_run_ordinal`, and
@@ -1217,16 +1225,21 @@ object, and returns failure. The client must start a new session. If assembly
 or the metadata read fails before a comparison can be made, the server returns
 `server_error` and keeps the session open so completion can be retried.
 
-If the completion response is lost, the client calls `complete` again. The
-server resolves the result from durable state:
+If completion fails without a clear response, resend the same completion
+request:
 
-- the session is already `completed` → the original result replays, with a
-  freshly minted receipt;
-- the session is still `open` and the provider has no such upload → the
-  object at the key is read back and verified; if it is the promised object,
-  the completion is recorded as if the first attempt's response had arrived;
-- neither an upload nor a matching object exists → the session is aborted and
-  completion fails.
+- a completed session returns its stored result and a fresh `content_token`
+  while the minting window remains open;
+- an open session continues completion;
+- an aborted session is terminal; do not retry.
+
+A caller that cannot resend the same request reads the upload status instead;
+a completed status returns the same stored result.
+
+When an `open` multipart upload no longer exists at the provider, the server
+checks whether the completed object matches the request. A match completes the
+session. If the upload and a matching object are both missing, the server
+aborts the session and returns an error.
 
 **Cleanup.** The session record carries the provider's upload id, so a
 session that is aborted — by the client, by a failed verification, or by
