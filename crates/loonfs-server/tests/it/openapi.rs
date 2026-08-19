@@ -754,6 +754,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         ("/v0/namespaces/{namespace_id}/filesystem/trash", "get"),
         ("/v0/admin/namespaces/{namespace_id}/checkpoints", "get"),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
+        ("/v0/namespaces/{namespace_id}/query/grep", "get"),
     ] {
         let parameter = query_parameter(paths, path, method, "limit");
         assert_eq!(parameter.get("required"), Some(&Value::Bool(false)));
@@ -779,6 +780,21 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             Some(default)
         );
     }
+
+    let grep_path = "/v0/namespaces/{namespace_id}/query/grep";
+    for name in ["case_insensitive", "allow_scan", "allow_stale"] {
+        let parameter = query_parameter(paths, grep_path, "get", name);
+        assert_eq!(parameter.get("required"), Some(&Value::Bool(false)));
+        let schema = parameter.get("schema").expect("grep boolean schema");
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("boolean"));
+        assert_eq!(schema.get("default").and_then(Value::as_bool), Some(false));
+    }
+    let pattern = query_parameter(paths, grep_path, "get", "pattern");
+    assert_eq!(pattern.get("required"), Some(&Value::Bool(true)));
+    assert!(pattern
+        .get("description")
+        .and_then(Value::as_str)
+        .is_some_and(|description| description.contains("1024 bytes")));
 
     for (path, method, parameter_name, schema_name, required) in [
         (

@@ -604,7 +604,10 @@ fn parse_after_seq(value: &str) -> Result<loonfs_api::ChangeSeq, ApiResponseErro
     parse_public_ordinal("after_seq", value, loonfs_api::ChangeSeq::parse)
 }
 
-fn required_query_param(value: Option<String>, name: &str) -> Result<String, ApiResponseError> {
+pub(super) fn required_query_param(
+    value: Option<String>,
+    name: &str,
+) -> Result<String, ApiResponseError> {
     value.ok_or_else(|| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
@@ -616,15 +619,19 @@ fn required_query_param(value: Option<String>, name: &str) -> Result<String, Api
 }
 
 pub(super) fn parse_include_attributes(value: &str) -> Result<bool, ApiResponseError> {
+    parse_boolean_query_param(value, "include_attributes")
+}
+
+pub(super) fn parse_boolean_query_param(value: &str, name: &str) -> Result<bool, ApiResponseError> {
     match value {
         "true" => Ok(true),
         "false" => Ok(false),
         other => Err(ApiResponseError::new(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
-            &format!("invalid include_attributes `{other}`: expected `true` or `false`"),
+            &format!("invalid {name} `{other}`: expected `true` or `false`"),
         )
-        .with_param("include_attributes")),
+        .with_param(name)),
     }
 }
 

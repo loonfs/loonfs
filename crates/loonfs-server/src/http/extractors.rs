@@ -293,6 +293,9 @@ where
     }
 }
 
+/// Maximum UTF-8 byte length accepted for a grep pattern query parameter.
+pub(super) const MAX_GREP_PATTERN_BYTES: usize = 1024;
+
 /// Maximum body size for starting an upload or signing multipart parts.
 /// A request with 1,000 part claims is at most 131,011 bytes, so 1 MiB leaves
 /// ample room for every valid request.

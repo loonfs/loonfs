@@ -319,7 +319,7 @@ feature, and the namespace's verified grep root shows the index
 materialized for the data being served. Missing either half is
 the existing `not_supported` response with the feature named.
 
-The endpoint is `POST /v0/namespaces/{ns}/query/grep`. The
+The endpoint is `GET /v0/namespaces/{ns}/query/grep`. The
 request carries the pattern, a case-insensitivity flag, an
 optional path prefix to scope the search, a page cursor, and
 limits. The pattern dialect is the Rust `regex` crate's — no

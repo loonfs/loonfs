@@ -97,8 +97,7 @@ pub(crate) enum RetryClass {
 /// `list_changes` pages through its sequence fields: `next_after_seq` is
 /// absent on the final page, so a pager stops at the snapshot head.
 ///
-/// `grep` stores its cursor in the request body. The pinned generators do not
-/// wire request-body cursors. `gc_grep_index` resumes a maintenance pass across
+/// `gc_grep_index` is excluded: its cursor resumes a maintenance pass across
 /// calls and does not paginate results.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PaginationOperation {
@@ -109,6 +108,12 @@ pub(crate) struct PaginationOperation {
 }
 
 pub(crate) const PAGINATION_OPERATIONS: &[PaginationOperation] = &[
+    PaginationOperation {
+        operation_id: "grep",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
+        results_field: "matches",
+    },
     PaginationOperation {
         operation_id: "list_changes",
         cursor_parameter: "after_seq",
@@ -1392,10 +1397,11 @@ mod tests {
 
         let error = add_pagination_metadata(&mut document)
             .expect_err("missing pagination operation should fail generation");
+        let expected_operation_id = PAGINATION_OPERATIONS[0].operation_id;
         assert!(matches!(
             error,
             OpenapiPostprocessError::MissingPaginationOperation { operation_id }
-                if operation_id == "list_changes"
+                if operation_id == expected_operation_id
         ));
     }
 

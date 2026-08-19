@@ -1,7 +1,7 @@
 //! Checkpoints, maintenance, store probes, and grep administration.
 
 use super::*;
-use crate::transport::append_optional_pagination_query;
+use crate::transport::{append_optional_pagination_query, append_query_param};
 
 /// Fetches active-checkpoint pages as needed.
 #[must_use]
@@ -178,8 +178,42 @@ impl Client {
         namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse> {
-        let url = format!("{}/v0/namespaces/{namespace_id}/query/grep", self.base_url);
-        self.request_json(self.post(&url), Some(request)).await
+        let mut url = format!("{}/v0/namespaces/{namespace_id}/query/grep", self.base_url);
+        let mut has_query = false;
+        append_query_param(&mut url, &mut has_query, "pattern", &request.pattern);
+        append_query_param(
+            &mut url,
+            &mut has_query,
+            "case_insensitive",
+            &request.case_insensitive.to_string(),
+        );
+        if let Some(path_prefix) = &request.path_prefix {
+            append_query_param(
+                &mut url,
+                &mut has_query,
+                "path_prefix",
+                path_prefix.as_str(),
+            );
+        }
+        append_query_param(
+            &mut url,
+            &mut has_query,
+            "allow_scan",
+            &request.allow_scan.to_string(),
+        );
+        append_query_param(
+            &mut url,
+            &mut has_query,
+            "allow_stale",
+            &request.allow_stale.to_string(),
+        );
+        append_optional_pagination_query(
+            &mut url,
+            &mut has_query,
+            request.limit,
+            request.cursor.as_deref(),
+        );
+        self.request_json::<(), _>(self.get(&url), None).await
     }
 
     /// Returns whether the namespace's grep index is disabled, being built,

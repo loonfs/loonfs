@@ -16,8 +16,9 @@ use xxhash_rust::xxh64::xxh64;
 #[serde(deny_unknown_fields)]
 pub struct GrepRequest {
     /// The pattern, in the Rust `regex` crate's dialect (no backreferences
-    /// or lookaround). Patterns that require no literal bytes are rejected
-    /// with `query_unindexable` unless `allow_scan` is set.
+    /// or lookaround). Its UTF-8 encoding must be at most 1024 bytes.
+    /// Patterns that require no literal bytes are rejected with
+    /// `query_unindexable` unless `allow_scan` is set.
     pub pattern: String,
     /// Match case-insensitively. Verification is exact; the index remains
     /// consulted through its case-folded grams.

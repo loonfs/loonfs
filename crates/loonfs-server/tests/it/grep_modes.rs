@@ -9,11 +9,10 @@ use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
 use loonfs::{FsAdmin, FsReader};
 use loonfs_api::v0::{GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse};
 use loonfs_api::{
-    ApiError, CapabilityDocument, ChangeSeq, GrepRequest, GrepResponse, NamespaceId,
-    FEATURE_ADMIN_GREP_INDEX, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    PROFILE_QUERY_V0,
+    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, FEATURE_ADMIN_GREP_INDEX,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, PROFILE_QUERY_V0,
 };
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
@@ -55,7 +54,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     // the key whose absence the client just read.
     assert_not_supported(
         &router,
-        Method::POST,
+        Method::GET,
         &query_path(&namespace_id),
         None,
         FEATURE_QUERY_GREP,
@@ -72,6 +71,74 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
         FEATURE_ADMIN_GREP_INDEX,
     )
     .await;
+    server.shutdown().await.expect("settle the server writer");
+}
+
+#[tokio::test]
+async fn grep_get_query_parameters_use_the_list_route_grammar() {
+    let temp_dir = tempdir().expect("store tempdir");
+    let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "query-grammar").await;
+    let (router, server, _local_cache) = app(test_config(temp_dir.path(), GrepMode::ServeOnly))
+        .await
+        .expect("build app");
+    let path = query_path(&namespace_id);
+
+    let response = send(&router, Method::GET, &path, None).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ApiError = response_json(response).await;
+    assert_eq!(error.code, "invalid_request");
+    assert_eq!(error.param.as_deref(), Some("pattern"));
+
+    for name in ["case_insensitive", "allow_scan", "allow_stale"] {
+        for value in ["yes", "1", "TRUE", ""] {
+            let response = send(
+                &router,
+                Method::GET,
+                &format!("{path}?pattern=needle&{name}={value}"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let error: ApiError = response_json(response).await;
+            assert_eq!(error.code, "invalid_request");
+            assert_eq!(error.param.as_deref(), Some(name));
+        }
+        for value in ["true", "false"] {
+            let response = send(
+                &router,
+                Method::GET,
+                &format!("{path}?pattern=needle&{name}={value}"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        }
+    }
+
+    let at_bound = "n".repeat(1024);
+    let response = send(
+        &router,
+        Method::GET,
+        &format!("{path}?pattern={at_bound}"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let over_bound = "n".repeat(1025);
+    let response = send(
+        &router,
+        Method::GET,
+        &format!("{path}?pattern={over_bound}"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ApiError = response_json(response).await;
+    assert_eq!(error.code, "invalid_request");
+    assert_eq!(error.param.as_deref(), Some("pattern"));
+    assert!(error.message.contains("maximum is 1024 bytes"));
+
     server.shutdown().await.expect("settle the server writer");
 }
 
@@ -326,12 +393,9 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 
     let not_materialized = send(
         &router,
-        Method::POST,
-        &format!("/v0/namespaces/{backfill}/query/grep"),
-        Some(
-            serde_json::to_vec(&grep_request("mid-backfill needle"))
-                .expect("serialize grep request"),
-        ),
+        Method::GET,
+        &query_path_with_pattern(&backfill, "mid-backfill needle"),
+        None,
     )
     .await;
     assert!(
@@ -449,9 +513,9 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     );
     let error = assert_not_supported(
         &router,
-        Method::POST,
+        Method::GET,
         &query_path(&namespace_id),
-        Some(serde_json::to_vec(&grep_request("needle")).expect("serialize grep request")),
+        None,
         FEATURE_QUERY_GREP,
     )
     .await;
@@ -665,6 +729,14 @@ fn query_path(namespace_id: &NamespaceId) -> String {
     format!("/v0/namespaces/{namespace_id}/query/grep")
 }
 
+fn query_path_with_pattern(namespace_id: &NamespaceId, pattern: &str) -> String {
+    format!(
+        "{}?pattern={}",
+        query_path(namespace_id),
+        pattern.replace(' ', "%20")
+    )
+}
+
 fn admin_grep_paths(namespace_id: &NamespaceId) -> Vec<String> {
     ["enable", "disable", "gc"]
         .into_iter()
@@ -706,29 +778,16 @@ async fn disable_grep(router: &Router, namespace_id: &NamespaceId) -> GrepIndexS
 }
 
 async fn grep(router: &Router, namespace_id: &NamespaceId, pattern: &str) -> GrepResponse {
-    let request = grep_request(pattern);
     response_json(
         send(
             router,
-            Method::POST,
-            &format!("/v0/namespaces/{namespace_id}/query/grep"),
-            Some(serde_json::to_vec(&request).expect("serialize grep request")),
+            Method::GET,
+            &query_path_with_pattern(namespace_id, pattern),
+            None,
         )
         .await,
     )
     .await
-}
-
-fn grep_request(pattern: &str) -> GrepRequest {
-    GrepRequest {
-        pattern: pattern.to_owned(),
-        case_insensitive: false,
-        path_prefix: None,
-        cursor: None,
-        limit: None,
-        allow_stale: false,
-        allow_scan: false,
-    }
 }
 
 async fn drive_worker_to_current(
