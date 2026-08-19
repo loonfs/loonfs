@@ -74,9 +74,29 @@ case "$LANGUAGE" in
             HARNESS_STATUS=$?
         fi
         ;;
-    python|typescript)
-        echo "harness not present yet" >&2
-        HARNESS_STATUS=1
+    python)
+        PYTHON_HARNESS="$REPO_ROOT/sdk/conformance/python"
+        if [ ! -d "$PYTHON_HARNESS/.venv" ]; then
+            python3 -m venv "$PYTHON_HARNESS/.venv"
+        fi
+        "$PYTHON_HARNESS/.venv/bin/pip" install -q -r "$PYTHON_HARNESS/requirements.txt"
+        if PYTHONPATH="$PYTHON_HARNESS" \
+            "$PYTHON_HARNESS/.venv/bin/python" -m pytest "$PYTHON_HARNESS/test_conformance.py"; then
+            HARNESS_STATUS=0
+        else
+            HARNESS_STATUS=$?
+        fi
+        ;;
+    typescript)
+        TYPESCRIPT_HARNESS="$REPO_ROOT/sdk/conformance/typescript"
+        if [ ! -d "$TYPESCRIPT_HARNESS/node_modules" ]; then
+            (cd "$TYPESCRIPT_HARNESS" && npm install --no-fund --no-audit)
+        fi
+        if (cd "$TYPESCRIPT_HARNESS" && npm run build && npm test); then
+            HARNESS_STATUS=0
+        else
+            HARNESS_STATUS=$?
+        fi
         ;;
 esac
 
