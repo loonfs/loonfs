@@ -237,7 +237,7 @@ fn add_union_discriminators(document: &mut Value) {
     visit(document, &mut Vec::new());
 }
 
-/// Moves inline discriminated-union variants into component schemas.
+/// Moves inline union variants into `components.schemas`.
 fn extract_union_variants(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
     struct UnionRewrite {
         union_name: String,
