@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "name": "upload_direct_put",
+  "intent": "Pins the direct PUT upload lifecycle from begin through a committed file and checksum-verified readback.",
+  "family": "upload_direct_put",
+  "operations": [
+    "create_namespace",
+    "begin_upload direct_put",
+    "transfer presigned PUT",
+    "complete_upload",
+    "apply_commit put_file",
+    "stat_path",
+    "get_file_content"
+  ],
+  "request": {
+    "namespace_id": "conf-upload-direct-put",
+    "path": "/direct-put.txt",
+    "commit_id": "conf-upload-direct-put-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-upload"
+    },
+    "content_utf8": "direct PUT corpus payload\n"
+  },
+  "expected": {
+    "mode": "direct_put",
+    "size_bytes": 26,
+    "checksum_algorithm": "sha256",
+    "committed_seq": 1,
+    "completion_content_ref_matches_begin": true,
+    "stat_content_ref_matches_completion": true,
+    "checksum_matches_payload": true,
+    "readback_matches_payload": true
+  }
+}

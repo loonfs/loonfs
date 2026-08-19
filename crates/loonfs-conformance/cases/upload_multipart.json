@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "name": "upload_multipart",
+  "intent": "Pins the replay retry class for complete_upload after a direct multipart transfer: identical completion returns the stored outcome.",
+  "family": "upload_multipart",
+  "operations": [
+    "create_namespace",
+    "begin_upload direct_multipart",
+    "sign_upload_parts",
+    "transfer presigned part PUTs",
+    "complete_upload",
+    "complete_upload replay",
+    "apply_commit put_file",
+    "get_file_content"
+  ],
+  "request": {
+    "namespace_id": "conf-upload-multipart",
+    "path": "/multipart.bin",
+    "commit_id": "conf-upload-multipart-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-upload"
+    },
+    "part_size_bytes": 5242880,
+    "content_pattern": {
+      "length": 5243904,
+      "modulus": 251
+    }
+  },
+  "expected": {
+    "mode": "direct_multipart",
+    "part_count": 2,
+    "size_bytes": 5243904,
+    "checksum_algorithm": "crc64nvme",
+    "committed_seq": 1,
+    "replayed_completion_matches_first": true,
+    "checksum_matches_payload": true,
+    "readback_matches_payload": true
+  }
+}

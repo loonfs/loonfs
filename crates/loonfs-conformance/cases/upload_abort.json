@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "upload_abort",
+  "intent": "Pins the safe retry class for abort_upload: repeating an abort on the open session returns the stored abort.",
+  "family": "upload_abort",
+  "operations": [
+    "create_namespace",
+    "begin_upload service_proxied",
+    "abort_upload",
+    "abort_upload replay"
+  ],
+  "request": {
+    "namespace_id": "conf-upload-abort"
+  },
+  "expected": {
+    "mode": "service_proxied",
+    "status": "aborted",
+    "replayed_response_matches_first": true,
+    "replayed_aborted_at_ms_matches_first": true
+  }
+}

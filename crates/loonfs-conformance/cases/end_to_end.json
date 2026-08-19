@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "name": "end_to_end",
+  "intent": "Pins the complete SDK workflow across namespace creation, filesystem mutation, streaming download, history, changes, and trash.",
+  "family": "end_to_end",
+  "operations": [
+    "create_namespace",
+    "create_directory",
+    "put_file",
+    "stat_path",
+    "list_path_entries",
+    "begin_download and stream",
+    "move_path",
+    "list_file_revisions",
+    "list_changes",
+    "delete_path",
+    "list_trash"
+  ],
+  "request": {
+    "namespace_id": "conf-end-to-end",
+    "directory": "/documents",
+    "upload_path": "/documents/draft.txt",
+    "moved_path": "/documents/final.txt",
+    "actor": {
+      "kind": "user",
+      "id": "conformance-user"
+    },
+    "content_utf8": "end-to-end corpus payload\n",
+    "commit_ids": {
+      "mkdir": "conf-e2e-mkdir-001",
+      "upload": "conf-e2e-upload-001",
+      "move": "conf-e2e-move-001",
+      "remove": "conf-e2e-remove-001"
+    }
+  },
+  "expected": {
+    "mkdir_committed_seq": 1,
+    "upload_committed_seq": 2,
+    "move_committed_seq": 3,
+    "remove_committed_seq": 4,
+    "size_bytes": 26,
+    "revision_count": 1,
+    "change_count": 4,
+    "initial_listing_contains_upload": true,
+    "stream_matches_payload": true,
+    "moved_listing_contains_destination": true,
+    "revision_commit_id_matches_upload": true,
+    "changes_match_commit_ids_and_actor": true,
+    "trash_contains_removed_inode": true,
+    "trash_deletion_seq_matches_remove": true
+  }
+}

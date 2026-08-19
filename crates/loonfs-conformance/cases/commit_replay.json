@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "commit_replay",
+  "intent": "Pins the replay retry class for apply_commit: an identical request with the same commit_id returns the stored result.",
+  "family": "commit_replay",
+  "operations": [
+    "create_namespace",
+    "apply_commit",
+    "apply_commit replay"
+  ],
+  "request": {
+    "namespace_id": "conf-commit-replay",
+    "commit_id": "conf-commit-replay-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-commit"
+    },
+    "message": "create replay directory",
+    "path": "/replayed"
+  },
+  "expected": {
+    "committed_seq": 1,
+    "response_commit_id_matches_request": true,
+    "replayed_committed_seq_matches_first": true,
+    "replayed_response_matches_first": true
+  }
+}

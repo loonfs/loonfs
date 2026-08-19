@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "name": "download",
+  "intent": "Pins begin_download and granted streaming read length and checksum verification against the returned content reference.",
+  "family": "download",
+  "operations": [
+    "create_namespace",
+    "put_file",
+    "stat_path",
+    "begin_download",
+    "fetch presigned GET stream"
+  ],
+  "request": {
+    "namespace_id": "conf-download",
+    "path": "/download.txt",
+    "commit_id": "conf-download-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-download"
+    },
+    "content_utf8": "download grant corpus payload\n"
+  },
+  "expected": {
+    "size_bytes": 30,
+    "checksum_algorithm": "sha256",
+    "committed_seq": 1,
+    "grant_content_ref_matches_stat": true,
+    "stream_length_matches_content_ref": true,
+    "stream_checksum_matches_content_ref": true,
+    "stream_matches_payload": true
+  }
+}

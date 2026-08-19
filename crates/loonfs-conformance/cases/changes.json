@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "changes",
+  "intent": "Pins the change feed fields for a commit read after a supplied sequence.",
+  "family": "changes",
+  "operations": [
+    "create_namespace",
+    "apply_commit create_directory",
+    "list_changes after sequence"
+  ],
+  "request": {
+    "namespace_id": "conf-changes",
+    "path": "/changed",
+    "commit_id": "conf-changes-001",
+    "actor": {
+      "kind": "service",
+      "id": "conformance-changes"
+    },
+    "after_seq": 0
+  },
+  "expected": {
+    "committed_seq": 1,
+    "change_count": 1,
+    "event_kind": "directory_created",
+    "commit_id_matches_request": true,
+    "committed_by_matches_request": true
+  }
+}
