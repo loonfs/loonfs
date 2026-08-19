@@ -15,8 +15,7 @@ enum Value {
     Object(Map),
 }
 
-/// Public operation IDs are stable because generated SDKs use them as method
-/// names. Keep this registry sorted so changes are easy to review.
+/// Generated SDKs use operation IDs as method names. Keep this list sorted.
 pub(crate) const OPENAPI_OPERATION_IDS: &[&str] = &[
     "abort_upload",
     "apply_commit",
@@ -57,7 +56,7 @@ pub(crate) const OPENAPI_OPERATION_IDS: &[&str] = &[
     "upload_content",
 ];
 
-/// Retry behavior published for generated SDKs.
+/// Retry behavior for generated SDKs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RetryClass {
     Safe,
@@ -77,7 +76,7 @@ impl RetryClass {
     }
 }
 
-/// One retry classification for every public operation ID.
+/// Retry class for each public operation.
 pub(crate) const OPERATION_RETRY_CLASSES: &[(&str, RetryClass)] = &[
     ("abort_upload", RetryClass::Safe),
     ("apply_commit", RetryClass::Replay),
@@ -164,12 +163,12 @@ pub(crate) fn openapi_json_pretty(
     serde_json::to_string_pretty(&document)
 }
 
-/// Publishes the retry rule associated with each stable operation ID.
+/// Adds `x-loonfs-retry` to every OpenAPI operation.
 fn add_operation_retry_classes(document: &mut Value) {
     assert_eq!(
         OPENAPI_OPERATION_IDS.len(),
         OPERATION_RETRY_CLASSES.len(),
-        "the operation ID registry and retry classification table differ in length"
+        "operation IDs and retry classes must have the same length"
     );
     for (registered, (classified, _)) in OPENAPI_OPERATION_IDS
         .iter()
@@ -177,7 +176,7 @@ fn add_operation_retry_classes(document: &mut Value) {
     {
         assert_eq!(
             registered, classified,
-            "the operation ID registry and retry classification table differ"
+            "operation IDs and retry classes must use the same order"
         );
     }
 

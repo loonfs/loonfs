@@ -314,7 +314,7 @@ fn openapi_documents_current_server_paths() {
 
 #[test]
 fn openapi_operation_ids_match_the_public_registry() {
-    const REGISTRY_MESSAGE: &str = "operation IDs define generated SDK method names; update crates/loonfs-server/src/bin/loonfs-openapi/openapi_postprocess.rs::OPENAPI_OPERATION_IDS only for a deliberate public rename";
+    const REGISTRY_MESSAGE: &str = "operation IDs define generated SDK method names; update OPENAPI_OPERATION_IDS only when renaming a public method";
 
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -384,12 +384,12 @@ fn every_registered_operation_publishes_its_retry_class() {
     assert_eq!(
         openapi_postprocess::OPENAPI_OPERATION_IDS.len(),
         registered.len(),
-        "the operation ID registry contains a duplicate"
+        "operation IDs must be unique"
     );
     assert_eq!(
         openapi_postprocess::OPERATION_RETRY_CLASSES.len(),
         classified.len(),
-        "an operation has more than one retry classification"
+        "each operation must have one retry class"
     );
     assert_eq!(classified, registered);
 
