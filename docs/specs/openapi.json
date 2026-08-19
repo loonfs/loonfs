@@ -200,7 +200,12 @@
             "$ref": "#/components/responses/DeadlineExceededResponse"
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.checkpoints"
+        }
       },
       "post": {
         "tags": [
@@ -1334,7 +1339,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.after_seq",
+          "next_cursor": "$response.next_after_seq",
+          "results": "$response.changes"
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/commits": {
@@ -1773,7 +1783,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.entries"
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/revisions": {
@@ -1881,7 +1896,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.revisions"
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/filesystem/stat": {
@@ -2066,7 +2086,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.entries"
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/forks": {
@@ -2381,7 +2406,12 @@
             }
           }
         },
-        "x-loonfs-retry": "safe"
+        "x-loonfs-retry": "safe",
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.revisions"
+        }
       }
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {

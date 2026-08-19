@@ -91,6 +91,62 @@ pub(crate) enum RetryClass {
     NewAttempt,
 }
 
+/// Pagination fields for cursor list operations. Keep this table sorted.
+///
+/// Most entries page through the opaque `cursor` and `next_cursor` pair.
+/// `list_changes` pages through its sequence fields: `next_after_seq` is
+/// absent on the final page, so a pager stops at the snapshot head.
+///
+/// `grep` stores its cursor in the request body. The pinned generators do not
+/// wire request-body cursors. `gc_grep_index` resumes a maintenance pass across
+/// calls and does not paginate results.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PaginationOperation {
+    pub(crate) operation_id: &'static str,
+    pub(crate) cursor_parameter: &'static str,
+    pub(crate) next_field: &'static str,
+    pub(crate) results_field: &'static str,
+}
+
+pub(crate) const PAGINATION_OPERATIONS: &[PaginationOperation] = &[
+    PaginationOperation {
+        operation_id: "list_changes",
+        cursor_parameter: "after_seq",
+        next_field: "next_after_seq",
+        results_field: "changes",
+    },
+    PaginationOperation {
+        operation_id: "list_checkpoints",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
+        results_field: "checkpoints",
+    },
+    PaginationOperation {
+        operation_id: "list_file_revisions",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
+        results_field: "revisions",
+    },
+    PaginationOperation {
+        operation_id: "list_file_revisions_by_inode",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
+        results_field: "revisions",
+    },
+    PaginationOperation {
+        operation_id: "list_path_entries",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
+        results_field: "entries",
+    },
+    PaginationOperation {
+        operation_id: "list_trash",
+        cursor_parameter: "cursor",
+        next_field: "next_cursor",
+        results_field: "entries",
+    },
+];
+
 impl RetryClass {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -107,6 +163,40 @@ pub(crate) enum OpenapiPostprocessError {
     Json(#[from] serde_json::Error),
     #[error("OpenAPI operation `{operation_id}` has no retry classification")]
     MissingRetryClassification { operation_id: String },
+    #[error("OpenAPI pagination operation `{operation_id}` does not appear in the document")]
+    MissingPaginationOperation { operation_id: String },
+    #[error("OpenAPI pagination operation `{operation_id}` has no `{parameter}` query parameter")]
+    MissingPaginationCursorParameter {
+        operation_id: String,
+        parameter: &'static str,
+    },
+    #[error("OpenAPI pagination operation `{operation_id}` has no 200 response component schema")]
+    MissingPaginationResponseSchema { operation_id: String },
+    #[error("OpenAPI pagination operation `{operation_id}` response has no `{property}` property")]
+    MissingPaginationResponseProperty {
+        operation_id: String,
+        property: String,
+    },
+    #[error(
+        "OpenAPI pagination operation `{operation_id}` response property `{results_field}` is not an array"
+    )]
+    PaginationResultsNotArray {
+        operation_id: String,
+        results_field: String,
+    },
+    #[error(
+        "OpenAPI operation `{operation_id}` has a `{parameter}` pagination query parameter but no pagination metadata entry"
+    )]
+    MissingPaginationMetadata {
+        operation_id: String,
+        parameter: String,
+    },
+    #[error("OpenAPI pagination metadata cannot read `{location}`")]
+    InvalidPaginationDocument { location: &'static str },
+    #[error("OpenAPI path item `{path}` is not an object")]
+    InvalidPaginationPathItem { path: String },
+    #[error("OpenAPI operation `{method} {path}` is not an object or has no operation ID")]
+    InvalidPaginationOperation { method: &'static str, path: String },
     #[error("OpenAPI union variant `{schema_name}` conflicts with an existing component schema")]
     UnionVariantSchemaCollision { schema_name: String },
     #[error("proxy operation `{operation_id}` does not appear in the full OpenAPI document")]
@@ -208,6 +298,7 @@ pub(crate) fn openapi_json_pretty(
     add_union_discriminators(&mut document);
     extract_union_variants(&mut document)?;
     add_operation_retry_classes(&mut document)?;
+    add_pagination_metadata(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
 }
 
@@ -573,6 +664,202 @@ fn add_operation_retry_classes(document: &mut Value) -> Result<(), OpenapiPostpr
             );
         }
     }
+    Ok(())
+}
+
+/// Adds `x-fern-pagination` to each cursor list operation.
+fn add_pagination_metadata(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+    validate_pagination_metadata(document)?;
+
+    let paths = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("paths"))
+        .and_then(Value::as_object_mut)
+        .ok_or(OpenapiPostprocessError::InvalidPaginationDocument { location: "paths" })?;
+
+    for (path, path_item) in paths {
+        let path_item = path_item.as_object_mut().ok_or_else(|| {
+            OpenapiPostprocessError::InvalidPaginationPathItem { path: path.clone() }
+        })?;
+        for &method in HTTP_METHODS {
+            let Some(operation) = path_item.get_mut(method) else {
+                continue;
+            };
+            let operation = operation.as_object_mut().ok_or_else(|| {
+                OpenapiPostprocessError::InvalidPaginationOperation {
+                    method,
+                    path: path.clone(),
+                }
+            })?;
+            let operation_id = operation
+                .get("operationId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| OpenapiPostprocessError::InvalidPaginationOperation {
+                    method,
+                    path: path.clone(),
+                })?;
+            let Some(metadata) = pagination_operation(&operation_id) else {
+                continue;
+            };
+
+            let mut extension = Map::new();
+            extension.insert(
+                "cursor".to_owned(),
+                Value::String(format!("$request.{}", metadata.cursor_parameter)),
+            );
+            extension.insert(
+                "next_cursor".to_owned(),
+                Value::String(format!("$response.{}", metadata.next_field)),
+            );
+            extension.insert(
+                "results".to_owned(),
+                Value::String(format!("$response.{}", metadata.results_field)),
+            );
+            operation.insert("x-fern-pagination".to_owned(), Value::Object(extension));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_pagination_metadata(document: &Value) -> Result<(), OpenapiPostprocessError> {
+    let schemas = document
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .ok_or(OpenapiPostprocessError::InvalidPaginationDocument {
+            location: "components.schemas",
+        })?;
+    let paths = document
+        .get("paths")
+        .and_then(Value::as_object)
+        .ok_or(OpenapiPostprocessError::InvalidPaginationDocument { location: "paths" })?;
+    let mut found_operations = BTreeSet::new();
+
+    for (path, path_item) in paths {
+        let path_item = path_item.as_object().ok_or_else(|| {
+            OpenapiPostprocessError::InvalidPaginationPathItem { path: path.clone() }
+        })?;
+        for &method in HTTP_METHODS {
+            let Some(operation) = path_item.get(method) else {
+                continue;
+            };
+            let operation = operation.as_object().ok_or_else(|| {
+                OpenapiPostprocessError::InvalidPaginationOperation {
+                    method,
+                    path: path.clone(),
+                }
+            })?;
+            let operation_id = operation
+                .get("operationId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| OpenapiPostprocessError::InvalidPaginationOperation {
+                    method,
+                    path: path.clone(),
+                })?;
+            let pagination_parameter = ["cursor", "after_seq"]
+                .into_iter()
+                .find(|name| has_query_parameter(operation, name));
+            let Some(metadata) = pagination_operation(operation_id) else {
+                if let Some(parameter) = pagination_parameter {
+                    return Err(OpenapiPostprocessError::MissingPaginationMetadata {
+                        operation_id: operation_id.to_owned(),
+                        parameter: parameter.to_owned(),
+                    });
+                }
+                continue;
+            };
+            found_operations.insert(metadata.operation_id);
+
+            if !has_query_parameter(operation, metadata.cursor_parameter) {
+                return Err(OpenapiPostprocessError::MissingPaginationCursorParameter {
+                    operation_id: operation_id.to_owned(),
+                    parameter: metadata.cursor_parameter,
+                });
+            }
+            validate_pagination_response(schemas, operation, metadata)?;
+        }
+    }
+
+    for metadata in PAGINATION_OPERATIONS {
+        if !found_operations.contains(metadata.operation_id) {
+            return Err(OpenapiPostprocessError::MissingPaginationOperation {
+                operation_id: metadata.operation_id.to_owned(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn pagination_operation(operation_id: &str) -> Option<&'static PaginationOperation> {
+    PAGINATION_OPERATIONS
+        .iter()
+        .find(|metadata| metadata.operation_id == operation_id)
+}
+
+fn has_query_parameter(operation: &Map, parameter_name: &str) -> bool {
+    operation
+        .get("parameters")
+        .and_then(Value::as_array)
+        .is_some_and(|parameters| {
+            parameters.iter().any(|parameter| {
+                parameter.get("in").and_then(Value::as_str) == Some("query")
+                    && parameter.get("name").and_then(Value::as_str) == Some(parameter_name)
+            })
+        })
+}
+
+fn validate_pagination_response(
+    schemas: &Map,
+    operation: &Map,
+    metadata: &PaginationOperation,
+) -> Result<(), OpenapiPostprocessError> {
+    let response_schema = operation
+        .get("responses")
+        .and_then(|responses| responses.get("200"))
+        .and_then(|response| response.get("content"))
+        .and_then(|content| content.get("application/json"))
+        .and_then(|content| content.get("schema"))
+        .and_then(|schema| schema.get("$ref"))
+        .and_then(Value::as_str)
+        .and_then(|reference| component_schema_for_reference(schemas, reference))
+        .and_then(Value::as_object)
+        .ok_or_else(
+            || OpenapiPostprocessError::MissingPaginationResponseSchema {
+                operation_id: metadata.operation_id.to_owned(),
+            },
+        )?;
+    let properties = response_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or_else(
+            || OpenapiPostprocessError::MissingPaginationResponseSchema {
+                operation_id: metadata.operation_id.to_owned(),
+            },
+        )?;
+
+    for property in [metadata.next_field, metadata.results_field] {
+        if !properties.contains_key(property) {
+            return Err(OpenapiPostprocessError::MissingPaginationResponseProperty {
+                operation_id: metadata.operation_id.to_owned(),
+                property: property.to_owned(),
+            });
+        }
+    }
+    if properties
+        .get(metadata.results_field)
+        .and_then(|property| property.get("type"))
+        .and_then(Value::as_str)
+        != Some("array")
+    {
+        return Err(OpenapiPostprocessError::PaginationResultsNotArray {
+            operation_id: metadata.operation_id.to_owned(),
+            results_field: metadata.results_field.to_owned(),
+        });
+    }
+
     Ok(())
 }
 
@@ -1093,6 +1380,46 @@ mod tests {
             error,
             OpenapiPostprocessError::MissingRetryClassification { operation_id }
                 if operation_id == "future_operation"
+        ));
+    }
+
+    #[test]
+    fn missing_pagination_operation_returns_a_named_error() {
+        let mut document = ordered(serde_json::json!({
+            "components": {"schemas": {}},
+            "paths": {}
+        }));
+
+        let error = add_pagination_metadata(&mut document)
+            .expect_err("missing pagination operation should fail generation");
+        assert!(matches!(
+            error,
+            OpenapiPostprocessError::MissingPaginationOperation { operation_id }
+                if operation_id == "list_changes"
+        ));
+    }
+
+    #[test]
+    fn unregistered_cursor_operation_returns_a_named_error() {
+        let mut document = ordered(serde_json::json!({
+            "components": {"schemas": {}},
+            "paths": {
+                "/future": {
+                    "get": {
+                        "operationId": "future_list",
+                        "parameters": [{"name": "cursor", "in": "query"}]
+                    }
+                }
+            }
+        }));
+        let error = add_pagination_metadata(&mut document)
+            .expect_err("unregistered cursor operation should fail generation");
+        assert!(matches!(
+            error,
+            OpenapiPostprocessError::MissingPaginationMetadata {
+                operation_id,
+                parameter,
+            } if operation_id == "future_list" && parameter == "cursor"
         ));
     }
 
