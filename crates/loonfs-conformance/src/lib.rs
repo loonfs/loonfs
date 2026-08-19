@@ -1,8 +1,6 @@
-//! SDK conformance fixture loading and pure invariant checks.
+//! Loads shared SDK test cases and checks behavior that does not need a server.
 //!
-//! The integration harness is in `tests/reference.rs`. This library keeps
-//! fixture parsing and checks that do not require a server available to unit
-//! tests.
+//! The integration harness is in `tests/reference.rs`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -11,50 +9,50 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Fixture format version accepted by this corpus.
+/// Supported fixture format version.
 pub const FIXTURE_VERSION: u32 = 1;
 
-/// One harness branch in the version-one corpus.
+/// Function that runs a test case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaseFamily {
-    /// Standard HTTP error responses.
+    /// Standard API errors.
     ErrorContract,
-    /// Durable commit replay.
+    /// Repeated commit requests.
     CommitReplay,
-    /// Direct whole-object upload.
+    /// Direct PUT upload.
     UploadDirectPut,
-    /// Multipart upload and completion replay.
+    /// Multipart upload and repeated completion.
     UploadMultipart,
-    /// Repeatable upload abort.
+    /// Repeated upload abort.
     UploadAbort,
-    /// Granted direct download.
+    /// Direct download.
     Download,
-    /// Cursor pagination and resumption.
+    /// Cursor pagination and resume.
     Pagination,
-    /// Ordered change feed.
+    /// Change feed order and identity.
     Changes,
-    /// Complete filesystem workflow.
+    /// End-to-end filesystem workflow.
     EndToEnd,
 }
 
-/// One language-neutral case document.
+/// One shared test case.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
     /// Fixture format version.
     pub version: u32,
-    /// Stable case identifier and file stem.
+    /// Case name and file stem.
     pub name: String,
-    /// Documented behavior and retry class, when applicable.
+    /// Behavior being tested.
     pub intent: String,
-    /// Harness branch that owns the sequence.
+    /// Function that runs the case.
     pub family: CaseFamily,
-    /// Ordered wire operations, for readers rather than dispatch.
+    /// Human-readable calls in execution order.
     pub operations: Vec<String>,
-    /// Family-specific request values.
+    /// Input values for this case.
     pub request: Value,
-    /// Family-specific response fields and invariants.
+    /// Expected responses and behavior.
     pub expected: Value,
 }
 
@@ -70,7 +68,7 @@ const EXPECTED_CASES: &[(&str, CaseFamily)] = &[
     ("upload_multipart", CaseFamily::UploadMultipart),
 ];
 
-/// Failure to read or validate the corpus.
+/// Failure to read or validate the test cases.
 #[derive(Debug, Error)]
 pub enum FixtureError {
     /// A fixture directory or file could not be read.
@@ -89,22 +87,22 @@ pub enum FixtureError {
         /// JSON error.
         source: serde_json::Error,
     },
-    /// A decoded fixture did not satisfy the corpus rules.
+    /// A decoded fixture is invalid.
     #[error("invalid fixture `{path}`: {reason}")]
     Invalid {
-        /// Fixture path or corpus directory.
+        /// Fixture path or case directory.
         path: PathBuf,
         /// Failed rule.
         reason: String,
     },
 }
 
-/// Returns the checked-in fixture directory.
+/// Returns the checked-in case directory.
 pub fn cases_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("cases")
 }
 
-/// Loads and validates every version-one case in stable name order.
+/// Loads and validates every case in name order.
 pub fn load_cases() -> Result<Vec<Case>, FixtureError> {
     let directory = cases_dir();
     let mut paths = fs::read_dir(&directory)
@@ -210,18 +208,18 @@ fn validate_inventory(directory: &Path, cases: &[Case]) -> Result<(), FixtureErr
     Ok(())
 }
 
-/// Invalid deterministic byte-pattern input.
+/// Invalid byte-pattern input.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PatternError {
-    /// A zero modulus cannot define the pattern.
+    /// The modulus is zero.
     #[error("byte pattern modulus must be greater than zero")]
     ZeroModulus,
-    /// The declared length does not fit this process.
+    /// The length does not fit in `usize`.
     #[error("byte pattern length does not fit usize")]
     LengthOverflow,
 }
 
-/// Expands the corpus byte pattern `offset % modulus`.
+/// Generates the byte pattern `offset % modulus`.
 pub fn byte_pattern(length: u64, modulus: u8) -> Result<Vec<u8>, PatternError> {
     if modulus == 0 {
         return Err(PatternError::ZeroModulus);
@@ -232,29 +230,29 @@ pub fn byte_pattern(length: u64, modulus: u8) -> Result<Vec<u8>, PatternError> {
         .collect())
 }
 
-/// Failure of the pagination completeness or resumption rules.
+/// Invalid pagination results.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PaginationInvariantError {
-    /// A full walk returned the same entry twice.
+    /// The full walk returned an entry twice.
     #[error("full pagination walk repeated `{0}`")]
     Duplicate(String),
-    /// The full walk differed from the expected ordered entries.
+    /// The full walk did not match the expected entries.
     #[error("full pagination walk did not match the expected entries")]
     FullWalkMismatch,
-    /// The saved cursor position was outside the completed walk.
+    /// The saved cursor position is past the end.
     #[error("pagination resume offset {offset} exceeds {length} entries")]
     ResumeOffset {
-        /// Saved entry position.
+        /// Saved position.
         offset: usize,
-        /// Full walk length.
+        /// Number of entries.
         length: usize,
     },
-    /// A resumed walk differed from the suffix after the saved cursor.
+    /// The resumed walk did not match the remaining entries.
     #[error("resumed pagination walk did not match the expected suffix")]
     ResumeMismatch,
 }
 
-/// Checks a complete cursor walk and a second walk resumed from a saved cursor.
+/// Checks a full page walk and a second walk resumed from a saved cursor.
 pub fn validate_page_walk(
     expected: &[String],
     observed: &[String],

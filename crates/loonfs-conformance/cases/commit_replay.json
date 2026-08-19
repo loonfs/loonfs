@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "commit_replay",
-  "intent": "Pins the replay retry class for apply_commit: an identical request with the same commit_id returns the stored result.",
+  "intent": "Checks that repeating apply_commit with the same commit_id returns the stored result.",
   "family": "commit_replay",
   "operations": [
     "create_namespace",

@@ -1,4 +1,4 @@
-//! Runs every language-neutral case through the Rust reference client.
+//! Runs every shared SDK case through `loonfs-client`.
 
 #![allow(clippy::panic, clippy::unwrap_used)]
 
@@ -116,8 +116,6 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
-        // Bind the API listener first so a restricted environment fails at
-        // the same boundary as the external-server integration suites.
         let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind conformance API listener");

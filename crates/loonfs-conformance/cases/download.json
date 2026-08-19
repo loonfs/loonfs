@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "download",
-  "intent": "Pins begin_download and granted streaming read length and checksum verification against the returned content reference.",
+  "intent": "Checks direct download length, checksum, and content.",
   "family": "download",
   "operations": [
     "create_namespace",

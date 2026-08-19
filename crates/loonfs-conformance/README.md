@@ -1,57 +1,52 @@
-# LoonFS SDK conformance corpus
+# SDK conformance tests
 
-This crate holds version one of the language-neutral SDK conformance corpus
-and the Rust reference harness. It is not published.
+This private crate contains shared JSON test cases and a Rust test harness.
 
-## Version-one inventory
+## Cases
 
-The corpus contains nine server-executable cases:
+The nine cases cover:
 
-- the standard error contract;
-- commit replay;
-- direct PUT upload;
-- multipart upload and completion replay;
-- upload abort and repeated abort;
-- granted direct download;
-- cursor pagination and resumption;
-- change-feed identity fields;
-- the complete namespace and filesystem workflow.
+- standard API errors
+- repeated commit requests
+- direct PUT uploads
+- multipart uploads and repeated completion requests
+- repeated upload aborts
+- direct downloads
+- cursor pagination and resumption
+- change feed identity fields
+- an end-to-end filesystem workflow
 
-Proxy cases are not part of version one.
+Proxy cases are not included yet.
 
-## Fixture format
+## JSON format
 
-Each file in `cases/` is one JSON object with these fields:
+Each file in `cases/` contains:
 
-- `version`: the fixture format version, currently `1`.
-- `name`: a stable case name that matches the file stem.
-- `intent`: the behavior under test. Retry cases name the API retry class.
-- `family`: the Rust harness branch that owns the sequence.
-- `operations`: the ordered wire operations for a reader of the fixture.
-- `request`: family-specific input values.
-- `expected`: stable response fields and wire-visible invariants.
+- `version`: the fixture format version, currently `1`
+- `name`: the case name, which must match the file name
+- `intent`: the behavior being tested
+- `family`: the Rust function that runs the case
+- `operations`: a human-readable list of calls in order
+- `request`: input values for the case
+- `expected`: expected response fields and behavior
 
-The `operations` array documents order. It does not dispatch generic actions.
-The harness has one Rust branch per family, and each branch contains its own
-sequence. This keeps the files as data and expectations rather than an
-execution language.
+The harness does not interpret `operations`. Each case family has a Rust
+function that performs the calls. The JSON files contain only inputs and
+expected results.
 
-Large multipart content uses a deterministic byte pattern. A pattern with
-length `N` and modulus `M` contains byte `offset % M` at each zero-based
-offset. Other payloads use UTF-8 strings directly.
+Large multipart cases use a repeatable byte pattern. For length `N` and
+modulus `M`, the byte at each zero-based offset is `offset % M`. Other payloads
+are UTF-8 strings.
 
-## Harness
+## Rust harness
 
-`tests/reference.rs` loads every JSON file, starts the production HTTP router,
-and sends typed operations through `loonfs-client`. The server uses a temporary
-local filesystem store. A loopback transfer provider handles direct PUT,
-multipart part PUT, and direct GET capabilities against the same store.
+`tests/reference.rs` starts the production HTTP router with a temporary local
+store and runs every case through `loonfs-client`. A loopback service handles
+direct uploads, multipart part uploads, and direct downloads.
 
-Malformed JSON values and invalid query text cannot be constructed by the
-typed client. Those two requests use a raw HTTP client, then decode and check
-the standard `ApiError` envelope. All ordinary operations use
-`loonfs-client`.
+The typed client cannot create malformed JSON or invalid query values, so the
+error case sends those two requests with a raw HTTP client. All other requests
+use `loonfs-client`.
 
-The fixture loader, deterministic pattern, and pagination completeness checks
-have unit coverage without a server. The full reference test needs loopback
-listeners and runs in the outside gate.
+Unit tests cover fixture loading, byte-pattern generation, and pagination.
+The integration test requires local TCP listeners.

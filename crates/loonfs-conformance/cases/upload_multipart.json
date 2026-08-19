@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "upload_multipart",
-  "intent": "Pins the replay retry class for complete_upload after a direct multipart transfer: identical completion returns the stored outcome.",
+  "intent": "Checks that repeating complete_upload after a multipart upload returns the stored result.",
   "family": "upload_multipart",
   "operations": [
     "create_namespace",

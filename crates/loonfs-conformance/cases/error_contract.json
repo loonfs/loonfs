@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "error_contract",
-  "intent": "Pins the standard error envelope for missing authentication, malformed body fields, and invalid query values.",
+  "intent": "Checks standard errors for missing authentication, malformed JSON, and invalid query values.",
   "family": "error_contract",
   "operations": [
     "get_namespace without authorization",

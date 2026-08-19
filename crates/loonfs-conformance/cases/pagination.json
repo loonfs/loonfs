@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "pagination",
-  "intent": "Pins cursor pagination completeness, uniqueness, exhaustion, and resumption from a cursor saved during the first walk.",
+  "intent": "Checks that pagination returns every entry once and can resume from a saved cursor.",
   "family": "pagination",
   "operations": [
     "create_namespace",

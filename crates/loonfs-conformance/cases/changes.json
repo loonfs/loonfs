@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "changes",
-  "intent": "Pins the change feed fields for a commit read after a supplied sequence.",
+  "intent": "Checks the change feed fields returned after a supplied sequence.",
   "family": "changes",
   "operations": [
     "create_namespace",

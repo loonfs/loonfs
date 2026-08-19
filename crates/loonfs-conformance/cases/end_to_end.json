@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "end_to_end",
-  "intent": "Pins the complete SDK workflow across namespace creation, filesystem mutation, streaming download, history, changes, and trash.",
+  "intent": "Checks an end-to-end filesystem workflow, including history, changes, and trash.",
   "family": "end_to_end",
   "operations": [
     "create_namespace",

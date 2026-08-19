@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "upload_abort",
-  "intent": "Pins the safe retry class for abort_upload: repeating an abort on the open session returns the stored abort.",
+  "intent": "Checks that repeating abort_upload returns the stored result.",
   "family": "upload_abort",
   "operations": [
     "create_namespace",

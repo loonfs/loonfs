@@ -251,10 +251,7 @@ pub async fn app_with_store(
         .0)
 }
 
-/// Builds the production router with caller-supplied direct-transfer issuers.
-///
-/// This entry point supports integration tests that keep durable objects in
-/// a local store while a loopback provider handles transfer capabilities.
+/// Builds the server router with custom direct-transfer providers for tests.
 #[cfg(feature = "test-support")]
 pub async fn app_with_test_transfers(
     config: ServerConfig,
