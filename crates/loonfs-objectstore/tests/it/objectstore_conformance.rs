@@ -180,6 +180,56 @@ async fn cloudflare_r2_streamed_write_round_trips() {
     assert_streamed_write_round_trips(&store).await;
 }
 
+#[tokio::test]
+#[ignore = "requires real AWS S3 credentials"]
+async fn aws_s3_checksumless_put_stores_a_trustworthy_checksum() {
+    let config = AwsS3ConformanceConfig::from_env()
+        .expect("load AWS S3 real-provider conformance environment");
+    let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
+        bucket: config.bucket,
+        region: config.region,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        session_token: config.session_token,
+        key_prefix: Some(config.prefix),
+        force_path_style: false,
+    })
+    .expect("create AWS S3 object store");
+    assert_checksumless_put_stores_a_trustworthy_checksum(&store, "aws-s3").await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Cloudflare R2 credentials"]
+async fn cloudflare_r2_checksumless_put_stores_a_trustworthy_checksum() {
+    let config = CloudflareR2ConformanceConfig::from_env()
+        .expect("load Cloudflare R2 real-provider conformance environment");
+    let store = S3CompatibleStore::cloudflare_r2(CloudflareR2StoreConfig {
+        bucket: config.bucket,
+        account_id: config.account_id,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create Cloudflare R2 object store");
+    assert_checksumless_put_stores_a_trustworthy_checksum(&store, "cloudflare-r2").await;
+}
+
+#[tokio::test]
+#[ignore = "requires real GCP GCS credentials"]
+async fn gcp_gcs_checksumless_put_stores_a_trustworthy_checksum() {
+    let config = GcpGcsConformanceConfig::from_env()
+        .expect("load GCP GCS real-provider conformance environment");
+    let store = GcpGcsStore::new(GcpGcsStoreConfig {
+        bucket: config.bucket,
+        service_account_key_path: config.service_account_key_path,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create GCP GCS object store");
+    assert_checksumless_put_stores_a_trustworthy_checksum(&store, "gcp-gcs").await;
+}
+
 #[test]
 #[ignore = "requires real AWS S3 credentials"]
 fn aws_s3_store_survives_alternating_current_thread_runtimes() {
@@ -416,6 +466,68 @@ fn probe_report_lines(report: &StoreProbeReport) -> String {
         .map(|check| format!("  {}", check.check_line()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The content key the checksum-less PUT evidence writes to and cleans up.
+fn checksumless_put_key() -> String {
+    content_blob(
+        &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
+            .expect("valid content store id"),
+        &ContentId::parse("con_9a41c07d55e2410fb3c6d8e1f2a3b4c5").expect("valid content id"),
+    )
+}
+
+/// The streaming-checksum plan's provider evidence: after a PUT that carries
+/// no checksum header, the provider must report a stored full-object checksum
+/// through the same head the completion path uses, and it must describe the
+/// uploaded bytes exactly. A provider that cannot do this must not advertise
+/// the checksum-less form of direct PUT.
+async fn assert_checksumless_put_stores_a_trustworthy_checksum<S: ObjectStore>(
+    store: &S,
+    provider: &str,
+) {
+    let key = checksumless_put_key();
+    let _ = store.delete(&key).await;
+
+    let payload: Vec<u8> = (0..1_000_003usize)
+        .map(|index| (index % 241) as u8)
+        .collect();
+    store
+        .put(
+            &key,
+            Bytes::from(payload.clone()),
+            loonfs_objectstore::PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("checksum-less PUT");
+
+    let stored = store
+        .head_stored_checksum(&key)
+        .await
+        .expect("head the stored checksum");
+    assert!(
+        stored.is_some(),
+        "{provider}: no stored checksum reported after a checksum-less PUT"
+    );
+    let stored = stored.expect("stored checksum present");
+    assert_eq!(
+        stored.size_bytes,
+        payload.len() as u64,
+        "{provider}: stored size does not match the uploaded bytes"
+    );
+    let local = match stored.checksum.algorithm {
+        loonfs_api::ChecksumAlgorithm::Sha256 => Checksum::sha256(&payload),
+        loonfs_api::ChecksumAlgorithm::Crc64nvme => Checksum::crc64nvme(&payload),
+        loonfs_api::ChecksumAlgorithm::Crc32c => Checksum::crc32c(&payload),
+    };
+    assert_eq!(
+        stored.checksum, local,
+        "{provider}: stored checksum does not match the uploaded bytes"
+    );
+    store
+        .delete(&key)
+        .await
+        .expect("delete the evidence object");
 }
 
 /// The content key a streamed-write exercise writes to and cleans up.
