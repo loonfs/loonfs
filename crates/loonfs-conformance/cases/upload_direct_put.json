@@ -3,15 +3,6 @@
   "name": "upload_direct_put",
   "intent": "Checks a direct PUT upload from creation through a verified file read.",
   "family": "upload_direct_put",
-  "operations": [
-    "create_namespace",
-    "begin_upload direct_put",
-    "transfer presigned PUT",
-    "complete_upload",
-    "apply_commit put_file",
-    "stat_path",
-    "get_file_content"
-  ],
   "request": {
     "namespace_id": "conf-upload-direct-put",
     "path": "/direct-put.txt",
@@ -26,10 +17,6 @@
     "mode": "direct_put",
     "size_bytes": 26,
     "checksum_algorithm": "sha256",
-    "committed_seq": 1,
-    "completion_content_ref_matches_begin": true,
-    "stat_content_ref_matches_completion": true,
-    "checksum_matches_payload": true,
-    "readback_matches_payload": true
+    "committed_seq": 1
   }
 }

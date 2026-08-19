@@ -48,8 +48,6 @@ pub struct Case {
     pub intent: String,
     /// Function that runs the case.
     pub family: CaseFamily,
-    /// Human-readable calls in execution order.
-    pub operations: Vec<String>,
     /// Input values for this case.
     pub request: Value,
     /// Expected responses and behavior.
@@ -164,16 +162,6 @@ fn validate_case(path: &Path, case: &Case) -> Result<(), FixtureError> {
     if case.intent.trim().is_empty() {
         return Err(invalid("intent must not be empty".to_owned()));
     }
-    if case.operations.is_empty() {
-        return Err(invalid("operations must not be empty".to_owned()));
-    }
-    if case
-        .operations
-        .iter()
-        .any(|operation| operation.trim().is_empty())
-    {
-        return Err(invalid("operation names must not be empty".to_owned()));
-    }
     if !case.request.is_object() {
         return Err(invalid("request must be a JSON object".to_owned()));
     }
@@ -287,7 +275,6 @@ mod tests {
         let cases = load_cases().expect("load version-one cases");
         assert_eq!(cases.len(), EXPECTED_CASES.len());
         assert!(cases.iter().all(|case| case.version == FIXTURE_VERSION));
-        assert!(cases.iter().all(|case| !case.operations.is_empty()));
     }
 
     #[test]

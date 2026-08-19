@@ -3,16 +3,6 @@
   "name": "upload_multipart",
   "intent": "Checks that repeating complete_upload after a multipart upload returns the stored result.",
   "family": "upload_multipart",
-  "operations": [
-    "create_namespace",
-    "begin_upload direct_multipart",
-    "sign_upload_parts",
-    "transfer presigned part PUTs",
-    "complete_upload",
-    "complete_upload replay",
-    "apply_commit put_file",
-    "get_file_content"
-  ],
   "request": {
     "namespace_id": "conf-upload-multipart",
     "path": "/multipart.bin",
@@ -32,9 +22,6 @@
     "part_count": 2,
     "size_bytes": 5243904,
     "checksum_algorithm": "crc64nvme",
-    "committed_seq": 1,
-    "replayed_completion_matches_first": true,
-    "checksum_matches_payload": true,
-    "readback_matches_payload": true
+    "committed_seq": 1
   }
 }

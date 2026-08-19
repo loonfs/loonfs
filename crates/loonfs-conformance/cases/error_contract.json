@@ -3,11 +3,6 @@
   "name": "error_contract",
   "intent": "Checks standard errors for missing authentication, malformed JSON, and invalid query values.",
   "family": "error_contract",
-  "operations": [
-    "get_namespace without authorization",
-    "apply_commit with a relative operation path",
-    "list_changes with a non-numeric after_seq"
-  ],
   "request": {
     "namespace_id": "conf-error-contract",
     "malformed_body": {
@@ -28,8 +23,7 @@
   "expected": {
     "unauthenticated": {
       "status": 401,
-      "code": "unauthorized",
-      "request_id_present": true
+      "code": "unauthorized"
     },
     "malformed_body": {
       "status": 400,

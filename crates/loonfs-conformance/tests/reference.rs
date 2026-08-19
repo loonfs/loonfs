@@ -583,10 +583,6 @@ fn put_options(actor: &ActorRef, id: &str) -> PutFileOptions {
     options
 }
 
-fn assert_expected(value: bool, label: &str) {
-    assert!(value, "fixture invariant `{label}` must be true");
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ErrorRequest {
@@ -608,7 +604,6 @@ struct ErrorExpected {
 struct UnauthorizedExpected {
     status: u16,
     code: String,
-    request_id_present: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -635,10 +630,7 @@ async fn run_error_contract(harness: &Harness, case: &Case) {
         } => {
             assert_eq!(status, expected.unauthenticated.status);
             assert_eq!(code, expected.unauthenticated.code);
-            assert_eq!(
-                request_id.is_some(),
-                expected.unauthenticated.request_id_present
-            );
+            assert!(request_id.is_some());
         }
         other => panic!("expected API error, found {other:?}"),
     }
@@ -691,9 +683,6 @@ struct CommitReplayRequest {
 #[serde(deny_unknown_fields)]
 struct CommitReplayExpected {
     committed_seq: u64,
-    response_commit_id_matches_request: bool,
-    replayed_committed_seq_matches_first: bool,
-    replayed_response_matches_first: bool,
 }
 
 async fn run_commit_replay(harness: &Harness, case: &Case) {
@@ -725,20 +714,8 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
         .expect("replayed commit");
 
     assert_eq!(first.committed_seq.0, expected.committed_seq);
-    assert_expected(
-        expected.response_commit_id_matches_request,
-        "response_commit_id_matches_request",
-    );
     assert_eq!(first.commit_id.as_str(), request.commit_id);
-    assert_expected(
-        expected.replayed_committed_seq_matches_first,
-        "replayed_committed_seq_matches_first",
-    );
     assert_eq!(replayed.committed_seq, first.committed_seq);
-    assert_expected(
-        expected.replayed_response_matches_first,
-        "replayed_response_matches_first",
-    );
     assert_eq!(replayed, first);
 }
 
@@ -759,10 +736,6 @@ struct DirectPutExpected {
     size_bytes: u64,
     checksum_algorithm: String,
     committed_seq: u64,
-    completion_content_ref_matches_begin: bool,
-    stat_content_ref_matches_completion: bool,
-    checksum_matches_payload: bool,
-    readback_matches_payload: bool,
 }
 
 async fn run_direct_put(harness: &Harness, case: &Case) {
@@ -797,10 +770,6 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         direct_put.content_ref.checksum.algorithm.as_str(),
         expected.checksum_algorithm
     );
-    assert_expected(
-        expected.checksum_matches_payload,
-        "checksum_matches_payload",
-    );
     assert!(direct_put.content_ref.checksum.matches(payload));
 
     harness
@@ -818,10 +787,6 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .expect("completed content ref")
         .clone();
     let content_token = completed.content_token().cloned();
-    assert_expected(
-        expected.completion_content_ref_matches_begin,
-        "completion_content_ref_matches_begin",
-    );
     assert_eq!(content_ref, direct_put.content_ref);
 
     let spec = namespace_path(&request.namespace_id, &request.path);
@@ -841,20 +806,12 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .stat_path(&spec, &StatPathOptions::default())
         .await
         .expect("stat direct PUT file");
-    assert_expected(
-        expected.stat_content_ref_matches_completion,
-        "stat_content_ref_matches_completion",
-    );
     assert_eq!(stat.content_ref(), Some(&content_ref));
     let readback = harness
         .client
         .get_file_bytes(&spec)
         .await
         .expect("read direct PUT file");
-    assert_expected(
-        expected.readback_matches_payload,
-        "readback_matches_payload",
-    );
     assert_eq!(readback, payload);
 }
 
@@ -884,9 +841,6 @@ struct MultipartExpected {
     size_bytes: u64,
     checksum_algorithm: String,
     committed_seq: u64,
-    replayed_completion_matches_first: bool,
-    checksum_matches_payload: bool,
-    readback_matches_payload: bool,
 }
 
 async fn run_multipart(harness: &Harness, case: &Case) {
@@ -982,10 +936,6 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         .complete_multipart_upload(&namespace, &upload_id, &completion_request)
         .await
         .expect("replay multipart completion");
-    assert_expected(
-        expected.replayed_completion_matches_first,
-        "replayed_completion_matches_first",
-    );
     assert_eq!(replayed.namespace_id, first.namespace_id);
     assert_eq!(replayed.upload_id, first.upload_id);
     assert_eq!(replayed.mode, first.mode);
@@ -993,10 +943,6 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     assert_eq!(completed_at_ms(&replayed.status), first_completed_at_ms);
     assert_eq!(first_content_ref.size_bytes, expected.size_bytes);
     assert_eq!(first_content_ref.checksum, whole_checksum);
-    assert_expected(
-        expected.checksum_matches_payload,
-        "checksum_matches_payload",
-    );
     assert!(first_content_ref.checksum.matches(&payload));
 
     let spec = namespace_path(&request.namespace_id, &request.path);
@@ -1016,10 +962,6 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         .get_file_bytes(&spec)
         .await
         .expect("read multipart file");
-    assert_expected(
-        expected.readback_matches_payload,
-        "readback_matches_payload",
-    );
     assert_eq!(readback, payload);
 }
 
@@ -1043,8 +985,6 @@ struct AbortRequest {
 struct AbortExpected {
     mode: String,
     status: String,
-    replayed_response_matches_first: bool,
-    replayed_aborted_at_ms_matches_first: bool,
 }
 
 async fn run_abort(harness: &Harness, case: &Case) {
@@ -1072,16 +1012,8 @@ async fn run_abort(harness: &Harness, case: &Case) {
         .expect("replay abort");
     assert_eq!(expected.mode, "service_proxied");
     assert_eq!(expected.status, "aborted");
-    assert_expected(
-        expected.replayed_response_matches_first,
-        "replayed_response_matches_first",
-    );
     assert_eq!(replayed, first);
     let first_aborted_at_ms = aborted_at_ms(&first.status);
-    assert_expected(
-        expected.replayed_aborted_at_ms_matches_first,
-        "replayed_aborted_at_ms_matches_first",
-    );
     assert_eq!(aborted_at_ms(&replayed.status), first_aborted_at_ms);
 }
 
@@ -1108,10 +1040,6 @@ struct DownloadExpected {
     size_bytes: u64,
     checksum_algorithm: String,
     committed_seq: u64,
-    grant_content_ref_matches_stat: bool,
-    stream_length_matches_content_ref: bool,
-    stream_checksum_matches_content_ref: bool,
-    stream_matches_payload: bool,
 }
 
 async fn run_download(harness: &Harness, case: &Case) {
@@ -1143,10 +1071,6 @@ async fn run_download(harness: &Harness, case: &Case) {
         .begin_download(&spec, None)
         .await
         .expect("begin direct download");
-    assert_expected(
-        expected.grant_content_ref_matches_stat,
-        "grant_content_ref_matches_stat",
-    );
     assert_eq!(stat.content_ref(), Some(&grant.content_ref));
     assert_eq!(grant.content_ref.size_bytes, expected.size_bytes);
     assert_eq!(
@@ -1155,17 +1079,8 @@ async fn run_download(harness: &Harness, case: &Case) {
     );
 
     let bytes = stream_grant(&harness.client, &grant).await;
-    assert_expected(
-        expected.stream_length_matches_content_ref,
-        "stream_length_matches_content_ref",
-    );
     assert_eq!(bytes.len() as u64, grant.content_ref.size_bytes);
-    assert_expected(
-        expected.stream_checksum_matches_content_ref,
-        "stream_checksum_matches_content_ref",
-    );
     assert!(grant.content_ref.checksum.matches(&bytes));
-    assert_expected(expected.stream_matches_payload, "stream_matches_payload");
     assert_eq!(bytes, request.content_utf8.as_bytes());
 }
 
@@ -1198,10 +1113,6 @@ struct PaginationExpected {
     entry_count: usize,
     minimum_page_count: usize,
     head_seq: u64,
-    no_entry_missed: bool,
-    no_entry_repeated: bool,
-    next_cursor_absent_at_exhaustion: bool,
-    resumed_walk_matches_saved_suffix: bool,
 }
 
 async fn run_pagination(harness: &Harness, case: &Case) {
@@ -1269,10 +1180,6 @@ async fn run_pagination(harness: &Harness, case: &Case) {
     }
     assert_eq!(observed.len(), expected.entry_count);
     assert!(page_count >= expected.minimum_page_count);
-    assert_expected(
-        expected.next_cursor_absent_at_exhaustion,
-        "next_cursor_absent_at_exhaustion",
-    );
     assert!(cursor.is_none());
 
     let saved_cursor = saved_cursor.expect("saved mid-walk cursor");
@@ -1302,12 +1209,6 @@ async fn run_pagination(harness: &Harness, case: &Case) {
             break;
         }
     }
-    assert_expected(expected.no_entry_missed, "no_entry_missed");
-    assert_expected(expected.no_entry_repeated, "no_entry_repeated");
-    assert_expected(
-        expected.resumed_walk_matches_saved_suffix,
-        "resumed_walk_matches_saved_suffix",
-    );
     validate_page_walk(&request.entry_names, &observed, resume_offset, &resumed)
         .expect("pagination invariants");
 }
@@ -1328,8 +1229,6 @@ struct ChangesExpected {
     committed_seq: u64,
     change_count: usize,
     event_kind: String,
-    commit_id_matches_request: bool,
-    committed_by_matches_request: bool,
 }
 
 async fn run_changes(harness: &Harness, case: &Case) {
@@ -1362,15 +1261,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
         .expect("list changes");
     assert_eq!(feed.changes.len(), expected.change_count);
     let change = feed.changes.first().expect("one change");
-    assert_expected(
-        expected.commit_id_matches_request,
-        "commit_id_matches_request",
-    );
     assert_eq!(change.commit_id.as_str(), request.commit_id);
-    assert_expected(
-        expected.committed_by_matches_request,
-        "committed_by_matches_request",
-    );
     assert_eq!(change.committed_by, request.actor);
     assert_eq!(expected.event_kind, "directory_created");
     assert!(matches!(
@@ -1410,13 +1301,6 @@ struct EndToEndExpected {
     size_bytes: u64,
     revision_count: usize,
     change_count: usize,
-    initial_listing_contains_upload: bool,
-    stream_matches_payload: bool,
-    moved_listing_contains_destination: bool,
-    revision_commit_id_matches_upload: bool,
-    changes_match_commit_ids_and_actor: bool,
-    trash_contains_removed_inode: bool,
-    trash_deletion_seq_matches_remove: bool,
 }
 
 async fn run_end_to_end(harness: &Harness, case: &Case) {
@@ -1461,10 +1345,6 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .list_path_entries_page(&directory, None, None, &ListPathEntriesOptions::default())
         .await
         .expect("list uploaded file");
-    assert_expected(
-        expected.initial_listing_contains_upload,
-        "initial_listing_contains_upload",
-    );
     assert!(initial_listing
         .entries
         .iter()
@@ -1476,7 +1356,6 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .await
         .expect("begin end-to-end download");
     let streamed = stream_grant(&harness.client, &grant).await;
-    assert_expected(expected.stream_matches_payload, "stream_matches_payload");
     assert_eq!(streamed, request.content_utf8.as_bytes());
 
     let moved_path = namespace_path(&request.namespace_id, &request.moved_path);
@@ -1493,10 +1372,6 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .list_path_entries_page(&directory, None, None, &ListPathEntriesOptions::default())
         .await
         .expect("list moved file");
-    assert_expected(
-        expected.moved_listing_contains_destination,
-        "moved_listing_contains_destination",
-    );
     assert!(moved_listing
         .entries
         .iter()
@@ -1508,10 +1383,6 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .await
         .expect("list end-to-end revisions");
     assert_eq!(revisions.revisions.len(), expected.revision_count);
-    assert_expected(
-        expected.revision_commit_id_matches_upload,
-        "revision_commit_id_matches_upload",
-    );
     assert_eq!(
         revisions.revisions[0].commit_id.as_str(),
         request.commit_ids.upload
@@ -1538,10 +1409,6 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .await
         .expect("list complete end-to-end changes");
     assert_eq!(changes.changes.len(), expected.change_count);
-    assert_expected(
-        expected.changes_match_commit_ids_and_actor,
-        "changes_match_commit_ids_and_actor",
-    );
     let expected_ids = [
         request.commit_ids.mkdir.as_str(),
         request.commit_ids.upload.as_str(),
@@ -1571,13 +1438,5 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .iter()
         .find(|entry| entry.inode_id == uploaded_inode)
         .expect("removed inode in trash");
-    assert_expected(
-        expected.trash_contains_removed_inode,
-        "trash_contains_removed_inode",
-    );
-    assert_expected(
-        expected.trash_deletion_seq_matches_remove,
-        "trash_deletion_seq_matches_remove",
-    );
     assert_eq!(removed_entry.deletion_seq, removed.committed_seq);
 }

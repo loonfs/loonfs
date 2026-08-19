@@ -26,13 +26,11 @@ Each file in `cases/` contains:
 - `name`: the case name, which must match the file name
 - `intent`: the behavior being tested
 - `family`: the Rust function that runs the case
-- `operations`: a human-readable list of calls in order
 - `request`: input values for the case
 - `expected`: expected response fields and behavior
 
-The harness does not interpret `operations`. Each case family has a Rust
-function that performs the calls. The JSON files contain only inputs and
-expected results.
+Each case family has a Rust function that performs the calls. The JSON files
+contain only inputs and expected results.
 
 Large multipart cases use a repeatable byte pattern. For length `N` and
 modulus `M`, the byte at each zero-based offset is `offset % M`. Other payloads
