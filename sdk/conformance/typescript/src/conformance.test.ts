@@ -1016,29 +1016,33 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     const [request, expected] = decodeDirectPut(testCase);
     await activeHarness.client.namespaces.createNamespace({ namespace_id: request.namespaceId });
     const payload = new TextEncoder().encode(request.contentUtf8);
-    const claim: LoonFS.UploadContentClaim = {
-        size_bytes: payload.byteLength,
-        checksum: checksum("sha256", payload),
-    };
     const begin = await activeHarness.client.uploads.beginUpload({
         namespace_id: request.namespaceId,
-        body: { mode: "direct_put", content: claim },
+        body: { mode: "direct_put", size_bytes: payload.byteLength },
     });
     assert.equal(begin.mode, "direct_put");
     assert.equal(expected.mode, "direct_put");
-    assert.equal(begin.direct_put.content_ref.size_bytes, expected.sizeBytes);
-    assert.equal(begin.direct_put.content_ref.checksum.algorithm, expected.checksumAlgorithm);
-    assert.deepEqual(begin.direct_put.content_ref.checksum, claim.checksum);
+    assert.equal(begin.direct_put.checksum_algorithm, expected.checksumAlgorithm);
 
     await uploadPresigned(begin.direct_put.access, payload, "direct PUT");
+    const claim: LoonFS.UploadContentClaim = {
+        size_bytes: payload.byteLength,
+        checksum: checksum(begin.direct_put.checksum_algorithm, payload),
+    };
     const completed = completedUpload(
         await activeHarness.client.uploads.completeUpload({
             namespace_id: request.namespaceId,
             upload_id: begin.upload_id,
-            body: { mode: "direct_put" },
+            body: { mode: "direct_put", content: claim },
         }),
     );
-    assert.deepEqual(completed.content_ref, begin.direct_put.content_ref);
+    assert.equal(completed.content_ref.size_bytes, expected.sizeBytes);
+    assert.equal(completed.content_ref.checksum.algorithm, expected.checksumAlgorithm);
+    assert.deepEqual(completed.content_ref.checksum, claim.checksum);
+    assert.deepEqual(
+        completed.content_ref.checksum,
+        checksum(completed.content_ref.checksum.algorithm, payload),
+    );
 
     const committed = await activeHarness.client.filesystem.applyCommit(
         fileCommit(

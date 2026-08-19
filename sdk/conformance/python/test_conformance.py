@@ -1081,34 +1081,30 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     request, expected = _decode_direct_put(cases["upload_direct_put"])
     harness.client.namespaces.create_namespace(namespace_id=request.namespace_id)
     payload = request.content_utf8.encode()
-    claim = UploadContentClaim(
-        size_bytes=len(payload),
-        checksum=_checksum("sha256", payload),
-    )
     begin = harness.client.uploads.begin_upload(
         request.namespace_id,
-        request=BeginUploadRequest_DirectPut(content=claim),
+        request=BeginUploadRequest_DirectPut(size_bytes=len(payload)),
     )
 
     assert expected.mode == "direct_put"
     assert begin.mode == expected.mode
-    assert begin.direct_put.content_ref.size_bytes == expected.size_bytes
-    assert (
-        begin.direct_put.content_ref.checksum.algorithm == expected.checksum_algorithm
-    )
-    assert begin.direct_put.content_ref.checksum == _checksum(
-        begin.direct_put.content_ref.checksum.algorithm,
-        payload,
-    )
+    assert begin.direct_put.checksum_algorithm == expected.checksum_algorithm
 
     _put_presigned(begin.direct_put.access, payload)
+    claim = UploadContentClaim(
+        size_bytes=len(payload),
+        checksum=_checksum(begin.direct_put.checksum_algorithm, payload),
+    )
     completed = harness.client.uploads.complete_upload(
         request.namespace_id,
         begin.upload_id,
-        request=CompleteUploadRequest_DirectPut(),
+        request=CompleteUploadRequest_DirectPut(content=claim),
     )
     content_ref, content_token, _ = _completed_content(completed)
-    assert content_ref == begin.direct_put.content_ref
+    assert content_ref.size_bytes == expected.size_bytes
+    assert content_ref.checksum.algorithm == expected.checksum_algorithm
+    assert content_ref.checksum == claim.checksum
+    assert content_ref.checksum == _checksum(content_ref.checksum.algorithm, payload)
 
     committed = _apply_put_file(
         harness.client,
