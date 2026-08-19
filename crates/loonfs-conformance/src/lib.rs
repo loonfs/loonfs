@@ -1,6 +1,8 @@
-//! Loads shared SDK test cases and checks behavior that does not need a server.
+//! Shared cases and server support for SDK conformance tests.
 //!
-//! The integration harness is in `tests/reference.rs`.
+//! Each client harness loads the same cases from `cases/`.
+
+pub mod server;
 
 use serde::Deserialize;
 use serde_json::Value;
