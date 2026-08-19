@@ -25,7 +25,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
@@ -135,17 +135,25 @@ struct LoopbackIssuer {
     base_url: String,
 }
 
+fn presigned_expiry_ms(now: SystemTime) -> u64 {
+    let expiry = now + Duration::from_secs(3600);
+    expiry
+        .duration_since(UNIX_EPOCH)
+        .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX >> 1))
+        .unwrap_or(0)
+}
+
 impl DirectGetIssuer for LoopbackIssuer {
     fn presign_get(
         &self,
         request: PresignedGetRequest<'_>,
-        _now: SystemTime,
+        now: SystemTime,
     ) -> Result<PresignedUrl, ObjectStoreError> {
         Ok(PresignedUrl {
             method: "GET".to_owned(),
             url: format!("{}/objects/{}", self.base_url, request.object_key),
             headers: BTreeMap::new(),
-            expires_at_ms: u64::MAX,
+            expires_at_ms: presigned_expiry_ms(now),
         })
     }
 }
@@ -162,13 +170,13 @@ impl DirectPutIssuer for LoopbackIssuer {
     fn presign_put(
         &self,
         request: PresignedPutRequest<'_>,
-        _now: SystemTime,
+        now: SystemTime,
     ) -> Result<PresignedUrl, ObjectStoreError> {
         Ok(PresignedUrl {
             method: "PUT".to_owned(),
             url: format!("{}/objects/{}", self.base_url, request.object_key),
             headers: BTreeMap::new(),
-            expires_at_ms: u64::MAX,
+            expires_at_ms: presigned_expiry_ms(now),
         })
     }
 }
@@ -177,7 +185,7 @@ impl DirectMultipartIssuer for LoopbackIssuer {
     fn presign_multipart_part(
         &self,
         request: PresignedPartRequest<'_>,
-        _now: SystemTime,
+        now: SystemTime,
     ) -> Result<PresignedUrl, ObjectStoreError> {
         Ok(PresignedUrl {
             method: "PUT".to_owned(),
@@ -186,7 +194,7 @@ impl DirectMultipartIssuer for LoopbackIssuer {
                 self.base_url, request.provider_upload_id, request.part_number
             ),
             headers: BTreeMap::new(),
-            expires_at_ms: u64::MAX,
+            expires_at_ms: presigned_expiry_ms(now),
         })
     }
 }
