@@ -13,10 +13,12 @@ cd "$(dirname "$0")/../sdk"
 npx --yes "fern-api@${FERN_CLI_VERSION}" check
 
 if [ "$#" -ge 1 ]; then
-    npx --yes "fern-api@${FERN_CLI_VERSION}" generate --local --group "$1"
+    rm -rf "generated/$1"
+    npx --yes "fern-api@${FERN_CLI_VERSION}" generate --force --local --group "$1"
     exit 0
 fi
 
 for group in go python typescript; do
-    npx --yes "fern-api@${FERN_CLI_VERSION}" generate --local --group "$group"
+    rm -rf "generated/${group}"
+    npx --yes "fern-api@${FERN_CLI_VERSION}" generate --force --local --group "$group"
 done
