@@ -11,6 +11,7 @@ groups:
         config:
           module:
             path: github.com/loonfs/loonfs-sdk-go
+          packageName: loonfs
         output:
           location: local-file-system
           path: ../generated/go
@@ -18,6 +19,8 @@ groups:
     generators:
       - name: fernapi/fern-python-sdk
         version: 5.28.0
+        config:
+          client_class_name: LoonFS
         output:
           location: local-file-system
           path: ../generated/python
@@ -25,6 +28,8 @@ groups:
     generators:
       - name: fernapi/fern-typescript-sdk
         version: 3.88.0
+        config:
+          namespaceExport: LoonFS
         output:
           location: local-file-system
           path: ../generated/typescript
