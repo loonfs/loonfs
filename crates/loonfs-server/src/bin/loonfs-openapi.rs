@@ -1,4 +1,4 @@
-//! Writes the full and proxy OpenAPI documents.
+//! Writes the full OpenAPI document and the browser proxy document.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

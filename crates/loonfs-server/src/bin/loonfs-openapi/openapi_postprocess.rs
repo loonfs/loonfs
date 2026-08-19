@@ -56,14 +56,14 @@ pub(crate) const OPENAPI_OPERATION_IDS: &[&str] = &[
     "upload_content",
 ];
 
-/// How a proxy operation is addressed.
+/// Whether a proxy operation uses a mount path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProxyOperationScope {
     Unscoped,
     Mount,
 }
 
-/// Operations published by the LoonFS Proxy profile. Keep this table sorted.
+/// Operations included in the browser proxy document. Keep this table sorted.
 pub(crate) const PROXY_OPERATIONS: &[(&str, ProxyOperationScope)] = &[
     ("abort_upload", ProxyOperationScope::Mount),
     ("apply_commit", ProxyOperationScope::Mount),
@@ -211,7 +211,7 @@ pub(crate) fn openapi_json_pretty(
     Ok(serde_json::to_string_pretty(&document)?)
 }
 
-/// Generates the full document and derives the proxy profile from its JSON.
+/// Generates the full OpenAPI document and the browser proxy document.
 pub(crate) fn openapi_documents_pretty(
     document: &(impl Serialize + ?Sized),
 ) -> Result<(String, String), OpenapiPostprocessError> {
@@ -220,11 +220,12 @@ pub(crate) fn openapi_documents_pretty(
     Ok((full, proxy))
 }
 
-/// Derives the LoonFS Proxy profile from a generated full OpenAPI document.
+/// Builds the browser proxy document from the full OpenAPI JSON.
 pub(crate) fn proxy_openapi_json_pretty(
     full_document: &str,
 ) -> Result<String, OpenapiPostprocessError> {
     let mut document = serde_json::from_str(full_document)?;
+    describe_proxy_document(&mut document);
     derive_proxy_paths(&mut document)?;
     remove_proxy_security(&mut document);
     remove_trusted_tags(&mut document);
@@ -235,6 +236,24 @@ pub(crate) fn proxy_openapi_json_pretty(
 const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch"];
 const NAMESPACE_PATH_PREFIX: &str = "/v0/namespaces/{namespace_id}";
 const MOUNT_PATH_PREFIX: &str = "/v0/mounts/{mount}";
+
+fn describe_proxy_document(document: &mut Value) {
+    let info = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("info"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no info object");
+    info.insert(
+        "title".to_owned(),
+        Value::String("LoonFS Browser Proxy API".to_owned()),
+    );
+    info.insert(
+        "description".to_owned(),
+        Value::String(
+            "API for browser clients that access namespaces through application mounts.".to_owned(),
+        ),
+    );
+}
 
 fn derive_proxy_paths(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
     let paths = document
@@ -357,7 +376,7 @@ fn rewrite_namespace_parameters(operation: &mut Value) -> usize {
         parameter.insert("name".to_owned(), Value::String("mount".to_owned()));
         parameter.insert(
             "description".to_owned(),
-            Value::String("Application mount label".to_owned()),
+            Value::String("Application mount name".to_owned()),
         );
         parameter.insert(
             "schema".to_owned(),

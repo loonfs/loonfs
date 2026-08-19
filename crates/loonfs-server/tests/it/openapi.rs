@@ -460,6 +460,11 @@ fn proxy_paths_use_mounts_and_declare_no_security() {
         &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
     )
     .expect("parse proxy openapi json");
+    assert_eq!(spec["info"]["title"], "LoonFS Browser Proxy API");
+    assert_eq!(
+        spec["info"]["description"],
+        "API for browser clients that access namespaces through application mounts."
+    );
     assert!(spec.get("security").is_none());
     assert!(spec.pointer("/components/securitySchemes").is_none());
     assert!(values_named(&spec, "security").next().is_none());
@@ -510,7 +515,7 @@ fn proxy_paths_use_mounts_and_declare_no_security() {
                         .iter()
                         .find(|parameter| parameter["in"] == "path" && parameter["name"] == "mount")
                         .expect("proxy operation mount parameter");
-                    assert_eq!(mount["description"], "Application mount label");
+                    assert_eq!(mount["description"], "Application mount name");
                     assert_eq!(mount["schema"], serde_json::json!({"type": "string"}));
                 }
             }
@@ -533,7 +538,9 @@ fn proxy_components_are_exactly_the_referenced_closure() {
         .flat_map(|(component_type, entries)| {
             entries
                 .as_object()
-                .unwrap_or_else(|| panic!("proxy component group `{component_type}` is an object"))
+                .unwrap_or_else(|| {
+                    panic!("proxy component group `{component_type}` must be an object")
+                })
                 .keys()
                 .map(move |component_name| (component_type.clone(), component_name.clone()))
         })

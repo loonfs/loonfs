@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "LoonFS HTTP API",
-    "description": "Static OpenAPI document for the LoonFS v0 HTTP API.",
+    "title": "LoonFS Browser Proxy API",
+    "description": "API for browser clients that access namespaces through application mounts.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -58,7 +58,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -157,7 +157,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -264,7 +264,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -381,7 +381,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -478,7 +478,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -596,7 +596,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -704,7 +704,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -800,7 +800,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -889,7 +889,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -1016,7 +1016,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -1123,7 +1123,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -1209,7 +1209,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -1305,7 +1305,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -1422,7 +1422,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
@@ -1550,7 +1550,7 @@
           {
             "name": "mount",
             "in": "path",
-            "description": "Application mount label",
+            "description": "Application mount name",
             "required": true,
             "schema": {
               "type": "string"
