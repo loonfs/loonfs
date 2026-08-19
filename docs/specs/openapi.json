@@ -3649,73 +3649,18 @@
       "AuthoritativePathEntryKind": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "AuthoritativePathEntryDirectory",
-            "description": "A directory, which has no revision payload in v0.\n\nThe entry tag reuses [`InodeKind`]'s wire vocabulary.",
-            "required": [
-              "inode_kind"
-            ],
-            "properties": {
-              "inode_kind": {
-                "type": "string",
-                "enum": [
-                  "dir"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/AuthoritativePathEntryDirectory"
           },
           {
-            "type": "object",
-            "title": "AuthoritativePathEntryFile",
-            "description": "A file and its current revision summary.",
-            "required": [
-              "revision_no",
-              "size_bytes",
-              "content_ref",
-              "revision_committed_by",
-              "revision_committed_at_ms",
-              "inode_kind"
-            ],
-            "properties": {
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Current content reference."
-              },
-              "inode_kind": {
-                "type": "string",
-                "enum": [
-                  "file"
-                ]
-              },
-              "revision_committed_at_ms": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
-                "minimum": 0
-              },
-              "revision_committed_by": {
-                "$ref": "#/components/schemas/ActorRef",
-                "description": "Actor responsible for the current revision."
-              },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Current file revision number."
-              },
-              "size_bytes": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Current file size in bytes.\n\nThis remains explicit even though `content_ref` also carries the\nlength because callers sort directory listings by this field.",
-                "minimum": 0
-              }
-            }
+            "$ref": "#/components/schemas/AuthoritativePathEntryFile"
           }
         ],
         "description": "Kind-specific metadata for an authoritative path entry.",
         "discriminator": {
           "propertyName": "inode_kind",
           "mapping": {
-            "dir": "#/components/schemas/AuthoritativePathEntryKind/oneOf/0",
-            "file": "#/components/schemas/AuthoritativePathEntryKind/oneOf/1"
+            "dir": "#/components/schemas/AuthoritativePathEntryDirectory",
+            "file": "#/components/schemas/AuthoritativePathEntryFile"
           }
         }
       },
@@ -3813,171 +3758,44 @@
       "BeginUploadRequest": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "BeginUploadServiceProxied",
-            "description": "Send the bytes to the service, which writes the content object.",
-            "required": [
-              "mode"
-            ],
-            "properties": {
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "service_proxied"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/BeginUploadServiceProxied"
           },
           {
-            "type": "object",
-            "title": "BeginUploadDirectPut",
-            "description": "Write the whole object through one presigned request. The server\nsigns exactly these bytes into the write it authorizes, so the claim\nis required.",
-            "required": [
-              "content",
-              "mode"
-            ],
-            "properties": {
-              "content": {
-                "$ref": "#/components/schemas/UploadContentClaim",
-                "description": "Byte length and digest of the payload about to be written."
-              },
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "direct_put"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/BeginUploadDirectPut"
           },
           {
-            "type": "object",
-            "title": "BeginUploadDirectMultipart",
-            "description": "Write the object in parts through presigned part uploads.",
-            "required": [
-              "mode"
-            ],
-            "properties": {
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "direct_multipart"
-                ]
-              },
-              "multipart": {
-                "$ref": "#/components/schemas/DirectMultipartUploadOptions",
-                "description": "Selects the part geometry; absent takes the server's default.\nA multipart upload claims its content at completion, so nothing\nabout the payload is declared here."
-              }
-            }
+            "$ref": "#/components/schemas/BeginUploadDirectMultipart"
           }
         ],
         "description": "Request to start an upload session, tagged by transport mode.\n\nEach variant contains only fields valid for that transport, so invalid\ncombinations are rejected during decoding. The `mode` field is required.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {
-            "service_proxied": "#/components/schemas/BeginUploadRequest/oneOf/0",
-            "direct_put": "#/components/schemas/BeginUploadRequest/oneOf/1",
-            "direct_multipart": "#/components/schemas/BeginUploadRequest/oneOf/2"
+            "service_proxied": "#/components/schemas/BeginUploadServiceProxied",
+            "direct_put": "#/components/schemas/BeginUploadDirectPut",
+            "direct_multipart": "#/components/schemas/BeginUploadDirectMultipart"
           }
         }
       },
       "BeginUploadResponse": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "BeginUploadResponseServiceProxied",
-            "description": "The service will receive the bytes and write the content object.",
-            "required": [
-              "namespace_id",
-              "upload_id",
-              "mode"
-            ],
-            "properties": {
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "service_proxied"
-                ]
-              },
-              "namespace_id": {
-                "$ref": "#/components/schemas/NamespaceId",
-                "description": "Namespace authorized to consume the eventual staged content."
-              },
-              "upload_id": {
-                "$ref": "#/components/schemas/UploadId",
-                "description": "Durable session identity used by subsequent append and completion\ncalls."
-              }
-            }
+            "$ref": "#/components/schemas/BeginUploadResponseServiceProxied"
           },
           {
-            "type": "object",
-            "title": "BeginUploadResponseDirectPut",
-            "description": "One presigned request writes the whole object.",
-            "required": [
-              "namespace_id",
-              "upload_id",
-              "direct_put",
-              "mode"
-            ],
-            "properties": {
-              "direct_put": {
-                "$ref": "#/components/schemas/DirectPutUpload",
-                "description": "The object this session writes, and the capability to write it."
-              },
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "direct_put"
-                ]
-              },
-              "namespace_id": {
-                "$ref": "#/components/schemas/NamespaceId",
-                "description": "Namespace authorized to consume the eventual staged content."
-              },
-              "upload_id": {
-                "$ref": "#/components/schemas/UploadId",
-                "description": "Durable session identity used by subsequent completion calls."
-              }
-            }
+            "$ref": "#/components/schemas/BeginUploadResponseDirectPut"
           },
           {
-            "type": "object",
-            "title": "BeginUploadResponseDirectMultipart",
-            "description": "Presigned part uploads assemble the object.",
-            "required": [
-              "namespace_id",
-              "upload_id",
-              "direct_multipart",
-              "mode"
-            ],
-            "properties": {
-              "direct_multipart": {
-                "$ref": "#/components/schemas/DirectMultipartUpload",
-                "description": "The geometry the client cuts its payload to."
-              },
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "direct_multipart"
-                ]
-              },
-              "namespace_id": {
-                "$ref": "#/components/schemas/NamespaceId",
-                "description": "Namespace authorized to consume the eventual staged content."
-              },
-              "upload_id": {
-                "$ref": "#/components/schemas/UploadId",
-                "description": "Durable session identity used by subsequent part-signing and\ncompletion calls."
-              }
-            }
+            "$ref": "#/components/schemas/BeginUploadResponseDirectMultipart"
           }
         ],
         "description": "Response to starting an upload session, tagged by transport mode.\n\nEach variant contains only the fields needed by that transport. Unknown\nresponse fields are accepted for forward compatibility.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {
-            "service_proxied": "#/components/schemas/BeginUploadResponse/oneOf/0",
-            "direct_put": "#/components/schemas/BeginUploadResponse/oneOf/1",
-            "direct_multipart": "#/components/schemas/BeginUploadResponse/oneOf/2"
+            "service_proxied": "#/components/schemas/BeginUploadResponseServiceProxied",
+            "direct_put": "#/components/schemas/BeginUploadResponseDirectPut",
+            "direct_multipart": "#/components/schemas/BeginUploadResponseDirectMultipart"
           }
         }
       },
@@ -4119,54 +3937,18 @@
       "CheckpointOwnerSummary": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "CheckpointOwnerUser",
-            "description": "An operator-created pin, released by id or by its own expiry.",
-            "required": [
-              "name",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "user"
-                ]
-              },
-              "name": {
-                "type": "string",
-                "description": "The label the creator recorded. Not a key: several records may\ncarry one label over different bases."
-              }
-            }
+            "$ref": "#/components/schemas/CheckpointOwnerUser"
           },
           {
-            "type": "object",
-            "title": "CheckpointOwnerFork",
-            "description": "A fork target keeping its source basis alive for the length of one\nfork attempt.",
-            "required": [
-              "target_namespace_id",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "fork"
-                ]
-              },
-              "target_namespace_id": {
-                "$ref": "#/components/schemas/NamespaceId",
-                "description": "Namespace whose continued existence keeps this pin standing."
-              }
-            }
+            "$ref": "#/components/schemas/CheckpointOwnerFork"
           }
         ],
         "description": "Who a checkpoint record answers to, as the record durably records it.\n\nThe two owners have different releases, so a listing that names the\nowner also says which records the release endpoint will act on: a user\npin is released by id, and a fork lease is released by deleting the\ntarget namespace it protects.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
-            "user": "#/components/schemas/CheckpointOwnerSummary/oneOf/0",
-            "fork": "#/components/schemas/CheckpointOwnerSummary/oneOf/1"
+            "user": "#/components/schemas/CheckpointOwnerUser",
+            "fork": "#/components/schemas/CheckpointOwnerFork"
           }
         }
       },
@@ -4316,74 +4098,22 @@
       "CompleteUploadRequest": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "CompleteUploadServiceProxied",
-            "description": "Complete a service-proxied upload.",
-            "required": [
-              "mode"
-            ],
-            "properties": {
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "service_proxied"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/CompleteUploadServiceProxied"
           },
           {
-            "type": "object",
-            "title": "CompleteUploadDirectPut",
-            "description": "Complete a direct-PUT upload.",
-            "required": [
-              "mode"
-            ],
-            "properties": {
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "direct_put"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/CompleteUploadDirectPut"
           },
           {
-            "type": "object",
-            "title": "CompleteUploadDirectMultipart",
-            "description": "Complete a direct multipart upload.",
-            "required": [
-              "content",
-              "parts",
-              "mode"
-            ],
-            "properties": {
-              "content": {
-                "$ref": "#/components/schemas/UploadContentClaim",
-                "description": "Expected length and checksum of the assembled object."
-              },
-              "mode": {
-                "type": "string",
-                "enum": [
-                  "direct_multipart"
-                ]
-              },
-              "parts": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/CompletedUploadPart"
-                },
-                "description": "Uploaded parts in ascending part order."
-              }
-            }
+            "$ref": "#/components/schemas/CompleteUploadDirectMultipart"
           }
         ],
         "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Service-proxied and\ndirect-PUT uploads need no other fields. Direct multipart uploads also\ninclude the completed parts and the expected content details.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {
-            "service_proxied": "#/components/schemas/CompleteUploadRequest/oneOf/0",
-            "direct_put": "#/components/schemas/CompleteUploadRequest/oneOf/1",
-            "direct_multipart": "#/components/schemas/CompleteUploadRequest/oneOf/2"
+            "service_proxied": "#/components/schemas/CompleteUploadServiceProxied",
+            "direct_put": "#/components/schemas/CompleteUploadDirectPut",
+            "direct_multipart": "#/components/schemas/CompleteUploadDirectMultipart"
           }
         }
       },
@@ -4795,548 +4525,80 @@
       "FilesystemChange": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "FilesystemChangeDirectoryCreated",
-            "description": "A directory was created.",
-            "required": [
-              "inode_id",
-              "parent_inode_id",
-              "display_name",
-              "kind"
-            ],
-            "properties": {
-              "display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "User-facing spelling of the new entry."
-              },
-              "inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "directory_created"
-                ]
-              },
-              "parent_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              }
-            }
+            "$ref": "#/components/schemas/FilesystemChangeDirectoryCreated"
           },
           {
-            "type": "object",
-            "title": "FilesystemChangeFileCreated",
-            "description": "A file and its first revision were created.",
-            "required": [
-              "inode_id",
-              "parent_inode_id",
-              "display_name",
-              "revision_no",
-              "content_ref",
-              "kind"
-            ],
-            "properties": {
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Content of the first revision."
-              },
-              "display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "User-facing spelling of the new entry."
-              },
-              "inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "file_created"
-                ]
-              },
-              "parent_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "First revision number."
-              }
-            }
+            "$ref": "#/components/schemas/FilesystemChangeFileCreated"
           },
           {
-            "type": "object",
-            "title": "FilesystemChangeContentChanged",
-            "description": "A file received a new current revision — a put over an existing\nfile, or a revision restore (one durable fact for both).",
-            "required": [
-              "inode_id",
-              "revision_no",
-              "content_ref",
-              "kind"
-            ],
-            "properties": {
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Immutable content published by the revision."
-              },
-              "inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "content_changed"
-                ]
-              },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "New monotonic position in that file's revision history."
-              }
-            }
+            "$ref": "#/components/schemas/FilesystemChangeContentChanged"
           },
           {
-            "type": "object",
-            "title": "FilesystemChangeMoved",
-            "description": "An inode moved to a new parent directory or name.",
-            "required": [
-              "inode_id",
-              "from_parent_inode_id",
-              "from_display_name",
-              "to_parent_inode_id",
-              "to_display_name",
-              "kind"
-            ],
-            "properties": {
-              "from_display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Spelling of the old binding."
-              },
-              "from_parent_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "moved"
-                ]
-              },
-              "to_display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Spelling of the new binding."
-              },
-              "to_parent_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              }
-            }
+            "$ref": "#/components/schemas/FilesystemChangeMoved"
           },
           {
-            "type": "object",
-            "title": "FilesystemChangeDeleted",
-            "description": "A file or directory subtree was deleted. Use the enclosing change's\n`committed_seq` as `deletion_seq` when restoring it.",
-            "required": [
-              "inode_id",
-              "kind"
-            ],
-            "properties": {
-              "deleted_direntry": {
-                "$ref": "#/components/schemas/DeletedDirentry",
-                "description": "Directory binding removed by the deletion, when the delete\nrecorded one."
-              },
-              "inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "deleted"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/FilesystemChangeDeleted"
           },
           {
-            "type": "object",
-            "title": "FilesystemChangeUndeleted",
-            "description": "A deleted inode was recovered and re-bound.",
-            "required": [
-              "inode_id",
-              "parent_inode_id",
-              "display_name",
-              "kind"
-            ],
-            "properties": {
-              "display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Spelling of the recovered binding."
-              },
-              "inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "undeleted"
-                ]
-              },
-              "parent_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              }
-            }
+            "$ref": "#/components/schemas/FilesystemChangeUndeleted"
           },
           {
-            "type": "object",
-            "title": "FilesystemChangeAttributesChanged",
-            "description": "An inode's attributes changed.",
-            "required": [
-              "inode_id",
-              "attributes_revision_no",
-              "attributes",
-              "kind"
-            ],
-            "properties": {
-              "attributes": {
-                "$ref": "#/components/schemas/Attributes",
-                "description": "The inode's complete attribute map after the update, so a consumer\nprojects it without reading anything back. An empty map is the\ncleared state."
-              },
-              "attributes_revision_no": {
-                "$ref": "#/components/schemas/AttributeRevisionNo",
-                "description": "New attribute revision for that inode."
-              },
-              "inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "attributes_changed"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/FilesystemChangeAttributesChanged"
           }
         ],
         "description": "One semantic filesystem change inside a commit.\n\nA commit's events are the operations it applied, in the order it applied\nthem. One request operation can apply several: creating missing parent\ndirectories, or replacing a file by moving over it, each produce an event\nper directory created or file replaced. So a request with three\noperations may report more than three events, and the events stay in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode or\nmaintain its own binding projection from this feed.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
-            "directory_created": "#/components/schemas/FilesystemChange/oneOf/0",
-            "file_created": "#/components/schemas/FilesystemChange/oneOf/1",
-            "content_changed": "#/components/schemas/FilesystemChange/oneOf/2",
-            "moved": "#/components/schemas/FilesystemChange/oneOf/3",
-            "deleted": "#/components/schemas/FilesystemChange/oneOf/4",
-            "undeleted": "#/components/schemas/FilesystemChange/oneOf/5",
-            "attributes_changed": "#/components/schemas/FilesystemChange/oneOf/6"
+            "directory_created": "#/components/schemas/FilesystemChangeDirectoryCreated",
+            "file_created": "#/components/schemas/FilesystemChangeFileCreated",
+            "content_changed": "#/components/schemas/FilesystemChangeContentChanged",
+            "moved": "#/components/schemas/FilesystemChangeMoved",
+            "deleted": "#/components/schemas/FilesystemChangeDeleted",
+            "undeleted": "#/components/schemas/FilesystemChangeUndeleted",
+            "attributes_changed": "#/components/schemas/FilesystemChangeAttributesChanged"
           }
         }
       },
       "FilesystemOperation": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "FsOpCreateDirectory",
-            "description": "Create one directory.",
-            "required": [
-              "path",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "create_directory"
-                ]
-              },
-              "parents": {
-                "type": "boolean",
-                "description": "Also create missing ancestor directories (the same auto-create\n`put_file` performs). The final component must still be new."
-              },
-              "path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute destination path, rejected when invalid or already bound."
-              }
-            }
+            "$ref": "#/components/schemas/FsOpCreateDirectory"
           },
           {
-            "type": "object",
-            "title": "FsOpPutFile",
-            "description": "Create or replace one file with an already-durable content ref.",
-            "required": [
-              "path",
-              "content_ref",
-              "kind"
-            ],
-            "properties": {
-              "behavior": {
-                "$ref": "#/components/schemas/DestinationBehavior",
-                "description": "Whether an existing file may receive a new revision instead of causing a conflict."
-              },
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Immutable bytes that must be covered by a valid preparation proof."
-              },
-              "expected_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "When set (with `replace` behavior), the put applies only while\nthe file's current revision is still this one; a raced write\nfails the request instead of silently stacking on it, and a\nmissing file answers `path_not_found`."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "put_file"
-                ]
-              },
-              "path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute destination path; missing ancestors are created automatically."
-              }
-            }
+            "$ref": "#/components/schemas/FsOpPutFile"
           },
           {
-            "type": "object",
-            "title": "FsOpDeletePath",
-            "description": "Delete one path.",
-            "required": [
-              "path",
-              "kind"
-            ],
-            "properties": {
-              "behavior": {
-                "$ref": "#/components/schemas/DeleteDirectoryBehavior",
-                "description": "Whether a non-empty directory may be tombstoned recursively."
-              },
-              "expected_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "delete_path"
-                ]
-              },
-              "path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute path that must resolve to a visible inode."
-              }
-            }
+            "$ref": "#/components/schemas/FsOpDeletePath"
           },
           {
-            "type": "object",
-            "title": "FsOpMovePath",
-            "description": "Move one path to another path.",
-            "required": [
-              "from_path",
-              "to_path",
-              "kind"
-            ],
-            "properties": {
-              "behavior": {
-                "$ref": "#/components/schemas/DestinationBehavior",
-                "description": "Whether an existing destination file may be replaced."
-              },
-              "from_path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute source path that must resolve to a visible inode."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "move_path"
-                ]
-              },
-              "to_path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute destination whose parent must be visible and writable."
-              }
-            }
+            "$ref": "#/components/schemas/FsOpMovePath"
           },
           {
-            "type": "object",
-            "title": "FsOpCopyPath",
-            "description": "Copy one file path to another path.",
-            "required": [
-              "from_path",
-              "to_path",
-              "kind"
-            ],
-            "properties": {
-              "behavior": {
-                "$ref": "#/components/schemas/DestinationBehavior",
-                "description": "Whether an existing destination file may receive a copied revision."
-              },
-              "from_path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute source path that must resolve to a visible file."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "copy_path"
-                ]
-              },
-              "to_path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute destination whose parent must be visible and writable."
-              }
-            }
+            "$ref": "#/components/schemas/FsOpCopyPath"
           },
           {
-            "type": "object",
-            "title": "FsOpUndelete",
-            "description": "Restore a deleted file or subtree.\n\n`inode_id` and `deletion_seq` identify one exact deletion. A stale\nsequence returns `not_deleted` and cannot undo a later deletion.",
-            "required": [
-              "inode_id",
-              "deletion_seq",
-              "kind"
-            ],
-            "properties": {
-              "deletion_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
-              },
-              "inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "undelete"
-                ]
-              },
-              "path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames. An explicit path is required when the\ndeletion recorded no binding."
-              }
-            }
+            "$ref": "#/components/schemas/FsOpUndelete"
           },
           {
-            "type": "object",
-            "title": "FsOpRestoreRevision",
-            "description": "Restore an older revision as the current revision for a path.",
-            "required": [
-              "path",
-              "source_revision_no",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "restore_revision"
-                ]
-              },
-              "path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute path that must resolve to a visible file."
-              },
-              "source_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Existing historical revision whose content will be copied into a new current revision."
-              }
-            }
+            "$ref": "#/components/schemas/FsOpRestoreRevision"
           },
           {
-            "type": "object",
-            "title": "FsOpUpdateAttributes",
-            "description": "Write and remove attributes on the inode one path resolves to.",
-            "required": [
-              "path",
-              "kind"
-            ],
-            "properties": {
-              "expected_attributes_revision_no": {
-                "$ref": "#/components/schemas/AttributeRevisionNo",
-                "description": "When set, the update applies only while the inode's attribute\nrevision is still this one. Absent means the update is applied\nover whatever revision is current; either way the write carries\nits own revision guard, so a concurrent update never merges\nsilently."
-              },
-              "expected_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "update_attributes"
-                ]
-              },
-              "path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute path that must resolve to a visible file or directory."
-              },
-              "remove": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/AttributeKey"
-                },
-                "description": "Attribute keys to remove.\n\nA list preserves duplicate entries so validation can report them instead\nof silently deduplicating the request."
-              },
-              "set": {
-                "type": "object",
-                "description": "Attributes to write. Each key replaces whatever the inode\ncurrently holds under it; keys the inode holds and this map does\nnot name are left alone.",
-                "additionalProperties": {
-                  "$ref": "#/components/schemas/AttributeValue"
-                },
-                "propertyNames": {
-                  "type": "string",
-                  "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected.",
-                  "example": "owner"
-                }
-              }
-            }
+            "$ref": "#/components/schemas/FsOpUpdateAttributes"
           }
         ],
         "description": "One path-oriented filesystem operation.\n\nUnknown fields are rejected because concurrency guards are optional. A\nmisspelled guard must fail decoding instead of silently becoming `None`\nand allowing an unguarded write. Any future fieldless variant must use\nempty braces so serde also rejects unexpected fields for that variant.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
-            "create_directory": "#/components/schemas/FilesystemOperation/oneOf/0",
-            "put_file": "#/components/schemas/FilesystemOperation/oneOf/1",
-            "delete_path": "#/components/schemas/FilesystemOperation/oneOf/2",
-            "move_path": "#/components/schemas/FilesystemOperation/oneOf/3",
-            "copy_path": "#/components/schemas/FilesystemOperation/oneOf/4",
-            "undelete": "#/components/schemas/FilesystemOperation/oneOf/5",
-            "restore_revision": "#/components/schemas/FilesystemOperation/oneOf/6",
-            "update_attributes": "#/components/schemas/FilesystemOperation/oneOf/7"
+            "create_directory": "#/components/schemas/FsOpCreateDirectory",
+            "put_file": "#/components/schemas/FsOpPutFile",
+            "delete_path": "#/components/schemas/FsOpDeletePath",
+            "move_path": "#/components/schemas/FsOpMovePath",
+            "copy_path": "#/components/schemas/FsOpCopyPath",
+            "undelete": "#/components/schemas/FsOpUndelete",
+            "restore_revision": "#/components/schemas/FsOpRestoreRevision",
+            "update_attributes": "#/components/schemas/FsOpUpdateAttributes"
           }
         }
       },
@@ -5575,85 +4837,22 @@
       "GrepIndexLifecycle": {
         "oneOf": [
           {
-            "type": "object",
-            "description": "No index is maintained for this namespace.",
-            "required": [
-              "status"
-            ],
-            "properties": {
-              "status": {
-                "type": "string",
-                "enum": [
-                  "disabled"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/GrepIndexLifecycleDisabled"
           },
           {
-            "type": "object",
-            "description": "The initial walk over a pinned checkpoint is running. Nothing is\nsearchable yet.",
-            "required": [
-              "target_seq",
-              "checkpoint_id",
-              "status"
-            ],
-            "properties": {
-              "checkpoint_id": {
-                "$ref": "#/components/schemas/CheckpointId",
-                "description": "Checkpoint pinning the state being walked."
-              },
-              "cursor_inode_id": {
-                "type": "string",
-                "description": "Stable inode ID within a namespace",
-                "example": "ino_123",
-                "pattern": "^ino_[1-9][0-9]*$"
-              },
-              "status": {
-                "type": "string",
-                "enum": [
-                  "backfilling"
-                ]
-              },
-              "target_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Namespace sequence the pinned checkpoint captured. Reaching it\nis what completes the backfill."
-              }
-            }
+            "$ref": "#/components/schemas/GrepIndexLifecycleBackfilling"
           },
           {
-            "type": "object",
-            "description": "The index follows the change feed. Commits at or below the watermark\nare searchable.",
-            "required": [
-              "built_through_seq",
-              "status"
-            ],
-            "properties": {
-              "built_through_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence of the commit at the index cursor."
-              },
-              "next_event_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Offset of the next change event within `built_through_seq`, or\nzero when the whole commit is represented.",
-                "minimum": 0
-              },
-              "status": {
-                "type": "string",
-                "enum": [
-                  "active"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/GrepIndexLifecycleActive"
           }
         ],
         "description": "Where a namespace's grep index is in its lifecycle.\n\nEach status contains only the fields valid for that lifecycle state.\n`Backfilling` reports its target and current position. `Active` reports\nhow far the index has been built. Clients should treat a namespace as\nsearchable only when the index is `Active`.",
         "discriminator": {
           "propertyName": "status",
           "mapping": {
-            "disabled": "#/components/schemas/GrepIndexLifecycle/oneOf/0",
-            "backfilling": "#/components/schemas/GrepIndexLifecycle/oneOf/1",
-            "active": "#/components/schemas/GrepIndexLifecycle/oneOf/2"
+            "disabled": "#/components/schemas/GrepIndexLifecycleDisabled",
+            "backfilling": "#/components/schemas/GrepIndexLifecycleBackfilling",
+            "active": "#/components/schemas/GrepIndexLifecycleActive"
           }
         }
       },
@@ -6136,54 +5335,14 @@
       "ObjectTransferAccess": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "ObjectTransferAccessPresignedUrl",
-            "description": "Short-lived URL plus required headers for one object-store write.",
-            "required": [
-              "method",
-              "url",
-              "expires_at_ms",
-              "kind"
-            ],
-            "properties": {
-              "expires_at_ms": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Expiration timestamp in Unix milliseconds.",
-                "minimum": 0
-              },
-              "headers": {
-                "type": "object",
-                "description": "Headers that are covered by the signature and must be sent.",
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "propertyNames": {
-                  "type": "string"
-                }
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "presigned_url"
-                ]
-              },
-              "method": {
-                "type": "string",
-                "description": "HTTP method the client must use."
-              },
-              "url": {
-                "type": "string",
-                "description": "Full presigned URL."
-              }
-            }
+            "$ref": "#/components/schemas/ObjectTransferAccessPresignedUrl"
           }
         ],
         "description": "Client-facing direct transfer capability.",
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
-            "presigned_url": "#/components/schemas/ObjectTransferAccess/oneOf/0"
+            "presigned_url": "#/components/schemas/ObjectTransferAccessPresignedUrl"
           }
         }
       },
@@ -6208,115 +5367,38 @@
       "ReorganizeStepOutcome": {
         "oneOf": [
           {
-            "type": "object",
-            "required": [
-              "outcome"
-            ],
-            "properties": {
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "not_needed"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeNotNeeded"
           },
           {
-            "type": "object",
-            "required": [
-              "outcome"
-            ],
-            "properties": {
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "unit_published"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeUnitPublished"
           },
           {
-            "type": "object",
-            "required": [
-              "outcome"
-            ],
-            "properties": {
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "compaction_started"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionStarted"
           },
           {
-            "type": "object",
-            "required": [
-              "outcome"
-            ],
-            "properties": {
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "compaction_running"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionRunning"
           },
           {
-            "type": "object",
-            "required": [
-              "outcome"
-            ],
-            "properties": {
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "compaction_at_capacity"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionAtCapacity"
           },
           {
-            "type": "object",
-            "required": [
-              "outcome"
-            ],
-            "properties": {
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "compaction_required"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired"
           },
           {
-            "type": "object",
-            "required": [
-              "outcome"
-            ],
-            "properties": {
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "superseded"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeSuperseded"
           }
         ],
         "description": "What the metadata-reorganization part of a maintenance step did.\n\nDeliberately coarse: the run counts and byte budgets a reorganization\nconsumes are engine policy, not a wire contract.",
         "discriminator": {
           "propertyName": "outcome",
           "mapping": {
-            "not_needed": "#/components/schemas/ReorganizeStepOutcome/oneOf/0",
-            "unit_published": "#/components/schemas/ReorganizeStepOutcome/oneOf/1",
-            "compaction_started": "#/components/schemas/ReorganizeStepOutcome/oneOf/2",
-            "compaction_running": "#/components/schemas/ReorganizeStepOutcome/oneOf/3",
-            "compaction_at_capacity": "#/components/schemas/ReorganizeStepOutcome/oneOf/4",
-            "compaction_required": "#/components/schemas/ReorganizeStepOutcome/oneOf/5",
-            "superseded": "#/components/schemas/ReorganizeStepOutcome/oneOf/6"
+            "not_needed": "#/components/schemas/ReorganizeStepOutcomeNotNeeded",
+            "unit_published": "#/components/schemas/ReorganizeStepOutcomeUnitPublished",
+            "compaction_started": "#/components/schemas/ReorganizeStepOutcomeCompactionStarted",
+            "compaction_running": "#/components/schemas/ReorganizeStepOutcomeCompactionRunning",
+            "compaction_at_capacity": "#/components/schemas/ReorganizeStepOutcomeCompactionAtCapacity",
+            "compaction_required": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired",
+            "superseded": "#/components/schemas/ReorganizeStepOutcomeSuperseded"
           }
         }
       },
@@ -6688,185 +5770,48 @@
       "UploadSessionStatus": {
         "oneOf": [
           {
-            "type": "object",
-            "title": "UploadSessionStatusOpen",
-            "description": "Accepting content until its lease passes.",
-            "required": [
-              "expires_at_ms",
-              "status"
-            ],
-            "properties": {
-              "expires_at_ms": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Unix-millisecond instant after which the session is abandoned and\nmay be aborted by server-side cleanup.",
-                "minimum": 0
-              },
-              "status": {
-                "type": "string",
-                "enum": [
-                  "open"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/UploadSessionStatusOpen"
           },
           {
-            "type": "object",
-            "title": "UploadSessionStatusCompleted",
-            "description": "Final: the content is durable and verified.",
-            "required": [
-              "completed_at_ms",
-              "content_ref",
-              "status"
-            ],
-            "properties": {
-              "completed_at_ms": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Unix-millisecond stamp of the completion.",
-                "minimum": 0
-              },
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Verified content selected by this session."
-              },
-              "content_token": {
-                "$ref": "#/components/schemas/ContentToken",
-                "description": "Fresh proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
-              },
-              "status": {
-                "type": "string",
-                "enum": [
-                  "completed"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/UploadSessionStatusCompleted"
           },
           {
-            "type": "object",
-            "title": "UploadSessionStatusAborted",
-            "description": "Final: the session selected no content and its object is gone.",
-            "required": [
-              "aborted_at_ms",
-              "status"
-            ],
-            "properties": {
-              "aborted_at_ms": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Unix-millisecond stamp of the abort.",
-                "minimum": 0
-              },
-              "status": {
-                "type": "string",
-                "enum": [
-                  "aborted"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/UploadSessionStatusAborted"
           }
         ],
         "description": "Observed state of an upload session.\n\nA session starts as `Open` and ends as either `Completed` or `Aborted`.\nBoth final states are permanent. Reading a completed session issues a new\nreceipt for the durable content, so a lost commit response does not require\nthe content to be uploaded again.",
         "discriminator": {
           "propertyName": "status",
           "mapping": {
-            "open": "#/components/schemas/UploadSessionStatus/oneOf/0",
-            "completed": "#/components/schemas/UploadSessionStatus/oneOf/1",
-            "aborted": "#/components/schemas/UploadSessionStatus/oneOf/2"
+            "open": "#/components/schemas/UploadSessionStatusOpen",
+            "completed": "#/components/schemas/UploadSessionStatusCompleted",
+            "aborted": "#/components/schemas/UploadSessionStatusAborted"
           }
         }
       },
       "WalFlushStepOutcome": {
         "oneOf": [
           {
-            "type": "object",
-            "description": "The tail was below the threshold, so there was nothing to flush.",
-            "required": [
-              "outcome"
-            ],
-            "properties": {
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "not_needed"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/WalFlushStepOutcomeNotNeeded"
           },
           {
-            "type": "object",
-            "description": "The step flushed the WAL tail and advanced the metadata root.",
-            "required": [
-              "manifest_head_seq",
-              "outcome"
-            ],
-            "properties": {
-              "manifest_head_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence covered by the published manifest."
-              },
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "flushed"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/WalFlushStepOutcomeFlushed"
           },
           {
-            "type": "object",
-            "description": "The root already covered the attempted sequence — another publisher\ngot there first.",
-            "required": [
-              "attempted_seq",
-              "current_manifest_id",
-              "outcome"
-            ],
-            "properties": {
-              "attempted_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence this step attempted to flush through."
-              },
-              "current_manifest_id": {
-                "$ref": "#/components/schemas/ManifestId",
-                "description": "Manifest the root currently references."
-              },
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "superseded"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/WalFlushStepOutcomeSuperseded"
           },
           {
-            "type": "object",
-            "description": "A concurrent head update won the race.",
-            "required": [
-              "observed_head_seq",
-              "outcome"
-            ],
-            "properties": {
-              "observed_head_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Head sequence observed before the advance attempt."
-              },
-              "outcome": {
-                "type": "string",
-                "enum": [
-                  "race_lost"
-                ]
-              }
-            }
+            "$ref": "#/components/schemas/WalFlushStepOutcomeRaceLost"
           }
         ],
         "description": "What the WAL-flush part of a maintenance step did.",
         "discriminator": {
           "propertyName": "outcome",
           "mapping": {
-            "not_needed": "#/components/schemas/WalFlushStepOutcome/oneOf/0",
-            "flushed": "#/components/schemas/WalFlushStepOutcome/oneOf/1",
-            "superseded": "#/components/schemas/WalFlushStepOutcome/oneOf/2",
-            "race_lost": "#/components/schemas/WalFlushStepOutcome/oneOf/3"
+            "not_needed": "#/components/schemas/WalFlushStepOutcomeNotNeeded",
+            "flushed": "#/components/schemas/WalFlushStepOutcomeFlushed",
+            "superseded": "#/components/schemas/WalFlushStepOutcomeSuperseded",
+            "race_lost": "#/components/schemas/WalFlushStepOutcomeRaceLost"
           }
         }
       },
@@ -6876,6 +5821,1167 @@
         "description": "Counter used to reject writes from an older writer.",
         "maximum": 9007199254740991,
         "minimum": 0
+      },
+      "AuthoritativePathEntryDirectory": {
+        "type": "object",
+        "description": "A directory, which has no revision payload in v0.\n\nThe entry tag reuses [`InodeKind`]'s wire vocabulary.",
+        "required": [
+          "inode_kind"
+        ],
+        "properties": {
+          "inode_kind": {
+            "type": "string",
+            "enum": [
+              "dir"
+            ]
+          }
+        }
+      },
+      "AuthoritativePathEntryFile": {
+        "type": "object",
+        "description": "A file and its current revision summary.",
+        "required": [
+          "revision_no",
+          "size_bytes",
+          "content_ref",
+          "revision_committed_by",
+          "revision_committed_at_ms",
+          "inode_kind"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Current content reference."
+          },
+          "inode_kind": {
+            "type": "string",
+            "enum": [
+              "file"
+            ]
+          },
+          "revision_committed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time of the current revision, in Unix milliseconds. Revision\nsequences determine order.",
+            "minimum": 0
+          },
+          "revision_committed_by": {
+            "$ref": "#/components/schemas/ActorRef",
+            "description": "Actor responsible for the current revision."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Current file revision number."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current file size in bytes.\n\nThis remains explicit even though `content_ref` also carries the\nlength because callers sort directory listings by this field.",
+            "minimum": 0
+          }
+        }
+      },
+      "BeginUploadServiceProxied": {
+        "type": "object",
+        "description": "Send the bytes to the service, which writes the content object.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "service_proxied"
+            ]
+          }
+        }
+      },
+      "BeginUploadDirectPut": {
+        "type": "object",
+        "description": "Write the whole object through one presigned request. The server\nsigns exactly these bytes into the write it authorizes, so the claim\nis required.",
+        "required": [
+          "content",
+          "mode"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Byte length and digest of the payload about to be written."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_put"
+            ]
+          }
+        }
+      },
+      "BeginUploadDirectMultipart": {
+        "type": "object",
+        "description": "Write the object in parts through presigned part uploads.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_multipart"
+            ]
+          },
+          "multipart": {
+            "$ref": "#/components/schemas/DirectMultipartUploadOptions",
+            "description": "Selects the part geometry; absent takes the server's default.\nA multipart upload claims its content at completion, so nothing\nabout the payload is declared here."
+          }
+        }
+      },
+      "BeginUploadResponseServiceProxied": {
+        "type": "object",
+        "description": "The service will receive the bytes and write the content object.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "service_proxied"
+            ]
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace authorized to consume the eventual staged content."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Durable session identity used by subsequent append and completion\ncalls."
+          }
+        }
+      },
+      "BeginUploadResponseDirectPut": {
+        "type": "object",
+        "description": "One presigned request writes the whole object.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "direct_put",
+          "mode"
+        ],
+        "properties": {
+          "direct_put": {
+            "$ref": "#/components/schemas/DirectPutUpload",
+            "description": "The object this session writes, and the capability to write it."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_put"
+            ]
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace authorized to consume the eventual staged content."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Durable session identity used by subsequent completion calls."
+          }
+        }
+      },
+      "BeginUploadResponseDirectMultipart": {
+        "type": "object",
+        "description": "Presigned part uploads assemble the object.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "direct_multipart",
+          "mode"
+        ],
+        "properties": {
+          "direct_multipart": {
+            "$ref": "#/components/schemas/DirectMultipartUpload",
+            "description": "The geometry the client cuts its payload to."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_multipart"
+            ]
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace authorized to consume the eventual staged content."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Durable session identity used by subsequent part-signing and\ncompletion calls."
+          }
+        }
+      },
+      "CheckpointOwnerUser": {
+        "type": "object",
+        "description": "An operator-created pin, released by id or by its own expiry.",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "user"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The label the creator recorded. Not a key: several records may\ncarry one label over different bases."
+          }
+        }
+      },
+      "CheckpointOwnerFork": {
+        "type": "object",
+        "description": "A fork target keeping its source basis alive for the length of one\nfork attempt.",
+        "required": [
+          "target_namespace_id",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "fork"
+            ]
+          },
+          "target_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose continued existence keeps this pin standing."
+          }
+        }
+      },
+      "CompleteUploadServiceProxied": {
+        "type": "object",
+        "description": "Complete a service-proxied upload.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "service_proxied"
+            ]
+          }
+        }
+      },
+      "CompleteUploadDirectPut": {
+        "type": "object",
+        "description": "Complete a direct-PUT upload.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_put"
+            ]
+          }
+        }
+      },
+      "CompleteUploadDirectMultipart": {
+        "type": "object",
+        "description": "Complete a direct multipart upload.",
+        "required": [
+          "content",
+          "parts",
+          "mode"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Expected length and checksum of the assembled object."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "direct_multipart"
+            ]
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompletedUploadPart"
+            },
+            "description": "Uploaded parts in ascending part order."
+          }
+        }
+      },
+      "FilesystemChangeDirectoryCreated": {
+        "type": "object",
+        "description": "A directory was created.",
+        "required": [
+          "inode_id",
+          "parent_inode_id",
+          "display_name",
+          "kind"
+        ],
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "User-facing spelling of the new entry."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "directory_created"
+            ]
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "FilesystemChangeFileCreated": {
+        "type": "object",
+        "description": "A file and its first revision were created.",
+        "required": [
+          "inode_id",
+          "parent_inode_id",
+          "display_name",
+          "revision_no",
+          "content_ref",
+          "kind"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Content of the first revision."
+          },
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "User-facing spelling of the new entry."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "file_created"
+            ]
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "First revision number."
+          }
+        }
+      },
+      "FilesystemChangeContentChanged": {
+        "type": "object",
+        "description": "A file received a new current revision — a put over an existing\nfile, or a revision restore (one durable fact for both).",
+        "required": [
+          "inode_id",
+          "revision_no",
+          "content_ref",
+          "kind"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Immutable content published by the revision."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "content_changed"
+            ]
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "New monotonic position in that file's revision history."
+          }
+        }
+      },
+      "FilesystemChangeMoved": {
+        "type": "object",
+        "description": "An inode moved to a new parent directory or name.",
+        "required": [
+          "inode_id",
+          "from_parent_inode_id",
+          "from_display_name",
+          "to_parent_inode_id",
+          "to_display_name",
+          "kind"
+        ],
+        "properties": {
+          "from_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Spelling of the old binding."
+          },
+          "from_parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "moved"
+            ]
+          },
+          "to_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Spelling of the new binding."
+          },
+          "to_parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "FilesystemChangeDeleted": {
+        "type": "object",
+        "description": "A file or directory subtree was deleted. Use the enclosing change's\n`committed_seq` as `deletion_seq` when restoring it.",
+        "required": [
+          "inode_id",
+          "kind"
+        ],
+        "properties": {
+          "deleted_direntry": {
+            "$ref": "#/components/schemas/DeletedDirentry",
+            "description": "Directory binding removed by the deletion, when the delete\nrecorded one."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "deleted"
+            ]
+          }
+        }
+      },
+      "FilesystemChangeUndeleted": {
+        "type": "object",
+        "description": "A deleted inode was recovered and re-bound.",
+        "required": [
+          "inode_id",
+          "parent_inode_id",
+          "display_name",
+          "kind"
+        ],
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Spelling of the recovered binding."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "undeleted"
+            ]
+          },
+          "parent_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          }
+        }
+      },
+      "FilesystemChangeAttributesChanged": {
+        "type": "object",
+        "description": "An inode's attributes changed.",
+        "required": [
+          "inode_id",
+          "attributes_revision_no",
+          "attributes",
+          "kind"
+        ],
+        "properties": {
+          "attributes": {
+            "$ref": "#/components/schemas/Attributes",
+            "description": "The inode's complete attribute map after the update, so a consumer\nprojects it without reading anything back. An empty map is the\ncleared state."
+          },
+          "attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "New attribute revision for that inode."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "attributes_changed"
+            ]
+          }
+        }
+      },
+      "FsOpCreateDirectory": {
+        "type": "object",
+        "description": "Create one directory.",
+        "required": [
+          "path",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "create_directory"
+            ]
+          },
+          "parents": {
+            "type": "boolean",
+            "description": "Also create missing ancestor directories (the same auto-create\n`put_file` performs). The final component must still be new."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination path, rejected when invalid or already bound."
+          }
+        }
+      },
+      "FsOpPutFile": {
+        "type": "object",
+        "description": "Create or replace one file with an already-durable content ref.",
+        "required": [
+          "path",
+          "content_ref",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DestinationBehavior",
+            "description": "Whether an existing file may receive a new revision instead of causing a conflict."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Immutable bytes that must be covered by a valid preparation proof."
+          },
+          "expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "When set (with `replace` behavior), the put applies only while\nthe file's current revision is still this one; a raced write\nfails the request instead of silently stacking on it, and a\nmissing file answers `path_not_found`."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "put_file"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination path; missing ancestors are created automatically."
+          }
+        }
+      },
+      "FsOpDeletePath": {
+        "type": "object",
+        "description": "Delete one path.",
+        "required": [
+          "path",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DeleteDirectoryBehavior",
+            "description": "Whether a non-empty directory may be tombstoned recursively."
+          },
+          "expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "delete_path"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path that must resolve to a visible inode."
+          }
+        }
+      },
+      "FsOpMovePath": {
+        "type": "object",
+        "description": "Move one path to another path.",
+        "required": [
+          "from_path",
+          "to_path",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DestinationBehavior",
+            "description": "Whether an existing destination file may be replaced."
+          },
+          "from_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute source path that must resolve to a visible inode."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "move_path"
+            ]
+          },
+          "to_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination whose parent must be visible and writable."
+          }
+        }
+      },
+      "FsOpCopyPath": {
+        "type": "object",
+        "description": "Copy one file path to another path.",
+        "required": [
+          "from_path",
+          "to_path",
+          "kind"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DestinationBehavior",
+            "description": "Whether an existing destination file may receive a copied revision."
+          },
+          "from_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute source path that must resolve to a visible file."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "copy_path"
+            ]
+          },
+          "to_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination whose parent must be visible and writable."
+          }
+        }
+      },
+      "FsOpUndelete": {
+        "type": "object",
+        "description": "Restore a deleted file or subtree.\n\n`inode_id` and `deletion_seq` identify one exact deletion. A stale\nsequence returns `not_deleted` and cannot undo a later deletion.",
+        "required": [
+          "inode_id",
+          "deletion_seq",
+          "kind"
+        ],
+        "properties": {
+          "deletion_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
+          },
+          "inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "undelete"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Optional destination for the restored inode.\n\nWhen absent, the inode is rebound to the parent and name recorded by the\ndeletion. Parent identity, rather than an old path string, keeps this\ncorrect after ancestor renames. An explicit path is required when the\ndeletion recorded no binding."
+          }
+        }
+      },
+      "FsOpRestoreRevision": {
+        "type": "object",
+        "description": "Restore an older revision as the current revision for a path.",
+        "required": [
+          "path",
+          "source_revision_no",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "restore_revision"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path that must resolve to a visible file."
+          },
+          "source_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Existing historical revision whose content will be copied into a new current revision."
+          }
+        }
+      },
+      "FsOpUpdateAttributes": {
+        "type": "object",
+        "description": "Write and remove attributes on the inode one path resolves to.",
+        "required": [
+          "path",
+          "kind"
+        ],
+        "properties": {
+          "expected_attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "When set, the update applies only while the inode's attribute\nrevision is still this one. Absent means the update is applied\nover whatever revision is current; either way the write carries\nits own revision guard, so a concurrent update never merges\nsilently."
+          },
+          "expected_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "update_attributes"
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path that must resolve to a visible file or directory."
+          },
+          "remove": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttributeKey"
+            },
+            "description": "Attribute keys to remove.\n\nA list preserves duplicate entries so validation can report them instead\nof silently deduplicating the request."
+          },
+          "set": {
+            "type": "object",
+            "description": "Attributes to write. Each key replaces whatever the inode\ncurrently holds under it; keys the inode holds and this map does\nnot name are left alone.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AttributeValue"
+            },
+            "propertyNames": {
+              "type": "string",
+              "description": "Validated name of one inode attribute.\n\nA key is 1 to 128 UTF-8 bytes and carries no Unicode control\ncharacter, which is also what rejects NUL. Keys are compared exactly:\nnothing case-folds or normalizes them, so two spellings that differ in\nany byte name two different attributes.\n\nThe `loonfs.` prefix is reserved for system-owned attributes. This\ntype accepts a reserved key, because a durable row has to be able to\ncarry a system attribute. The write operation is where a caller's\nattempt to write a reserved key is rejected.",
+              "example": "owner"
+            }
+          }
+        }
+      },
+      "GrepIndexLifecycleDisabled": {
+        "type": "object",
+        "description": "No index is maintained for this namespace.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "disabled"
+            ]
+          }
+        }
+      },
+      "GrepIndexLifecycleBackfilling": {
+        "type": "object",
+        "description": "The initial walk over a pinned checkpoint is running. Nothing is\nsearchable yet.",
+        "required": [
+          "target_seq",
+          "checkpoint_id",
+          "status"
+        ],
+        "properties": {
+          "checkpoint_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Checkpoint pinning the state being walked."
+          },
+          "cursor_inode_id": {
+            "type": "string",
+            "description": "Stable inode ID within a namespace",
+            "example": "ino_123",
+            "pattern": "^ino_[1-9][0-9]*$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "backfilling"
+            ]
+          },
+          "target_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence the pinned checkpoint captured. Reaching it\nis what completes the backfill."
+          }
+        }
+      },
+      "GrepIndexLifecycleActive": {
+        "type": "object",
+        "description": "The index follows the change feed. Commits at or below the watermark\nare searchable.",
+        "required": [
+          "built_through_seq",
+          "status"
+        ],
+        "properties": {
+          "built_through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence of the commit at the index cursor."
+          },
+          "next_event_index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Offset of the next change event within `built_through_seq`, or\nzero when the whole commit is represented.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active"
+            ]
+          }
+        }
+      },
+      "ObjectTransferAccessPresignedUrl": {
+        "type": "object",
+        "description": "Short-lived URL plus required headers for one object-store write.",
+        "required": [
+          "method",
+          "url",
+          "expires_at_ms",
+          "kind"
+        ],
+        "properties": {
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiration timestamp in Unix milliseconds.",
+            "minimum": 0
+          },
+          "headers": {
+            "type": "object",
+            "description": "Headers that are covered by the signature and must be sent.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "presigned_url"
+            ]
+          },
+          "method": {
+            "type": "string",
+            "description": "HTTP method the client must use."
+          },
+          "url": {
+            "type": "string",
+            "description": "Full presigned URL."
+          }
+        }
+      },
+      "ReorganizeStepOutcomeNotNeeded": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "not_needed"
+            ]
+          }
+        }
+      },
+      "ReorganizeStepOutcomeUnitPublished": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "unit_published"
+            ]
+          }
+        }
+      },
+      "ReorganizeStepOutcomeCompactionStarted": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "compaction_started"
+            ]
+          }
+        }
+      },
+      "ReorganizeStepOutcomeCompactionRunning": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "compaction_running"
+            ]
+          }
+        }
+      },
+      "ReorganizeStepOutcomeCompactionAtCapacity": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "compaction_at_capacity"
+            ]
+          }
+        }
+      },
+      "ReorganizeStepOutcomeCompactionRequired": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "compaction_required"
+            ]
+          }
+        }
+      },
+      "ReorganizeStepOutcomeSuperseded": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "superseded"
+            ]
+          }
+        }
+      },
+      "UploadSessionStatusOpen": {
+        "type": "object",
+        "description": "Accepting content until its lease passes.",
+        "required": [
+          "expires_at_ms",
+          "status"
+        ],
+        "properties": {
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix-millisecond instant after which the session is abandoned and\nmay be aborted by server-side cleanup.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open"
+            ]
+          }
+        }
+      },
+      "UploadSessionStatusCompleted": {
+        "type": "object",
+        "description": "Final: the content is durable and verified.",
+        "required": [
+          "completed_at_ms",
+          "content_ref",
+          "status"
+        ],
+        "properties": {
+          "completed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix-millisecond stamp of the completion.",
+            "minimum": 0
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Verified content selected by this session."
+          },
+          "content_token": {
+            "$ref": "#/components/schemas/ContentToken",
+            "description": "Fresh proof for a later commit. This is absent after the token\nminting window closes, while `content_ref` remains available."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed"
+            ]
+          }
+        }
+      },
+      "UploadSessionStatusAborted": {
+        "type": "object",
+        "description": "Final: the session selected no content and its object is gone.",
+        "required": [
+          "aborted_at_ms",
+          "status"
+        ],
+        "properties": {
+          "aborted_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix-millisecond stamp of the abort.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "aborted"
+            ]
+          }
+        }
+      },
+      "WalFlushStepOutcomeNotNeeded": {
+        "type": "object",
+        "description": "The tail was below the threshold, so there was nothing to flush.",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "not_needed"
+            ]
+          }
+        }
+      },
+      "WalFlushStepOutcomeFlushed": {
+        "type": "object",
+        "description": "The step flushed the WAL tail and advanced the metadata root.",
+        "required": [
+          "manifest_head_seq",
+          "outcome"
+        ],
+        "properties": {
+          "manifest_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence covered by the published manifest."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "flushed"
+            ]
+          }
+        }
+      },
+      "WalFlushStepOutcomeSuperseded": {
+        "type": "object",
+        "description": "The root already covered the attempted sequence — another publisher\ngot there first.",
+        "required": [
+          "attempted_seq",
+          "current_manifest_id",
+          "outcome"
+        ],
+        "properties": {
+          "attempted_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence this step attempted to flush through."
+          },
+          "current_manifest_id": {
+            "$ref": "#/components/schemas/ManifestId",
+            "description": "Manifest the root currently references."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "superseded"
+            ]
+          }
+        }
+      },
+      "WalFlushStepOutcomeRaceLost": {
+        "type": "object",
+        "description": "A concurrent head update won the race.",
+        "required": [
+          "observed_head_seq",
+          "outcome"
+        ],
+        "properties": {
+          "observed_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Head sequence observed before the advance attempt."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "race_lost"
+            ]
+          }
+        }
       }
     },
     "responses": {
