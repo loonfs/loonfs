@@ -1028,6 +1028,10 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
     assert!(!schemas.contains_key("ContentStoreId"));
     assert!(!schemas.contains_key("FilesystemChangeCreated"));
     assert!(
+        !schemas.contains_key("GrepRequest"),
+        "grep uses query parameters and must not publish an unused request schema"
+    );
+    assert!(
         !raw.contains(r#""created""#),
         "retired creation-event kind remains in OpenAPI"
     );
