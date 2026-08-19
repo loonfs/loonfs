@@ -3,6 +3,9 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[path = "../../src/bin/loonfs-openapi/openapi_postprocess.rs"]
+mod openapi_postprocess;
+
 const OPENAPI_JSON_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/openapi.json");
 const OPENAPI_PATH_SOURCES: &[&str] = &[
@@ -18,7 +21,9 @@ const OPENAPI_PATH_SOURCES: &[&str] = &[
 
 #[test]
 fn openapi_static_file_is_current() {
-    let mut generated = loonfs_server::openapi_json_pretty().expect("generate openapi json");
+    let mut generated =
+        openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
+            .expect("generate openapi json");
     generated.push('\n');
     let committed = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
 
@@ -26,6 +31,77 @@ fn openapi_static_file_is_current() {
         generated, committed,
         "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- docs/specs/openapi.json`"
     );
+}
+
+#[test]
+fn every_one_of_is_a_discriminated_non_null_union() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let mut unions = Vec::new();
+    collect_one_of_objects(&spec, &mut unions);
+    assert!(
+        !unions.is_empty(),
+        "the generated document has no oneOf schemas"
+    );
+
+    for union in unions {
+        let variants = union
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("collected object has a oneOf array");
+        assert!(
+            variants
+                .iter()
+                .all(|variant| variant.get("type").and_then(Value::as_str) != Some("null")),
+            "oneOf contains a null alternative: {union:?}"
+        );
+
+        let discriminator = union
+            .get("discriminator")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("oneOf has no discriminator: {union:?}"));
+        let property_name = discriminator
+            .get("propertyName")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("oneOf discriminator has no propertyName: {union:?}"));
+        let mapping = discriminator
+            .get("mapping")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("oneOf discriminator has no mapping: {union:?}"));
+        assert_eq!(
+            mapping.len(),
+            variants.len(),
+            "oneOf discriminator mapping is incomplete: {union:?}"
+        );
+        for variant in variants {
+            let tag_schema = variant
+                .get("properties")
+                .and_then(Value::as_object)
+                .and_then(|properties| properties.get(property_name))
+                .unwrap_or_else(|| {
+                    panic!("oneOf variant has no discriminator property: {variant:?}")
+                });
+            let tag = tag_schema
+                .get("const")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    let values = tag_schema.get("enum")?.as_array()?;
+                    let [value] = values.as_slice() else {
+                        return None;
+                    };
+                    value.as_str()
+                })
+                .unwrap_or_else(|| {
+                    panic!("oneOf variant has no fixed discriminator value: {variant:?}")
+                });
+            assert!(
+                mapping.get(tag).and_then(Value::as_str).is_some(),
+                "oneOf discriminator has no mapping for `{tag}`: {union:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -637,7 +713,7 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
 }
 
 #[test]
-fn openapi_describes_inode_ids_as_strings_with_correct_nullability() {
+fn openapi_describes_inode_ids_as_non_null_strings() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
     )
@@ -672,7 +748,6 @@ fn openapi_describes_inode_ids_as_strings_with_correct_nullability() {
     fn assert_public_inode_schema(
         schema: &Value,
         schemas: &serde_json::Map<String, Value>,
-        nullable: bool,
         location: &str,
     ) {
         assert!(
@@ -689,12 +764,11 @@ fn openapi_describes_inode_ids_as_strings_with_correct_nullability() {
             }),
             "inode ID at {location} must not accept integers: {schema}"
         );
-        assert_eq!(
-            schema_matches(schema, schemas, |schema| {
+        assert!(
+            !schema_matches(schema, schemas, |schema| {
                 schema.get("type").and_then(Value::as_str) == Some("null")
             }),
-            nullable,
-            "wrong inode ID nullability at {location}: {schema}"
+            "inode ID at {location} must not accept null: {schema}"
         );
     }
 
@@ -702,16 +776,11 @@ fn openapi_describes_inode_ids_as_strings_with_correct_nullability() {
         match value {
             Value::Object(object) => {
                 if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-                    let required = object.get("required").and_then(Value::as_array);
                     for (name, schema) in properties {
                         if name.ends_with("inode_id") {
-                            let is_required = required.is_some_and(|required| {
-                                required.iter().any(|entry| entry.as_str() == Some(name))
-                            });
                             assert_public_inode_schema(
                                 schema,
                                 schemas,
-                                !is_required,
                                 &format!("{location}.{name}"),
                             );
                         }
@@ -721,7 +790,7 @@ fn openapi_describes_inode_ids_as_strings_with_correct_nullability() {
                     if let Some(name) = object.get("name").and_then(Value::as_str) {
                         if name.ends_with("inode_id") {
                             let schema = object.get("schema").expect("path parameter schema");
-                            assert_public_inode_schema(schema, schemas, false, location);
+                            assert_public_inode_schema(schema, schemas, location);
                         }
                     }
                 }
@@ -862,34 +931,21 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         .and_then(|schema| schema.get("oneOf"))
         .and_then(Value::as_array)
         .expect("completion variants");
-    assert_eq!(
-        completion_variants,
-        &[
-            serde_json::json!({
-                "$ref": "#/components/schemas/CompleteKnownContentUploadRequest"
-            }),
-            serde_json::json!({
-                "$ref": "#/components/schemas/CompleteMultipartUploadRequest"
-            }),
-        ]
-    );
-    let known_completion = schemas
-        .get("CompleteKnownContentUploadRequest")
-        .expect("known-content completion schema");
-    assert!(known_completion
-        .get("properties")
-        .and_then(Value::as_object)
-        .is_none_or(serde_json::Map::is_empty));
-
-    let multipart_completion = schemas
-        .get("CompleteMultipartUploadRequest")
-        .expect("multipart completion schema");
-    let required = required_fields(multipart_completion);
-    assert!(required.contains("content"));
-    assert!(required.contains("parts"));
-
-    for request_schema in [known_completion, multipart_completion] {
-        let properties = request_schema
+    assert_eq!(completion_variants.len(), 3);
+    for (variant, (title, mode)) in completion_variants.iter().zip([
+        ("CompleteUploadServiceProxied", "service_proxied"),
+        ("CompleteUploadDirectPut", "direct_put"),
+        ("CompleteUploadDirectMultipart", "direct_multipart"),
+    ]) {
+        assert_eq!(variant.get("title").and_then(Value::as_str), Some(title));
+        assert_eq!(
+            variant
+                .pointer("/properties/mode/enum/0")
+                .and_then(Value::as_str),
+            Some(mode)
+        );
+        assert!(required_fields(variant).contains("mode"));
+        let properties = variant
             .get("properties")
             .and_then(Value::as_object)
             .cloned()
@@ -901,6 +957,11 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             );
         }
     }
+    let multipart_required = required_fields(&completion_variants[2]);
+    assert!(multipart_required.contains("content"));
+    assert!(multipart_required.contains("parts"));
+    assert!(!schemas.contains_key("CompleteKnownContentUploadRequest"));
+    assert!(!schemas.contains_key("CompleteMultipartUploadRequest"));
 
     for properties in values_named(&spec, "properties").filter_map(Value::as_object) {
         for retired_name in [
@@ -962,8 +1023,6 @@ fn openapi_flattens_the_path_entry_attribute_projection() {
         .get("allOf")
         .and_then(Value::as_array)
         .into_iter()
-        .flatten()
-        .filter_map(|schema| schema.get("oneOf").and_then(Value::as_array))
         .flatten()
         .filter_map(|schema| schema.get("$ref").and_then(Value::as_str))
         .any(|reference| reference == "#/components/schemas/AttributesProjection");
@@ -1034,6 +1093,28 @@ fn values_named<'a>(value: &'a Value, name: &'a str) -> Box<dyn Iterator<Item = 
                 .flat_map(move |value| values_named(value, name)),
         ),
         _ => Box::new(std::iter::empty()),
+    }
+}
+
+fn collect_one_of_objects<'a>(
+    value: &'a Value,
+    unions: &mut Vec<&'a serde_json::Map<String, Value>>,
+) {
+    match value {
+        Value::Object(object) => {
+            if object.get("oneOf").and_then(Value::as_array).is_some() {
+                unions.push(object);
+            }
+            for child in object.values() {
+                collect_one_of_objects(child, unions);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                collect_one_of_objects(child, unions);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 

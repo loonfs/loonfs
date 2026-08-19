@@ -1555,6 +1555,7 @@ dependencies = [
  "futures",
  "http",
  "http-body",
+ "indexmap",
  "loonfs",
  "loonfs-api",
  "loonfs-client",

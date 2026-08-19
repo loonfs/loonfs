@@ -94,6 +94,7 @@ pub enum BeginUploadRequest {
         /// A multipart upload claims its content at completion, so nothing
         /// about the payload is declared here.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         multipart: Option<DirectMultipartUploadOptions>,
     },
 }
@@ -320,12 +321,41 @@ pub struct UploadContentResponse {
     pub content_ref: ContentRef,
 }
 
-/// Empty request used when the upload session already contains the content
-/// reference.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Request to complete an upload session, tagged by its transport mode.
+///
+/// The tag must match the mode recorded when the session began. Proxied and
+/// direct-PUT sessions need no additional fields, while direct multipart
+/// completion carries the assembled content claim and uploaded parts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CompleteKnownContentUploadRequest {}
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompleteUploadRequest {
+    /// Complete a service-proxied session after its bytes have been uploaded.
+    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadServiceProxied"))]
+    ServiceProxied {},
+    /// Complete a direct-PUT session after the provider accepted its object.
+    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadDirectPut"))]
+    DirectPut {},
+    /// Complete a direct multipart session with its final claim and parts.
+    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadDirectMultipart"))]
+    DirectMultipart {
+        /// Expected length and checksum of the assembled object.
+        content: UploadContentClaim,
+        /// Uploaded parts in ascending part order.
+        parts: Vec<CompletedUploadPart>,
+    },
+}
+
+impl CompleteUploadRequest {
+    /// The transport mode declared by this completion request.
+    pub const fn mode(&self) -> UploadMode {
+        match self {
+            Self::ServiceProxied {} => UploadMode::ServiceProxied,
+            Self::DirectPut {} => UploadMode::DirectPut,
+            Self::DirectMultipart { .. } => UploadMode::DirectMultipart,
+        }
+    }
+}
 
 /// Information required to complete a `direct_multipart` upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +395,7 @@ pub enum UploadSessionStatus {
         /// Fresh proof for a later commit. This is absent after the token
         /// minting window closes, while `content_ref` remains available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_token: Option<ContentToken>,
     },
     /// Final: the session selected no content and its object is gone.
@@ -412,10 +443,9 @@ impl UploadSessionResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, CompleteKnownContentUploadRequest,
-        CompleteMultipartUploadRequest, ContentToken, DirectMultipartUpload, DirectPutUpload,
-        ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSessionResponse,
-        UploadSessionStatus,
+        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, ContentToken,
+        DirectMultipartUpload, DirectPutUpload, ObjectTransferAccess, UploadContentClaim,
+        UploadMode, UploadSessionResponse, UploadSessionStatus,
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -458,36 +488,36 @@ mod tests {
         }
     }
 
-    /// Completion request fields must match the stored upload mode.
+    /// Completion requests state the mode and carry only that mode's fields.
     #[test]
-    fn completion_request_shapes_reject_fields_the_session_did_not_select() {
+    fn completion_requests_are_tagged_and_mode_specific() {
         assert_eq!(
-            serde_json::from_str::<CompleteKnownContentUploadRequest>("{}")
-                .expect("decode known-content completion"),
-            CompleteKnownContentUploadRequest {}
+            serde_json::from_str::<CompleteUploadRequest>(r#"{"mode":"service_proxied"}"#)
+                .expect("decode proxied completion"),
+            CompleteUploadRequest::ServiceProxied {}
         );
         assert_eq!(
-            serde_json::to_string(&CompleteKnownContentUploadRequest {})
-                .expect("encode known-content completion"),
-            "{}"
+            serde_json::to_string(&CompleteUploadRequest::DirectPut {})
+                .expect("encode direct-put completion"),
+            r#"{"mode":"direct_put"}"#
         );
         for body in [
-            r#"{"completion":"content_ref"}"#,
-            r#"{"content_ref":{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
-            r#"{"content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}},"parts":[]}"#,
+            r#"{}"#,
+            r#"{"mode":"service_proxied","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}},"parts":[]}"#,
+            r#"{"mode":"direct_multipart"}"#,
         ] {
             assert!(
-                serde_json::from_str::<CompleteKnownContentUploadRequest>(body).is_err(),
-                "decoded a known-content completion carrying fields: {body}"
+                serde_json::from_str::<CompleteUploadRequest>(body).is_err(),
+                "decoded an invalid completion request: {body}"
             );
         }
 
-        let missing_parts = r#"{"content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#;
-        let error = serde_json::from_str::<CompleteMultipartUploadRequest>(missing_parts)
+        let missing_parts = r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#;
+        let error = serde_json::from_str::<CompleteUploadRequest>(missing_parts)
             .expect_err("multipart parts are required");
         assert!(error.to_string().contains("missing field `parts`"));
 
-        let multipart = CompleteMultipartUploadRequest {
+        let multipart = CompleteUploadRequest::DirectMultipart {
             content: UploadContentClaim {
                 size_bytes: 5,
                 checksum: Checksum::crc64nvme(b"hello"),
@@ -495,8 +525,17 @@ mod tests {
             parts: Vec::new(),
         };
         let encoded = serde_json::to_string(&multipart).expect("encode multipart completion");
-        assert!(!encoded.contains("completion"));
-        assert!(!encoded.contains("content_ref"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).expect("decode multipart JSON"),
+            serde_json::json!({
+                "mode": "direct_multipart",
+                "content": {
+                    "size_bytes": 5,
+                    "checksum": Checksum::crc64nvme(b"hello"),
+                },
+                "parts": [],
+            })
+        );
     }
 
     #[test]

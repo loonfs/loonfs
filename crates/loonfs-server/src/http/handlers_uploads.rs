@@ -21,8 +21,8 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     direct_put_checksum_feature,
     v0::{
-        BeginUploadRequest, BeginUploadResponse, CompleteKnownContentUploadRequest,
-        CompleteMultipartUploadRequest, DirectMultipartUpload, DirectMultipartUploadOptions,
+        BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest,
+        CompleteUploadRequest, DirectMultipartUpload, DirectMultipartUploadOptions,
         DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
         SignedUploadPart, UploadContentClaim, UploadContentResponse, UploadMode,
         UploadSessionResponse, UploadSessionStatus,
@@ -587,14 +587,14 @@ pub(super) async fn upload_content(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
-        description = "Completes an upload using the body required by its stored mode. Service-proxied and direct-put sessions accept `{}`. Direct-multipart sessions require the content claim and completed parts.",
+        description = "Completes an upload using a body tagged with its stored mode. Service-proxied and direct-put sessions require only the `mode` tag. Direct-multipart sessions also require the content claim and completed parts.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         request_body(
-            content = crate::http::openapi::CompleteUploadRequestSchema,
-            description = "The stored upload mode determines which body is accepted."
+            content = CompleteUploadRequest,
+            description = "The `mode` tag must match the stored upload mode."
         ),
         responses(
             (status = 200, description = "Upload completed", body = UploadSessionResponse),
@@ -642,17 +642,22 @@ fn decode_completion_body(
             upload_mode_name(mode)
         )
     };
-    match mode {
-        UploadMode::ServiceProxied | UploadMode::DirectPut => {
-            serde_json::from_slice::<CompleteKnownContentUploadRequest>(body)
-                .map(|_| ResolvedUploadCompletion::KnownContent)
-                .map_err(invalid)
+    let request = serde_json::from_slice::<CompleteUploadRequest>(body).map_err(invalid)?;
+    if request.mode() != mode {
+        return Err(format!(
+            "completion request mode `{}` does not match stored upload mode `{}`",
+            upload_mode_name(request.mode()),
+            upload_mode_name(mode)
+        ));
+    }
+
+    match request {
+        CompleteUploadRequest::ServiceProxied {} | CompleteUploadRequest::DirectPut {} => {
+            Ok(ResolvedUploadCompletion::KnownContent)
         }
-        UploadMode::DirectMultipart => {
-            serde_json::from_slice::<CompleteMultipartUploadRequest>(body)
-                .map(ResolvedUploadCompletion::Multipart)
-                .map_err(invalid)
-        }
+        CompleteUploadRequest::DirectMultipart { content, parts } => Ok(
+            ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
+        ),
     }
 }
 
@@ -677,40 +682,47 @@ mod completion_body_tests {
 
     #[test]
     fn stored_mode_selects_a_precise_completion_schema_error() {
-        let multipart_body = format!(r#"{{"content":{CONTENT},"parts":[]}}"#);
+        let multipart_body =
+            format!(r#"{{"mode":"direct_multipart","content":{CONTENT},"parts":[]}}"#);
         let direct_put_error =
             decode_completion_body(UploadMode::DirectPut, multipart_body.as_bytes())
-                .expect_err("multipart fields do not belong to direct put");
+                .expect_err("multipart mode does not match direct put");
         assert_eq!(
             direct_put_error,
-            "request body is not valid JSON for direct_put completion: unknown field `content`, \
-             there are no fields at line 1 column 10"
+            "completion request mode `direct_multipart` does not match stored upload mode \
+             `direct_put`"
         );
 
         let multipart_error = decode_completion_body(UploadMode::DirectMultipart, b"{}")
-            .expect_err("multipart completion needs its claim and parts");
+            .expect_err("completion mode is required");
         assert_eq!(
             multipart_error,
             "request body is not valid JSON for direct_multipart completion: missing field \
-             `content` at line 1 column 2"
+             `mode` at line 1 column 2"
         );
 
-        let missing_parts = format!(r#"{{"content":{CONTENT}}}"#);
+        let missing_parts = format!(r#"{{"mode":"direct_multipart","content":{CONTENT}}}"#);
         let missing_parts_error =
             decode_completion_body(UploadMode::DirectMultipart, missing_parts.as_bytes())
                 .expect_err("multipart completion needs parts");
         assert_eq!(
             missing_parts_error,
             "request body is not valid JSON for direct_multipart completion: missing field \
-             `parts` at line 1 column 92"
+             `parts`"
         );
     }
 
     #[test]
     fn retired_completion_fields_are_unknown_in_known_content_bodies() {
         for (body, field) in [
-            (r#"{"completion":"content_ref"}"#, "completion"),
-            (r#"{"content_ref":{}}"#, "content_ref"),
+            (
+                r#"{"mode":"service_proxied","completion":"content_ref"}"#,
+                "completion",
+            ),
+            (
+                r#"{"mode":"service_proxied","content_ref":{}}"#,
+                "content_ref",
+            ),
         ] {
             let error = decode_completion_body(UploadMode::ServiceProxied, body.as_bytes())
                 .expect_err("retired completion field");
@@ -729,7 +741,7 @@ mod completion_body_tests {
         };
         let quoted_etag = format!("\"{}\"", "e".repeat(254));
         assert_eq!(quoted_etag.len(), 256);
-        let request = CompleteMultipartUploadRequest {
+        let request = CompleteUploadRequest::DirectMultipart {
             content: UploadContentClaim {
                 size_bytes: u64::MAX,
                 checksum: checksum.clone(),
@@ -750,7 +762,7 @@ mod completion_body_tests {
             encoded.len(),
             MAX_COMPLETION_BODY_BYTES
         );
-        let decoded = serde_json::from_slice::<CompleteMultipartUploadRequest>(&encoded)
+        let decoded = serde_json::from_slice::<CompleteUploadRequest>(&encoded)
             .expect("maximal completion decodes");
         assert_eq!(decoded, request);
     }

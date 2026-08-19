@@ -24,6 +24,7 @@ pub struct BeginDownloadRequest {
     pub path: AbsolutePath,
     /// Revision to read, or `None` for the path's current revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub revision_no: Option<RevisionNo>,
 }
 

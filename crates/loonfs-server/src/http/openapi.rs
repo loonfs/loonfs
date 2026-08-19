@@ -10,10 +10,9 @@ use loonfs_api::{
     v0::{
         BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
         BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-        CommitResponse as ApiCommitResponse, CompleteKnownContentUploadRequest,
-        CompleteMultipartUploadRequest, ContentToken, DeletedDirentry, DirectPutUpload,
-        ObjectTransferAccess, UploadContentResponse, UploadMode, UploadSessionResponse,
-        UploadSessionStatus,
+        CommitResponse as ApiCommitResponse, CompleteUploadRequest, ContentToken, DeletedDirentry,
+        DirectPutUpload, ObjectTransferAccess, UploadContentResponse, UploadMode,
+        UploadSessionResponse, UploadSessionStatus,
     },
     AdvanceRetentionResponse, ApiError, Checkpoint, CheckpointOwnerSummary, CommitRequest,
     ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
@@ -26,38 +25,6 @@ use loonfs_api::{
 /// Builds the static OpenAPI document for the v0 HTTP API.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     <LoonfsOpenApi as utoipa::OpenApi>::openapi()
-}
-
-/// Serializes the static OpenAPI document as pretty-printed JSON.
-pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
-    serde_json::to_string_pretty(&openapi_document())
-}
-
-/// OpenAPI schema for the two upload completion bodies.
-pub(super) struct CompleteUploadRequestSchema;
-
-impl utoipa::PartialSchema for CompleteUploadRequestSchema {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::schema::OneOfBuilder::new()
-            .item(utoipa::openapi::Ref::from_schema_name(
-                "CompleteKnownContentUploadRequest",
-            ))
-            .item(utoipa::openapi::Ref::from_schema_name(
-                "CompleteMultipartUploadRequest",
-            ))
-            .description(Some(
-                "The upload session determines the accepted body. Service-proxied and \
-                 direct-put sessions use an empty object. Direct-multipart sessions provide \
-                 the content claim and completed parts.",
-            ))
-            .into()
-    }
-}
-
-impl utoipa::ToSchema for CompleteUploadRequestSchema {
-    fn name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("CompleteUploadRequest")
-    }
 }
 
 #[derive(utoipa::OpenApi)]
@@ -166,9 +133,7 @@ impl utoipa::ToSchema for CompleteUploadRequestSchema {
         BeginUploadRequest,
         BeginUploadResponse,
         UploadContentResponse,
-        CompleteUploadRequestSchema,
-        CompleteKnownContentUploadRequest,
-        CompleteMultipartUploadRequest,
+        CompleteUploadRequest,
         UploadSessionResponse,
         UploadSessionStatus,
         DirectPutUpload,

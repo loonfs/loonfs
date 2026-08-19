@@ -801,7 +801,11 @@ mod tests {
         let client = retry_policy_client();
 
         let actual = client
-            .complete_upload(&namespace_id, &upload_id)
+            .complete_upload(
+                &namespace_id,
+                &upload_id,
+                &CompleteUploadRequest::ServiceProxied {},
+            )
             .await
             .expect("completed-session replay should retry");
         assert_eq!(actual, response);
