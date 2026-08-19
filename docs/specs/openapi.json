@@ -7052,7 +7052,7 @@
   "tags": [
     {
       "name": "system",
-      "description": "Server health"
+      "description": "Server health, readiness, and metrics"
     },
     {
       "name": "capabilities",
