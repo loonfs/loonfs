@@ -7,9 +7,9 @@ use crate::common::*;
 use bytes::Bytes;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
-    BeginUploadRequest, ChangeSeq, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions, RuntimeCacheConfig,
-    SharedObjectStore, UploadMode,
+    BeginUploadRequest, ChangeSeq, ChecksumAlgorithm, CommitId, CreateDirectoryOptions,
+    CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions,
+    RuntimeCacheConfig, SharedObjectStore, UploadMode,
 };
 use loonfs_api::v0::{UploadContentClaim, UploadSessionStatus};
 use loonfs_api::Checksum;
@@ -101,25 +101,30 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, direct_put_claim(bytes)))
-        .expect("begin direct put");
+    let claim = direct_put_claim(bytes);
+    let begin =
+        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+            .expect("begin direct put");
     // The target is minted here, before a byte is written, and the key it
     // names is derived from that identity alone.
-    let content_ref = begin.target.content_ref.clone();
     assert!(begin
         .target
         .object_key
-        .ends_with(content_ref.content_id.as_str()));
+        .rsplit('/')
+        .next()
+        .is_some_and(|content_id| content_id.starts_with("con_")));
 
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
-    let completed = fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id)
+    let completed = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
         .expect("complete direct put");
     assert_eq!(completed.mode, UploadMode::DirectPut);
-    assert_eq!(completed.content_ref(), Some(&content_ref));
+    let content_ref = completed
+        .content_ref()
+        .expect("completed content ref")
+        .clone();
 
     block_on(fs.put_file_content_ref(
         &namespace_id,
@@ -150,9 +155,10 @@ fn direct_put_completion_proves_upload_without_reading_content() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, direct_put_claim(bytes)))
-        .expect("begin direct put");
-    let content_ref = begin.target.content_ref.clone();
+    let claim = direct_put_claim(bytes);
+    let begin =
+        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+            .expect("begin direct put");
 
     // Stands in for the provider-verified presigned upload.
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
@@ -160,11 +166,16 @@ fn direct_put_completion_proves_upload_without_reading_content() {
         .expect("write direct object");
 
     raw_store.reset();
-    let completed = fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id)
+    let completed = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
         .expect("complete direct put");
     assert_eq!(completed.mode, UploadMode::DirectPut);
-    assert_eq!(completed.content_ref(), Some(&content_ref));
+    assert_eq!(
+        completed
+            .content_ref()
+            .expect("completed content ref")
+            .checksum,
+        Checksum::sha256(bytes)
+    );
     assert_eq!(
         raw_store.count(OperationClass::Read),
         0,
@@ -185,14 +196,14 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, claim))
-        .expect("begin direct put");
+    let begin =
+        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+            .expect("begin direct put");
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
-    let error = fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id)
+    let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
         .expect_err("mis-declared size must fail completion");
     assert!(
         error.to_string().contains("content length mismatch"),
@@ -214,8 +225,9 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
+    let claim = direct_put_claim(promised);
     let begin =
-        block_on(fs.begin_direct_put_upload_target(&namespace_id, direct_put_claim(promised)))
+        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(
@@ -223,8 +235,7 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
     )
     .expect("write mismatched direct object");
 
-    let error = fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id)
+    let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
         .expect_err("mismatched bytes must fail completion");
     assert_eq!(
         error.code(),
@@ -257,17 +268,17 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, direct_put_claim(bytes)))
-        .expect("begin direct put");
-    let content_ref = begin.target.content_ref.clone();
+    let claim = direct_put_claim(bytes);
+    let begin =
+        block_on(fs.begin_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+            .expect("begin direct put");
 
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
     raw_store.fail_next(1);
-    let error = fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id)
+    let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim.clone()))
         .expect_err("a verification that cannot run does not complete the upload");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert_eq!(raw_store.attempts(), 1, "the checksum head is what failed");
@@ -284,11 +295,16 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
         "a store failure must not end the session"
     );
 
-    let completed = fs
-        .complete_upload_blocking(&namespace_id, &begin.upload_id)
+    let completed = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
         .expect("the retried completion verifies and completes");
     assert_eq!(completed.mode, UploadMode::DirectPut);
-    assert_eq!(completed.content_ref(), Some(&content_ref));
+    assert_eq!(
+        completed
+            .content_ref()
+            .expect("completed content ref")
+            .checksum,
+        Checksum::sha256(bytes)
+    );
 }
 
 #[test]

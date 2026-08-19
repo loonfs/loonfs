@@ -19,17 +19,15 @@ use loonfs::FsWriter;
 use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;
 use loonfs_api::{
-    direct_put_checksum_feature,
     v0::{
         BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest,
         CompleteUploadRequest, DirectMultipartUpload, DirectMultipartUploadOptions,
         DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
-        SignedUploadPart, UploadContentClaim, UploadContentResponse, UploadMode,
-        UploadSessionResponse, UploadSessionStatus,
+        SignedUploadPart, UploadContentResponse, UploadMode, UploadSessionResponse,
+        UploadSessionStatus,
     },
-    ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
 };
 use loonfs_objectstore::{
     presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
@@ -133,8 +131,8 @@ pub(super) async fn begin_upload(
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
     match request {
-        BeginUploadRequest::DirectPut { content } => {
-            begin_direct_put_upload(state, namespace_id, content).await
+        BeginUploadRequest::DirectPut { size_bytes } => {
+            begin_direct_put_upload(state, namespace_id, size_bytes).await
         }
         BeginUploadRequest::DirectMultipart { multipart } => {
             begin_direct_multipart_upload(state, namespace_id, multipart).await
@@ -153,7 +151,7 @@ pub(super) async fn begin_upload(
 async fn begin_direct_put_upload(
     state: AppState,
     namespace_id: NamespaceId,
-    claim: UploadContentClaim,
+    size_bytes: Option<u64>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     let Some(issuer) = state
         .direct_transfers
@@ -162,51 +160,37 @@ async fn begin_direct_put_upload(
     else {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_PUT,
-            "direct_put requires an object store that can presign create-only, \
-             checksum-bound uploads; this deployment's endpoint cannot",
+            "direct_put requires an object store that can presign create-only uploads and \
+             report a durable full-object checksum; this deployment's endpoint cannot",
         ));
     };
-    // The issuer is the one authority on both: it is what the capability
-    // document was built from, and what will sign this write.
-    let advertised = issuer.checksum_algorithm();
-    if let Err(message) =
-        validate_direct_put_checksum_algorithm(claim.checksum.algorithm, advertised)
-    {
-        return Err(ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            &message,
-        )
-        .with_param("/content/checksum/algorithm"));
-    }
     let max_content_bytes = issuer.max_content_bytes();
-    if claim.size_bytes > max_content_bytes {
+    if let Some(size_bytes) = size_bytes.filter(|size_bytes| *size_bytes > max_content_bytes) {
         return Err(ApiResponseError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             ErrorCode::ContentTooLarge,
             &format!(
                 "this deployment's provider accepts at most {max_content_bytes} bytes in one \
-                 direct_put request, and this claim declares {}; check the \
+                 direct_put request, and this request reports {}; check the \
                  `{LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES}` capability limit and use \
                  `direct_multipart` for larger content when \
                  `{FEATURE_UPLOADS_DIRECT_MULTIPART}` is advertised",
-                claim.size_bytes,
+                size_bytes,
             ),
         )
-        .with_param("/content/size_bytes"));
+        .with_param("/size_bytes"));
     }
 
+    let checksum_algorithm = issuer.stored_checksum_algorithm();
     let prepared = state
         .writer
-        .begin_direct_put_upload_target(&namespace_id, claim)
+        .begin_direct_put_upload_target(&namespace_id, checksum_algorithm)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    let content_ref = prepared.target.content_ref;
     let signed = issuer
         .presign_put(
             PresignedPutRequest {
                 object_key: &prepared.target.object_key,
-                content_ref: &content_ref,
                 expires_in: DIRECT_PUT_URL_TTL,
             },
             presign_time(),
@@ -217,7 +201,7 @@ async fn begin_direct_put_upload(
         namespace_id: prepared.namespace_id,
         upload_id: prepared.upload_id,
         direct_put: DirectPutUpload {
-            content_ref,
+            checksum_algorithm: prepared.target.checksum_algorithm,
             access: ObjectTransferAccess::PresignedUrl {
                 method: signed.method,
                 url: signed.url,
@@ -226,20 +210,6 @@ async fn begin_direct_put_upload(
             },
         },
     }))
-}
-
-fn validate_direct_put_checksum_algorithm(
-    actual: ChecksumAlgorithm,
-    advertised: ChecksumAlgorithm,
-) -> Result<(), String> {
-    if actual == advertised {
-        return Ok(());
-    }
-    Err(format!(
-        "direct_put here enforces a {advertised} checksum, not {actual}; \
-         the advertised algorithm is the `{}` capability feature",
-        direct_put_checksum_feature(advertised),
-    ))
 }
 
 async fn begin_direct_multipart_upload(
@@ -587,7 +557,7 @@ pub(super) async fn upload_content(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
-        description = "Completes an upload. The request mode must match the mode used to start the session. Direct-multipart requests also include the content claim and completed parts.",
+        description = "Completes an upload. The request mode must match the mode used to start the session. Direct uploads include a content claim; multipart also includes completed parts.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -618,10 +588,15 @@ pub(super) async fn complete_upload(
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let body = body.into_bytes();
+    let direct_put_max_content_bytes = state
+        .direct_transfers
+        .as_ref()
+        .and_then(|transfers| transfers.put.as_ref())
+        .map(|issuer| issuer.max_content_bytes());
     let completed = state
         .writer
         .complete_upload_prepared_for_mode(&namespace_id, &upload_id, |mode| {
-            decode_completion_body(mode, &body)
+            decode_completion_body(mode, &body, direct_put_max_content_bytes)
         })
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -635,6 +610,7 @@ pub(super) async fn complete_upload(
 fn decode_completion_body(
     mode: UploadMode,
     body: &[u8],
+    direct_put_max_content_bytes: Option<u64>,
 ) -> std::result::Result<ResolvedUploadCompletion, String> {
     let invalid = |error: serde_json::Error| {
         format!(
@@ -652,9 +628,13 @@ fn decode_completion_body(
     }
 
     match request {
-        CompleteUploadRequest::ServiceProxied {} | CompleteUploadRequest::DirectPut {} => {
-            Ok(ResolvedUploadCompletion::KnownContent)
-        }
+        CompleteUploadRequest::ServiceProxied {} => Ok(ResolvedUploadCompletion::KnownContent),
+        CompleteUploadRequest::DirectPut { content } => Ok(ResolvedUploadCompletion::DirectPut {
+            content,
+            max_content_bytes: direct_put_max_content_bytes.ok_or_else(|| {
+                "direct_put completion requires the configured provider limit".to_owned()
+            })?,
+        }),
         CompleteUploadRequest::DirectMultipart { content, parts } => Ok(
             ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
         ),
@@ -670,11 +650,13 @@ fn upload_mode_name(mode: UploadMode) -> &'static str {
 }
 
 #[cfg(test)]
+// Keep the private decoder tests beside the decoder. Route handlers continue below.
+#[allow(clippy::items_after_test_module)]
 mod completion_body_tests {
     use super::*;
     use loonfs_api::{
-        v0::{CompletedUploadPart, UploadPartChecksumClaim},
-        Checksum,
+        v0::{CompletedUploadPart, UploadContentClaim, UploadPartChecksumClaim},
+        Checksum, ChecksumAlgorithm,
     };
 
     const CONTENT: &str =
@@ -685,7 +667,7 @@ mod completion_body_tests {
         let multipart_body =
             format!(r#"{{"mode":"direct_multipart","content":{CONTENT},"parts":[]}}"#);
         let direct_put_error =
-            decode_completion_body(UploadMode::DirectPut, multipart_body.as_bytes())
+            decode_completion_body(UploadMode::DirectPut, multipart_body.as_bytes(), Some(10))
                 .expect_err("multipart mode does not match direct put");
         assert_eq!(
             direct_put_error,
@@ -693,7 +675,7 @@ mod completion_body_tests {
              `direct_put`"
         );
 
-        let multipart_error = decode_completion_body(UploadMode::DirectMultipart, b"{}")
+        let multipart_error = decode_completion_body(UploadMode::DirectMultipart, b"{}", None)
             .expect_err("completion mode is required");
         assert_eq!(
             multipart_error,
@@ -703,7 +685,7 @@ mod completion_body_tests {
 
         let missing_parts = format!(r#"{{"mode":"direct_multipart","content":{CONTENT}}}"#);
         let missing_parts_error =
-            decode_completion_body(UploadMode::DirectMultipart, missing_parts.as_bytes())
+            decode_completion_body(UploadMode::DirectMultipart, missing_parts.as_bytes(), None)
                 .expect_err("multipart completion needs parts");
         assert_eq!(
             missing_parts_error,
@@ -724,7 +706,7 @@ mod completion_body_tests {
                 "content_ref",
             ),
         ] {
-            let error = decode_completion_body(UploadMode::ServiceProxied, body.as_bytes())
+            let error = decode_completion_body(UploadMode::ServiceProxied, body.as_bytes(), None)
                 .expect_err("retired completion field");
             assert!(
                 error.contains(&format!("unknown field `{field}`")),
@@ -893,23 +875,4 @@ fn parse_upload_id(value: &str) -> Result<UploadId, ApiResponseError> {
         )
         .with_param("upload_id")
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn direct_put_rejects_an_algorithm_other_than_the_issuers() {
-        assert!(validate_direct_put_checksum_algorithm(
-            ChecksumAlgorithm::Sha256,
-            ChecksumAlgorithm::Sha256
-        )
-        .is_ok());
-        assert!(validate_direct_put_checksum_algorithm(
-            ChecksumAlgorithm::Crc32c,
-            ChecksumAlgorithm::Sha256
-        )
-        .is_err());
-    }
 }

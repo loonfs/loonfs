@@ -1,6 +1,8 @@
 //! Upload transport selection, multipart driving, and resumable staging state.
 
 use super::super::*;
+use futures::StreamExt as _;
+use std::sync::{Arc, Mutex};
 
 /// Minimum payload size for streaming and multipart uploads.
 ///
@@ -74,7 +76,7 @@ enum UploadTransport {
     /// Multipart upload directly to object storage.
     Multipart,
     /// One checksummed request directly to object storage.
-    DirectPut(ChecksumAlgorithm),
+    DirectPut,
     /// Stream through the server.
     Proxied,
 }
@@ -91,22 +93,81 @@ struct MeasuredBytes(u64);
 struct NoTransportFits {
     /// Description of the relevant limits.
     reason: String,
-    /// Checksum used by direct PUT, if supported. A size hint may still choose
-    /// this path because its first pass measures the actual payload.
-    direct_put_algorithm: Option<ChecksumAlgorithm>,
+    /// Whether direct PUT is supported.
+    direct_put_supported: bool,
 }
 
 /// Payload for a direct whole-object upload.
 enum DirectPutBody<'a> {
     /// Bytes the caller already holds.
     Held(&'a [u8]),
-    /// A measured payload, re-read from disk in pieces.
-    Rewound(PayloadSource),
+    /// A payload read in pieces during upload.
+    Streamed(PayloadSource),
 }
 
-/// Converts a failure to reopen a measured payload into a client error.
-fn read_back_failed(error: std::io::Error) -> ClientError {
-    ClientError::Io(format!("could not re-read the measured payload: {error}"))
+impl DirectPutBody<'_> {
+    fn size_hint(&self) -> Option<u64> {
+        match self {
+            Self::Held(bytes) => Some(bytes.len() as u64),
+            Self::Streamed(source) => source.size_bytes(),
+        }
+    }
+}
+
+/// Size and checksum observed from the exact stream sent in one direct PUT.
+struct DirectPutObservation {
+    size_bytes: u64,
+    checksum: Option<StreamingChecksum>,
+}
+
+impl DirectPutObservation {
+    fn new(algorithm: ChecksumAlgorithm) -> Self {
+        Self {
+            size_bytes: 0,
+            checksum: Some(StreamingChecksum::for_algorithm(algorithm)),
+        }
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        self.size_bytes += bytes.len() as u64;
+        self.checksum
+            .as_mut()
+            .expect("direct PUT checksum is unfinished")
+            .update(bytes);
+    }
+
+    fn finish(&mut self) -> UploadContentClaim {
+        UploadContentClaim {
+            size_bytes: self.size_bytes,
+            checksum: self
+                .checksum
+                .take()
+                .expect("direct PUT checksum is finished once")
+                .finish(),
+        }
+    }
+}
+
+fn observed_direct_put_source(
+    source: PayloadSource,
+    algorithm: ChecksumAlgorithm,
+) -> (PayloadSource, Arc<Mutex<DirectPutObservation>>) {
+    let observation = Arc::new(Mutex::new(DirectPutObservation::new(algorithm)));
+    let stream_observation = Arc::clone(&observation);
+    let source = source.map_stream(move |stream| {
+        stream
+            .map(move |chunk| {
+                if let Ok(bytes) = &chunk {
+                    stream_observation
+                        .lock()
+                        .expect("direct PUT observation lock")
+                        .update(bytes);
+                }
+                chunk
+            })
+            .boxed()
+    });
+    (source, observation)
 }
 
 /// Builds a presigned whole-object PUT request.
@@ -243,9 +304,8 @@ impl Client {
                 )
                 .await
             }
-            UploadTransport::DirectPut(algorithm) => {
-                self.stage_bytes_via_direct_put(namespace_id, bytes, algorithm)
-                    .await
+            UploadTransport::DirectPut => {
+                self.stage_bytes_via_direct_put(namespace_id, bytes).await
             }
             UploadTransport::Proxied => self.stage_bytes_via_server(namespace_id, bytes).await,
         }
@@ -272,9 +332,8 @@ impl Client {
                 )
                 .await
             }
-            UploadTransport::DirectPut(algorithm) => {
-                self.stage_source_via_direct_put(namespace_id, source, algorithm, continuity)
-                    .await
+            UploadTransport::DirectPut => {
+                self.stage_source_via_direct_put(namespace_id, source).await
             }
             // Proxied uploads are one request and have no resumable parts.
             UploadTransport::Proxied => self.stage_source_via_server(namespace_id, source).await,
@@ -283,69 +342,26 @@ impl Client {
 
     /// Stages a streamed payload through one presigned whole-object write.
     ///
-    /// The first pass measures and checksums the source, spooling it only when
-    /// it cannot be reopened. The measured size selects the final transport.
-    /// A second pass sends the bytes if direct PUT remains eligible.
+    /// The source is checksummed as the presigned request consumes it.
     async fn stage_source_via_direct_put(
         &self,
         namespace_id: &NamespaceId,
         source: PayloadSource,
-        algorithm: ChecksumAlgorithm,
-        continuity: UploadContinuity<'_>,
     ) -> Result<StagedContent> {
-        let mut digest = StreamingChecksum::for_algorithm(algorithm);
-        let measured = source
-            .measure(&mut digest)
+        self.direct_put_transfer(namespace_id, DirectPutBody::Streamed(source))
             .await
-            .map_err(|error| ClientError::Io(error.to_string()))?;
-        let size = MeasuredBytes(measured.size_bytes());
-        let checksum = digest.finish();
-
-        match self.transport_for_measured(size).await? {
-            UploadTransport::DirectPut(_) => {
-                self.direct_put_transfer(
-                    namespace_id,
-                    size,
-                    checksum,
-                    DirectPutBody::Rewound(measured.reread().await.map_err(read_back_failed)?),
-                )
-                .await
-            }
-            // Capabilities may change between routing and the measured check.
-            UploadTransport::Multipart => {
-                let (stream, _) = measured
-                    .reread()
-                    .await
-                    .map_err(read_back_failed)?
-                    .into_stream();
-                self.stage_via_multipart(
-                    namespace_id,
-                    MultipartPayload::Streamed(stream),
-                    continuity,
-                )
-                .await
-            }
-            UploadTransport::Proxied => {
-                self.stage_source_via_server(
-                    namespace_id,
-                    measured.reread().await.map_err(read_back_failed)?,
-                )
-                .await
-            }
-        }
     }
 
     /// Selects an initial transport from an optional size hint.
     ///
-    /// Size hints never reject an upload. Direct PUT measures the payload
-    /// before sending it; proxied upload lets the server enforce its limit.
+    /// Size hints never reject an upload locally. Direct PUT and proxied
+    /// upload let the server enforce their limits.
     async fn provisional_transport(&self, size_hint: Option<u64>) -> Result<UploadTransport> {
         let capabilities = self.capabilities().await?;
         Ok(match Self::transport_for(&capabilities, size_hint) {
             Ok(transport) => transport,
-            Err(no_fit) => no_fit
-                .direct_put_algorithm
-                .map_or(UploadTransport::Proxied, UploadTransport::DirectPut),
+            Err(no_fit) if no_fit.direct_put_supported => UploadTransport::DirectPut,
+            Err(_) => UploadTransport::Proxied,
         })
     }
 
@@ -380,14 +396,15 @@ impl Client {
         if worth_cutting && capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART) {
             return Ok(UploadTransport::Multipart);
         }
-        let direct_put_algorithm = capabilities.direct_put_checksum_algorithm();
+        let direct_put_supported = capabilities.supports(FEATURE_UPLOADS_DIRECT_PUT);
         // Unknown sizes cannot be checked against a limit. Prefer direct PUT
-        // when available because its first pass measures the payload before
-        // transfer; otherwise let the server enforce the proxied limit.
+        // when available; otherwise let the server enforce the proxied limit.
         let Some(size_bytes) = size_bytes else {
-            return Ok(
-                direct_put_algorithm.map_or(UploadTransport::Proxied, UploadTransport::DirectPut)
-            );
+            return Ok(if direct_put_supported {
+                UploadTransport::DirectPut
+            } else {
+                UploadTransport::Proxied
+            });
         };
         let proxy_cap = capabilities
             .limits
@@ -395,12 +412,11 @@ impl Client {
             .copied();
         let fits_proxy = proxy_cap.is_none_or(|cap| size_bytes <= cap);
         let direct_put_cap = capabilities.direct_put_max_content_bytes();
-        if worth_cutting || !fits_proxy {
-            if let Some(algorithm) = direct_put_algorithm {
-                if direct_put_cap.is_none_or(|cap| size_bytes <= cap) {
-                    return Ok(UploadTransport::DirectPut(algorithm));
-                }
-            }
+        if (worth_cutting || !fits_proxy)
+            && direct_put_supported
+            && direct_put_cap.is_none_or(|cap| size_bytes <= cap)
+        {
+            return Ok(UploadTransport::DirectPut);
         }
         if fits_proxy {
             return Ok(UploadTransport::Proxied);
@@ -418,53 +434,37 @@ impl Client {
                 None => format!(
                     "the service takes at most {proxy_cap} bytes \
                      (`{LIMIT_UPLOAD_MAX_CONTENT_BYTES}`), and neither \
-                     `{FEATURE_UPLOADS_DIRECT_MULTIPART}` nor a usable `direct_put` checksum is \
+                     `{FEATURE_UPLOADS_DIRECT_MULTIPART}` nor `{FEATURE_UPLOADS_DIRECT_PUT}` is \
                      advertised"
                 ),
             },
-            direct_put_algorithm,
+            direct_put_supported,
         })
     }
 
     /// Uploads in-memory bytes directly to object storage.
     ///
-    /// The provider enforces the checksum included in the signed request.
+    /// The completion claim describes the bytes sent in the request.
     async fn stage_bytes_via_direct_put(
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
-        algorithm: ChecksumAlgorithm,
     ) -> Result<StagedContent> {
-        let mut digest = StreamingChecksum::for_algorithm(algorithm);
-        digest.update(bytes);
-        self.direct_put_transfer(
-            namespace_id,
-            MeasuredBytes(bytes.len() as u64),
-            digest.finish(),
-            DirectPutBody::Held(bytes),
-        )
-        .await
+        self.direct_put_transfer(namespace_id, DirectPutBody::Held(bytes))
+            .await
     }
 
     /// Opens a `direct_put` session, writes its object, and completes it.
     ///
-    /// The claim uses the measured size and checksum. A failed transfer aborts
-    /// the session so it does not remain open for garbage collection.
+    /// A failed transfer aborts the session so it does not remain open for
+    /// garbage collection.
     async fn direct_put_transfer(
         &self,
         namespace_id: &NamespaceId,
-        size: MeasuredBytes,
-        checksum: Checksum,
         body: DirectPutBody<'_>,
     ) -> Result<StagedContent> {
         let begin = self
-            .begin_direct_put(
-                namespace_id,
-                UploadContentClaim {
-                    size_bytes: size.0,
-                    checksum,
-                },
-            )
+            .begin_direct_put(namespace_id, body.size_hint())
             .await?;
         let BeginUploadResponse::DirectPut {
             upload_id,
@@ -474,14 +474,29 @@ impl Client {
         else {
             return Err(negotiated_a_different_upload_mode());
         };
-        let written = match body {
+        let (written, content) = match body {
             DirectPutBody::Held(bytes) => {
-                self.upload_via_presigned_url(&direct_put.access, bytes)
-                    .await
+                let content = UploadContentClaim {
+                    size_bytes: bytes.len() as u64,
+                    checksum: Checksum::compute(direct_put.checksum_algorithm, bytes),
+                };
+                (
+                    self.upload_via_presigned_url(&direct_put.access, bytes)
+                        .await,
+                    content,
+                )
             }
-            DirectPutBody::Rewound(source) => {
-                self.upload_streamed_via_presigned_url(&direct_put.access, source)
-                    .await
+            DirectPutBody::Streamed(source) => {
+                let (source, observation) =
+                    observed_direct_put_source(source, direct_put.checksum_algorithm);
+                let written = self
+                    .upload_streamed_via_presigned_url(&direct_put.access, source)
+                    .await;
+                let content = observation
+                    .lock()
+                    .expect("direct PUT observation lock")
+                    .finish();
+                (written, content)
             }
         };
         if let Err(error) = written {
@@ -492,7 +507,7 @@ impl Client {
             .complete_upload(
                 namespace_id,
                 &upload_id,
-                &CompleteUploadRequest::DirectPut {},
+                &CompleteUploadRequest::DirectPut { content },
             )
             .await?;
         Self::staged_from_completion(response)

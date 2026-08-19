@@ -3152,7 +3152,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
-        "description": "Completes an upload. The request mode must match the mode used to start the session. Direct-multipart requests also include the content claim and completed parts.",
+        "description": "Completes an upload. The request mode must match the mode used to start the session. Direct uploads include a content claim; multipart also includes completed parts.",
         "operationId": "complete_upload",
         "parameters": [
           {
@@ -4193,7 +4193,7 @@
             "$ref": "#/components/schemas/CompleteUploadDirectMultipart"
           }
         ],
-        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Service-proxied and\ndirect-PUT uploads need no other fields. Direct multipart uploads also\ninclude the completed parts and the expected content details.",
+        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Direct uploads\ninclude the expected content details. Multipart also includes its parts.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {
@@ -4442,7 +4442,7 @@
         "type": "object",
         "description": "Presigned direct_put upload details. The raw object key is intentionally not public.",
         "required": [
-          "content_ref",
+          "checksum_algorithm",
           "access"
         ],
         "properties": {
@@ -4450,9 +4450,9 @@
             "$ref": "#/components/schemas/ObjectTransferAccess",
             "description": "Short-lived write capability the client uses without learning the raw object key."
           },
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Immutable object identity the server minted, plus the byte length and\nchecksum covered by the signed request. Completion and the later\ncommit both name exactly this reference."
+          "checksum_algorithm": {
+            "$ref": "#/components/schemas/ChecksumAlgorithm",
+            "description": "Checksum algorithm the client must use for its completion claim."
           }
         }
       },
@@ -5698,7 +5698,7 @@
       },
       "UploadContentClaim": {
         "type": "object",
-        "description": "What an upload client claims about a complete payload.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. Direct PUT binds the claim into the provider\nwrite; multipart verifies it against the assembled object at completion.\n\nThe digest names its own algorithm because providers do not agree on one:\neach binds into a presigned write whatever its API can enforce. The\ndeployment advertises which it is, and a claim in any other algorithm is\nrefused at begin rather than signed into a write the provider would\nreject.",
+        "description": "What an upload client claims about a complete payload.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. Direct uploads submit this claim at completion,\nwhen the server verifies it against the stored object.",
         "required": [
           "size_bytes",
           "checksum"
@@ -5938,21 +5938,22 @@
       },
       "BeginUploadDirectPut": {
         "type": "object",
-        "description": "Write the whole object through one presigned request. The server\nsigns exactly these bytes into the write it authorizes, so the claim\nis required.",
+        "description": "Write the whole object through one presigned request.",
         "required": [
-          "content",
           "mode"
         ],
         "properties": {
-          "content": {
-            "$ref": "#/components/schemas/UploadContentClaim",
-            "description": "Byte length and digest of the payload about to be written."
-          },
           "mode": {
             "type": "string",
             "enum": [
               "direct_put"
             ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Advisory byte length for an early provider-limit check.",
+            "minimum": 0
           }
         }
       },
@@ -6119,9 +6120,14 @@
         "type": "object",
         "description": "Complete a direct-PUT upload.",
         "required": [
+          "content",
           "mode"
         ],
         "properties": {
+          "content": {
+            "$ref": "#/components/schemas/UploadContentClaim",
+            "description": "Expected length and checksum of the stored object."
+          },
           "mode": {
             "type": "string",
             "enum": [

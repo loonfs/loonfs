@@ -18,18 +18,15 @@ impl Client {
 
     /// Starts a direct upload of bytes the caller already has.
     ///
-    /// The claim describes the caller's bytes. The returned content reference
-    /// identifies the object used by completion and the later commit.
+    /// A known length is advisory and lets the server reject an oversized
+    /// single PUT before issuing access.
     pub async fn begin_direct_put(
         &self,
         namespace_id: &NamespaceId,
-        claim: UploadContentClaim,
+        size_bytes: Option<u64>,
     ) -> Result<BeginUploadResponse> {
-        self.begin_upload(
-            namespace_id,
-            &BeginUploadRequest::DirectPut { content: claim },
-        )
-        .await
+        self.begin_upload(namespace_id, &BeginUploadRequest::DirectPut { size_bytes })
+            .await
     }
 
     /// Opens a direct multipart upload session.

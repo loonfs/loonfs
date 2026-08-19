@@ -159,7 +159,7 @@ impl DirectGetIssuer for LoopbackIssuer {
 }
 
 impl DirectPutIssuer for LoopbackIssuer {
-    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+    fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
         ChecksumAlgorithm::Sha256
     }
 

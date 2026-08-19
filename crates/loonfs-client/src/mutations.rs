@@ -79,9 +79,8 @@ impl Client {
     /// Retrying with a `commit_id` that already committed is safe here in
     /// the same way it is for [`Self::put_file_bytes`], and by the same
     /// evidence: this pass measured the payload's length and folded its
-    /// digest, which is what the reconciliation compares. The digest is
-    /// CRC-64/NVME on the direct path, because that is what a provider
-    /// computes over an assembled object.
+    /// digest, which is what the reconciliation compares. Direct transports
+    /// use the algorithm returned when their upload session begins.
     pub async fn put_file_stream(
         &self,
         spec: &NamespacePath,
@@ -95,13 +94,13 @@ impl Client {
     /// [`Self::put_file_stream`] for a caller that intends to survive an
     /// interruption.
     ///
-    /// `journal` records the session and each completed part. `resume`
-    /// supplies the state from an earlier attempt so only missing parts are
-    /// uploaded. Proxied uploads ignore both values.
+    /// For direct multipart, `journal` records the session and each completed
+    /// part. `resume` supplies the state from an earlier attempt so only
+    /// missing parts are uploaded. Proxied and direct-PUT uploads ignore both
+    /// values; direct PUT has no part state and remains a one-pass transfer.
     ///
-    /// Resuming still reads the source from the beginning because the final
-    /// checksum covers the complete object. The source must therefore be
-    /// reopenable; a pipe cannot use this method.
+    /// A resumed multipart attempt still receives the source from the
+    /// beginning because the final checksum covers the complete object.
     pub async fn put_file_stream_resumable(
         &self,
         spec: &NamespacePath,
@@ -428,14 +427,6 @@ mod tests {
 
     fn test_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef::blob_v1(ContentId::generate(), bytes)
-    }
-
-    fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
-        let content_ref = test_content_ref(bytes);
-        UploadContentClaim {
-            size_bytes: content_ref.size_bytes,
-            checksum: content_ref.checksum,
-        }
     }
 
     /// `Client::new` runs the same validation as `ClientConfig::load`, so a
@@ -772,7 +763,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .begin_direct_put(&namespace_id, direct_put_claim(b"direct"))
+                .begin_direct_put(&namespace_id, Some(b"direct".len() as u64))
                 .await,
             &transport,
         );

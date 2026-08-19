@@ -9,7 +9,7 @@
 //! exists and fails.
 
 use crate::object_store::Result;
-use loonfs_api::{Checksum, ChecksumAlgorithm, ContentRef};
+use loonfs_api::{Checksum, ChecksumAlgorithm};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -19,19 +19,17 @@ use std::time::{Duration, SystemTime};
 pub struct PresignedPutRequest<'a> {
     /// Logical unscoped object key that the issuer resolves beneath its configured prefix.
     pub object_key: &'a str,
-    /// Expected digest and byte length the provider must enforce for the request body.
-    pub content_ref: &'a ContentRef,
     /// Lifetime of the issued capability measured from the supplied signing time.
     pub expires_in: Duration,
 }
 
 /// Describes one read of an existing content object to authorize for a client.
 ///
-/// There is nothing to bind but the key. A write has to carry the digest
-/// and the create-only precondition into the signature because the bytes do
-/// not exist yet and the provider is the only party that can refuse them; a
-/// read is of bytes this deployment already verified, and the reader checks
-/// what arrives against the reference it was handed.
+/// There is nothing to bind but the key. A write also carries a create-only
+/// precondition because the bytes do not exist yet and the provider is the
+/// only party that can prevent replacement. A read is of bytes this
+/// deployment already verified, and the reader checks what arrives against
+/// the reference it was handed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresignedGetRequest<'a> {
     /// Logical unscoped object key that the issuer resolves beneath its configured prefix.
@@ -68,46 +66,34 @@ pub struct PresignedUrl {
     pub expires_at_ms: u64,
 }
 
-/// Issues whole-object create-only write capabilities, and in doing so
-/// carries the write-time enforcement contract the rest of the system leans
-/// on:
+/// Issues whole-object create-only write capabilities.
 ///
-/// - The signed request must make the provider verify that the uploaded
-///   body hashes to the content ref's digest and reject anything else
-///   (S3-family: a signed `x-amz-checksum-sha256` header).
 /// - The signed request must be create-only, so an existing object is never
 ///   replaced through a transfer capability (S3-family: a signed
 ///   `if-none-match: *` header).
-/// - Both requirements ride the signature: a client cannot drop or alter
-///   them without invalidating the capability.
+/// - The issuer must report the checksum algorithm the provider stores for a
+///   checksum-less single PUT. Completion verifies that stored checksum.
 ///
-/// Because every implementor guarantees this, `direct_put` completion proves
-/// an upload by existence and size alone — it never reads content back. A
-/// provider that cannot enforce digest verification and create-only
-/// preconditions in a presigned request must not implement this trait; the
-/// deployment then reports `direct_put` as unsupported instead of falling
-/// back to weaker verification.
+/// A provider that cannot preserve create-only writes and report a durable
+/// full-object checksum must not implement this trait.
 pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
-    /// The whole-object checksum this provider enforces on a presigned write.
+    /// The whole-object checksum this provider stores for a single PUT.
     ///
-    /// Providers do not agree on one: the S3 family verifies SHA-256, and
-    /// others verify what their own API can bind into a signature. This is
-    /// the single authority for that answer — the deployment advertises it,
-    /// a client folds that digest over its payload while staging, and the
-    /// begin handler refuses a claim in any other algorithm.
-    fn checksum_algorithm(&self) -> ChecksumAlgorithm;
+    /// The begin response dictates this algorithm to the client. Completion
+    /// compares the client's claim with the provider's stored checksum.
+    fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm;
 
     /// The largest object this provider accepts in one presigned request.
     ///
     /// A payload past it has to move some other way, so the deployment
-    /// advertises the number and the begin handler refuses a claim over it
-    /// rather than issuing a capability the provider will reject.
+    /// advertises the number. The begin handler refuses an advisory size over
+    /// it, and completion checks the stored size authoritatively.
     fn max_content_bytes(&self) -> u64;
 
-    /// Issues a create-only write capability bound to the requested content identity.
+    /// Issues a create-only write capability for the requested object key.
     ///
-    /// Issuance fails for invalid keys, unsupported content-reference kinds,
-    /// invalid expiry policy, unusable signing time, or malformed provider configuration.
+    /// Issuance fails for invalid keys, invalid expiry policy, unusable signing
+    /// time, or malformed provider configuration.
     fn presign_put(
         &self,
         request: PresignedPutRequest<'_>,
@@ -175,8 +161,8 @@ pub trait DirectMultipartIssuer: Send + Sync + std::fmt::Debug {
 pub struct DirectTransferIssuers {
     /// Signs reads of content objects. Always present.
     pub get: Arc<dyn DirectGetIssuer>,
-    /// Signs whole-object create-only writes, when the provider enforces a
-    /// digest and a create-only precondition on a presigned request.
+    /// Signs whole-object create-only writes when the provider can report a
+    /// durable full-object checksum afterward.
     pub put: Option<Arc<dyn DirectPutIssuer>>,
     /// Signs the parts of a provider multipart upload, when the provider has
     /// one.

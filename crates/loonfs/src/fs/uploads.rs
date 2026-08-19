@@ -17,8 +17,8 @@ use crate::ByteStream;
 use crate::FsWriter;
 use crate::Result;
 use crate::{
-    BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest, MaintenanceJobId,
-    NamespaceId, UploadContentClaim, UploadContentResponse, UploadMode, UploadSessionResponse,
+    BeginUploadRequest, BeginUploadResponse, ChecksumAlgorithm, CompleteMultipartUploadRequest,
+    MaintenanceJobId, NamespaceId, UploadContentResponse, UploadMode, UploadSessionResponse,
 };
 use loonfs_api::v0::{DirectMultipartUploadOptions, UploadPartChecksumClaim};
 use loonfs_api::UploadId;
@@ -89,12 +89,12 @@ impl FsWriter {
     pub async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        claim: UploadContentClaim,
+        checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine(namespace_id)
-            .begin_direct_put_upload_target(claim)
+            .begin_direct_put_upload_target(checksum_algorithm)
             .await?;
         self.schedule_upload_session_reclamation(namespace_id);
         Ok(response)

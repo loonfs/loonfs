@@ -6,10 +6,9 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::{BoxStream, StreamExt};
-use loonfs_api::StreamingChecksum;
 use std::io;
-use std::path::{Path, PathBuf};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt as _};
+use std::path::Path;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Bytes read from a source in one go before they are handed on.
 ///
@@ -33,11 +32,6 @@ pub type PayloadStream = BoxStream<'static, io::Result<Bytes>>;
 pub struct PayloadSource {
     stream: PayloadStream,
     size_bytes: Option<u64>,
-    /// A file these same bytes can be read from again, when this source was
-    /// opened from one. A transport that has to state the payload's digest
-    /// before it may write reads twice, and re-opening a file costs nothing;
-    /// every other source pays for its second pass with a spool.
-    rewind: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for PayloadSource {
@@ -54,7 +48,6 @@ impl PayloadSource {
         Self {
             stream,
             size_bytes: None,
-            rewind: None,
         }
     }
 
@@ -75,7 +68,6 @@ impl PayloadSource {
         Ok(Self {
             stream: read_in_chunks(file),
             size_bytes: Some(size_bytes),
-            rewind: Some(path.as_ref().to_path_buf()),
         })
     }
 
@@ -91,101 +83,12 @@ impl PayloadSource {
         (self.stream, self.size_bytes)
     }
 
-    /// Replaces the byte stream while preserving length and rewind metadata.
-    ///
-    /// Wrappers such as progress reporters do not change the payload source.
-    /// Preserving `rewind` lets file-backed uploads reopen the file instead of
-    /// copying it to a temporary spool for a second pass.
+    /// Replaces the byte stream while preserving its length hint.
     pub fn map_stream(self, wrap: impl FnOnce(PayloadStream) -> PayloadStream) -> Self {
         Self {
             stream: wrap(self.stream),
             size_bytes: self.size_bytes,
-            rewind: self.rewind,
         }
-    }
-
-    /// Measures and hashes the source, then returns a payload that can be read
-    /// again.
-    ///
-    /// Transports that sign a checksum before upload require a complete first
-    /// pass. File-backed sources are reopened for the second pass; other sources
-    /// are copied incrementally to a temporary file. The returned length is the
-    /// number of bytes actually read, not the source's optional length hint.
-    pub(crate) async fn measure(
-        self,
-        digest: &mut StreamingChecksum,
-    ) -> io::Result<MeasuredPayload> {
-        let Self {
-            mut stream, rewind, ..
-        } = self;
-        let mut size_bytes = 0u64;
-        match rewind {
-            // The bytes are already on disk under a name that outlives this
-            // upload, so the pass only has to read and fold them.
-            Some(path) => {
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    size_bytes += chunk.len() as u64;
-                    digest.update(&chunk);
-                }
-                Ok(MeasuredPayload {
-                    path,
-                    spool: None,
-                    size_bytes,
-                })
-            }
-            None => {
-                let spool = tempfile::NamedTempFile::new()?;
-                let path = spool.path().to_path_buf();
-                let mut writer = tokio::fs::File::create(&path).await?;
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    size_bytes += chunk.len() as u64;
-                    digest.update(&chunk);
-                    writer.write_all(&chunk).await?;
-                }
-                writer.flush().await?;
-                Ok(MeasuredPayload {
-                    path,
-                    spool: Some(spool),
-                    size_bytes,
-                })
-            }
-        }
-    }
-}
-
-/// A payload that has been read once and can be read again, plus what that
-/// first pass measured.
-///
-/// Dropping this deletes the spool, if one was written, so it must outlive
-/// every read taken from it.
-pub(crate) struct MeasuredPayload {
-    path: PathBuf,
-    /// Holds the spool's name for as long as this value lives. `None` when
-    /// the bytes were already a file the caller named.
-    ///
-    /// Never read: it is held for its `Drop`, which is what deletes the
-    /// spool once the upload that reads it is done.
-    #[allow(dead_code, reason = "owns the spool's lifetime, not its contents")]
-    spool: Option<tempfile::NamedTempFile>,
-    size_bytes: u64,
-}
-
-impl MeasuredPayload {
-    /// The payload's measured length.
-    pub(crate) fn size_bytes(&self) -> u64 {
-        self.size_bytes
-    }
-
-    /// Opens a fresh forward read of the measured bytes, in pieces.
-    ///
-    /// A spool cannot change under this, and a caller's own file that does
-    /// is caught rather than stored: the digest the first pass measured is
-    /// what the write was signed against, so a provider refuses bytes that
-    /// no longer hash to it.
-    pub(crate) async fn reread(&self) -> io::Result<PayloadSource> {
-        PayloadSource::open_file(&self.path).await
     }
 }
 
@@ -283,8 +186,6 @@ impl PartReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::Checksum;
-
     fn source(chunks: Vec<&'static [u8]>) -> PayloadStream {
         futures::stream::iter(chunks.into_iter().map(|chunk| Ok(Bytes::from(chunk)))).boxed()
     }
@@ -346,68 +247,6 @@ mod tests {
         assert_eq!(first.len(), 4_096);
         assert_eq!(second.len(), 904);
         assert!(reader.next_part().await.expect("cut").is_none());
-    }
-
-    /// The measuring pass counts and folds what it actually read, and a
-    /// file-backed payload is not copied to do it: the second pass re-opens
-    /// the caller's own file.
-    ///
-    /// Wrapping the stream must not cost that. The CLI wraps every source it
-    /// opens to count progress, so losing the rewind here would copy every
-    /// uploaded file to a spool for nothing.
-    #[tokio::test]
-    async fn a_wrapped_file_source_is_re_read_rather_than_spooled() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("payload.bin");
-        let payload = vec![3u8; 5_000];
-        std::fs::write(&path, &payload).expect("write payload");
-
-        let source = PayloadSource::open_file(&path)
-            .await
-            .expect("open payload")
-            .map_stream(|stream| stream.boxed());
-
-        let mut digest = sha256();
-        let measured = source.measure(&mut digest).await.expect("measure payload");
-
-        assert_eq!(measured.size_bytes(), 5_000);
-        assert!(
-            measured.spool.is_none(),
-            "a file-backed payload must not be copied to be read twice"
-        );
-        assert_eq!(digest.finish(), Checksum::sha256(&payload));
-    }
-
-    /// A source that cannot be read again is spooled so the second pass has
-    /// something to read, and the spool goes away with the payload.
-    #[tokio::test]
-    async fn a_pipe_source_is_spooled_and_the_spool_is_reclaimed() {
-        let payload = vec![9u8; 5_000];
-        let source = PayloadSource::reader(std::io::Cursor::new(payload.clone()));
-
-        let mut digest = sha256();
-        let measured = source.measure(&mut digest).await.expect("measure payload");
-
-        assert_eq!(measured.size_bytes(), 5_000);
-        assert_eq!(digest.finish(), Checksum::sha256(&payload));
-        let spool_path = measured.path.clone();
-        assert!(spool_path.exists(), "the second pass has nothing to read");
-
-        let mut reread = Vec::new();
-        let (mut stream, size_bytes) = measured.reread().await.expect("re-read").into_stream();
-        while let Some(chunk) = stream.next().await {
-            reread.extend_from_slice(&chunk.expect("read a chunk"));
-        }
-        assert_eq!(size_bytes, Some(5_000));
-        assert_eq!(reread, payload);
-
-        drop(stream);
-        drop(measured);
-        assert!(!spool_path.exists(), "the spool outlived the upload");
-    }
-
-    fn sha256() -> StreamingChecksum {
-        StreamingChecksum::for_algorithm(loonfs_api::ChecksumAlgorithm::Sha256)
     }
 
     /// A reader-backed source declares no length, which is exactly the

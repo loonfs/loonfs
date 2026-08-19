@@ -675,7 +675,7 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             created_at_ms: 1_000,
             transport: UploadSessionTransport::DirectPut {
-                promised_content: sample_content_ref(),
+                checksum_algorithm: ChecksumAlgorithm::Sha256,
             },
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
@@ -1042,71 +1042,51 @@ fn upload_sessions_reject_a_reference_to_another_content_object() {
             payload["transport"]["staging"]["content_ref"]["content_id"] = other.clone();
         },
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+}
+
+/// Direct-put session records from before completion claims moved to the
+/// completion request fail with the retired field named in the error.
+#[test]
+fn direct_put_sessions_reject_the_pre_completion_claim_record() {
+    let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
-        |payload| payload["transport"]["promised_content"]["content_id"] = other.clone(),
+        |payload| {
+            payload["transport"]
+                .as_object_mut()
+                .expect("transport object")
+                .remove("checksum_algorithm");
+            payload["transport"]["promised_content"] =
+                serde_json::to_value(sample_content_ref()).expect("content ref");
+        },
+    );
+    assert!(
+        message.contains("unknown field `promised_content`"),
+        "unexpected refusal: {message}"
     );
 }
 
-/// A direct-put session settles on exactly the reference its write was
-/// signed against: the provider enforced that digest over those bytes, and
-/// completion read that object back against the same reference. A completed
-/// reference that drifts from the promise names content nobody proved.
 #[test]
-fn direct_put_sessions_reject_a_completion_that_drifts_from_the_promise() {
-    let fixture = "control_upload_session_direct_put.v1.json";
-    // Completing the open fixture on its own promise is a record that
-    // decodes, so the two edits below are refused for the drift alone.
-    decode_control_object::<UploadSessionState>(
-        &control_document_with_payload_edit(fixture, complete_on_the_promise(|_| {})),
+fn completed_direct_put_sessions_require_the_dictated_algorithm() {
+    let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
-    )
-    .expect("a direct_put session completed on its own promise");
-
-    for message in [
-        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-            fixture,
-            ControlObjectKind::UploadSession,
-            complete_on_the_promise(|content_ref| {
-                content_ref["size_bytes"] = serde_json::Value::from(11);
-            }),
-        ),
-        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-            fixture,
-            ControlObjectKind::UploadSession,
-            complete_on_the_promise(|content_ref| {
-                content_ref["checksum"]["value"] = serde_json::Value::from("0".repeat(64));
-            }),
-        ),
-    ] {
-        assert!(
-            message.contains("never promised"),
-            "unexpected refusal: {message}"
-        );
-    }
-}
-
-/// Edits an open `direct_put` payload into a completed one carrying the
-/// transport's own promise, then lets the caller drift the reference it
-/// settled on.
-fn complete_on_the_promise(
-    drift: impl FnOnce(&mut serde_json::Value),
-) -> impl FnOnce(&mut serde_json::Value) {
-    move |payload| {
-        let promised = payload["transport"]["promised_content"].clone();
-        payload["state"] = serde_json::json!({
-            "kind": "completed",
-            "completed_at_ms": 2_000,
-            "content_ref": promised,
-        });
-        drift(&mut payload["state"]["content_ref"]);
-    }
+        |payload| {
+            payload["transport"] = serde_json::json!({
+                "kind": "direct_put",
+                "checksum_algorithm": "crc32c"
+            });
+        },
+    );
+    assert!(
+        message.contains("requires `crc32c` but its completed content uses `sha256`"),
+        "unexpected refusal: {message}"
+    );
 }
 
 /// Each transport carries its own details, and carries all of them. A
-/// direct-put session that never recorded the reference its write was
-/// signed against could not check what landed; a multipart session missing
+/// direct-put session that never recorded its checksum algorithm could not
+/// validate a completion claim; a multipart session missing
 /// its provider upload could not assemble or clean up, and one missing its
 /// checksum algorithm could not safely sign or complete after a restart.
 /// None is a record that decodes.
@@ -1119,7 +1099,7 @@ fn upload_sessions_reject_a_transport_missing_its_own_fields() {
             payload["transport"]
                 .as_object_mut()
                 .expect("transport object")
-                .remove("promised_content");
+                .remove("checksum_algorithm");
         },
     );
     for missing in [

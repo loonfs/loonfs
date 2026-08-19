@@ -12,8 +12,8 @@ use crate::transport::test_transport::{self, Outcome};
 use futures::stream::StreamExt;
 use loonfs_api::v0::{DirectMultipartUpload, DirectPutUpload, UploadMode};
 use loonfs_api::{
-    direct_put_checksum_feature, CapabilityDocument, ContentId, ContentRef, ContentRefKind,
-    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    CapabilityDocument, ContentId, ContentRef, ContentRefKind, FEATURE_UPLOADS_DIRECT_PUT,
+    PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use loonfs_test_support::ids::content_ref;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -161,13 +161,8 @@ fn capabilities(direct_multipart: bool) -> Outcome {
 #[derive(Default, Clone, Copy)]
 struct Advertised {
     direct_multipart: bool,
-    /// The whole-object checksum this deployment says its provider
-    /// enforces, or `None` to advertise no `direct_put` at all.
-    ///
-    /// Providers do not agree on one -- the S3 family enforces SHA-256 and
-    /// GCS enforces CRC-32C -- so the shape is a parameter here for the same
-    /// reason it is a capability key on the wire: the client folds whichever
-    /// the deployment names.
+    /// The algorithm returned at begin, or `None` to advertise no
+    /// `direct_put` at all.
     direct_put: Option<ChecksumAlgorithm>,
     /// The service's own buffering cap, when the deployment advertises one.
     proxy_max_bytes: Option<u64>,
@@ -180,9 +175,8 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
         FEATURE_UPLOADS_DIRECT_MULTIPART.to_owned(),
         advertised.direct_multipart,
     )]);
-    if let Some(algorithm) = advertised.direct_put {
+    if advertised.direct_put.is_some() {
         features.insert(FEATURE_UPLOADS_DIRECT_PUT.to_owned(), true);
-        features.insert(direct_put_checksum_feature(algorithm).to_owned(), true);
     }
     let mut limits = std::collections::BTreeMap::new();
     if let Some(cap) = advertised.proxy_max_bytes {
@@ -199,12 +193,12 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
     })
 }
 
-fn begin_direct_put(content_ref: ContentRef) -> Outcome {
+fn begin_direct_put(checksum_algorithm: ChecksumAlgorithm) -> Outcome {
     json(&BeginUploadResponse::DirectPut {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
         direct_put: DirectPutUpload {
-            content_ref,
+            checksum_algorithm,
             access: ObjectTransferAccess::PresignedUrl {
                 method: "PUT".to_owned(),
                 url: "http://object.invalid/content".to_owned(),
@@ -264,6 +258,29 @@ fn completed(content_ref: ContentRef) -> Outcome {
             content_token: None,
         },
     })
+}
+
+#[tokio::test]
+async fn a_direct_put_observes_the_dictated_checksum_over_the_stream_sent() {
+    let first = Bytes::from_static(b"one ");
+    let second = Bytes::from_static(b"pass");
+    let source = PayloadSource::stream(
+        futures::stream::iter([Ok(first.clone()), Ok(second.clone())]).boxed(),
+    );
+    let (source, observation) = observed_direct_put_source(source, ChecksumAlgorithm::Crc32c);
+    let (mut stream, _) = source.into_stream();
+    let mut sent = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        sent.extend_from_slice(&chunk.expect("source chunk"));
+    }
+
+    let claim = observation
+        .lock()
+        .expect("direct PUT observation lock")
+        .finish();
+    assert_eq!(sent, b"one pass");
+    assert_eq!(claim.size_bytes, sent.len() as u64);
+    assert_eq!(claim.checksum, Checksum::crc32c(&sent));
 }
 
 fn commit_landed() -> Outcome {
@@ -637,7 +654,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        begin_direct_put(uploaded.clone()),
+        begin_direct_put(ChecksumAlgorithm::Sha256),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -664,12 +681,10 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
 /// signs no multipart — which is what the GCS adapter is.
 ///
 /// A length nobody knows is not a reason to fall to the service. The
-/// whole-object write's own first pass measures the payload without sending
-/// a byte, and that measurement is what routes it. Falling straight to the
-/// proxy here would stream an unmeasured payload — a pipe, a `tar` on
-/// stdin — at a cap it does not fit, and fail at the far end after moving
-/// every byte, with the one transport that could have carried it never
-/// asked.
+/// whole-object write counts and hashes the source while sending it. Falling
+/// straight to the proxy here would stream an unmeasured payload — a pipe, a
+/// `tar` on stdin — at a cap it does not fit, with the direct transport never
+/// attempted.
 #[tokio::test]
 async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     let payload = payload(64 * 1024);
@@ -686,7 +701,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
             proxy_max_bytes: Some(1_024),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024 * 1024),
         }),
-        begin_direct_put(uploaded.clone()),
+        begin_direct_put(ChecksumAlgorithm::Crc32c),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -707,24 +722,19 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
         .find(|sent| sent.url.starts_with("http://object.invalid/"))
         .expect("the payload went straight to object storage");
     assert_eq!(object_write.body_bytes(), payload.len());
-    // And the measuring pass still never held it: it folded and spooled.
+    // The source was consumed once and never held in full.
     assert_eq!(retention.total_bytes(), payload.len() as u64);
     assert!(
         retention.peak_live_bytes() <= 8 * 1024,
-        "the measuring pass accumulated the payload; peak was {}",
+        "the upload accumulated the payload; peak was {}",
         retention.peak_live_bytes()
     );
 }
 
-/// The other half of the same rule: measuring first does not push small
-/// payloads onto the direct write.
-///
-/// The pass decides nothing by itself — it produces a length, and the
-/// ordinary ladder routes on it. A payload the service will take goes
-/// through the service, exactly as it would have with its length known up
-/// front.
+/// An unknown length cannot be routed by its eventual size. Direct PUT is
+/// selected without a preflight read and observes the size during transfer.
 #[tokio::test]
-async fn a_small_unknown_length_payload_still_proxies() {
+async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
     let payload = payload(1_000);
     let uploaded = content_ref(&payload);
     let (source, _) = watched_source(&payload, 512);
@@ -737,12 +747,8 @@ async fn a_small_unknown_length_payload_still_proxies() {
             proxy_max_bytes: Some(4_096),
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024 * 1024),
         }),
-        begin_proxied(),
-        json(&UploadContentResponse {
-            namespace_id: namespace_id(),
-            upload_id: upload_id(),
-            content_ref: uploaded.clone(),
-        }),
+        begin_direct_put(ChecksumAlgorithm::Crc32c),
+        Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
     ]);
@@ -754,21 +760,18 @@ async fn a_small_unknown_length_payload_still_proxies() {
             &PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
-        .expect("a small unmeasured payload should still proxy");
+        .expect("an unmeasured payload should take the direct write");
 
-    assert!(
-        transport
-            .sent()
-            .into_iter()
-            .all(|sent| !sent.url.starts_with("http://object.invalid/")),
-        "a payload the service would take was sent straight to object storage"
-    );
+    let object_write = transport
+        .sent()
+        .into_iter()
+        .find(|sent| sent.url.starts_with("http://object.invalid/"))
+        .expect("the payload went straight to object storage");
+    assert_eq!(object_write.body_bytes(), payload.len());
 }
 
-/// A direct-put payload crosses the network in bounded pieces: the first
-/// pass measures it without holding it, and the second streams it from
-/// where that pass left it. Nothing on either side of the digest ever holds
-/// the payload whole.
+/// A direct-put payload crosses the network in bounded pieces. The same pass
+/// counts, hashes, and sends it without holding the complete payload.
 #[tokio::test]
 async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     let payload = payload(TEST_PAYLOAD_BYTES);
@@ -781,7 +784,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        begin_direct_put(uploaded.clone()),
+        begin_direct_put(ChecksumAlgorithm::Sha256),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -796,17 +799,16 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
         .await
         .expect("a large streamed direct put should land");
 
-    // Pass one: the source's own chunks were folded and spooled, never
-    // accumulated.
+    // The source's own chunks were folded and sent once, never accumulated.
     assert_eq!(retention.total_bytes(), TEST_PAYLOAD_BYTES as u64);
     assert!(
         retention.peak_live_bytes() <= 2 * TEST_PART_BYTES,
-        "the measuring pass accumulated the payload; peak was {}",
+        "the upload accumulated the payload; peak was {}",
         retention.peak_live_bytes()
     );
 
-    // Pass two: the request body arrived in many bounded pieces, so no
-    // single allocation ever held the payload.
+    // The request body arrived in many bounded pieces, so no single
+    // allocation held the payload.
     let object_write = transport
         .sent()
         .into_iter()
@@ -818,7 +820,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
         "a payload sent in one piece was assembled whole somewhere"
     );
     assert!(
-        object_write.largest_body_chunk() <= crate::payload::SOURCE_CHUNK_BYTES,
+        object_write.largest_body_chunk() <= TEST_PART_BYTES as usize,
         "one body piece was larger than a source read: {} bytes",
         object_write.largest_body_chunk()
     );
@@ -841,10 +843,10 @@ async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy(
     assert_eq!(transport.attempts(), 1);
 }
 
-/// A file-backed direct PUT reopens the source for its second pass instead of
-/// copying it to memory or a spool file.
+/// A file-backed direct PUT reads the source once without copying it to a
+/// spool file.
 #[tokio::test]
-async fn a_file_backed_direct_put_re_reads_the_file_rather_than_spooling_it() {
+async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
     let payload = payload(TEST_PAYLOAD_BYTES);
     let uploaded = content_ref(&payload);
     let directory = tempfile::tempdir().expect("tempdir");
@@ -859,7 +861,7 @@ async fn a_file_backed_direct_put_re_reads_the_file_rather_than_spooling_it() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        begin_direct_put(uploaded.clone()),
+        begin_direct_put(ChecksumAlgorithm::Sha256),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -883,7 +885,7 @@ async fn a_file_backed_direct_put_re_reads_the_file_rather_than_spooling_it() {
     assert_eq!(
         left_behind,
         vec![std::ffi::OsString::from("payload.bin")],
-        "a file-backed payload should be re-read, not copied"
+        "a file-backed payload should not be copied"
     );
 
     let object_write = transport

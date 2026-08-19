@@ -143,11 +143,10 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
 /// provider's own stored checksum and size.
 ///
 /// This is the completion check for bytes that never passed through the
-/// LoonFS server. It verifies rather than trusts: the presigned write is
-/// checksum-bound, but a provider that accepts a wrong claim at assembly
-/// time (Cloudflare R2 does, at multipart completion) would otherwise leave
-/// a corrupt object publishable. One `HeadObject` with checksum mode enabled
-/// answers both questions and moves no payload.
+/// LoonFS server. It verifies rather than trusts: a provider can accept bytes
+/// that do not match the completion claim, and multipart assembly can do the
+/// same. One `HeadObject` with checksum mode enabled answers both questions
+/// and moves no payload.
 ///
 /// A caller that gets a mismatch owns the repair: the object sits at a
 /// random id nothing references yet, so deleting it costs nothing and

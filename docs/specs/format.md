@@ -275,11 +275,10 @@ The surrounding field defines coverage. `ContentRef.checksum` and
 one multipart upload part. A `checksum_algorithm` field selects an algorithm
 but does not contain a checksum.
 
-Service-proxied uploads produce SHA-256. Direct PUT uses the algorithm
-advertised by `core.uploads.direct_put.checksum.<algorithm>`. Direct multipart
-uses the algorithm stored in the session, currently CRC-64/NVME. For direct
-uploads, LoonFS accepts a client checksum only after the provider enforces it
-and completion verifies the stored object.
+Service-proxied uploads produce SHA-256. Direct PUT uses the algorithm returned
+when the session begins. Direct multipart uses the algorithm stored in the
+session, currently CRC-64/NVME. For direct uploads, LoonFS accepts a client
+checksum only after completion verifies the provider's stored object.
 
 Metadata materialization tables include canonical metadata families and
 validated derived families. The canonical families are `inodes`,
@@ -1785,9 +1784,8 @@ The session chooses a `transport` when it opens and never changes it:
   receives. It is `idle`, `claimed` while one request owns the upload, or
   `staged { content_ref }` after validation. The upload-session lease bounds
   an abandoned claim.
-- `direct_put`: `promised_content`, the content reference the presigned write
-  is signed against. The provider enforces its checksum, and completion
-  verifies the stored object against the same reference.
+- `direct_put`: `checksum_algorithm`, the provider's durable whole-object
+  checksum algorithm. The client supplies size and checksum at completion.
 - `direct_multipart`: `provider_upload_id`, `part_size_bytes`, and
   `checksum_algorithm`. The algorithm applies to part signing and completion.
 
@@ -1808,15 +1806,13 @@ exclusive states.
 Three invariants are checked when the record is read, because the shape cannot
 express them:
 
-- Every content reference the record holds — the transport's promise or
-  staged reference, and the completed reference — names the record's own
-  `content_id`. A record that disagrees with itself describes two objects and
-  could verify one while publishing the other.
+- Every content reference the record holds — a staged or completed reference —
+  names the record's own `content_id`. A record that disagrees with itself
+  describes two objects and could verify one while publishing the other.
 - The record carries a `transport` and a `state`. Neither has a default and
   neither may be omitted.
-- A `direct_put` session's `completed` reference equals its
-  `promised_content` in full, which is the reference the provider enforced
-  and completion read back.
+- A completed `direct_put` session's checksum uses the transport's stored
+  `checksum_algorithm`.
 
 A record that fails any invariant is rejected as corrupt. Upload sessions use
 control-object format version 1. Intermediate pre-release encodings are not

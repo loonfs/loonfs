@@ -313,13 +313,9 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .await
         .expect("create direct-put namespace");
     let payload = request.content_utf8.as_bytes();
-    let claim = UploadContentClaim {
-        size_bytes: payload.len() as u64,
-        checksum: Checksum::sha256(payload),
-    };
     let begin = harness
         .client
-        .begin_direct_put(&namespace, claim)
+        .begin_direct_put(&namespace, Some(payload.len() as u64))
         .await
         .expect("begin direct PUT");
     let (upload_id, direct_put) = match begin {
@@ -331,12 +327,10 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         other => panic!("expected direct_put, found {other:?}"),
     };
     assert_eq!(expected.mode, "direct_put");
-    assert_eq!(direct_put.content_ref.size_bytes, expected.size_bytes);
     assert_eq!(
-        direct_put.content_ref.checksum.algorithm.as_str(),
+        direct_put.checksum_algorithm.as_str(),
         expected.checksum_algorithm
     );
-    assert!(direct_put.content_ref.checksum.matches(payload));
 
     harness
         .client
@@ -345,7 +339,16 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .expect("transfer direct PUT");
     let completed = harness
         .client
-        .complete_upload(&namespace, &upload_id, &CompleteUploadRequest::DirectPut {})
+        .complete_upload(
+            &namespace,
+            &upload_id,
+            &CompleteUploadRequest::DirectPut {
+                content: UploadContentClaim {
+                    size_bytes: payload.len() as u64,
+                    checksum: Checksum::compute(direct_put.checksum_algorithm, payload),
+                },
+            },
+        )
         .await
         .expect("complete direct PUT");
     let content_ref = completed
@@ -353,7 +356,12 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .expect("completed content ref")
         .clone();
     let content_token = completed.content_token().cloned();
-    assert_eq!(content_ref, direct_put.content_ref);
+    assert_eq!(content_ref.size_bytes, expected.size_bytes);
+    assert_eq!(
+        content_ref.checksum.algorithm.as_str(),
+        expected.checksum_algorithm
+    );
+    assert!(content_ref.checksum.matches(payload));
 
     let spec = namespace_path(&request.namespace_id, &request.path);
     let committed = harness

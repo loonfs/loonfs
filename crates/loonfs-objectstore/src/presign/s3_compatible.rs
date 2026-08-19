@@ -14,14 +14,13 @@ use crate::presign::v4::{
 use crate::ObjectStoreError;
 use base64::Engine as _;
 use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::{Checksum, ChecksumAlgorithm, ContentRef, ContentRefKind, SecretString};
+use loonfs_api::{Checksum, ChecksumAlgorithm, SecretString};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime};
 
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
-const S3_SHA256_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 const S3_CRC64NVME_CHECKSUM_HEADER: &str = "x-amz-checksum-crc64nvme";
 const S3_CHECKSUM_ALGORITHM_HEADER: &str = "x-amz-checksum-algorithm";
 /// Pins every multipart upload LoonFS opens to a whole-object checksum.
@@ -77,7 +76,7 @@ pub struct S3PresignerConfig {
     pub direct_put_max_content_bytes: u64,
 }
 
-/// Issues checksum-bound, create-only SigV4 PUT capabilities for S3-compatible providers.
+/// Issues create-only SigV4 PUT capabilities for S3-compatible providers.
 #[derive(Debug, Clone)]
 pub struct S3CompatiblePresigner {
     config: S3PresignerConfig,
@@ -393,9 +392,8 @@ impl S3CompatiblePresigner {
 }
 
 impl DirectPutIssuer for S3CompatiblePresigner {
-    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
-        // The signed header this presigner binds a body to.
-        ChecksumAlgorithm::Sha256
+    fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
+        ChecksumAlgorithm::Crc64nvme
     }
 
     fn max_content_bytes(&self) -> u64 {
@@ -407,11 +405,10 @@ impl DirectPutIssuer for S3CompatiblePresigner {
         request: PresignedPutRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let required_headers = s3_direct_put_required_headers(request.content_ref)?;
         self.presign(
             "PUT",
             request.object_key,
-            required_headers,
+            BTreeMap::from([(S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned())]),
             request.expires_in,
             now,
         )
@@ -484,42 +481,6 @@ fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
-fn s3_direct_put_required_headers(content_ref: &ContentRef) -> Result<BTreeMap<String, String>> {
-    Ok(BTreeMap::from([
-        (S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned()),
-        (
-            S3_SHA256_CHECKSUM_HEADER.to_owned(),
-            s3_sha256_checksum_header(content_ref)?,
-        ),
-    ]))
-}
-
-/// Converts the reference's stored checksum into the base64 spelling the
-/// S3 family signs, so the provider refuses any body that does not hash to it.
-fn s3_sha256_checksum_header(content_ref: &ContentRef) -> Result<String> {
-    if content_ref.kind != ContentRefKind::BlobV1 {
-        return Err(invalid_direct_put_content(
-            "direct_put only supports blob_v1 content refs",
-        ));
-    }
-    // Single PUT is the only direct producer today, and it signs a SHA-256.
-    // The CRC algorithms exist in the format for direct multipart, which
-    // presigns nothing.
-    if content_ref.checksum.algorithm != ChecksumAlgorithm::Sha256 {
-        return Err(invalid_direct_put_content(
-            "direct_put requires a sha256 checksum",
-        ));
-    }
-    content_ref
-        .checksum
-        .validate()
-        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
-    let digest = hex_decode_bytes(&content_ref.checksum.value)
-        .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
-
-    Ok(base64::engine::general_purpose::STANDARD.encode(digest))
-}
-
 fn invalid_direct_put_content(message: &str) -> ObjectStoreError {
     ObjectStoreError::InvalidContentRef(message.to_owned())
 }
@@ -546,18 +507,10 @@ mod tests {
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
     use crate::ObjectStoreError;
-    use loonfs_api::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind};
     use std::time::{Duration, UNIX_EPOCH};
 
     const CONTENT_KEY: &str =
         "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef";
-
-    fn content_ref() -> ContentRef {
-        ContentRef::blob_v1(
-            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id"),
-            b"hello",
-        )
-    }
 
     fn presigner(key_prefix: Option<&str>, endpoint_url: Option<&str>) -> S3CompatiblePresigner {
         S3CompatiblePresigner::new(S3PresignerConfig {
@@ -580,7 +533,6 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    content_ref: &content_ref(),
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -592,19 +544,13 @@ mod tests {
             signed.headers.get("if-none-match").map(String::as_str),
             Some("*")
         );
-        assert_eq!(
-            signed
-                .headers
-                .get("x-amz-checksum-sha256")
-                .map(String::as_str),
-            Some("LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=")
-        );
+        assert!(!signed.headers.contains_key("x-amz-checksum-sha256"));
         assert!(signed
             .url
             .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/content-stores/"));
         assert!(signed
             .url
-            .contains("X-Amz-SignedHeaders=host%3Bif-none-match%3Bx-amz-checksum-sha256"));
+            .contains("X-Amz-SignedHeaders=host%3Bif-none-match"));
         assert!(!signed.url.contains("secret"));
     }
 
@@ -680,7 +626,6 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    content_ref: &content_ref(),
                     expires_in: Duration::from_secs(900),
                 },
                 now,
@@ -762,43 +707,6 @@ mod tests {
     }
 
     #[test]
-    fn presigned_put_rejects_content_refs_it_cannot_bind_to_the_write() {
-        let signer = presigner(None, None);
-        let unsupported_kind = ContentRef {
-            kind: ContentRefKind::Unsupported("future_kind".to_owned()),
-            ..content_ref()
-        };
-        let crc_only = ContentRef {
-            checksum: Checksum {
-                algorithm: ChecksumAlgorithm::Crc64nvme,
-                value: "bbb7305bdf118bcb".to_owned(),
-            },
-            ..content_ref()
-        };
-        let malformed_sha256 = ContentRef {
-            checksum: Checksum {
-                algorithm: ChecksumAlgorithm::Sha256,
-                value: "A".repeat(64),
-            },
-            ..content_ref()
-        };
-
-        for content_ref in [unsupported_kind, crc_only, malformed_sha256] {
-            let error = signer
-                .presign_put(
-                    PresignedPutRequest {
-                        object_key: CONTENT_KEY,
-                        content_ref: &content_ref,
-                        expires_in: Duration::from_secs(900),
-                    },
-                    UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-                )
-                .expect_err("unsignable content ref");
-            assert!(matches!(error, ObjectStoreError::InvalidContentRef(_)));
-        }
-    }
-
-    #[test]
     fn presigned_put_accepts_bucket_specific_custom_endpoint() {
         let signed = presigner(
             Some("tenant-a"),
@@ -807,7 +715,6 @@ mod tests {
         .presign_put(
             PresignedPutRequest {
                 object_key: CONTENT_KEY,
-                content_ref: &content_ref(),
                 expires_in: Duration::from_secs(900),
             },
             UNIX_EPOCH + Duration::from_secs(1_700_000_000),

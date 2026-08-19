@@ -3260,7 +3260,6 @@ mod direct_download {
         v0::{CompleteMultipartUploadRequest, UploadContentClaim},
         Checksum, ChecksumAlgorithm, RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET,
         FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-        FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC32C, FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256,
         LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     };
     use loonfs_objectstore::presign::{
@@ -3352,7 +3351,7 @@ mod direct_download {
     }
 
     impl DirectPutIssuer for LoopbackIssuer {
-        fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+        fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
             self.checksum_algorithm
         }
 
@@ -3787,12 +3786,10 @@ mod direct_download {
             !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
             "a provider with no multipart API must not advertise one"
         );
-        assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256));
-        assert_eq!(
-            advertised.direct_put_checksum_algorithm(),
-            Some(ChecksumAlgorithm::Sha256),
-            "a client folds the algorithm the deployment names, not one it assumed"
-        );
+        assert!(advertised
+            .features
+            .keys()
+            .all(|feature| !feature.starts_with("core.uploads.direct_put.checksum.")));
         assert_eq!(
             advertised
                 .limits
@@ -3825,13 +3822,7 @@ mod direct_download {
             .await
             .expect("create namespace");
         let begin = client
-            .begin_direct_put(
-                &namespace_id,
-                UploadContentClaim {
-                    size_bytes: 5,
-                    checksum: Checksum::sha256(b"hello"),
-                },
-            )
+            .begin_direct_put(&namespace_id, Some(5))
             .await
             .expect("begin direct put");
 
@@ -3894,19 +3885,17 @@ mod direct_download {
         )
         .await;
 
-        // The deployment names crc32c, and names only crc32c.
+        // The deployment advertises direct PUT without checksum feature keys.
         let advertised = client.capabilities().await.expect("capabilities");
         assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT));
         assert!(advertised.supports(FEATURE_DOWNLOADS_DIRECT_GET));
-        assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_CRC32C));
-        assert!(!advertised.supports(FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256));
+        assert!(advertised
+            .features
+            .keys()
+            .all(|feature| !feature.starts_with("core.uploads.direct_put.checksum.")));
         assert!(
             !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
             "this adapter signs no multipart for GCS, so the key must be absent"
-        );
-        assert_eq!(
-            advertised.direct_put_checksum_algorithm(),
-            Some(ChecksumAlgorithm::Crc32c)
         );
 
         let namespace = namespace_id("ladder-crc32c-put");
@@ -3960,7 +3949,6 @@ mod direct_download {
             FEATURE_UPLOADS_DIRECT_PUT,
             FEATURE_UPLOADS_DIRECT_MULTIPART,
             FEATURE_DOWNLOADS_DIRECT_GET,
-            FEATURE_UPLOADS_DIRECT_PUT_CHECKSUM_SHA256,
         ] {
             assert!(!advertised.supports(feature), "unexpected `{feature}`");
         }

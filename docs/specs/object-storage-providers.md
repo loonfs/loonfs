@@ -24,12 +24,12 @@ This document is a non-normative reference: provider limits and performance data
 ## 3. Proven providers and direct-put
 
 Direct-put hands a presigned PUT to the client, then trusts the object-store
-provider to enforce every signed checksum and create-only precondition. Those
-preconditions are the safety argument: the checksum binds the stored bytes to
-the requested content reference, and create-only behavior prevents a client
-from replacing an immutable content object. A provider that accepts the HMAC
-signature but silently ignores either precondition breaks that argument.
-HMAC-compatible gateways have been observed doing exactly that.
+provider to preserve a create-only precondition and report a durable checksum.
+Create-only behavior prevents a client from replacing an immutable content
+object. Completion compares the client's byte count and checksum with the
+provider's stored facts before the object can be published. HMAC-compatible
+gateways have been observed ignoring preconditions, so signature compatibility
+alone is not enough.
 
 LoonFS represents every checksum as
 `{"algorithm":"sha256","value":"<64 lowercase hex>"}`. The surrounding
@@ -41,15 +41,12 @@ Two things must both hold for direct-put to be available, and
 the bundle *is* the decision, so nothing above the object-store crate asks
 configuration the question a second time:
 
-1. **The adapter can presign a request that binds the content ref's digest.**
-   The S3-compatible adapters (AWS S3 and Cloudflare R2) issue a presigned
-   PUT carrying a signed `x-amz-checksum-sha256` and `if-none-match: *`.
-   Google Cloud Storage issues the same guarantee in its own spellings: a
-   native `GOOG4-RSA-SHA256` signed URL carrying a signed
-   `x-goog-hash: crc32c=<base64>` and `x-goog-if-generation-match: 0`, which
-   is create-only. Azure Blob can presign and enforce create-only but
-   validates only MD5, which this format does not name; the local filesystem
-   has no signing surface at all.
+1. **The adapter can presign a create-only request and read back a stored
+   checksum.** The S3-compatible adapters (AWS S3 and Cloudflare R2) sign
+   `if-none-match: *` and read the stored CRC-64/NVME after the PUT. Google
+   Cloud Storage signs `x-goog-if-generation-match: 0` through its native
+   `GOOG4-RSA-SHA256` API and reads the stored CRC-32C. Azure Blob and the local
+   filesystem do not offer this direct-transfer contract.
 
    GCS's *S3-interoperability* surface is banned outright and is not the
    route here. Live conformance proved it accepts the signature and then
@@ -81,26 +78,23 @@ Where both hold, the server advertises `core.uploads.direct_put` in its
 capability document and accepts the mode. Everywhere else the feature key is
 absent and beginning that mode answers `not_supported`. There is no override:
 a provider that has not been proven does not get the capability, because the
-whole point of the gate is that the provider — not LoonFS — is being trusted to
-enforce the preconditions. An implementation passing its own unit tests is
-not that evidence; only a run against the live provider is.
+provider — not LoonFS — is being trusted to preserve the precondition and
+report stored facts. An implementation passing its own unit tests is not that
+evidence; only a run against the live provider is.
 
-The digest a provider binds is its own, not a fixed one. The deployment names
-it in `core.uploads.direct_put.checksum.<algorithm>`, and the client folds
-that digest while staging; a claim in any other algorithm is refused at
-begin. That is what lets GCS join at all: it validates CRC-32C, the S3 family
-validates SHA-256, and the client learns which from the capability document
-rather than from the backend kind. The provider's single-request ceiling is
-advertised the same way, as `upload.direct_put_max_content_bytes` — 5 GiB on
+The stored digest is provider-specific. The direct-PUT begin response names
+the algorithm, and the client folds it over the bytes while uploading. A
+completion claim in another algorithm is refused. GCS reports CRC-32C; the S3
+family reports CRC-64/NVME. The provider's single-request ceiling is advertised
+as `upload.direct_put_max_content_bytes` — 5 GiB on
 AWS S3, 5 MiB less than that on R2, which documents the smaller single-part
 maximum of the two, and 5 TiB on GCS, which documents one object-size
 maximum and no separate single-request one.[^1]
 
 A deployment's `direct_put` issuer and its stored-checksum readback have to
 name the same algorithm, because completion compares one against the other.
-That is not a rule anyone remembers: a provider adapter that signs CRC-32C
-reads CRC-32C back, from the same adapter, and a provider that cannot report
-a stored checksum at all cannot offer `direct_put` either.
+The issuer reports the algorithm directly, and a provider that cannot report a
+stored checksum cannot offer `direct_put`.
 
 Browser callers reading or writing through these URLs need CORS configured on
 the bucket or container itself; LoonFS issues the capability and the provider
