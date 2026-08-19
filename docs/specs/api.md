@@ -2111,7 +2111,7 @@ Representative content-upload response:
 Representative complete-upload request:
 
 ```json
-{}
+{ "mode": "service_proxied" }
 ```
 
 Representative complete-upload response:

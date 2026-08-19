@@ -8,6 +8,10 @@ mod openapi_postprocess;
 
 const OPENAPI_JSON_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/openapi.json");
+const PROXY_OPENAPI_JSON_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/specs/openapi-proxy.json"
+);
 const OPENAPI_PATH_SOURCES: &[&str] = &[
     include_str!("../../src/http/mod.rs"),
     include_str!("../../src/http/handlers_downloads.rs"),
@@ -20,16 +24,23 @@ const OPENAPI_PATH_SOURCES: &[&str] = &[
 ];
 
 #[test]
-fn openapi_static_file_is_current() {
-    let mut generated =
-        openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
-            .expect("generate openapi json");
-    generated.push('\n');
-    let committed = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
+fn openapi_static_files_are_current() {
+    let (mut full, mut proxy) =
+        openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())
+            .expect("generate full and proxy OpenAPI JSON");
+    full.push('\n');
+    proxy.push('\n');
 
     assert_eq!(
-        generated, committed,
-        "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- docs/specs/openapi.json`"
+        full,
+        std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+        "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- --proxy-output docs/specs/openapi-proxy.json docs/specs/openapi.json`"
+    );
+    assert_eq!(
+        proxy,
+        std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH)
+            .expect("read static proxy openapi json"),
+        "docs/specs/openapi-proxy.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- --proxy-output docs/specs/openapi-proxy.json docs/specs/openapi.json`"
     );
 }
 
@@ -391,6 +402,189 @@ fn openapi_operation_ids_match_the_public_registry() {
         operation_ids,
         openapi_postprocess::OPENAPI_OPERATION_IDS,
         "operationIds changed; {REGISTRY_MESSAGE}"
+    );
+}
+
+#[test]
+fn proxy_operation_ids_match_the_allowlist() {
+    let registered = openapi_postprocess::OPENAPI_OPERATION_IDS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let allowlisted = openapi_postprocess::PROXY_OPERATIONS
+        .iter()
+        .map(|(operation_id, _)| *operation_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        allowlisted.len(),
+        openapi_postprocess::PROXY_OPERATIONS.len(),
+        "proxy operation IDs must be unique"
+    );
+    assert!(
+        allowlisted.is_subset(&registered),
+        "proxy operation IDs must be registered public operations"
+    );
+    assert!(
+        openapi_postprocess::PROXY_OPERATIONS
+            .windows(2)
+            .all(|pair| pair[0].0 < pair[1].0),
+        "proxy operations must stay sorted"
+    );
+
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
+    )
+    .expect("parse proxy openapi json");
+    let published = spec["paths"]
+        .as_object()
+        .expect("proxy openapi paths object")
+        .values()
+        .filter_map(Value::as_object)
+        .flat_map(|path_item| {
+            ["get", "post", "put", "delete", "patch"]
+                .into_iter()
+                .filter_map(|method| path_item.get(method))
+        })
+        .map(|operation| {
+            operation["operationId"]
+                .as_str()
+                .expect("proxy operation has an operation ID")
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(published, allowlisted);
+}
+
+#[test]
+fn proxy_paths_use_mounts_and_declare_no_security() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
+    )
+    .expect("parse proxy openapi json");
+    assert_eq!(spec["info"]["title"], "LoonFS Browser Proxy API");
+    assert_eq!(
+        spec["info"]["description"],
+        "API for browser clients that access namespaces through application mounts."
+    );
+    assert!(spec.get("security").is_none());
+    assert!(spec.pointer("/components/securitySchemes").is_none());
+    assert!(values_named(&spec, "security").next().is_none());
+
+    let tag_names = spec["tags"]
+        .as_array()
+        .expect("proxy tags array")
+        .iter()
+        .filter_map(|tag| tag["name"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(!tag_names.contains("system"));
+    assert!(!tag_names.contains("admin"));
+    let referenced_tags = spec["paths"]
+        .as_object()
+        .expect("proxy openapi paths object")
+        .values()
+        .flat_map(|path_item| path_item.as_object().expect("proxy path item").values())
+        .flat_map(|operation| operation["tags"].as_array().into_iter().flatten())
+        .filter_map(|tag| tag.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        tag_names, referenced_tags,
+        "every declared proxy tag must be referenced by a retained operation"
+    );
+
+    let paths = spec["paths"]
+        .as_object()
+        .expect("proxy openapi paths object");
+    for (path, path_item) in paths {
+        assert!(
+            !path.contains("namespace_id"),
+            "proxy path contains namespace_id: `{path}`"
+        );
+        assert!(!path.starts_with("/v0/admin/"));
+        assert!(!matches!(
+            path.as_str(),
+            "/health" | "/readiness" | "/metrics"
+        ));
+
+        for operation in ["get", "post", "put", "delete", "patch"]
+            .into_iter()
+            .filter_map(|method| path_item.get(method))
+        {
+            let operation_id = operation["operationId"]
+                .as_str()
+                .expect("proxy operation ID");
+            let scope = openapi_postprocess::PROXY_OPERATIONS
+                .iter()
+                .find_map(|(candidate, scope)| (*candidate == operation_id).then_some(*scope))
+                .expect("published proxy operation is allowlisted");
+            match scope {
+                openapi_postprocess::ProxyOperationScope::Unscoped => {
+                    assert_eq!(path, "/v0/capabilities");
+                }
+                openapi_postprocess::ProxyOperationScope::Mount => {
+                    assert!(path.starts_with("/v0/mounts/{mount}/"));
+                    let mount = operation["parameters"]
+                        .as_array()
+                        .expect("proxy operation parameters")
+                        .iter()
+                        .find(|parameter| parameter["in"] == "path" && parameter["name"] == "mount")
+                        .expect("proxy operation mount parameter");
+                    assert_eq!(mount["description"], "Application mount name");
+                    assert_eq!(mount["schema"], serde_json::json!({"type": "string"}));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn proxy_components_are_exactly_the_referenced_closure() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH).expect("read static proxy openapi json"),
+    )
+    .expect("parse proxy openapi json");
+    let components = spec["components"]
+        .as_object()
+        .expect("proxy components object");
+    let referenced = referenced_components(&spec);
+    let published = components
+        .iter()
+        .flat_map(|(component_type, entries)| {
+            entries
+                .as_object()
+                .unwrap_or_else(|| {
+                    panic!("proxy component group `{component_type}` must be an object")
+                })
+                .keys()
+                .map(move |component_name| (component_type.clone(), component_name.clone()))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(published, referenced);
+
+    let schemas = components["schemas"]
+        .as_object()
+        .expect("proxy schemas object");
+    for reference in string_values(&spec)
+        .filter_map(Value::as_str)
+        .filter_map(|reference| reference.strip_prefix("#/components/schemas/"))
+    {
+        let schema_name = decode_json_pointer_segment(reference);
+        assert!(
+            schemas.contains_key(&schema_name),
+            "proxy schema reference is missing: `{schema_name}`"
+        );
+    }
+}
+
+#[test]
+fn openapi_document_generation_is_byte_stable() {
+    let first = openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())
+        .expect("generate full and proxy OpenAPI JSON");
+    let second = openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())
+        .expect("generate full and proxy OpenAPI JSON again");
+    assert_eq!(first, second);
+    assert_eq!(
+        openapi_postprocess::proxy_openapi_json_pretty(&first.0)
+            .expect("derive proxy OpenAPI JSON again"),
+        first.1
     );
 }
 
@@ -1196,6 +1390,60 @@ fn values_named<'a>(value: &'a Value, name: &'a str) -> Box<dyn Iterator<Item = 
         ),
         _ => Box::new(std::iter::empty()),
     }
+}
+
+fn string_values(value: &Value) -> Box<dyn Iterator<Item = &Value> + '_> {
+    match value {
+        Value::String(_) => Box::new(std::iter::once(value)),
+        Value::Object(object) => Box::new(object.values().flat_map(string_values)),
+        Value::Array(values) => Box::new(values.iter().flat_map(string_values)),
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+fn referenced_components(spec: &Value) -> BTreeSet<(String, String)> {
+    let components = spec["components"]
+        .as_object()
+        .expect("proxy components object");
+    let mut pending = string_values(&spec["paths"])
+        .filter_map(Value::as_str)
+        .filter(|value| value.starts_with("#/components/"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut referenced = BTreeSet::new();
+
+    while let Some(reference) = pending.pop() {
+        let Some((component_type, component_name)) = component_reference_parts(&reference) else {
+            continue;
+        };
+        if !referenced.insert((component_type.clone(), component_name.clone())) {
+            continue;
+        }
+        let component = components
+            .get(&component_type)
+            .and_then(Value::as_object)
+            .and_then(|entries| entries.get(&component_name))
+            .unwrap_or_else(|| panic!("missing proxy component reference `{reference}`"));
+        pending.extend(
+            string_values(component)
+                .filter_map(Value::as_str)
+                .filter(|value| value.starts_with("#/components/"))
+                .map(str::to_owned),
+        );
+    }
+    referenced
+}
+
+fn component_reference_parts(reference: &str) -> Option<(String, String)> {
+    let mut parts = reference.strip_prefix("#/components/")?.split('/');
+    Some((
+        decode_json_pointer_segment(parts.next()?),
+        decode_json_pointer_segment(parts.next()?),
+    ))
+}
+
+fn decode_json_pointer_segment(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
 }
 
 fn collect_one_of_objects<'a>(

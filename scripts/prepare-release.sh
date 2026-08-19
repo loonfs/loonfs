@@ -7,13 +7,15 @@ usage() {
 Usage: prepare-release.sh --version <version>
 
 Updates the workspace version references, regenerates the OpenAPI
-specification, and refreshes Cargo.lock. It then runs the version and
+documents, and refreshes Cargo.lock. It then runs the version and
 OpenAPI checks used by the release workflow:
 
   Cargo.toml               workspace.package.version and the pinned
                            versions of the published workspace crates
   Chart.yaml               version and appVersion of the server chart
   docs/specs/openapi.json  regenerated from the server
+  docs/specs/openapi-proxy.json
+                           derived from the full OpenAPI document
   Cargo.lock               refreshed by the regeneration build
 
 Run it on a clean branch based on main after CI passes. Commit the result
@@ -61,6 +63,7 @@ cd "$repo_root"
 
 chart="crates/loonfs-server/deploy/helm/loonfs-server/Chart.yaml"
 spec="docs/specs/openapi.json"
+proxy_spec="docs/specs/openapi-proxy.json"
 
 git diff --quiet && git diff --cached --quiet \
     || die "the working tree has changes; prepare a release from a clean checkout"
@@ -96,9 +99,10 @@ sed "s/^version: .*\$/version: $version/
     "$chart" > "$chart.tmp"
 mv "$chart.tmp" "$chart"
 
-# Regenerate the specification because it includes the release version.
+# Regenerate both documents because they include the release version.
 # Cargo also refreshes Cargo.lock while building the OpenAPI generator.
-cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- "$spec"
+cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- \
+    --proxy-output "$proxy_spec" "$spec"
 
 # Run the version checks used by the release workflow.
 resolved=$(cargo pkgid -p loonfs-cli | sed 's/.*#//')
@@ -114,6 +118,8 @@ app_version=$(sed -n 's/^appVersion: *//p' "$chart" | tr -d '"')
 
 grep -q "\"version\": \"$version\"" "$spec" \
     || die "regenerated spec does not carry version $version"
+grep -q "\"version\": \"$version\"" "$proxy_spec" \
+    || die "regenerated proxy spec does not carry version $version"
 
 # Run the OpenAPI specification test with the same options used in CI.
 cargo test -p loonfs-server --features openapi --locked openapi

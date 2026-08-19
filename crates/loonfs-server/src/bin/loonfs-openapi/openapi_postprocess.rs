@@ -56,6 +56,33 @@ pub(crate) const OPENAPI_OPERATION_IDS: &[&str] = &[
     "upload_content",
 ];
 
+/// Whether a proxy operation uses a mount path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProxyOperationScope {
+    Unscoped,
+    Mount,
+}
+
+/// Operations included in the browser proxy document. Keep this table sorted.
+pub(crate) const PROXY_OPERATIONS: &[(&str, ProxyOperationScope)] = &[
+    ("abort_upload", ProxyOperationScope::Mount),
+    ("apply_commit", ProxyOperationScope::Mount),
+    ("begin_download", ProxyOperationScope::Mount),
+    ("begin_upload", ProxyOperationScope::Mount),
+    ("capabilities", ProxyOperationScope::Unscoped),
+    ("complete_upload", ProxyOperationScope::Mount),
+    ("get_file_bytes", ProxyOperationScope::Mount),
+    ("get_upload_status", ProxyOperationScope::Mount),
+    ("grep", ProxyOperationScope::Mount),
+    ("list_changes", ProxyOperationScope::Mount),
+    ("list_file_revisions", ProxyOperationScope::Mount),
+    ("list_path_entries", ProxyOperationScope::Mount),
+    ("list_trash", ProxyOperationScope::Mount),
+    ("sign_upload_parts", ProxyOperationScope::Mount),
+    ("stat_path", ProxyOperationScope::Mount),
+    ("upload_content", ProxyOperationScope::Mount),
+];
+
 /// Retry behavior for generated SDKs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RetryClass {
@@ -82,6 +109,18 @@ pub(crate) enum OpenapiPostprocessError {
     MissingRetryClassification { operation_id: String },
     #[error("OpenAPI union variant `{schema_name}` conflicts with an existing component schema")]
     UnionVariantSchemaCollision { schema_name: String },
+    #[error("proxy operation `{operation_id}` does not appear in the full OpenAPI document")]
+    MissingProxyOperation { operation_id: String },
+    #[error(
+        "proxy operation `{operation_id}` appears more than once in the full OpenAPI document"
+    )]
+    DuplicateProxyOperation { operation_id: String },
+    #[error("proxy operation `{operation_id}` has an unexpected path `{path}`")]
+    UnexpectedProxyPath { operation_id: String, path: String },
+    #[error("proxy operation `{operation_id}` has no `namespace_id` path parameter")]
+    MissingProxyNamespaceParameter { operation_id: String },
+    #[error("proxy document references a missing OpenAPI component `{reference}`")]
+    MissingProxyComponent { reference: String },
 }
 
 /// Retry class for each public operation.
@@ -170,6 +209,316 @@ pub(crate) fn openapi_json_pretty(
     extract_union_variants(&mut document)?;
     add_operation_retry_classes(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
+}
+
+/// Generates the full OpenAPI document and the browser proxy document.
+pub(crate) fn openapi_documents_pretty(
+    document: &(impl Serialize + ?Sized),
+) -> Result<(String, String), OpenapiPostprocessError> {
+    let full = openapi_json_pretty(document)?;
+    let proxy = proxy_openapi_json_pretty(&full)?;
+    Ok((full, proxy))
+}
+
+/// Builds the browser proxy document from the full OpenAPI JSON.
+pub(crate) fn proxy_openapi_json_pretty(
+    full_document: &str,
+) -> Result<String, OpenapiPostprocessError> {
+    let mut document = serde_json::from_str(full_document)?;
+    describe_proxy_document(&mut document);
+    derive_proxy_paths(&mut document)?;
+    remove_proxy_security(&mut document);
+    retain_referenced_tags(&mut document);
+    prune_proxy_components(&mut document)?;
+    Ok(serde_json::to_string_pretty(&document)?)
+}
+
+const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch"];
+const NAMESPACE_PATH_PREFIX: &str = "/v0/namespaces/{namespace_id}";
+const MOUNT_PATH_PREFIX: &str = "/v0/mounts/{mount}";
+
+fn describe_proxy_document(document: &mut Value) {
+    let info = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("info"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no info object");
+    info.insert(
+        "title".to_owned(),
+        Value::String("LoonFS Browser Proxy API".to_owned()),
+    );
+    info.insert(
+        "description".to_owned(),
+        Value::String(
+            "API for browser clients that access namespaces through application mounts.".to_owned(),
+        ),
+    );
+}
+
+fn derive_proxy_paths(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+    let paths = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("paths"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no paths object");
+    let mut derived_paths = Map::new();
+    let mut found_operations = BTreeSet::new();
+
+    for (path, path_item) in paths.iter() {
+        let path_item = path_item
+            .as_object()
+            .expect("OpenAPI path item is not an object");
+        let mut derived_path_item = Map::new();
+        let mut derived_path = None;
+
+        for (field, value) in path_item {
+            if !HTTP_METHODS.contains(&field.as_str()) {
+                derived_path_item.insert(field.clone(), value.clone());
+                continue;
+            }
+
+            let operation_id = value
+                .get("operationId")
+                .and_then(Value::as_str)
+                .expect("OpenAPI operation has no operationId");
+            let Some((_, scope)) = PROXY_OPERATIONS
+                .iter()
+                .find(|(candidate, _)| *candidate == operation_id)
+            else {
+                continue;
+            };
+            if !found_operations.insert(operation_id.to_owned()) {
+                return Err(OpenapiPostprocessError::DuplicateProxyOperation {
+                    operation_id: operation_id.to_owned(),
+                });
+            }
+
+            let operation_path = proxy_path(operation_id, path, *scope)?;
+            if let Some(existing) = &derived_path {
+                assert_eq!(
+                    existing, &operation_path,
+                    "one path item changed proxy scope"
+                );
+            } else {
+                derived_path = Some(operation_path);
+            }
+
+            let mut operation = value.clone();
+            operation
+                .as_object_mut()
+                .expect("OpenAPI operation is not an object")
+                .shift_remove("security");
+            if *scope == ProxyOperationScope::Mount
+                && rewrite_namespace_parameters(&mut operation) == 0
+            {
+                return Err(OpenapiPostprocessError::MissingProxyNamespaceParameter {
+                    operation_id: operation_id.to_owned(),
+                });
+            }
+            derived_path_item.insert(field.clone(), operation);
+        }
+
+        if let Some(derived_path) = derived_path {
+            derived_paths.insert(derived_path, Value::Object(derived_path_item));
+        }
+    }
+
+    for (operation_id, _) in PROXY_OPERATIONS {
+        if !found_operations.contains(*operation_id) {
+            return Err(OpenapiPostprocessError::MissingProxyOperation {
+                operation_id: (*operation_id).to_owned(),
+            });
+        }
+    }
+    *paths = derived_paths;
+    Ok(())
+}
+
+fn proxy_path(
+    operation_id: &str,
+    path: &str,
+    scope: ProxyOperationScope,
+) -> Result<String, OpenapiPostprocessError> {
+    match scope {
+        ProxyOperationScope::Unscoped => Ok(path.to_owned()),
+        ProxyOperationScope::Mount => path
+            .strip_prefix(NAMESPACE_PATH_PREFIX)
+            .map(|suffix| format!("{MOUNT_PATH_PREFIX}{suffix}"))
+            .ok_or_else(|| OpenapiPostprocessError::UnexpectedProxyPath {
+                operation_id: operation_id.to_owned(),
+                path: path.to_owned(),
+            }),
+    }
+}
+
+fn rewrite_namespace_parameters(operation: &mut Value) -> usize {
+    let Some(parameters) = operation
+        .as_object_mut()
+        .and_then(|operation| operation.get_mut("parameters"))
+        .and_then(|parameters| match parameters {
+            Value::Array(parameters) => Some(parameters),
+            _ => None,
+        })
+    else {
+        return 0;
+    };
+    let mut rewritten = 0;
+
+    for parameter in parameters {
+        let Some(parameter) = parameter.as_object_mut() else {
+            continue;
+        };
+        if parameter.get("in").and_then(Value::as_str) != Some("path")
+            || parameter.get("name").and_then(Value::as_str) != Some("namespace_id")
+        {
+            continue;
+        }
+        parameter.insert("name".to_owned(), Value::String("mount".to_owned()));
+        parameter.insert(
+            "description".to_owned(),
+            Value::String("Application mount name".to_owned()),
+        );
+        parameter.insert(
+            "schema".to_owned(),
+            Value::Object(IndexMap::from([(
+                "type".to_owned(),
+                Value::String("string".to_owned()),
+            )])),
+        );
+        rewritten += 1;
+    }
+    rewritten
+}
+
+fn remove_proxy_security(document: &mut Value) {
+    let document = document
+        .as_object_mut()
+        .expect("OpenAPI document is not an object");
+    document.shift_remove("security");
+    if let Some(components) = document
+        .get_mut("components")
+        .and_then(Value::as_object_mut)
+    {
+        components.shift_remove("securitySchemes");
+    }
+}
+
+/// Retains only tag definitions that a retained operation references, so a
+/// tag whose operations were all pruned does not survive as a dead entry.
+fn retain_referenced_tags(document: &mut Value) {
+    let mut referenced = BTreeSet::new();
+    if let Some(paths) = document.get("paths").and_then(Value::as_object) {
+        for path_item in paths.values() {
+            let Some(path_item) = path_item.as_object() else {
+                continue;
+            };
+            for (field, operation) in path_item {
+                if !HTTP_METHODS.contains(&field.as_str()) {
+                    continue;
+                }
+                let Some(tags) = operation.get("tags").and_then(Value::as_array) else {
+                    continue;
+                };
+                for tag in tags {
+                    if let Some(tag) = tag.as_str() {
+                        referenced.insert(tag.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let Some(tags) = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("tags"))
+        .and_then(|tags| match tags {
+            Value::Array(tags) => Some(tags),
+            _ => None,
+        })
+    else {
+        return;
+    };
+    tags.retain(|tag| {
+        tag.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| referenced.contains(name))
+    });
+}
+
+fn prune_proxy_components(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+    let mut pending = Vec::new();
+    collect_component_references(
+        document
+            .get("paths")
+            .expect("OpenAPI document has no paths object"),
+        &mut pending,
+    );
+    let mut referenced = BTreeSet::new();
+
+    while let Some(reference) = pending.pop() {
+        let Some((component_type, component_name)) = component_reference_parts(&reference) else {
+            continue;
+        };
+        if !referenced.insert((component_type.clone(), component_name.clone())) {
+            continue;
+        }
+        let component = document
+            .get("components")
+            .and_then(|components| components.get(&component_type))
+            .and_then(Value::as_object)
+            .and_then(|components| components.get(&component_name))
+            .ok_or_else(|| OpenapiPostprocessError::MissingProxyComponent {
+                reference: reference.clone(),
+            })?;
+        collect_component_references(component, &mut pending);
+    }
+
+    let components = document
+        .as_object_mut()
+        .and_then(|document| document.get_mut("components"))
+        .and_then(Value::as_object_mut)
+        .expect("OpenAPI document has no components object");
+    components.retain(|component_type, entries| {
+        let Some(entries) = entries.as_object_mut() else {
+            return false;
+        };
+        entries.retain(|component_name, _| {
+            referenced.contains(&(component_type.clone(), component_name.clone()))
+        });
+        !entries.is_empty()
+    });
+    Ok(())
+}
+
+fn collect_component_references(value: &Value, references: &mut Vec<String>) {
+    match value {
+        Value::String(value) => {
+            if value.starts_with("#/components/") {
+                references.push(value.clone());
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_component_references(value, references);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values() {
+                collect_component_references(value, references);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn component_reference_parts(reference: &str) -> Option<(String, String)> {
+    let mut parts = reference.strip_prefix("#/components/")?.split('/');
+    let component_type = decode_json_pointer_segment(parts.next()?);
+    let component_name = decode_json_pointer_segment(parts.next()?);
+    Some((component_type, component_name))
+}
+
+fn decode_json_pointer_segment(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
 }
 
 /// Adds `x-loonfs-retry` to every OpenAPI operation.
