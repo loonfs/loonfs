@@ -5024,52 +5024,6 @@
           }
         }
       },
-      "GrepRequest": {
-        "type": "object",
-        "description": "One content-search request.\n\nEvery field but `pattern` is optional, and each one selects results. A\nmisspelled `case_insensitive` or `path_prefix` would decode to the default\nand answer a different search than the caller asked for, with no sign that\nanything was dropped, so unknown fields are rejected.",
-        "required": [
-          "pattern"
-        ],
-        "properties": {
-          "allow_scan": {
-            "type": "boolean",
-            "description": "Permit a capped exhaustive scan when the pattern yields no required\ngrams. Refused beyond the server's scan budget."
-          },
-          "allow_stale": {
-            "type": "boolean",
-            "description": "When the unindexed tail exceeds the scan budget, return\nindexed-only results (reported via `tail_scanned: false`) instead\nof failing with `index_lagging`."
-          },
-          "case_insensitive": {
-            "type": "boolean",
-            "description": "Match case-insensitively. Verification is exact; the index remains\nconsulted through its case-folded grams."
-          },
-          "cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Resume cursor from a previous page. The cursor resumes strictly\nafter the last candidate the issuing page finished scanning and is\nbound to that page's request; each page is evaluated against the\nnamespace head at page time."
-          },
-          "limit": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Maximum matches per page.",
-            "minimum": 0
-          },
-          "path_prefix": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Restrict matches to files under this complete absolute path, resolved\nto a directory inode before candidates are filtered."
-          },
-          "pattern": {
-            "type": "string",
-            "description": "The pattern, in the Rust `regex` crate's dialect (no backreferences\nor lookaround). Its UTF-8 encoding must be at most 1024 bytes.\nPatterns that require no literal bytes are rejected with\n`query_unindexable` unless `allow_scan` is set."
-          }
-        },
-        "additionalProperties": false
-      },
       "GrepResponse": {
         "type": "object",
         "description": "One content-search page.",

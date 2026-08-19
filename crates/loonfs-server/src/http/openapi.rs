@@ -154,7 +154,6 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         DeletedDirentry,
         loonfs_api::v0::CommittedChange,
         ChangesResponse,
-        loonfs_api::v0::GrepRequest,
         loonfs_api::v0::GrepMatch,
         loonfs_api::v0::GrepResponse,
         loonfs_api::v0::GrepIndexLifecycle,
