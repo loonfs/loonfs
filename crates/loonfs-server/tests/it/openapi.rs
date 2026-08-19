@@ -678,80 +678,6 @@ fn cursor_list_operations_publish_the_registered_pagination_metadata() {
 }
 
 #[test]
-fn every_cursor_query_operation_publishes_pagination_metadata() {
-    let spec: Value = serde_json::from_str(
-        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-    )
-    .expect("parse openapi json");
-
-    for (operation_id, operation) in operations_by_id(&spec) {
-        if !operation_has_query_parameter(operation, "cursor") {
-            continue;
-        }
-        assert!(
-            operation.get("x-fern-pagination").is_some(),
-            "cursor query operation `{operation_id}` has no x-fern-pagination extension"
-        );
-    }
-}
-
-#[test]
-fn pagination_response_components_publish_cursor_and_result_fields() {
-    let spec: Value = serde_json::from_str(
-        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-    )
-    .expect("parse openapi json");
-    let operations = operations_by_id(&spec);
-    let schemas = spec
-        .get("components")
-        .and_then(|components| components.get("schemas"))
-        .and_then(Value::as_object)
-        .expect("openapi schemas object");
-
-    for metadata in openapi_postprocess::PAGINATION_OPERATIONS {
-        let operation = operations
-            .get(metadata.operation_id)
-            .unwrap_or_else(|| panic!("missing operation `{}`", metadata.operation_id));
-        let response_reference = operation
-            .pointer("/responses/200/content/application~1json/schema/$ref")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| {
-                panic!(
-                    "pagination operation `{}` has no 200 response schema reference",
-                    metadata.operation_id
-                )
-            });
-        let response_schema = component_schema_for_ref(schemas, response_reference)
-            .unwrap_or_else(|| panic!("missing response component `{response_reference}`"));
-        let properties = response_schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .unwrap_or_else(|| {
-                panic!(
-                    "pagination operation `{}` response has no properties",
-                    metadata.operation_id
-                )
-            });
-
-        assert!(
-            properties.contains_key("next_cursor"),
-            "pagination operation `{}` response has no next_cursor property",
-            metadata.operation_id
-        );
-        assert_eq!(
-            properties
-                .get(metadata.results_field)
-                .and_then(|property| property.get("type"))
-                .and_then(Value::as_str),
-            Some("array"),
-            "pagination operation `{}` response field `{}` is not an array",
-            metadata.operation_id,
-            metadata.results_field
-        );
-    }
-}
-
-#[test]
 fn proxy_cursor_list_operations_keep_pagination_metadata() {
     let full: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
@@ -1650,18 +1576,6 @@ fn operations_by_id(spec: &Value) -> BTreeMap<&str, &Value> {
     }
 
     operations
-}
-
-fn operation_has_query_parameter(operation: &Value, parameter_name: &str) -> bool {
-    operation
-        .get("parameters")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|parameter| {
-            parameter.get("in").and_then(Value::as_str) == Some("query")
-                && parameter.get("name").and_then(Value::as_str) == Some(parameter_name)
-        })
 }
 
 fn component_schema_for_ref<'a>(

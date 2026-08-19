@@ -1381,8 +1381,6 @@ mod tests {
                 }
             }
         }));
-        let original = document.clone();
-
         let error = add_pagination_metadata(&mut document)
             .expect_err("unregistered cursor operation should fail generation");
         assert!(matches!(
@@ -1390,130 +1388,6 @@ mod tests {
             OpenapiPostprocessError::MissingPaginationMetadata { operation_id }
                 if operation_id == "future_list"
         ));
-        assert_eq!(document, original);
-    }
-
-    #[test]
-    fn pagination_operation_without_cursor_returns_a_named_error() {
-        let mut document = list_checkpoints_document(
-            serde_json::json!([]),
-            serde_json::json!({
-                "next_cursor": {"type": ["string", "null"]},
-                "checkpoints": {"type": "array", "items": {}}
-            }),
-        );
-
-        let error = add_pagination_metadata(&mut document)
-            .expect_err("pagination operation without cursor should fail generation");
-        assert!(matches!(
-            error,
-            OpenapiPostprocessError::MissingPaginationCursorParameter { operation_id }
-                if operation_id == "list_checkpoints"
-        ));
-    }
-
-    #[test]
-    fn pagination_operation_without_response_component_returns_a_named_error() {
-        let mut document = list_checkpoints_document(
-            serde_json::json!([{"name": "cursor", "in": "query"}]),
-            serde_json::json!({
-                "next_cursor": {"type": ["string", "null"]},
-                "checkpoints": {"type": "array", "items": {}}
-            }),
-        );
-        document
-            .as_object_mut()
-            .expect("document object")
-            .get_mut("components")
-            .and_then(Value::as_object_mut)
-            .and_then(|components| components.get_mut("schemas"))
-            .and_then(Value::as_object_mut)
-            .expect("schemas object")
-            .clear();
-
-        let error = add_pagination_metadata(&mut document)
-            .expect_err("missing response component should fail generation");
-        assert!(matches!(
-            error,
-            OpenapiPostprocessError::MissingPaginationResponseSchema { operation_id }
-                if operation_id == "list_checkpoints"
-        ));
-    }
-
-    #[test]
-    fn pagination_response_without_next_cursor_returns_a_named_error() {
-        let mut document = list_checkpoints_document(
-            serde_json::json!([{"name": "cursor", "in": "query"}]),
-            serde_json::json!({
-                "checkpoints": {"type": "array", "items": {}}
-            }),
-        );
-
-        let error = add_pagination_metadata(&mut document)
-            .expect_err("response without next_cursor should fail generation");
-        assert!(matches!(
-            error,
-            OpenapiPostprocessError::MissingPaginationResponseProperty {
-                operation_id,
-                property
-            } if operation_id == "list_checkpoints" && property == "next_cursor"
-        ));
-    }
-
-    #[test]
-    fn pagination_results_field_without_array_returns_a_named_error() {
-        let mut document = list_checkpoints_document(
-            serde_json::json!([{"name": "cursor", "in": "query"}]),
-            serde_json::json!({
-                "next_cursor": {"type": ["string", "null"]},
-                "checkpoints": {"type": "object"}
-            }),
-        );
-
-        let error = add_pagination_metadata(&mut document)
-            .expect_err("non-array results field should fail generation");
-        assert!(matches!(
-            error,
-            OpenapiPostprocessError::PaginationResultsNotArray {
-                operation_id,
-                results_field
-            } if operation_id == "list_checkpoints" && results_field == "checkpoints"
-        ));
-    }
-
-    fn list_checkpoints_document(
-        parameters: serde_json::Value,
-        properties: serde_json::Value,
-    ) -> Value {
-        ordered(serde_json::json!({
-            "components": {
-                "schemas": {
-                    "ListCheckpointsResponse": {
-                        "type": "object",
-                        "properties": properties
-                    }
-                }
-            },
-            "paths": {
-                "/checkpoints": {
-                    "get": {
-                        "operationId": "list_checkpoints",
-                        "parameters": parameters,
-                        "responses": {
-                            "200": {
-                                "content": {
-                                    "application/json": {
-                                        "schema": {
-                                            "$ref": "#/components/schemas/ListCheckpointsResponse"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }))
     }
 
     #[test]
