@@ -2,7 +2,7 @@
 # Output is written locally through Docker.
 api:
   specs:
-    - openapi: ../docs/specs/openapi.json
+    - openapi: ../../docs/specs/openapi.json
 groups:
   go:
     generators:
@@ -13,18 +13,18 @@ groups:
             path: github.com/loonfs/loonfs-sdk-go
         output:
           location: local-file-system
-          path: ./generated/go
+          path: ../generated/go
   python:
     generators:
       - name: fernapi/fern-python-sdk
         version: 5.28.0
         output:
           location: local-file-system
-          path: ./generated/python
+          path: ../generated/python
   typescript:
     generators:
       - name: fernapi/fern-typescript-sdk
         version: 3.88.0
         output:
           location: local-file-system
-          path: ./generated/typescript
+          path: ../generated/typescript
