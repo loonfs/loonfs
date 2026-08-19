@@ -3028,7 +3028,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
-        "description": "Completes an upload using a body tagged with its stored mode. Service-proxied and direct-put sessions require only the `mode` tag. Direct-multipart sessions also require the content claim and completed parts.",
+        "description": "Completes an upload. The request mode must match the mode used to start the session. Direct-multipart requests also include the content claim and completed parts.",
         "operationId": "complete_upload",
         "parameters": [
           {
@@ -3051,7 +3051,7 @@
           }
         ],
         "requestBody": {
-          "description": "The `mode` tag must match the stored upload mode.",
+          "description": "The request mode must match the upload session.",
           "content": {
             "application/json": {
               "schema": {
@@ -4281,7 +4281,7 @@
           {
             "type": "object",
             "title": "CompleteUploadServiceProxied",
-            "description": "Complete a service-proxied session after its bytes have been uploaded.",
+            "description": "Complete a service-proxied upload.",
             "required": [
               "mode"
             ],
@@ -4297,7 +4297,7 @@
           {
             "type": "object",
             "title": "CompleteUploadDirectPut",
-            "description": "Complete a direct-PUT session after the provider accepted its object.",
+            "description": "Complete a direct-PUT upload.",
             "required": [
               "mode"
             ],
@@ -4313,7 +4313,7 @@
           {
             "type": "object",
             "title": "CompleteUploadDirectMultipart",
-            "description": "Complete a direct multipart session with its final claim and parts.",
+            "description": "Complete a direct multipart upload.",
             "required": [
               "content",
               "parts",
@@ -4340,7 +4340,7 @@
             }
           }
         ],
-        "description": "Request to complete an upload session, tagged by its transport mode.\n\nThe tag must match the mode recorded when the session began. Proxied and\ndirect-PUT sessions need no additional fields, while direct multipart\ncompletion carries the assembled content claim and uploaded parts.",
+        "description": "Request to complete an upload session.\n\n`mode` must match the mode used to start the session. Service-proxied and\ndirect-PUT uploads need no other fields. Direct multipart uploads also\ninclude the completed parts and the expected content details.",
         "discriminator": {
           "propertyName": "mode",
           "mapping": {

@@ -587,14 +587,14 @@ pub(super) async fn upload_content(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
-        description = "Completes an upload using a body tagged with its stored mode. Service-proxied and direct-put sessions require only the `mode` tag. Direct-multipart sessions also require the content claim and completed parts.",
+        description = "Completes an upload. The request mode must match the mode used to start the session. Direct-multipart requests also include the content claim and completed parts.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         request_body(
             content = CompleteUploadRequest,
-            description = "The `mode` tag must match the stored upload mode."
+            description = "The request mode must match the upload session."
         ),
         responses(
             (status = 200, description = "Upload completed", body = UploadSessionResponse),

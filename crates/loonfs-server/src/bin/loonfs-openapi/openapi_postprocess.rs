@@ -49,8 +49,7 @@ impl Value {
     }
 }
 
-/// Serializes and normalizes one generated OpenAPI document without changing
-/// the field order produced by utoipa.
+/// Generates OpenAPI JSON, applies schema fixes, and preserves field order.
 pub(crate) fn openapi_json_pretty(
     document: &(impl Serialize + ?Sized),
 ) -> Result<String, serde_json::Error> {
@@ -61,12 +60,12 @@ pub(crate) fn openapi_json_pretty(
     serde_json::to_string_pretty(&document)
 }
 
-/// Renders omitted `Option<T>` values as optional, non-null schemas.
+/// Removes `null` from schemas for values that are omitted when absent.
 fn normalize_optional_schemas(document: &mut Value) {
     normalize_optional_schemas_in(document);
 }
 
-/// Adds metadata that utoipa 5.5 cannot derive for internally tagged enums.
+/// Adds discriminators that utoipa 5.5 omits from tagged unions.
 fn add_union_discriminators(document: &mut Value) {
     visit(document, &mut Vec::new());
 }

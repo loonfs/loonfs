@@ -243,7 +243,9 @@ impl Client {
             .await
     }
 
-    /// Completes an upload session with a request tagged by its stored mode.
+    /// Completes an upload session.
+    ///
+    /// The request mode must match the mode used to start the session.
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,

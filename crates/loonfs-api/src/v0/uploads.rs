@@ -321,22 +321,22 @@ pub struct UploadContentResponse {
     pub content_ref: ContentRef,
 }
 
-/// Request to complete an upload session, tagged by its transport mode.
+/// Request to complete an upload session.
 ///
-/// The tag must match the mode recorded when the session began. Proxied and
-/// direct-PUT sessions need no additional fields, while direct multipart
-/// completion carries the assembled content claim and uploaded parts.
+/// `mode` must match the mode used to start the session. Service-proxied and
+/// direct-PUT uploads need no other fields. Direct multipart uploads also
+/// include the completed parts and the expected content details.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompleteUploadRequest {
-    /// Complete a service-proxied session after its bytes have been uploaded.
+    /// Complete a service-proxied upload.
     #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadServiceProxied"))]
     ServiceProxied {},
-    /// Complete a direct-PUT session after the provider accepted its object.
+    /// Complete a direct-PUT upload.
     #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadDirectPut"))]
     DirectPut {},
-    /// Complete a direct multipart session with its final claim and parts.
+    /// Complete a direct multipart upload.
     #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadDirectMultipart"))]
     DirectMultipart {
         /// Expected length and checksum of the assembled object.
@@ -347,7 +347,7 @@ pub enum CompleteUploadRequest {
 }
 
 impl CompleteUploadRequest {
-    /// The transport mode declared by this completion request.
+    /// Returns the upload mode in this request.
     pub const fn mode(&self) -> UploadMode {
         match self {
             Self::ServiceProxied {} => UploadMode::ServiceProxied,
@@ -488,7 +488,7 @@ mod tests {
         }
     }
 
-    /// Completion requests state the mode and carry only that mode's fields.
+    /// Each completion request includes only the fields for its upload mode.
     #[test]
     fn completion_requests_are_tagged_and_mode_specific() {
         assert_eq!(
