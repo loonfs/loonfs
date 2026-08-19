@@ -54,6 +54,33 @@ jobs:
       - run: cargo test --all --locked
       - run: cargo test -p loonfs-server --features openapi --locked openapi
 
+  sdk-conformance-go:
+    name: SDK conformance (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.x
+          cache: false
+      - run: scripts/generate-sdks.sh go
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-sdk-conformance-${{ hashFiles('sdk/generated/go/go.sum', 'sdk/conformance/go/go.mod') }}
+          restore-keys: ${{ runner.os }}-go-sdk-conformance-
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sdk-conformance-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-sdk-conformance-
+      - run: scripts/run-sdk-conformance.sh go
+
   # Checks the declared minimum supported Rust version actually builds the
   # workspace. Keep the toolchain here in sync with `rust-version` in the
   # workspace Cargo.toml.
