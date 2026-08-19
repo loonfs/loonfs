@@ -1,0 +1,30 @@
+# Generates SDKs from docs/specs/openapi.json with pinned generator versions.
+# Output is written locally through Docker.
+api:
+  specs:
+    - openapi: ../docs/specs/openapi.json
+groups:
+  go:
+    generators:
+      - name: fernapi/fern-go-sdk
+        version: 1.57.2
+        config:
+          module:
+            path: github.com/loonfs/loonfs-sdk-go
+        output:
+          location: local-file-system
+          path: ./generated/go
+  python:
+    generators:
+      - name: fernapi/fern-python-sdk
+        version: 5.28.0
+        output:
+          location: local-file-system
+          path: ./generated/python
+  typescript:
+    generators:
+      - name: fernapi/fern-typescript-sdk
+        version: 3.88.0
+        output:
+          location: local-file-system
+          path: ./generated/typescript
